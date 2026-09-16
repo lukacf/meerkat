@@ -94,6 +94,21 @@ impl Drop for LiveContextDrainTask {
 /// to select rows, cursor edges, or recovery channel identity.
 #[async_trait::async_trait]
 pub trait LiveContextMirrorHost: Send + Sync {
+    /// Read canonical store-owned content after a runtime commit notification.
+    /// The notification is only a wake signal, never transcript content.
+    async fn committed_boundary(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<
+        (
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+            String,
+        ),
+        String,
+    > {
+        Err("live context host cannot export committed session authority".to_string())
+    }
+
     async fn append_context(
         &self,
         authority: LiveContextAppendAuthority,
@@ -238,7 +253,7 @@ pub(crate) fn classify_committed_boundary_rows_after(
     session_id: &SessionId,
     committed: &meerkat_core::lifecycle::core_executor::BoundSessionCommit,
     canonical_cursor: u64,
-    provenance: LiveContextCommittedTextProvenance,
+    channel_id: &meerkat_core::LiveChannelId,
     store_commit_authority: &str,
     existing_member_interactions: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<CommittedLiveContextRow>, String> {
@@ -286,16 +301,22 @@ pub(crate) fn classify_committed_boundary_rows_after(
     raw_rows
         .into_iter()
         .map(|(sequence, message, serialized)| {
-            let provenance = if provenance
-                == LiveContextCommittedTextProvenance::ParentSessionServiceTurn
-                && matches!(&message, Message::BlockAssistant(assistant)
+            let origin = match &message {
+                Message::User(user) => user.identity.realtime_origin.as_ref(),
+                Message::BlockAssistant(assistant) => assistant.identity.realtime_origin.as_ref(),
+                _ => None,
+            };
+            let provenance =
+                if origin.is_some_and(|origin| origin.matches(session_id, channel_id, sequence)) {
+                    LiveContextCommittedTextProvenance::LiveRealtimeTranscript
+                } else if matches!(&message, Message::BlockAssistant(assistant)
                     if assistant.identity.interaction_id.is_some_and(|interaction|
                         existing_member_interactions.contains(&interaction.to_string())))
-            {
-                LiveContextCommittedTextProvenance::ExecutorTrace
-            } else {
-                provenance
-            };
+                {
+                    LiveContextCommittedTextProvenance::ExecutorTrace
+                } else {
+                    LiveContextCommittedTextProvenance::ParentSessionServiceTurn
+                };
             CommittedLiveContextRow::classify(
                 session_id,
                 sequence,
@@ -441,7 +462,7 @@ mod tests {
             &session_id,
             &committed,
             0,
-            LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
+            &meerkat_core::LiveChannelId::new("voice-origin-test"),
             "store-receipt",
             &std::collections::BTreeSet::from([voice_interaction.to_string()]),
         )

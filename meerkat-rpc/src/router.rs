@@ -13268,6 +13268,147 @@ mod tests {
     }
 
     #[cfg(feature = "openai-live")]
+    struct RuntimeCommitMirrorProbe {
+        runtime: Arc<SessionRuntime>,
+        appends: tokio::sync::Mutex<Vec<String>>,
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[async_trait]
+    impl meerkat_runtime::live_context_mirror::LiveContextMirrorHost for RuntimeCommitMirrorProbe {
+        async fn committed_boundary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<
+            (
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+                String,
+            ),
+            String,
+        > {
+            self.runtime
+                .persistent_service()
+                .export_live_context_committed_boundary(session_id)
+                .await
+                .map_err(|error| error.to_string())
+        }
+
+        async fn append_context(
+            &self,
+            authority: meerkat_runtime::live_execution::LiveContextAppendAuthority,
+            context: String,
+        ) -> Result<
+            (
+                meerkat_runtime::live_execution::LiveContextAppendAuthority,
+                meerkat_core::LiveAppendDeliveryOutcome,
+            ),
+            String,
+        > {
+            self.appends.lock().await.push(context);
+            Ok((
+                authority,
+                meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+            ))
+        }
+
+        async fn recover_ambiguous_append(
+            &self,
+            _authority: meerkat_runtime::live_execution::LiveContextAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            Err("unexpected context ambiguity".to_string())
+        }
+
+        async fn recover_ambiguous_delegation_result(
+            &self,
+            _authority: meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            Err("unexpected result ambiguity".to_string())
+        }
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[tokio::test]
+    async fn ordinary_rpc_turn_start_projects_store_committed_context_without_another_turn() {
+        let (router, _notifications) = test_router().await;
+        let create = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt":"initial source context","initial_turn":"deferred",
+                    "model":"claude-sonnet-4-5","provider":"anthropic"
+                }),
+            ))
+            .await
+            .expect("create response");
+        assert!(create.error.is_none(), "{create:?}");
+        let session = SessionId::parse(
+            result_value(&create)["session_id"]
+                .as_str()
+                .expect("session"),
+        )
+        .unwrap();
+        let warm = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id":session.to_string(),"prompt":"warm the persistent source"
+                }),
+            ))
+            .await
+            .expect("warm response");
+        assert!(warm.error.is_none(), "{warm:?}");
+        let history = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({
+                    "session_id":session.to_string(),"offset":0,"limit":100
+                }),
+            ))
+            .await
+            .expect("history response");
+        let seed_cursor = result_value(&history)["messages"]
+            .as_array()
+            .expect("messages")
+            .len() as u64;
+        router
+            .runtime_adapter
+            .__test_open_live_context_channel(&session, seed_cursor)
+            .await
+            .expect("generated experimental context binding");
+        let probe = Arc::new(RuntimeCommitMirrorProbe {
+            runtime: Arc::clone(&router.runtime),
+            appends: tokio::sync::Mutex::new(Vec::new()),
+        });
+        router
+            .runtime_adapter
+            .set_live_context_mirror_host(probe.clone());
+        let turn = tokio::time::timeout(std::time::Duration::from_secs(5), router.dispatch(make_request(
+            "turn/start", serde_json::json!({"session_id":session.to_string(),"prompt":"typed-runtime-loop-nonce"}),
+        ))).await.expect("ordinary RPC completion is bounded").expect("turn response");
+        assert!(turn.error.is_none(), "{turn:?}");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            router.runtime_adapter.drain_live_context_outbox(&session),
+        )
+        .await
+        .expect("post-commit projection is bounded")
+        .expect("owned projection and delivery");
+        let appends = probe.appends.lock().await;
+        assert!(
+            appends
+                .iter()
+                .any(|context| context.contains("typed-runtime-loop-nonce")),
+            "actual turn/start must notify canonical context through its CoreExecutor ACK path"
+        );
+        assert!(
+            appends
+                .iter()
+                .all(|context| !context.contains("warm the persistent source")),
+            "the acknowledged seed must not be replayed"
+        );
+    }
+
+    #[cfg(feature = "openai-live")]
     fn attach_experimental_test_webrtc(router: MethodRouter) -> MethodRouter {
         let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
             meerkat_live::NoOpProjectionSink,

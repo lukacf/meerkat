@@ -1238,6 +1238,7 @@ enum SessionCommand {
     },
     AppendRealtimeTranscriptEvent {
         event: RealtimeTranscriptEvent,
+        channel_id: Option<meerkat_core::LiveChannelId>,
         reply_tx: oneshot::Sender<
             Result<RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError>,
         >,
@@ -2292,6 +2293,17 @@ pub trait SessionAgent: Send {
     ) -> Result<RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError> {
         Err(meerkat_core::error::AgentError::ConfigError(
             "realtime transcript append is not supported by this session agent".to_string(),
+        ))
+    }
+
+    fn append_realtime_transcript_event_for_channel(
+        &mut self,
+        _event: RealtimeTranscriptEvent,
+        _channel_id: meerkat_core::LiveChannelId,
+    ) -> Result<RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "channel-scoped realtime transcript append is not supported by this session agent"
+                .to_string(),
         ))
     }
 
@@ -3934,6 +3946,26 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         event: RealtimeTranscriptEvent,
     ) -> Result<RealtimeTranscriptApplyOutcome, SessionError> {
+        self.append_realtime_transcript_event_with_origin(id, event, None)
+            .await
+    }
+
+    pub async fn append_realtime_transcript_event_for_channel(
+        &self,
+        id: &SessionId,
+        event: RealtimeTranscriptEvent,
+        channel_id: meerkat_core::LiveChannelId,
+    ) -> Result<RealtimeTranscriptApplyOutcome, SessionError> {
+        self.append_realtime_transcript_event_with_origin(id, event, Some(channel_id))
+            .await
+    }
+
+    async fn append_realtime_transcript_event_with_origin(
+        &self,
+        id: &SessionId,
+        event: RealtimeTranscriptEvent,
+        channel_id: Option<meerkat_core::LiveChannelId>,
+    ) -> Result<RealtimeTranscriptApplyOutcome, SessionError> {
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(id)
@@ -3941,7 +3973,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
             .command_tx
-            .send(SessionCommand::AppendRealtimeTranscriptEvent { event, reply_tx })
+            .send(SessionCommand::AppendRealtimeTranscriptEvent {
+                event,
+                channel_id,
+                reply_tx,
+            })
             .await
             .map_err(|_| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -7576,8 +7612,17 @@ async fn session_task<A: SessionAgent>(
                 }
                 let _ = reply_tx.send(result);
             }
-            SessionCommand::AppendRealtimeTranscriptEvent { event, reply_tx } => {
-                let result = agent.append_realtime_transcript_event(event);
+            SessionCommand::AppendRealtimeTranscriptEvent {
+                event,
+                channel_id,
+                reply_tx,
+            } => {
+                let result = match channel_id {
+                    Some(channel) => {
+                        agent.append_realtime_transcript_event_for_channel(event, channel)
+                    }
+                    None => agent.append_realtime_transcript_event(event),
+                };
                 if let Ok(outcome) = &result {
                     let snap = agent.snapshot();
                     control.publish_summary(SessionSummaryCache {

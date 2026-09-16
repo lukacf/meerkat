@@ -855,7 +855,12 @@ impl CoreExecutor for SessionRuntimeExecutor {
                 session_snapshot,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "openai-live")]
+        self.runtime
+            .runtime_adapter()
+            .notify_committed_live_context(&self.session_id);
+        Ok(())
     }
 
     async fn acknowledge_committed_session_boundary(
@@ -869,7 +874,12 @@ impl CoreExecutor for SessionRuntimeExecutor {
                 authority,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "openai-live")]
+        self.runtime
+            .runtime_adapter()
+            .notify_committed_live_context(&self.session_id);
+        Ok(())
     }
 
     async fn publish_interaction_terminals(
@@ -1173,7 +1183,14 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 session_snapshot,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "openai-live")]
+        if let Some(runtime) = &self.runtime {
+            runtime
+                .runtime_adapter()
+                .notify_committed_live_context(&self.session_id);
+        }
+        Ok(())
     }
 
     async fn acknowledge_committed_session_boundary(
@@ -1186,7 +1203,14 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 authority,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "openai-live")]
+        if let Some(runtime) = &self.runtime {
+            runtime
+                .runtime_adapter()
+                .notify_committed_live_context(&self.session_id);
+        }
+        Ok(())
     }
 
     async fn publish_interaction_terminals(

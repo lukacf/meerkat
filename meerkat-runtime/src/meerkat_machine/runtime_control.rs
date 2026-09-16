@@ -193,6 +193,14 @@ mod live_context_mirror_tests {
     struct RecordingMirrorHost {
         appends: std::sync::Mutex<Vec<(String, String)>>,
         first_append_barrier: Option<Arc<MirrorAppendBarrier>>,
+        committed: std::sync::Mutex<
+            Option<(
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+                String,
+            )>,
+        >,
+        first_read_barrier: Option<Arc<MirrorAppendBarrier>>,
+        reads: std::sync::atomic::AtomicUsize,
     }
 
     struct MirrorAppendBarrier {
@@ -210,6 +218,34 @@ mod live_context_mirror_tests {
 
     #[async_trait::async_trait]
     impl crate::live_context_mirror::LiveContextMirrorHost for RecordingMirrorHost {
+        async fn committed_boundary(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<
+            (
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+                String,
+            ),
+            String,
+        > {
+            if self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+                && let Some(barrier) = &self.first_read_barrier
+            {
+                barrier.entered.notify_one();
+                barrier
+                    .release
+                    .acquire()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .forget();
+            }
+            self.committed
+                .lock()
+                .map_err(|_| "committed fixture lock poisoned".to_string())?
+                .clone()
+                .ok_or_else(|| "fixture has no committed snapshot".to_string())
+        }
+
         async fn append_context(
             &self,
             authority: crate::live_execution::LiveContextAppendAuthority,
@@ -2664,9 +2700,15 @@ mod live_context_mirror_tests {
             "canonical commit must not await provider ACK"
         );
 
-        session.push(meerkat_core::Message::User(
-            meerkat_core::UserMessage::text("voice row already present in provider"),
-        ));
+        session.append_realtime_transcript_event_for_channel(
+            meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "voice-overlap".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "voice row already present in provider".to_string(),
+            },
+            channel_id.clone(),
+        );
         let voice = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(
             session.clone(),
         ))
@@ -2866,6 +2908,233 @@ mod live_context_mirror_tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn committed_runtime_notification_failure_remains_observable_until_successful_retry() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
+        machine.notify_committed_live_context(&session_id);
+        assert!(
+            machine
+                .drain_live_context_outbox(&session_id)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            machine
+                .quiesce_live_context_outbox_for_channel(&session_id, &channel_id)
+                .await,
+            crate::live_context_mirror::LiveContextDrainCompletion::Failed(_)
+        ));
+        assert!(
+            machine
+                .drain_live_context_outbox(&session_id)
+                .await
+                .is_err(),
+            "close observation must not consume the failed source-read outcome"
+        );
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("retained canonical fact"),
+        ));
+        *host.committed.lock().expect("committed") = Some((
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("canonical body"),
+            "retry-store-authority".to_string(),
+        ));
+        machine.notify_committed_live_context(&session_id);
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect("explicit notification retries exact canonical scan");
+        assert_eq!(host.appends.lock().expect("appends").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn committed_runtime_notification_rebinds_owned_projection_after_close() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let machine = Arc::new(machine);
+        let barrier = Arc::new(MirrorAppendBarrier {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("before close"),
+        ));
+        let first = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(
+            session.clone(),
+        ))
+        .expect("first committed body");
+        let host = Arc::new(RecordingMirrorHost {
+            committed: std::sync::Mutex::new(Some((first, "first-store-authority".to_string()))),
+            first_read_barrier: Some(Arc::clone(&barrier)),
+            ..Default::default()
+        });
+        machine.set_live_context_mirror_host(host.clone());
+        machine.notify_committed_live_context(&session_id);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            barrier.entered.notified(),
+        )
+        .await
+        .expect("owned read starts");
+        let observing_machine = Arc::clone(&machine);
+        let observing_session = session_id.clone();
+        let observer = tokio::spawn(async move {
+            observing_machine
+                .drain_live_context_outbox(&observing_session)
+                .await
+        });
+        tokio::task::yield_now().await;
+        observer.abort();
+        assert!(
+            observer
+                .await
+                .expect_err("observer cancelled")
+                .is_cancelled()
+        );
+        assert!(matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                machine.quiesce_live_context_outbox_for_channel(&session_id, &channel_id),
+            )
+            .await
+            .expect("close must not join a source read held behind unrelated background work"),
+            crate::live_context_mirror::LiveContextDrainCompletion::Succeeded
+        ));
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+                    session_id: session_id.to_string(),
+                    channel_id: channel_id.to_string(),
+                    close_observation_sequence: 1,
+                },
+                "test:RecordLiveCloseClosed",
+            )
+            .await
+            .expect("generated fixture close");
+        let replacement = meerkat_core::LiveChannelId::new("replacement-after-owned-read");
+        machine
+            .resolve_live_open_admission(
+                &session_id,
+                &replacement,
+                &meerkat_core::SessionLlmIdentity {
+                    model: "context-fixture-model".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+            )
+            .await
+            .expect("fresh channel");
+        stage_experimental_live_machine(&machine, &session_id, &replacement, 1).await;
+        bind_experimental_live_machine(&machine, &session_id, &replacement, 1).await;
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("after reopen"),
+        ));
+        *host.committed.lock().expect("committed") = Some((
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("later committed body"),
+            "later-store-authority".to_string(),
+        ));
+        barrier.release.add_permits(1);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            machine.drain_live_context_outbox(&session_id),
+        )
+        .await
+        .expect("owned read and delivery complete")
+        .expect("current context delivery");
+        let appends = host.appends.lock().expect("appends");
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].0, replacement.to_string());
+        assert!(appends[0].1.contains("after reopen"));
+        assert!(!appends[0].1.contains("before close"));
+    }
+
+    #[tokio::test]
+    async fn mixed_parent_and_live_suffixes_preserve_origin_in_both_arrival_orders() {
+        for live_first in [false, true] {
+            let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+            let host = Arc::new(RecordingMirrorHost::default());
+            machine.set_live_context_mirror_host(host.clone());
+            let mut session = meerkat_core::Session::with_id(session_id.clone());
+            session.push(meerkat_core::Message::User(
+                meerkat_core::UserMessage::text("typed parent prompt"),
+            ));
+            session.push(meerkat_core::Message::BlockAssistant(
+                meerkat_core::types::BlockAssistantMessage::new(
+                    vec![meerkat_core::AssistantBlock::Text {
+                        text: "typed parent answer".to_string(),
+                        meta: None,
+                    }],
+                    meerkat_core::StopReason::EndTurn,
+                ),
+            ));
+            session.append_realtime_transcript_event_for_channel(
+                meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: "mixed-voice-row".to_string(),
+                    previous_item_id: None,
+                    content_index: 0,
+                    text: "already spoken user input".to_string(),
+                },
+                channel_id.clone(),
+            );
+            let committed = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(
+                Arc::new(session),
+            )
+            .expect("store-sealed mixed origin snapshot");
+            for live in [live_first, !live_first] {
+                if live {
+                    machine
+                        .enqueue_committed_live_transcript_boundary(
+                            &session_id,
+                            &committed,
+                            "mixed-store-token",
+                        )
+                        .await
+                        .expect("live handoff does not reclassify parent rows");
+                } else {
+                    machine
+                        .enqueue_committed_parent_session_boundary(
+                            &session_id,
+                            &committed,
+                            "mixed-store-token",
+                        )
+                        .await
+                        .expect("deferred parent read does not echo live rows");
+                }
+            }
+            machine
+                .drain_live_context_outbox(&session_id)
+                .await
+                .expect("drain exact mixed suffix");
+            {
+                let appends = host.appends.lock().expect("appends");
+                assert_eq!(appends.len(), 2);
+                assert!(appends[0].1.contains("typed parent prompt"));
+                assert!(appends[1].1.contains("typed parent answer"));
+                assert!(
+                    appends
+                        .iter()
+                        .all(|(_, text)| !text.contains("already spoken user input"))
+                );
+            }
+            assert_eq!(
+                machine
+                    .session_dsl_state(&session_id)
+                    .await
+                    .expect("state")
+                    .live_context_cursor_by_channel
+                    .get(channel_id.as_str()),
+                Some(&3)
+            );
+        }
     }
 
     #[tokio::test]
@@ -7974,6 +8243,7 @@ impl MeerkatMachine {
             committed,
             store_commit_authority,
             meerkat_core::generated::session_document::LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
+            None,
         )
         .await
     }
@@ -7992,6 +8262,7 @@ impl MeerkatMachine {
             committed,
             store_commit_authority,
             meerkat_core::generated::session_document::LiveContextCommittedTextProvenance::LiveRealtimeTranscript,
+            None,
         )
         .await
     }
@@ -8018,13 +8289,17 @@ impl MeerkatMachine {
         session_id: &SessionId,
         committed: &meerkat_core::lifecycle::core_executor::BoundSessionCommit,
         store_commit_authority: &str,
-        provenance: meerkat_core::generated::session_document::LiveContextCommittedTextProvenance,
+        _provenance: meerkat_core::generated::session_document::LiveContextCommittedTextProvenance,
+        expected_channel: Option<&meerkat_core::LiveChannelId>,
     ) -> Result<usize, RuntimeDriverError> {
         let projection_gate = self.live_context_projection_gate(session_id);
         let projection_guard = projection_gate.lock().await;
         let Some(channel_id) = self.live_active_channel_for_session(session_id).await else {
             return Ok(0);
         };
+        if expected_channel.is_some_and(|expected| expected != &channel_id) {
+            return Ok(0);
+        }
         let state = self.session_dsl_state(session_id).await.map_err(|reason| {
             RuntimeDriverError::ValidationFailed {
                 reason: reason.to_string(),
@@ -8199,7 +8474,7 @@ impl MeerkatMachine {
             session_id,
             committed,
             canonical_cursor,
-            provenance,
+            &channel_id,
             store_commit_authority,
             &existing_member_interactions,
         )
@@ -8217,6 +8492,108 @@ impl MeerkatMachine {
         drop(projection_guard);
         self.request_live_context_drain(session_id, &channel_id);
         Ok(row_count)
+    }
+
+    #[cfg(feature = "live")]
+    pub fn notify_committed_live_context(&self, session_id: &SessionId) {
+        use std::sync::atomic::Ordering;
+        if self.live_context_mirror_host().is_none() {
+            return;
+        }
+        let mut tasks = self
+            .shared
+            .live_context_projection_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tasks.retain(|session, task| {
+            session == session_id
+                || !matches!(
+                    &*task
+                        .outcome
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    Some(Ok(()))
+                )
+        });
+        if let Some(current) = tasks.get(session_id) {
+            let outcome = current
+                .outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if outcome.is_none() {
+                current.generation.fetch_add(1, Ordering::AcqRel);
+                return;
+            }
+        }
+        let worker = Arc::new(crate::live_context_mirror::LiveContextDrainTask::new());
+        tasks.insert(session_id.clone(), Arc::clone(&worker));
+        let machine = self.clone();
+        let session = session_id.clone();
+        let owned = Arc::clone(&worker);
+        let task = tokio::spawn(async move {
+            use futures::FutureExt as _;
+            loop {
+                let generation = owned.generation.load(Ordering::Acquire);
+                let result =
+                    std::panic::AssertUnwindSafe(machine.project_committed_live_context(&session))
+                        .catch_unwind()
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(RuntimeDriverError::Internal(
+                                "committed live context projection task panicked".to_string(),
+                            ))
+                        });
+                if let Err(error) = &result {
+                    tracing::warn!(%session, %error, "committed live context projection failed with retained observation");
+                }
+                let mut outcome = owned
+                    .outcome
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if generation != owned.generation.load(Ordering::Acquire) {
+                    continue;
+                }
+                *outcome = Some(result.map_err(Arc::new));
+                owned.changed.notify_waiters();
+                break;
+            }
+        });
+        *worker
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
+    }
+
+    #[cfg(feature = "live")]
+    async fn project_committed_live_context(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        loop {
+            let Some(channel) = self.live_active_channel_for_session(session_id).await else {
+                return Ok(());
+            };
+            let Some(host) = self.live_context_mirror_host() else {
+                return Ok(());
+            };
+            let (committed, token) = host
+                .committed_boundary(session_id)
+                .await
+                .map_err(RuntimeDriverError::Internal)?;
+            self.enqueue_committed_session_boundary_with_provenance(
+                session_id, &committed, &token,
+                meerkat_core::generated::session_document::LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
+                Some(&channel),
+            ).await?;
+            if self
+                .live_active_channel_for_session(session_id)
+                .await
+                .as_ref()
+                == Some(&channel)
+            {
+                return Ok(());
+            }
+        }
     }
 
     #[cfg(feature = "live")]
@@ -8312,6 +8689,16 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
+        let projection = self
+            .shared
+            .live_context_projection_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned();
+        if let Some(projection) = projection {
+            projection.wait().await?;
+        }
         let Some(channel) = self.live_active_channel_for_session(session_id).await else {
             return Ok(());
         };
@@ -8338,9 +8725,36 @@ impl MeerkatMachine {
         session_id: &SessionId,
         channel_id: &meerkat_core::LiveChannelId,
     ) -> crate::live_context_mirror::LiveContextDrainCompletion {
-        self.request_live_context_drain(session_id, channel_id)
+        let completion = self
+            .request_live_context_drain(session_id, channel_id)
             .wait_completion()
-            .await
+            .await;
+        if matches!(
+            completion,
+            crate::live_context_mirror::LiveContextDrainCompletion::Failed(_)
+        ) {
+            return completion;
+        }
+        // Source reads follow an already committed boundary and can wait behind
+        // unrelated text work. Report completed failures without joining that work.
+        let projection = self
+            .shared
+            .live_context_projection_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned();
+        if let Some(projection) = projection
+            && let Some(Err(error)) = &*projection
+                .outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            return crate::live_context_mirror::LiveContextDrainCompletion::Failed(Arc::clone(
+                error,
+            ));
+        }
+        completion
     }
 
     #[cfg(feature = "live")]

@@ -5788,6 +5788,22 @@ impl SessionRuntime {
             .await
     }
 
+    pub async fn append_realtime_transcript_event_from_channel(
+        &self,
+        session_id: &SessionId,
+        event: meerkat_core::RealtimeTranscriptEvent,
+        channel_id: meerkat_core::LiveChannelId,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
+        self.service
+            .append_realtime_transcript_event_from_channel_with_machine(
+                self.runtime_adapter.as_ref(),
+                session_id,
+                event,
+                channel_id,
+            )
+            .await
+    }
+
     /// Admit an assistant playback target only from the generated foreground
     /// user interaction already sealed by provider TurnStarted authority.
     #[allow(clippy::too_many_arguments)]

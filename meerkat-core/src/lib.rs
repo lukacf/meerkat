@@ -348,8 +348,9 @@ pub use realtime_transcript::{
     SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
 };
 pub use realtime_transcript_sidecar::{
-    REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V1, RealtimeTranscriptSidecarError,
-    RealtimeTranscriptSidecarRecord, RealtimeTranscriptSnapshotReasonV1,
+    REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V1, REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V2,
+    RealtimeTranscriptSidecarError, RealtimeTranscriptSidecarRecord,
+    RealtimeTranscriptSnapshotReasonV1,
 };
 pub use retry::{
     DEFAULT_STREAM_INACTIVITY_TIMEOUT, LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan,

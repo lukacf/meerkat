@@ -104,6 +104,18 @@ fn build_agent_error_to_session_error(
 }
 
 impl FactoryAgent {
+    fn account_realtime_transcript(&self, outcome: &meerkat_core::RealtimeTranscriptApplyOutcome) {
+        for materialized in &outcome.materialized_messages {
+            if let meerkat_core::RealtimeTranscriptMaterializedMessage::Assistant {
+                usage: Some(usage),
+                ..
+            } = materialized
+            {
+                self.agent.budget().record_turn_usage(usage);
+            }
+        }
+    }
+
     /// Access the underlying agent.
     pub fn agent(&self) -> &DynAgent {
         &self.agent
@@ -816,15 +828,20 @@ impl SessionAgent for FactoryAgent {
             .agent
             .session_mut()
             .append_realtime_transcript_event(event);
-        for materialized in &outcome.materialized_messages {
-            if let meerkat_core::RealtimeTranscriptMaterializedMessage::Assistant {
-                usage: Some(usage),
-                ..
-            } = materialized
-            {
-                self.agent.budget().record_turn_usage(usage);
-            }
-        }
+        self.account_realtime_transcript(&outcome);
+        Ok(outcome)
+    }
+
+    fn append_realtime_transcript_event_for_channel(
+        &mut self,
+        event: meerkat_core::RealtimeTranscriptEvent,
+        channel_id: meerkat_core::LiveChannelId,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError> {
+        let outcome = self
+            .agent
+            .session_mut()
+            .append_realtime_transcript_event_for_channel(event, channel_id);
+        self.account_realtime_transcript(&outcome);
         Ok(outcome)
     }
 

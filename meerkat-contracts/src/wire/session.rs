@@ -2445,11 +2445,29 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_wire_cannot_import_realtime_origin_authority() {
+        let value = serde_json::json!({
+            "role":"user","content":"caller text",
+            "identity":{"realtime_origin":{
+                "session_id":meerkat_core::SessionId::new().to_string(),
+                "channel_id":"caller-selected-channel","canonical_row_sequence":1
+            }}
+        });
+        let wire: TranscriptRewriteMessage =
+            serde_json::from_value(value).expect("parse rewrite content");
+        let Message::User(user) = wire.into_core().expect("ordinary rewrite") else {
+            panic!("user")
+        };
+        assert!(user.identity.realtime_origin.is_none());
+    }
+
+    #[test]
     fn test_wire_session_history_exposes_transcript_identity() {
         let interaction_id = InteractionId(uuid::Uuid::from_u128(7));
         let run_id = RunId::from_uuid(uuid::Uuid::from_u128(8));
         let mut user = UserMessage::text("hello");
         user.identity = meerkat_core::types::TranscriptMessageIdentity {
+            realtime_origin: None,
             interaction_id: Some(interaction_id),
             run_id: None,
             objective_id: None,
@@ -2462,6 +2480,7 @@ mod tests {
             StopReason::EndTurn,
         );
         assistant.identity = meerkat_core::types::TranscriptMessageIdentity {
+            realtime_origin: None,
             interaction_id: Some(interaction_id),
             run_id: Some(run_id.clone()),
             objective_id: None,

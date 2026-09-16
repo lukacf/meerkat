@@ -249,6 +249,7 @@ impl TranscriptIdentityConsensus {
 
     fn finish(self) -> TranscriptMessageIdentity {
         TranscriptMessageIdentity {
+            realtime_origin: None,
             interaction_id: self.interaction_id.finish(),
             run_id: self.run_id.finish(),
             objective_id: self.objective_id.finish(),

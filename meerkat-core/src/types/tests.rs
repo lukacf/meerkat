@@ -130,6 +130,7 @@ fn test_transcript_message_identity_serialization_is_optional() {
     let run_id = crate::lifecycle::RunId::from_uuid(uuid::Uuid::from_u128(42));
     let mut user = UserMessage::text("hello");
     user.identity = TranscriptMessageIdentity {
+        realtime_origin: None,
         interaction_id: Some(interaction_id),
         run_id: Some(run_id.clone()),
         objective_id: None,

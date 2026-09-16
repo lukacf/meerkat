@@ -2531,6 +2531,7 @@ impl MemberTurnOptions {
             keep_alive: self.keep_alive,
             render_metadata: self.render_metadata,
             transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
+                realtime_origin: None,
                 interaction_id: self.interaction_id,
                 objective_id: self.objective_id,
                 run_id: None,

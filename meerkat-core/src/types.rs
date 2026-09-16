@@ -38,11 +38,50 @@ pub struct TranscriptMessageIdentity {
     /// causally-related turn chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective_id: Option<crate::interaction::ObjectiveId>,
+    /// Session-owned provenance; not accepted by transcript rewrite wire inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime_origin: Option<RealtimeMessageOrigin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealtimeMessageOrigin {
+    session_id: crate::types::SessionId,
+    channel_id: crate::LiveChannelId,
+    canonical_row_sequence: u64,
+}
+
+impl RealtimeMessageOrigin {
+    pub(crate) fn new(
+        session_id: crate::types::SessionId,
+        channel_id: crate::LiveChannelId,
+        canonical_row_sequence: u64,
+    ) -> Self {
+        Self {
+            session_id,
+            channel_id,
+            canonical_row_sequence,
+        }
+    }
+
+    #[must_use]
+    pub fn matches(
+        &self,
+        session_id: &crate::types::SessionId,
+        channel_id: &crate::LiveChannelId,
+        canonical_row_sequence: u64,
+    ) -> bool {
+        &self.session_id == session_id
+            && &self.channel_id == channel_id
+            && self.canonical_row_sequence == canonical_row_sequence
+    }
 }
 
 impl TranscriptMessageIdentity {
     pub fn is_empty(&self) -> bool {
-        self.interaction_id.is_none() && self.run_id.is_none() && self.objective_id.is_none()
+        self.interaction_id.is_none()
+            && self.run_id.is_none()
+            && self.objective_id.is_none()
+            && self.realtime_origin.is_none()
     }
 
     pub fn with_run_id(&self, run_id: crate::lifecycle::RunId) -> Self {
@@ -50,6 +89,7 @@ impl TranscriptMessageIdentity {
             interaction_id: self.interaction_id,
             run_id: Some(run_id),
             objective_id: self.objective_id,
+            realtime_origin: self.realtime_origin.clone(),
         }
     }
 }

@@ -2854,6 +2854,7 @@ fn submit_work_turn_metadata(
             .merge(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                     transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
+                        realtime_origin: None,
                         interaction_id,
                         run_id: None,
                         objective_id,

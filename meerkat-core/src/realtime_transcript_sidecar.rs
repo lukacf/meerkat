@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 /// Schema of canonical realtime component-event bytes.
 pub const REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V1: u16 = 1;
+pub const REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V2: u16 = 2;
 
 /// Exceptional operation that authorizes a full realtime projection reset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -64,6 +65,11 @@ pub enum RealtimeTranscriptSidecarRecord {
     /// Ordinary provider observation. The domain event is the durable record;
     /// there is no parallel persistence DTO.
     EventV1 { event: RealtimeTranscriptEvent },
+    /// Channel-attributed input; older readers reject schema 2 explicitly.
+    ChannelEventV2 {
+        channel_id: crate::LiveChannelId,
+        event: RealtimeTranscriptEvent,
+    },
     /// Install the bounded image-blob recovery anchor.
     PendingUserContentBlobStagedV1 {
         pending: PendingRealtimeUserContentBlob,
@@ -217,11 +223,24 @@ impl SessionRealtimeTranscriptProjection {
         let state = sequence.replay(
             SessionRealtimeTranscriptState::default(),
             |state, sequence, event| {
+                let schema = event.schema_version();
+                if !matches!(
+                    schema,
+                    REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V1
+                        | REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V2
+                ) {
+                    return Err(RealtimeTranscriptSidecarError::Incoherent(format!(
+                        "unsupported realtime event schema {schema}"
+                    )));
+                }
                 let record = event
-                    .decode_payload::<RealtimeTranscriptSidecarRecord>(
-                        REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V1,
-                    )
+                    .decode_payload::<RealtimeTranscriptSidecarRecord>(schema)
                     .map_err(|error| RealtimeTranscriptSidecarError::Prefix(error.to_string()))?;
+                if record_schema(&record) != schema {
+                    return Err(RealtimeTranscriptSidecarError::Incoherent(
+                        "realtime event variant does not match schema".to_string(),
+                    ));
+                }
                 apply_record(state, sequence, record)
             },
         )?;
@@ -273,13 +292,28 @@ impl SessionRealtimeTranscriptProjection {
         &mut self,
         event: RealtimeTranscriptEvent,
     ) -> Result<(RealtimeTranscriptApplyCommit, bool), RealtimeTranscriptSidecarError> {
-        let record = RealtimeTranscriptSidecarRecord::EventV1 {
-            event: event.clone(),
+        self.apply_event_from_channel(event, None)
+    }
+
+    pub(crate) fn apply_event_from_channel(
+        &mut self,
+        event: RealtimeTranscriptEvent,
+        channel_id: Option<crate::LiveChannelId>,
+    ) -> Result<(RealtimeTranscriptApplyCommit, bool), RealtimeTranscriptSidecarError> {
+        let record = match &channel_id {
+            Some(channel_id) => RealtimeTranscriptSidecarRecord::ChannelEventV2 {
+                channel_id: channel_id.clone(),
+                event: event.clone(),
+            },
+            None => RealtimeTranscriptSidecarRecord::EventV1 {
+                event: event.clone(),
+            },
         };
         let serialized = serialize_record(&record)?;
-        let commit = realtime_transcript_revision::apply_realtime_transcript_event(
+        let commit = realtime_transcript_revision::apply_realtime_transcript_event_from_channel(
             Arc::make_mut(&mut self.state),
             event,
+            channel_id,
         )?;
         let rejected = user_content_event_rejected(&commit);
         if !rejected {
@@ -366,8 +400,22 @@ impl SessionRealtimeTranscriptProjection {
 fn serialize_record(
     record: &RealtimeTranscriptSidecarRecord,
 ) -> Result<SerializedComponentEvent, RealtimeTranscriptSidecarError> {
-    SerializedComponentEvent::canonical_json(REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V1, record)
+    SerializedComponentEvent::canonical_json(record_schema(record), record)
         .map_err(|error| RealtimeTranscriptSidecarError::Prefix(error.to_string()))
+}
+
+fn record_schema(record: &RealtimeTranscriptSidecarRecord) -> u16 {
+    match record {
+        RealtimeTranscriptSidecarRecord::ChannelEventV2 { .. } => {
+            REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V2
+        }
+        RealtimeTranscriptSidecarRecord::SnapshotV1 { state, .. }
+            if state.has_channel_origins() =>
+        {
+            REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V2
+        }
+        _ => REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V1,
+    }
 }
 
 fn apply_record(
@@ -400,6 +448,19 @@ fn apply_record(
             if user_content_event_rejected(&commit) {
                 return Err(RealtimeTranscriptSidecarError::Incoherent(
                     "durable realtime event is one the producer reducer rejects".to_string(),
+                ));
+            }
+        }
+        RealtimeTranscriptSidecarRecord::ChannelEventV2 { channel_id, event } => {
+            let commit =
+                realtime_transcript_revision::apply_realtime_transcript_event_from_channel(
+                    state,
+                    event,
+                    Some(channel_id),
+                )?;
+            if user_content_event_rejected(&commit) {
+                return Err(RealtimeTranscriptSidecarError::Incoherent(
+                    "durable channel realtime event was rejected".to_string(),
                 ));
             }
         }
@@ -489,6 +550,56 @@ mod tests {
             blob_id: crate::blob::content_blob_id(&media_type, "sidecar-test-image"),
             media_type,
         }
+    }
+
+    #[test]
+    fn channel_origin_survives_verified_sidecar_replay_until_deferred_materialization() {
+        let session_id = SessionId::new();
+        let channel = crate::LiveChannelId::new("channel-for-pending-user");
+        let mut producer = SessionRealtimeTranscriptProjection::empty(&session_id);
+        let (pending, _) = producer
+            .apply_event_from_channel(
+                RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: "later-user".to_string(),
+                    previous_item_id: Some("earlier-user".to_string()),
+                    content_index: 0,
+                    text: "held text".to_string(),
+                },
+                Some(channel.clone()),
+            )
+            .expect("record pending origin");
+        assert!(pending.messages.is_empty());
+        let suffix = producer
+            .prepare_suffix()
+            .expect("prepare attributed suffix")
+            .expect("attributed events are pending");
+        assert_eq!(
+            suffix.events()[0].schema_version(),
+            REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V2
+        );
+        assert!(
+            suffix.events()[0]
+                .decode_payload::<RealtimeTranscriptSidecarRecord>(
+                    REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V1,
+                )
+                .is_err(),
+            "an old schema reader must reject attributed event bytes"
+        );
+        let verified = verified_sequence(suffix.successor().clone(), suffix.events());
+        let mut restored =
+            SessionRealtimeTranscriptProjection::from_verified_sequence(&session_id, &verified)
+                .expect("replay attributed sidecar");
+        let (released, _) = restored
+            .apply_event(RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "earlier-user".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "unscoped predecessor".to_string(),
+            })
+            .expect("release the deferred user item");
+        assert_eq!(released.messages.len(), 2);
+        assert!(released.messages[0].source_channel.is_none());
+        assert_eq!(released.messages[1].source_channel.as_ref(), Some(&channel));
     }
 
     #[test]

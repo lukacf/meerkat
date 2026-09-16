@@ -367,6 +367,19 @@ impl<B: SessionAgentBuilder + 'static> LiveProjectionSink for ServiceLiveProject
                 content_index: identity.content_index.unwrap_or(0),
                 text: text.to_string(),
             };
+            if let Some(channel_id) = identity.channel_id {
+                return self
+                    .service
+                    .append_realtime_transcript_event_from_channel_with_machine(
+                        self.machine.as_ref(),
+                        session_id,
+                        event,
+                        channel_id.clone(),
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| session_error_to_projection(error, session_id));
+            }
             return self
                 .service
                 .append_realtime_transcript_event_with_machine(

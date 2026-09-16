@@ -366,7 +366,10 @@ pub(crate) fn commit_final_live_user_transcript(
     }
     let digest = NormalizedLiveUserInputDigest::derive(&text)
         .map_err(|error| meerkat_core::error::AgentError::ConfigError(error.to_string()))?;
-    let outcome = agent.append_realtime_transcript_event(final_event)?;
+    let outcome = agent.append_realtime_transcript_event_for_channel(
+        final_event,
+        provisional.correlation().channel_id().clone(),
+    )?;
     let canonical_commit_observed = outcome.materialized_messages.iter().any(|materialized| {
         matches!(
             materialized,
@@ -1364,6 +1367,17 @@ mod tests {
                 self.completed_events += 1;
             }
             Ok(self.session.append_realtime_transcript_event(event))
+        }
+
+        fn append_realtime_transcript_event_for_channel(
+            &mut self,
+            event: RealtimeTranscriptEvent,
+            channel_id: LiveChannelId,
+        ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError>
+        {
+            Ok(self
+                .session
+                .append_realtime_transcript_event_for_channel(event, channel_id))
         }
 
         fn staged_realtime_assistant_segment_text(

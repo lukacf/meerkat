@@ -467,6 +467,18 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
                 content_index: identity.content_index.unwrap_or(0),
                 text: text.to_string(),
             };
+            if let Some(channel_id) = identity.channel_id {
+                return self
+                    .runtime
+                    .append_realtime_transcript_event_from_channel(
+                        session_id,
+                        event,
+                        channel_id.clone(),
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| session_error_to_projection(error, session_id));
+            }
             return self
                 .runtime
                 .append_realtime_transcript_event(session_id, event)
@@ -2687,6 +2699,7 @@ mod tests {
     #[test]
     fn t10_assistant_text_delta_helper_builds_text_delta_event() {
         let identity = LiveTranscriptIdentity {
+            channel_id: None,
             provider_item_id: Some("item_text"),
             previous_item_id: Some("item_prev"),
             content_index: Some(2),
@@ -2722,6 +2735,7 @@ mod tests {
     fn missing_delta_identity_fails_closed_typed() {
         // Missing response_id.
         let identity = LiveTranscriptIdentity {
+            channel_id: None,
             provider_item_id: Some("item"),
             previous_item_id: None,
             content_index: Some(0),
@@ -2735,6 +2749,7 @@ mod tests {
 
         // Missing delta_id.
         let identity = LiveTranscriptIdentity {
+            channel_id: None,
             provider_item_id: Some("item"),
             previous_item_id: None,
             content_index: Some(0),
@@ -2748,6 +2763,7 @@ mod tests {
 
         // Missing item_id.
         let identity = LiveTranscriptIdentity {
+            channel_id: None,
             provider_item_id: None,
             previous_item_id: None,
             content_index: Some(0),
@@ -2767,6 +2783,7 @@ mod tests {
         // `AssistantTranscriptDelta` variant so the materializer routes
         // it to `AssistantBlock::Transcript`.
         let identity = LiveTranscriptIdentity {
+            channel_id: None,
             provider_item_id: Some("item_tx"),
             previous_item_id: Some("item_prev"),
             content_index: Some(0),

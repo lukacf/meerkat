@@ -544,6 +544,7 @@ impl std::fmt::Display for LiveToolDispatchTimeout {
 ///   final is not a delta).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LiveTranscriptIdentity<'a> {
+    pub channel_id: Option<&'a LiveChannelId>,
     pub provider_item_id: Option<&'a str>,
     pub previous_item_id: Option<&'a str>,
     pub content_index: Option<u32>,
@@ -552,6 +553,12 @@ pub struct LiveTranscriptIdentity<'a> {
 }
 
 impl<'a> LiveTranscriptIdentity<'a> {
+    #[must_use]
+    pub fn with_channel(mut self, channel_id: &'a LiveChannelId) -> Self {
+        self.channel_id = Some(channel_id);
+        self
+    }
+
     /// Build identity for a user-side observation (response/delta IDs are
     /// always `None` on the user side).
     pub fn user(
@@ -560,6 +567,7 @@ impl<'a> LiveTranscriptIdentity<'a> {
         content_index: Option<u32>,
     ) -> Self {
         Self {
+            channel_id: None,
             provider_item_id,
             previous_item_id,
             content_index,
@@ -577,6 +585,7 @@ impl<'a> LiveTranscriptIdentity<'a> {
         delta_id: Option<&'a str>,
     ) -> Self {
         Self {
+            channel_id: None,
             provider_item_id,
             previous_item_id,
             content_index,
@@ -594,6 +603,7 @@ impl<'a> LiveTranscriptIdentity<'a> {
         response_id: Option<&'a str>,
     ) -> Self {
         Self {
+            channel_id: None,
             provider_item_id: Some(provider_item_id),
             previous_item_id,
             content_index,
@@ -2517,7 +2527,8 @@ impl LiveAdapterHost {
                     provider_item_id.as_deref(),
                     previous_item_id.as_deref(),
                     *content_index,
-                );
+                )
+                .with_channel(channel_id);
                 self.projection_sink
                     .append_user_transcript(&session_id, text, identity)
                     .await?;

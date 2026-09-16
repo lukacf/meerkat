@@ -13264,11 +13264,12 @@ mod tests {
         struct PromotionEvidence {
             candidate: CommittedWholeBlobProvisionalTail,
             receipt: RunBoundaryReceipt,
+            kind: PreparedRuntimeSessionCommitKind,
         }
 
         /// Observe the real store boundary without manufacturing a checkpoint or
-        /// replacing any store write. A body-free service-terminal request can
-        /// only be a provisional promotion, unlike a receipt-only success.
+        /// replacing any store write. The retained candidate and final exact
+        /// bytes distinguish a body-free promotion from receipt-only success.
         struct PromotionRecordingStore {
             inner: InMemoryRuntimeStore,
             promotion: Mutex<Option<PromotionEvidence>>,
@@ -13287,7 +13288,12 @@ mod tests {
                 runtime_id: &LogicalRuntimeId,
                 request: PreparedRuntimeSessionCommit,
             ) -> Result<PreparedRuntimeSessionCommitResult, RuntimeStoreError> {
-                if request.kind() == PreparedRuntimeSessionCommitKind::ServiceTurnTerminal {
+                let kind = request.kind();
+                if matches!(
+                    kind,
+                    PreparedRuntimeSessionCommitKind::ServiceTurnTerminal
+                        | PreparedRuntimeSessionCommitKind::Success
+                ) {
                     assert!(
                         request.session().is_none(),
                         "the streamed turn must promote, not rewrite an inline session body"
@@ -13308,9 +13314,13 @@ mod tests {
                         self.promotion
                             .lock()
                             .await
-                            .replace(PromotionEvidence { candidate, receipt })
+                            .replace(PromotionEvidence {
+                                candidate,
+                                receipt,
+                                kind
+                            })
                             .is_none(),
-                        "exactly one normal service-turn promotion"
+                        "exactly one normal turn promotion"
                     );
                     self.entered.notify_one();
                     self.release.notified().await;
@@ -13469,6 +13479,27 @@ mod tests {
                 self.inner.persist_input_state(runtime_id, state).await
             }
 
+            async fn persist_input_states_atomically(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                states: &[InputStatePersistenceRecord],
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner
+                    .persist_input_states_atomically(runtime_id, states)
+                    .await
+            }
+
+            async fn compare_and_swap_input_states_atomically(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                expected: &[StoredInputState],
+                replacements: &[InputStatePersistenceRecord],
+            ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
+                self.inner
+                    .compare_and_swap_input_states_atomically(runtime_id, expected, replacements)
+                    .await
+            }
+
             async fn load_input_state(
                 &self,
                 runtime_id: &LogicalRuntimeId,
@@ -13605,6 +13636,7 @@ mod tests {
 
         struct RecordingLiveContextMirrorHost {
             store: Arc<PromotionRecordingStore>,
+            exported_boundaries: Mutex<Vec<WholeBlobStoreAuthority>>,
             appends: Mutex<
                 Vec<(
                     LiveContextAppendAuthority,
@@ -13618,6 +13650,26 @@ mod tests {
 
         #[async_trait]
         impl LiveContextMirrorHost for RecordingLiveContextMirrorHost {
+            async fn committed_boundary(
+                &self,
+                session_id: &SessionId,
+            ) -> Result<(BoundSessionCommit, String), String> {
+                let persisted = self
+                    .store
+                    .load_committed_whole_blob_snapshot(&LogicalRuntimeId::for_session(session_id))
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "committed runtime boundary is absent".to_string())?;
+                assert_eq!(persisted.session().id(), session_id);
+                let boundary = BoundSessionCommit::sealed(persisted.session_arc())
+                    .map_err(|error| error.to_string())?;
+                self.exported_boundaries
+                    .lock()
+                    .await
+                    .push(persisted.authority().clone());
+                Ok((boundary, persisted.authority().blob_sha256().to_string()))
+            }
+
             async fn append_context(
                 &self,
                 authority: LiveContextAppendAuthority,
@@ -13676,6 +13728,21 @@ mod tests {
 
         #[tokio::test]
         async fn streamed_persistent_turn_promotes_exact_tail_into_live_context_once() {
+            run_promoted_turn_context_regression(PromotionTurnPath::DirectService).await;
+        }
+
+        #[tokio::test]
+        async fn runtime_loop_streamed_turn_promotes_exact_tail_into_live_context_once() {
+            run_promoted_turn_context_regression(PromotionTurnPath::RuntimeLoop).await;
+        }
+
+        #[derive(Clone, Copy)]
+        enum PromotionTurnPath {
+            DirectService,
+            RuntimeLoop,
+        }
+
+        async fn run_promoted_turn_context_regression(path: PromotionTurnPath) {
             let store = Arc::new(PromotionRecordingStore {
                 inner: InMemoryRuntimeStore::new(),
                 promotion: Mutex::new(None),
@@ -13778,6 +13845,7 @@ mod tests {
                 .expect("generated live execution binding with no provider connection");
             let mirror = Arc::new(RecordingLiveContextMirrorHost {
                 store: store.clone(),
+                exported_boundaries: Mutex::new(Vec::new()),
                 appends: Mutex::new(Vec::new()),
                 entered: Notify::new(),
                 acknowledgements: Semaphore::new(0),
@@ -13787,7 +13855,40 @@ mod tests {
             let turn_service = service.clone();
             let turn_runtime = runtime.clone();
             let turn_session = session_id.clone();
+            let runtime_input = matches!(path, PromotionTurnPath::RuntimeLoop).then(|| {
+                meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
+                    meerkat_core::ContentInput::Text(PROMPT.to_string()),
+                    Some(
+                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                            execution_kind: Some(
+                                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                            ),
+                            ..Default::default()
+                        },
+                    ),
+                ))
+            });
+            let input_id = runtime_input.as_ref().map(|input| input.id().clone());
             let mut turn = tokio::spawn(async move {
+                if let Some(input) = runtime_input {
+                    let (outcome, completion) = turn_runtime
+                        .accept_input_with_completion(&turn_session, input)
+                        .await
+                        .expect("runtime admits the ordinary durable operator prompt");
+                    assert!(
+                        matches!(outcome, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+                        "runtime input was not accepted: {outcome:?}"
+                    );
+                    return match completion
+                        .expect("accepted prompt has a completion witness")
+                        .wait()
+                        .await
+                        .expect("RuntimeLoop completion witness settles")
+                    {
+                        meerkat_runtime::CompletionOutcome::Completed(result) => Ok(*result),
+                        other => panic!("RuntimeLoop did not commit a normal turn: {other:?}"),
+                    };
+                }
                 let admission = turn_service
                     .reserve_runtime_turn_admission(&turn_session)
                     .await
@@ -13829,6 +13930,10 @@ mod tests {
                 mirror.appends.lock().await.is_empty(),
                 "uncommitted candidate is not LIVE context"
             );
+            assert!(
+                mirror.exported_boundaries.lock().await.is_empty(),
+                "runtime ACK must not request projection before canonical commit"
+            );
             let still_committed = store
                 .load_committed_whole_blob_snapshot(&runtime_id)
                 .await
@@ -13863,6 +13968,33 @@ mod tests {
             );
             let promotion = store.promotion.lock().await;
             let evidence = promotion.as_ref().expect("observed actual store promotion");
+            assert_eq!(
+                evidence.kind,
+                match path {
+                    PromotionTurnPath::DirectService => {
+                        PreparedRuntimeSessionCommitKind::ServiceTurnTerminal
+                    }
+                    PromotionTurnPath::RuntimeLoop => PreparedRuntimeSessionCommitKind::Success,
+                },
+                "the runtime case must use the executor boundary, not the direct-service path"
+            );
+            if let Some(input_id) = &input_id {
+                assert_eq!(
+                    &evidence.receipt.contributing_input_ids,
+                    std::slice::from_ref(input_id)
+                );
+                let exports = mirror.exported_boundaries.lock().await;
+                assert!(
+                    !exports.is_empty(),
+                    "executor ACK wakes the canonical store exporter"
+                );
+                assert!(
+                    exports
+                        .iter()
+                        .all(|authority| authority == committed.authority()),
+                    "wake-driven exports carry only the actual promoted authority"
+                );
+            }
             assert_eq!(committed.bytes(), evidence.candidate.candidate_bytes());
             assert_eq!(
                 committed.authority().blob_sha256(),

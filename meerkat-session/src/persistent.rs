@@ -6064,9 +6064,38 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         event: meerkat_core::RealtimeTranscriptEvent,
     ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
+        self.append_realtime_transcript_event_with_machine_origin(machine, id, event, None)
+            .await
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn append_realtime_transcript_event_from_channel_with_machine(
+        &self,
+        machine: &MeerkatMachine,
+        id: &SessionId,
+        event: meerkat_core::RealtimeTranscriptEvent,
+        channel_id: meerkat_core::LiveChannelId,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
+        self.append_realtime_transcript_event_with_machine_origin(
+            machine,
+            id,
+            event,
+            Some(channel_id),
+        )
+        .await
+    }
+
+    #[cfg(feature = "live")]
+    async fn append_realtime_transcript_event_with_machine_origin(
+        &self,
+        machine: &MeerkatMachine,
+        id: &SessionId,
+        event: meerkat_core::RealtimeTranscriptEvent,
+        channel_id: Option<meerkat_core::LiveChannelId>,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
         let mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
         let outcome = self
-            .append_realtime_transcript_event_guarded(id, event)
+            .append_realtime_transcript_event_guarded_with_origin(id, event, channel_id)
             .await?;
         let committed_projection = if outcome.materialized_messages.is_empty() {
             None
@@ -6115,6 +6144,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
+        self.append_realtime_transcript_event_guarded_with_origin(id, event, None)
+            .await
+    }
+
+    async fn append_realtime_transcript_event_guarded_with_origin(
+        &self,
+        id: &SessionId,
+        event: meerkat_core::RealtimeTranscriptEvent,
+        channel_id: Option<meerkat_core::LiveChannelId>,
     ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
         let mut current = self.inner.export_session(id).await?;
         if let Some(user_content) = current.preflight_realtime_user_content_event(&event) {
@@ -6166,10 +6205,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
 
         let Some(prepared) = prepared else {
-            let outcome = self
-                .inner
-                .append_realtime_transcript_event(id, event)
-                .await?;
+            let outcome = match channel_id {
+                Some(channel) => {
+                    self.inner
+                        .append_realtime_transcript_event_for_channel(id, event, channel)
+                        .await?
+                }
+                None => {
+                    self.inner
+                        .append_realtime_transcript_event(id, event)
+                        .await?
+                }
+            };
             if let Err(error) = self.persist_full_session(id).await {
                 let _ = self.discard_live_session_unfenced(id).await;
                 return Err(error);
@@ -17469,6 +17516,20 @@ mod tests {
                 Err(poisoned) => poisoned.into_inner(),
             };
             Ok(session.append_realtime_transcript_event(event))
+        }
+
+        fn append_realtime_transcript_event_for_channel(
+            &mut self,
+            event: meerkat_core::RealtimeTranscriptEvent,
+            channel_id: meerkat_core::LiveChannelId,
+        ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError>
+        {
+            let mut session = self
+                .inner
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Ok(session.append_realtime_transcript_event_for_channel(event, channel_id))
         }
 
         fn interaction_event_injector(

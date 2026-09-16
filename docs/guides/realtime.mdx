@@ -805,6 +805,29 @@ are executor trace for generic mirroring: their result has the separate
 delegation-specific delivery path. Later ordinary background interactions
 remain eligible for generic context delivery.
 
+Ordinary runtime-backed turns, including RPC `turn/start`, notify an owned
+context-projection task after the CoreExecutor acknowledges the committed
+boundary. That task reads the store-sealed canonical body after executor locks
+are released; it never reconstructs history from turn results or UI events.
+It rechecks the target channel after each read, so a delayed read cannot publish
+through an old channel after close/reopen. A failed post-commit source read or
+classification is retained for explicit drain observers and reported during
+close; a later commit notification retries the canonical scan. Close does not
+wait for a source read held behind unrelated background work. This derived
+context delivery is distinct from committing incoming live transcript evidence:
+a failure of the latter still blocks the physical drain.
+
+Mirroring classifies each committed row independently. User speech retains
+session-, channel-, and row-scoped domain provenance before canonical hashing,
+including when materialization is deferred behind another transcript item.
+Thus a live callback cannot swallow preceding ordinary text rows, and a text
+callback cannot echo speech already present on that channel. Generic transcript
+rewrites clear replacement-row provenance; another session, channel, or row
+cannot reuse it. Attributed realtime sidecar events and snapshots use schema 2;
+new readers verify both schemas 1 and 2, while older readers reject schema 2.
+This domain provenance is used with the store witness and generated channel
+binding, not as a standalone transport authorization token.
+
 Provider ingress routes append receipts before the control consumer, so a
 control task committing its final user transcript cannot wait on its own
 receive loop. Duplicate high-volume transcript notifications stay on the

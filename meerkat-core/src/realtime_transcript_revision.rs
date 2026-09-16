@@ -349,6 +349,14 @@ pub struct SessionRealtimeTranscriptState {
     pending_user_content_blob: Option<PendingRealtimeUserContentBlob>,
 }
 
+impl SessionRealtimeTranscriptState {
+    pub(crate) fn has_channel_origins(&self) -> bool {
+        self.items
+            .values()
+            .any(|item| item.source_channel.is_some())
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PlaybackSettlementReceipt {
     channel_id: String,
@@ -383,6 +391,8 @@ pub fn playback_settlement(
 #[serde(rename_all = "snake_case")]
 struct RealtimeTranscriptItemState {
     role: RealtimeTranscriptRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_channel: Option<crate::LiveChannelId>,
     #[serde(default)]
     previous_item_id: Option<String>,
     #[serde(default)]
@@ -419,6 +429,7 @@ impl RealtimeTranscriptItemState {
     ) -> Self {
         Self {
             role,
+            source_channel: None,
             previous_item_id,
             response_id,
             content_segments: BTreeMap::new(),
@@ -435,6 +446,7 @@ impl RealtimeTranscriptItemState {
     fn skipped(previous_item_id: Option<String>) -> Self {
         Self {
             role: RealtimeTranscriptRole::Assistant,
+            source_channel: None,
             previous_item_id,
             response_id: None,
             content_segments: BTreeMap::new(),
@@ -549,8 +561,14 @@ mod completion_usage_tests {
 #[derive(Debug, Clone, Default)]
 pub struct RealtimeTranscriptApplyCommit {
     pub outcome: RealtimeTranscriptApplyOutcome,
-    pub messages: Vec<Message>,
+    pub messages: Vec<RealtimeMaterializedRow>,
     pub usage: Usage,
+}
+
+#[derive(Debug, Clone)]
+pub struct RealtimeMaterializedRow {
+    pub message: Message,
+    pub source_channel: Option<crate::LiveChannelId>,
 }
 
 /// Authorize a durable snapshot through the canonical SessionDocument
@@ -698,6 +716,14 @@ pub fn apply_realtime_transcript_event(
     state: &mut SessionRealtimeTranscriptState,
     event: RealtimeTranscriptEvent,
 ) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
+    apply_realtime_transcript_event_from_channel(state, event, None)
+}
+
+pub fn apply_realtime_transcript_event_from_channel(
+    state: &mut SessionRealtimeTranscriptState,
+    event: RealtimeTranscriptEvent,
+    source_channel: Option<crate::LiveChannelId>,
+) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
     let commit = match event {
         RealtimeTranscriptEvent::ItemObserved {
             item_id,
@@ -742,7 +768,14 @@ pub fn apply_realtime_transcript_event(
             previous_item_id,
             content_index,
             text,
-        } => apply_user_transcript_final(state, item_id, previous_item_id, content_index, text)?,
+        } => apply_user_transcript_final(
+            state,
+            item_id,
+            previous_item_id,
+            content_index,
+            text,
+            source_channel,
+        )?,
         RealtimeTranscriptEvent::UserContentFinal {
             idempotency_key,
             item_id,
@@ -1083,6 +1116,7 @@ fn apply_user_transcript_final(
     previous_item_id: Option<String>,
     content_index: u32,
     text: String,
+    source_channel: Option<crate::LiveChannelId>,
 ) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
     let existing_segment = state
         .items
@@ -1109,6 +1143,9 @@ fn apply_user_transcript_final(
     } else {
         None
     } {
+        if !item.materialized && item.source_channel.is_none() && decision.write_user_segment {
+            item.source_channel = source_channel;
+        }
         if decision.write_user_segment {
             item.content_segments.insert(content_index, text);
         } else if !text.is_empty() && !segment_empty && !segment_matches {
@@ -2159,7 +2196,13 @@ fn materialize_realtime_transcript_ready_items(
                         item.user_content_segments.clear();
                     }
                     let text = ContentInput::Blocks(content.clone()).text_content();
-                    messages.push(Message::User(UserMessage::with_blocks(content)));
+                    messages.push(RealtimeMaterializedRow {
+                        message: Message::User(UserMessage::with_blocks(content)),
+                        source_channel: state
+                            .items
+                            .get(&item_id)
+                            .and_then(|item| item.source_channel.clone()),
+                    });
                     materialized
                         .push(RealtimeTranscriptMaterializedMessage::User { item_id, text });
                 }
@@ -2264,7 +2307,7 @@ enum ResolvedMaterialization {
 }
 
 fn flush_pending_assistant_blocks(
-    messages: &mut Vec<Message>,
+    messages: &mut Vec<RealtimeMaterializedRow>,
     committed_usage: &mut Usage,
     pending_blocks: &mut Vec<AssistantBlock>,
     pending_stop_reason: Option<StopReason>,
@@ -2279,7 +2322,10 @@ fn flush_pending_assistant_blocks(
         Some(stop_reason) => BlockAssistantMessage::new(blocks, stop_reason),
         None => BlockAssistantMessage::snapshot(blocks),
     };
-    messages.push(Message::BlockAssistant(message));
+    messages.push(RealtimeMaterializedRow {
+        message: Message::BlockAssistant(message),
+        source_channel: None,
+    });
     if let Some(turn_usage) = pending_usage.take() {
         let mut cumulative = crate::types::CumulativeUsage::from_usage(committed_usage.clone());
         cumulative.add_turn(&turn_usage);

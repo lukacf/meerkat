@@ -1926,7 +1926,10 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
                 session_snapshot,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "live")]
+        self.adapter.notify_committed_live_context(&self.session_id);
+        Ok(())
     }
 
     async fn acknowledge_committed_session_boundary(
@@ -1939,7 +1942,10 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
                 authority,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "live")]
+        self.adapter.notify_committed_live_context(&self.session_id);
+        Ok(())
     }
 
     async fn reconcile_committed_compaction_projections(

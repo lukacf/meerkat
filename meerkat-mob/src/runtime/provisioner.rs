@@ -16045,6 +16045,7 @@ mod bridge_rejection_tests {
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::runtime_metadata(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                     transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
+                        realtime_origin: None,
                         interaction_id: None,
                         run_id: None,
                         objective_id: Some(objective_id),

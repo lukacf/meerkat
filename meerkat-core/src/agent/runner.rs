@@ -3401,6 +3401,7 @@ mod skill_activation_effect_tests {
         let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
         let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_beef));
         let transcript_identity = crate::types::TranscriptMessageIdentity {
+            realtime_origin: None,
             interaction_id: Some(interaction_id),
             run_id: None,
             objective_id: None,
@@ -3465,6 +3466,7 @@ mod skill_activation_effect_tests {
         let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
         let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_f00d));
         let transcript_identity = crate::types::TranscriptMessageIdentity {
+            realtime_origin: None,
             interaction_id: Some(interaction_id),
             run_id: None,
             objective_id: None,
@@ -3529,6 +3531,7 @@ mod skill_activation_effect_tests {
         let interaction_id = crate::interaction::InteractionId(uuid::Uuid::from_u128(0xfeed_cafe));
         let run_id = crate::lifecycle::RunId::new();
         agent.set_active_transcript_identity(Some(crate::types::TranscriptMessageIdentity {
+            realtime_origin: None,
             interaction_id: Some(interaction_id),
             run_id: None,
             objective_id: None,

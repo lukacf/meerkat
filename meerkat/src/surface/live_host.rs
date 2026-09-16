@@ -1091,6 +1091,23 @@ impl<B: SessionAgentBuilder + 'static>
 impl<B: SessionAgentBuilder + 'static> meerkat_runtime::live_context_mirror::LiveContextMirrorHost
     for ExperimentalGptLiveContextMirrorHost<B>
 {
+    async fn committed_boundary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        (
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+            String,
+        ),
+        String,
+    > {
+        self.member_host
+            .service
+            .export_live_context_committed_boundary(session_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     async fn append_context(
         &self,
         authority: meerkat_runtime::live_execution::LiveContextAppendAuthority,

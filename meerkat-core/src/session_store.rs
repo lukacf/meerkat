@@ -7868,6 +7868,7 @@ mod tests {
             }],
             stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity {
+                realtime_origin: None,
                 interaction_id: None,
                 run_id,
                 objective_id: None,
@@ -7902,6 +7903,7 @@ mod tests {
                 }
                 Message::BlockAssistant(assistant) => {
                     assistant.identity = crate::types::TranscriptMessageIdentity {
+                        realtime_origin: None,
                         interaction_id: None,
                         run_id: Some(crate::lifecycle::RunId::new()),
                         objective_id: None,

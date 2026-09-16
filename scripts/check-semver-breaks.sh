@@ -77,7 +77,7 @@ workspace_version="$(
 baseline_version="${MEERKAT_SEMVER_BASELINE_VERSION:-}"
 if [[ -z "$baseline_version" ]]; then
     baseline_version="$(
-        curl -fsSL \
+        curl -fsSL --retry 6 --retry-delay 10 \
             -H 'User-Agent: meerkat-semver-breaks (https://github.com/lukacf/meerkat)' \
             'https://crates.io/api/v1/crates/meerkat-core' \
             | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["crate"]["max_version"])'

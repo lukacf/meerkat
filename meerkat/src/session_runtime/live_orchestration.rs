@@ -2846,15 +2846,6 @@ mod orchestrator {
             };
             Self::check_session_pin(channel_id, &session_id, expected_session)?;
 
-            self.service
-                .resolve_live_assistant_playback_on_channel_close(&session_id, channel_id.clone())
-                .await
-                .map_err(|error| LiveChannelVerbError::HostCommit {
-                    message: format!(
-                        "failed to resolve pending assistant playback before close: {error}"
-                    ),
-                })?;
-
             let observation = match host.reserve_channel_close_observation(channel_id).await {
                 Ok(observation) => observation,
                 Err(error) => {
@@ -2869,6 +2860,23 @@ mod orchestrator {
                     message: format!(
                         "physical adapter close failed before generated terminal authority: {error}"
                     ),
+                })?;
+            // The provider transport must have drained final output through
+            // canonical projection before close-specific Unmeasured settlement
+            // is allowed to discard any still-unmeasured playback target.
+            self.service
+                .resolve_live_assistant_playback_on_channel_close(&session_id, channel_id.clone())
+                .await
+                .map_err(|error| match error {
+                    SessionError::Busy { .. } => LiveChannelVerbError::CloseSettlementBusy {
+                        channel_id: channel_id.to_string(),
+                        session_id: session_id.to_string(),
+                    },
+                    error => LiveChannelVerbError::HostCommit {
+                        message: format!(
+                            "failed to resolve pending assistant playback before close: {error}"
+                        ),
+                    },
                 })?;
             let authority = self
                 .runtime_adapter
@@ -3059,7 +3067,7 @@ mod orchestrator {
                 Err(error @ LiveAdapterHostError::PlaybackTerminalAcceptedButReceiptFailed(_)) => {
                     let burn = self
                         .runtime_adapter
-                        .commit_live_assistant_output_terminal(reservation)
+                        .retain_live_assistant_output_terminal(reservation)
                         .map_err(|commit| commit.to_string());
                     host.fail_playback_waiters_for_channel(
                         channel_id,
@@ -3120,13 +3128,11 @@ mod orchestrator {
                 Err(error) => Err(error),
             };
             if let Err(primary) = settlement_result {
-                // Queue acceptance makes a missing settlement ambiguous. Burn
-                // the address, then force the exact channel close path to
-                // resolve the durable target as Unmeasured. Never release it
-                // for a second terminal attempt.
+                // Spend caller permission but retain the exact target for
+                // projection-owner retry of already accepted evidence.
                 let burn = self
                     .runtime_adapter
-                    .commit_live_assistant_output_terminal(reservation)
+                    .retain_live_assistant_output_terminal(reservation)
                     .map_err(|error| error.to_string());
                 host.fail_playback_waiters_for_channel(
                     channel_id,

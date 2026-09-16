@@ -535,6 +535,14 @@ ResolveRealtimeAssistantTurnCompletedRecord(response_id_valid, response_discarde
     /\ UnchangedFrame_afcdf325669eb17c
 
 
+ResolveRealtimeAssistantPlaybackSnapshot(target_matches, snapshot_present, response_discarded, item_materialized) ==
+    /\ phase = "Ready"
+    /\ (target_matches /\ snapshot_present /\ (response_discarded = FALSE) /\ (item_materialized = FALSE))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_afcdf325669eb17c
+
+
 ResolveRealtimeAssistantTurnInterruptedInvalid(response_id_valid) ==
     /\ phase = "Ready"
     /\ (response_id_valid = FALSE)
@@ -701,6 +709,19 @@ ResolveLiveAssistantPlaybackOnChannelClose(session_id, channel_id, interaction_i
     /\ session_live_assistant_terminal_prefix_chars' = MapRemove(session_live_assistant_terminal_prefix_chars, session_id)
     /\ session_live_assistant_terminal_prefix_digest' = MapRemove(session_live_assistant_terminal_prefix_digest, session_id)
     /\ UnchangedFrame_b4248dd3143f6dbd
+
+
+ObserveLiveAssistantPlaybackSnapshot(session_id, channel_id, interaction_id, response_id, item_id, content_index, snapshot_chars, snapshot_digest, canonical_chars, canonical_digest, prefix_matches_snapshot) ==
+    /\ phase = "Ready"
+    /\ ((snapshot_chars > 0) /\ (snapshot_digest # "") /\ prefix_matches_snapshot /\ (canonical_chars <= snapshot_chars) /\ (canonical_digest # "") /\ ((IF (session_id \in DOMAIN session_live_channel_id) THEN Some((IF session_id \in DOMAIN session_live_channel_id THEN session_live_channel_id[session_id] ELSE "None")) ELSE None) = Some(channel_id)) /\ ((IF (session_id \in DOMAIN session_live_interaction_id) THEN Some((IF session_id \in DOMAIN session_live_interaction_id THEN session_live_interaction_id[session_id] ELSE "None")) ELSE None) = Some(interaction_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_response_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_response_id THEN session_live_assistant_playback_response_id[session_id] ELSE "None")) ELSE None) = Some(response_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_item_id) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_item_id THEN session_live_assistant_playback_item_id[session_id] ELSE "None")) ELSE None) = Some(item_id)) /\ ((IF (session_id \in DOMAIN session_live_assistant_playback_content_index) THEN Some((IF session_id \in DOMAIN session_live_assistant_playback_content_index THEN session_live_assistant_playback_content_index[session_id] ELSE 0)) ELSE None) = Some(content_index)) /\ ~((session_id \in DOMAIN session_live_assistant_terminal_observation)))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_live_assistant_playback_response_id' = MapRemove(session_live_assistant_playback_response_id, session_id)
+    /\ session_live_assistant_playback_item_id' = MapRemove(session_live_assistant_playback_item_id, session_id)
+    /\ session_live_assistant_playback_content_index' = MapRemove(session_live_assistant_playback_content_index, session_id)
+    /\ session_live_assistant_final_chars' = MapRemove(session_live_assistant_final_chars, session_id)
+    /\ session_live_assistant_final_digest' = MapRemove(session_live_assistant_final_digest, session_id)
+    /\ UnchangedFrame_5577ab234d3d2728
 
 
 ObserveLiveAssistantPlaybackFinalPendingTerminal(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, pending_terminal_observation, pending_reported_prefix_chars, pending_reported_prefix_digest, reported_prefix_matches_authoritative) ==
@@ -1149,6 +1170,7 @@ Next ==
     \/ \E response_discarded \in BOOLEAN : \E stop_reason \in RealtimeTranscriptStopReasonKindValues : ResolveRealtimeAssistantTurnCompletedDiscard(TRUE, response_discarded, stop_reason)
     \/ \E stop_reason \in RealtimeTranscriptStopReasonKindValues : ResolveRealtimeAssistantTurnCompletedToolUse(TRUE, FALSE, stop_reason)
     \/ \E stop_reason \in RealtimeTranscriptStopReasonKindValues : ResolveRealtimeAssistantTurnCompletedRecord(TRUE, FALSE, stop_reason)
+    \/ ResolveRealtimeAssistantPlaybackSnapshot(TRUE, TRUE, FALSE, FALSE)
     \/ ResolveRealtimeAssistantTurnInterruptedInvalid(FALSE)
     \/ ResolveRealtimeAssistantTurnInterruptedValid(TRUE)
     \/ \E predecessor_materialized \in BOOLEAN : \E item_skipped \in BOOLEAN : \E item_ready \in BOOLEAN : \E item_text_present \in BOOLEAN : \E role \in RealtimeTranscriptRoleKindValues : \E response_id_present \in BOOLEAN : \E completion_present \in BOOLEAN : \E completion_usage_consumed \in BOOLEAN : ResolveRealtimeMaterializeAlreadyDone(TRUE, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed)
@@ -1166,6 +1188,7 @@ Next ==
     \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : AdmitLiveAssistantPlaybackTarget(session_id, channel_id, interaction_id, response_id, item_id, content_index)
     \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : RecoverLiveAssistantPlaybackTarget(session_id, channel_id, interaction_id, response_id, item_id, content_index)
     \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : ResolveLiveAssistantPlaybackOnChannelClose(session_id, channel_id, interaction_id, response_id, item_id, content_index)
+    \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E snapshot_chars \in 0..2 : \E snapshot_digest \in StringValues : \E canonical_chars \in 0..2 : \E canonical_digest \in StringValues : ObserveLiveAssistantPlaybackSnapshot(session_id, channel_id, interaction_id, response_id, item_id, content_index, snapshot_chars, snapshot_digest, canonical_chars, canonical_digest, TRUE)
     \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : \E pending_terminal_observation \in LiveAssistantPlaybackTerminalObservationValues : \E pending_reported_prefix_chars \in 0..2 : \E pending_reported_prefix_digest \in StringValues : ObserveLiveAssistantPlaybackFinalPendingTerminal(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, pending_terminal_observation, pending_reported_prefix_chars, pending_reported_prefix_digest, FALSE)
     \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : RecoverLiveAssistantPlaybackFinal(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest)
     \/ \E session_id \in SessionIdValues : \E channel_id \in StringValues : \E interaction_id \in StringValues : \E response_id \in StringValues : \E item_id \in StringValues : \E content_index \in 0..2 : \E observation \in LiveAssistantPlaybackTerminalObservationValues : \E reported_prefix_chars \in 0..2 : \E reported_prefix_digest \in StringValues : \E authoritative_assistant_chars \in 0..2 : \E authoritative_text_digest \in StringValues : ObserveLiveAssistantPlaybackTerminalPendingFinal(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, FALSE, FALSE)

@@ -474,7 +474,7 @@ impl<B: SessionAgentBuilder + 'static> LiveProjectionSink for ServiceLiveProject
         provider_item_id: &str,
         content_index: u32,
     ) -> Result<Option<meerkat_core::InteractionId>, LiveProjectionError> {
-        let Some(target) = self
+        let target = self
             .service
             .live_assistant_playback_target(
                 session_id,
@@ -483,16 +483,29 @@ impl<B: SessionAgentBuilder + 'static> LiveProjectionSink for ServiceLiveProject
                 content_index,
             )
             .await
-            .map_err(|err| session_error_to_projection(err, session_id))?
-        else {
-            return Ok(None);
-        };
-        if target.response_id() != response_id {
+            .map_err(|err| session_error_to_projection(err, session_id))?;
+        if target
+            .as_ref()
+            .is_some_and(|target| target.response_id() != response_id)
+        {
             return Err(LiveProjectionError::Rejected(
                 "assistant final did not match the active playback response".to_string(),
             ));
         }
-        let interaction_id = target.interaction_id();
+        let interaction_id = target.map(|target| target.interaction_id()).or_else(|| {
+            self.machine
+                .live_assistant_output_handle_for_target(
+                    session_id,
+                    channel_id,
+                    response_id,
+                    provider_item_id,
+                    content_index,
+                )
+                .map(|handle| handle.interaction_id())
+        });
+        let Some(interaction_id) = interaction_id else {
+            return Ok(None);
+        };
         self.service
             .observe_live_assistant_playback_final(
                 session_id,
@@ -590,8 +603,10 @@ impl<B: SessionAgentBuilder + 'static> LiveProjectionSink for ServiceLiveProject
         stop_reason: StopReason,
         usage: meerkat_core::TurnUsage,
     ) -> Result<bool, LiveProjectionError> {
-        self.service
-            .observe_live_assistant_playback_terminal(
+        let outcome = self
+            .service
+            .observe_live_assistant_playback_terminal_with_machine(
+                self.machine.as_ref(),
                 session_id,
                 channel_id.clone(),
                 interaction_id,
@@ -603,13 +618,11 @@ impl<B: SessionAgentBuilder + 'static> LiveProjectionSink for ServiceLiveProject
                 usage,
             )
             .await
-            .map(|outcome| {
-                matches!(
-                    outcome,
-                    meerkat_session::LiveAssistantPlaybackObservationResult::Resolved(_)
-                )
-            })
-            .map_err(|err| session_error_to_projection(err, session_id))
+            .map_err(|err| session_error_to_projection(err, session_id))?;
+        Ok(matches!(
+            outcome,
+            meerkat_session::LiveAssistantPlaybackObservationResult::Resolved(_)
+        ))
     }
 
     async fn fail_assistant_output_publication(

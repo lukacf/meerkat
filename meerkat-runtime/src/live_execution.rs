@@ -3724,6 +3724,9 @@ impl LiveContextAppendResolutionReceipt {
             LiveContextAppendObservation::Delivered => LiveAppendDeliveryOutcome::Acknowledged,
             LiveContextAppendObservation::Rejected => LiveAppendDeliveryOutcome::Rejected,
             LiveContextAppendObservation::Ambiguous => LiveAppendDeliveryOutcome::Ambiguous,
+            LiveContextAppendObservation::InterruptedByClose => {
+                LiveAppendDeliveryOutcome::InterruptedByClose
+            }
         };
         let expected_cursor = if matches!(expected_outcome, LiveAppendDeliveryOutcome::Acknowledged)
         {
@@ -4025,6 +4028,8 @@ pub enum LiveDelegationResultDeliveryObservation {
     Delivered,
     Rejected,
     Ambiguous,
+    /// Close interrupted completion; partial provider consumption is unknown.
+    InterruptedByClose,
 }
 
 /// Generated disposition of any assistant speech that could follow a
@@ -4035,6 +4040,8 @@ pub enum LiveDelegationResultSpeechDisposition {
     Eligible,
     SuppressedByNewerUserTurn,
     NotDelivered,
+    /// Close interruption establishes no claim about partial result readout.
+    Unmeasured,
 }
 
 #[derive(Debug, Clone)]
@@ -4238,6 +4245,9 @@ impl LiveDelegationResultDeliveryReceipt {
             DslLiveDelegationResultDeliveryObservation::Ambiguous => {
                 LiveDelegationResultDeliveryObservation::Ambiguous
             }
+            DslLiveDelegationResultDeliveryObservation::InterruptedByClose => {
+                LiveDelegationResultDeliveryObservation::InterruptedByClose
+            }
         };
         let effect_speech_disposition = match speech_disposition {
             crate::meerkat_machine::dsl::LiveDelegationResultSpeechDisposition::Eligible => {
@@ -4249,6 +4259,23 @@ impl LiveDelegationResultDeliveryReceipt {
             crate::meerkat_machine::dsl::LiveDelegationResultSpeechDisposition::NotDelivered => {
                 LiveDelegationResultSpeechDisposition::NotDelivered
             }
+            crate::meerkat_machine::dsl::LiveDelegationResultSpeechDisposition::Unmeasured => {
+                LiveDelegationResultSpeechDisposition::Unmeasured
+            }
+        };
+        let speech_matches = match effect_observation {
+            LiveDelegationResultDeliveryObservation::Delivered => matches!(
+                effect_speech_disposition,
+                LiveDelegationResultSpeechDisposition::Eligible
+                    | LiveDelegationResultSpeechDisposition::SuppressedByNewerUserTurn
+            ),
+            LiveDelegationResultDeliveryObservation::InterruptedByClose => {
+                effect_speech_disposition == LiveDelegationResultSpeechDisposition::Unmeasured
+            }
+            LiveDelegationResultDeliveryObservation::Rejected
+            | LiveDelegationResultDeliveryObservation::Ambiguous => {
+                effect_speech_disposition == LiveDelegationResultSpeechDisposition::NotDelivered
+            }
         };
         let correlation = authority.operation().domain_correlation();
         if channel_id != correlation.channel_id().as_str()
@@ -4256,10 +4283,7 @@ impl LiveDelegationResultDeliveryReceipt {
             || result_digest != &authority.result_digest
             || effect_disposition != authority.disposition()
             || effect_observation != expected_observation
-            || (effect_observation == LiveDelegationResultDeliveryObservation::Delivered
-                && effect_speech_disposition == LiveDelegationResultSpeechDisposition::NotDelivered)
-            || (effect_observation != LiveDelegationResultDeliveryObservation::Delivered
-                && effect_speech_disposition != LiveDelegationResultSpeechDisposition::NotDelivered)
+            || !speech_matches
             || *retry_allowed
             || *recovery_required
                 != matches!(

@@ -274,6 +274,29 @@ pub enum RealtimeTranscriptEvent {
         item_id: String,
         content_index: u32,
     },
+    /// Record exact settlement facts and consume the target in one operation.
+    /// Internal replay may recover the receipt, never new caller permission.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    AssistantPlaybackTerminalSettled {
+        channel_id: String,
+        interaction_id: crate::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        settlement: Box<crate::LiveAssistantPlaybackSettlement>,
+    },
+    /// Generated-authorized local playback checkpoint. The provider group may
+    /// continue; this does not record a provider turn-final observation.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    AssistantPlaybackSnapshotCommitted {
+        channel_id: String,
+        interaction_id: crate::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        text: String,
+        evidence: crate::LiveAssistantPlaybackEvidence,
+    },
     /// Provider turn reached a terminal boundary. The session decides which
     /// staged assistant items, if any, are now canonical.
     AssistantTurnCompleted {

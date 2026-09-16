@@ -4088,6 +4088,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ObserveLiveAssistantTurnStartedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AdvanceLiveAssistantPlaybackSegmentIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdvanceLiveAssistantPlaybackSegmentAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdvanceLiveAssistantPlaybackSegmentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReplayLiveAssistantPlaybackSegmentIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReplayLiveAssistantPlaybackSegmentAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReplayLiveAssistantPlaybackSegmentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AdmitLiveInteractionIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4773,6 +4791,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `BindLiveContextRecoveryChannelRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextAppendInterruptedByCloseIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextAppendInterruptedByCloseAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextAppendInterruptedByCloseRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveLiveContextAppendRejectedIdle`
@@ -7559,6 +7586,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveAssistantTurnStarted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveAssistantPlaybackSegmentAdvanced`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveProviderTurnFinished`

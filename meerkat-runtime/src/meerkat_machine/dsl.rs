@@ -2732,6 +2732,7 @@ pub enum LiveContextAppendObservation {
     Delivered,
     Rejected,
     Ambiguous,
+    InterruptedByClose,
 }
 
 /// Bridging copy of SessionDocument's generated committed-row disposition.
@@ -2758,6 +2759,7 @@ pub enum LiveDelegationResultDeliveryObservation {
     Delivered,
     Rejected,
     Ambiguous,
+    InterruptedByClose,
 }
 
 /// Bridging copy of the catalog-owned delegation-result speech disposition.
@@ -2767,6 +2769,7 @@ pub enum LiveDelegationResultSpeechDisposition {
     Eligible,
     SuppressedByNewerUserTurn,
     NotDelivered,
+    Unmeasured,
 }
 
 /// Typed mirror of the public runtime lifecycle projection. The shell passes

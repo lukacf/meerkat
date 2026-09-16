@@ -105,6 +105,7 @@ fn meerkat_machine_owns_live_fence_delegation_and_delivery_authority() {
     for required in [
         "BindLiveExecutionChannel",
         "ObserveLiveAssistantTurnStarted",
+        "AdvanceLiveAssistantPlaybackSegment",
         "AdmitLiveInteraction",
         "AdmitLiveDelegation",
         "AdmitLiveInteractionDelegation",
@@ -188,6 +189,7 @@ fn meerkat_machine_owns_live_fence_delegation_and_delivery_authority() {
     for required in [
         "LiveExecutionChannelBound",
         "LiveAssistantTurnStarted",
+        "LiveAssistantPlaybackSegmentAdvanced",
         "LiveInteractionAdmitted",
         "LiveDelegationAdmitted",
         "LiveInteractionDelegationAdmitted",
@@ -267,6 +269,8 @@ fn session_document_owns_live_transcript_reconciliation_and_playback_terminal() 
         "RecoverLiveAssistantPlaybackTarget",
         "ResolveLiveAssistantPlaybackOnChannelClose",
         "ObserveLiveAssistantPlaybackFinal",
+        "ObserveLiveAssistantPlaybackSnapshot",
+        "ResolveRealtimeAssistantPlaybackSnapshot",
         "RecoverLiveAssistantPlaybackFinal",
         "ObserveLiveAssistantPlaybackTerminal",
         "RecoverLiveAssistantPlaybackTerminal",

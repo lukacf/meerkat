@@ -4581,6 +4581,7 @@ fn json_value_payload_bytes(value: &serde_json::Value) -> usize {
 fn realtime_transcript_payload_bytes(event: &RealtimeTranscriptEvent) -> usize {
     match event {
         RealtimeTranscriptEvent::UserTranscriptFinal { text, .. }
+        | RealtimeTranscriptEvent::AssistantPlaybackSnapshotCommitted { text, .. }
         | RealtimeTranscriptEvent::AssistantTranscriptTruncated { text, .. }
         | RealtimeTranscriptEvent::AssistantTranscriptFinalText { text, .. } => text.len(),
         RealtimeTranscriptEvent::UserContentFinal { content, .. } => {
@@ -4593,6 +4594,7 @@ fn realtime_transcript_payload_bytes(event: &RealtimeTranscriptEvent) -> usize {
         | RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted { .. }
         | RealtimeTranscriptEvent::AssistantPlaybackTargetResolved { .. }
         | RealtimeTranscriptEvent::AssistantPlaybackTerminalObserved { .. }
+        | RealtimeTranscriptEvent::AssistantPlaybackTerminalSettled { .. }
         | RealtimeTranscriptEvent::AssistantTurnCompleted { .. }
         | RealtimeTranscriptEvent::AssistantTurnInterrupted { .. } => 0,
     }

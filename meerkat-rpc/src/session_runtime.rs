@@ -5918,7 +5918,8 @@ impl SessionRuntime {
         usage: meerkat_core::TurnUsage,
     ) -> Result<bool, SessionError> {
         self.service
-            .observe_live_assistant_playback_terminal(
+            .observe_live_assistant_playback_terminal_with_machine(
+                self.runtime_adapter.as_ref(),
                 session_id,
                 channel_id,
                 interaction_id,

@@ -6866,11 +6866,11 @@ impl LiveProviderTurnStartedAuthority {
     }
 }
 
-/// Opaque one-use address for one exact assistant output turn.
+/// Opaque one-use address for one exact assistant playback segment.
 ///
-/// The handle is minted only from a generated `LiveAssistantTurnStarted`
-/// effect after a typed role-bearing provider observation freezes the current
-/// foreground InteractionId. Clones share two-phase reservation and terminal
+/// The initial handle follows generated `LiveAssistantTurnStarted` authority;
+/// successors require a session-sealed snapshot cut and generated segment
+/// advancement within that same frozen interaction. Clones share reservation and terminal
 /// state, so pre-acceptance failures can release exact custody while stale,
 /// cross-channel, concurrent, or replayed commands still fail closed.
 #[derive(Clone)]
@@ -6879,6 +6879,7 @@ pub struct LiveAssistantOutputHandle {
     binding: crate::live_execution::LiveDelegationRuntimeBinding,
     interaction_id: meerkat_core::InteractionId,
     assistant_turn_ref: String,
+    playback_segment: u64,
     output_id: String,
     target: Arc<StdMutex<Option<(String, String, u32)>>>,
     terminal_reserved: Arc<std::sync::atomic::AtomicBool>,
@@ -6919,6 +6920,11 @@ impl std::fmt::Debug for LiveAssistantOutputHandle {
 
 #[cfg(feature = "live")]
 impl LiveAssistantOutputHandle {
+    #[doc(hidden)]
+    pub fn __playback_segment(&self) -> u64 {
+        self.playback_segment
+    }
+
     #[must_use]
     pub fn binding(&self) -> &crate::live_execution::LiveDelegationRuntimeBinding {
         &self.binding

@@ -788,7 +788,12 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "LiveAssistantPlaybackTerminalDisposition",
-                &["Unmeasured", "PlaybackComplete", "TruncateToReportedPrefix"],
+                &[
+                    "Unmeasured",
+                    "PlaybackComplete",
+                    "TruncateToReportedPrefix",
+                    "CallerConfirmedSnapshot",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "RealtimeUserContentBlobFinalizeDisposition",
@@ -1150,7 +1155,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "LiveContextAppendObservation",
-                &["Delivered", "Rejected", "Ambiguous"],
+                &["Delivered", "Rejected", "Ambiguous", "InterruptedByClose"],
             ),
             NamedTypeBinding::string_enum(
                 "LiveContextRowDisposition",
@@ -1166,11 +1171,16 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "LiveDelegationResultDeliveryObservation",
-                &["Delivered", "Rejected", "Ambiguous"],
+                &["Delivered", "Rejected", "Ambiguous", "InterruptedByClose"],
             ),
             NamedTypeBinding::string_enum(
                 "LiveDelegationResultSpeechDisposition",
-                &["Eligible", "SuppressedByNewerUserTurn", "NotDelivered"],
+                &[
+                    "Eligible",
+                    "SuppressedByNewerUserTurn",
+                    "NotDelivered",
+                    "Unmeasured",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "LiveDelegationWorkerPhase",
@@ -2933,6 +2943,7 @@ runtime_internal_inputs!(
         RevokeLiveChannelCloseCustody,
         ObserveLiveProviderTurnStarted,
         ObserveLiveAssistantTurnStarted,
+        AdvanceLiveAssistantPlaybackSegment,
         AdmitLiveInteraction,
         AdmitLiveDelegation,
         AdmitLiveInteractionDelegation,

@@ -1596,6 +1596,7 @@ pub enum LiveContextAppendObservation {
     Delivered,
     Rejected,
     Ambiguous,
+    InterruptedByClose,
 }
 
 /// Generated projection of SessionDocument's total committed-row
@@ -1628,6 +1629,7 @@ pub enum LiveDelegationResultDeliveryObservation {
     Delivered,
     Rejected,
     Ambiguous,
+    InterruptedByClose,
 }
 
 /// Whether a delivered executor result may open an assistant response slot.
@@ -1639,6 +1641,7 @@ pub enum LiveDelegationResultSpeechDisposition {
     Eligible,
     SuppressedByNewerUserTurn,
     NotDelivered,
+    Unmeasured,
 }
 
 /// Generated lifecycle of the exact Mob worker bound to one live operation.
@@ -3676,6 +3679,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_awaiting_assistant_interaction_by_channel: Map<String, String>,
             live_assistant_interaction_by_turn: Map<String, String>,
             live_assistant_turn_channel_by_ref: Map<String, String>,
+            live_assistant_playback_segment_by_turn: Map<String, u64>,
             live_abandoned_interactions: Set<String>,
 
             // Exactly one serialized delegation may be pending per channel.
@@ -4252,6 +4256,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_provider_turn_channel_by_ref = EmptyMap,
             live_awaiting_assistant_interaction_by_channel = EmptyMap,
             live_assistant_interaction_by_turn = EmptyMap,
+            live_assistant_playback_segment_by_turn = EmptyMap,
             live_assistant_turn_channel_by_ref = EmptyMap,
             live_abandoned_interactions = EmptySet,
             live_delegation_interaction_by_channel = EmptyMap,
@@ -5400,6 +5405,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 fence_token: FenceToken,
                 generation: Generation,
                 assistant_turn_ref: String,
+            },
+            AdvanceLiveAssistantPlaybackSegment {
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                assistant_turn_ref: String,
+                interaction_id: String,
+                previous_segment: u64,
             },
             AdmitLiveInteraction {
                 session_id: String,
@@ -6895,6 +6909,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interaction_id: String,
                 assistant_turn_ref: String,
             },
+            LiveAssistantPlaybackSegmentAdvanced {
+                channel_id: String,
+                interaction_id: String,
+                assistant_turn_ref: String,
+                segment: u64,
+            },
             LiveProviderTurnFinished {
                 channel_id: String,
                 interaction_id: String,
@@ -7558,6 +7578,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveChannelCloseCustodyRevoked => external seam OwnerRealizationOnly,
         disposition LiveProviderTurnStarted => local seam OwnerRealizationOnly,
         disposition LiveAssistantTurnStarted => local seam OwnerRealizationOnly,
+        disposition LiveAssistantPlaybackSegmentAdvanced => local seam OwnerRealizationOnly,
         disposition LiveProviderTurnFinished => local seam OwnerRealizationOnly,
         disposition LiveInteractionAdmitted => local seam OwnerRealizationOnly,
         disposition LiveDelegationAdmitted => external seam OwnerRealizationOnly,
@@ -23788,6 +23809,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                         .get_cloned(channel_id).get("value")
                 );
                 self.live_assistant_turn_channel_by_ref.insert(assistant_turn_ref, channel_id);
+                self.live_assistant_playback_segment_by_turn.insert(assistant_turn_ref, 0);
                 self.live_awaiting_assistant_interaction_by_channel.remove(channel_id);
             }
             to Idle
@@ -23796,6 +23818,54 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interaction_id: self.live_assistant_interaction_by_turn
                     .get_cloned(assistant_turn_ref).get("value"),
                 assistant_turn_ref: assistant_turn_ref
+            }
+        }
+
+        transition AdvanceLiveAssistantPlaybackSegment {
+            per_phase [Idle, Attached, Running]
+            on input AdvanceLiveAssistantPlaybackSegment {
+                channel_id, runtime_id, fence_token, generation,
+                assistant_turn_ref, interaction_id, previous_segment
+            }
+            guard {
+                previous_segment < u64::MAX
+                && self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                && self.live_assistant_turn_channel_by_ref.get_cloned(assistant_turn_ref) == Some(channel_id)
+                && self.live_assistant_interaction_by_turn.get_cloned(assistant_turn_ref) == Some(interaction_id)
+                && self.live_assistant_playback_segment_by_turn.get_copied(assistant_turn_ref) == Some(previous_segment)
+            }
+            update {
+                self.live_assistant_playback_segment_by_turn.insert(assistant_turn_ref, previous_segment + 1);
+            }
+            to Idle
+            emit LiveAssistantPlaybackSegmentAdvanced {
+                channel_id: channel_id, interaction_id: interaction_id,
+                assistant_turn_ref: assistant_turn_ref, segment: previous_segment + 1
+            }
+        }
+
+        transition ReplayLiveAssistantPlaybackSegment {
+            per_phase [Idle, Attached, Running]
+            on input AdvanceLiveAssistantPlaybackSegment {
+                channel_id, runtime_id, fence_token, generation,
+                assistant_turn_ref, interaction_id, previous_segment
+            }
+            guard {
+                previous_segment < u64::MAX
+                && self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                && self.live_assistant_turn_channel_by_ref.get_cloned(assistant_turn_ref) == Some(channel_id)
+                && self.live_assistant_interaction_by_turn.get_cloned(assistant_turn_ref) == Some(interaction_id)
+                && self.live_assistant_playback_segment_by_turn.get_copied(assistant_turn_ref) == Some(previous_segment + 1)
+            }
+            update {}
+            to Idle
+            emit LiveAssistantPlaybackSegmentAdvanced {
+                channel_id: channel_id, interaction_id: interaction_id,
+                assistant_turn_ref: assistant_turn_ref, segment: previous_segment + 1
             }
         }
 
@@ -25070,15 +25140,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // Delivered and rejected provider observations terminalize the exact
-        // result without creating a canonical context row or retry path.
+        // These terminal observations create neither a canonical context row
+        // nor a retry path. Close interruption keeps partial readout unmeasured.
         transition ResolveLiveDelegationResultDelivery {
             per_phase [Idle, Attached, Running]
             on input ResolveLiveDelegationResultDelivery {
                 channel_id, runtime_id, fence_token, generation, operation_id,
                 result_digest, replacement_channel_id, observation
             }
-            guard "non_ambiguous_observation" {
+            guard "observation_without_replacement" {
                 observation != LiveDelegationResultDeliveryObservation::Ambiguous
                 && replacement_channel_id == ""
             }
@@ -25117,7 +25187,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 result_digest: result_digest,
                 disposition: self.live_result_release_disposition_by_operation.get_copied(operation_id).get("value"),
                 observation: observation,
-                speech_disposition: if observation != LiveDelegationResultDeliveryObservation::Delivered {
+                speech_disposition: if observation == LiveDelegationResultDeliveryObservation::InterruptedByClose {
+                    LiveDelegationResultSpeechDisposition::Unmeasured
+                } else { if observation != LiveDelegationResultDeliveryObservation::Delivered {
                     LiveDelegationResultSpeechDisposition::NotDelivered
                 } else {
                     if self.live_result_speech_suppressed_operations.contains(operation_id) {
@@ -25125,7 +25197,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                     } else {
                         LiveDelegationResultSpeechDisposition::Eligible
                     }
-                },
+                }},
                 retry_allowed: false,
                 recovery_required: false
             }
@@ -26916,6 +26988,46 @@ macro_rules! meerkat_catalog_machine_dsl {
                 runtime_id: runtime_id,
                 fence_token: fence_token,
                 generation: generation
+            }
+        }
+
+        // A close interruption proves failure to complete, not absence of
+        // partial consumption. Spend the append without retry or replacement.
+        transition ResolveLiveContextAppendInterruptedByClose {
+            per_phase [Idle, Attached, Running]
+            on input ResolveLiveContextAppend {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor, replacement_channel_id, observation
+            }
+            guard {
+                append_id != ""
+                && observation == LiveContextAppendObservation::InterruptedByClose
+                && replacement_channel_id == ""
+                && self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                && self.live_context_pending_append_by_channel.get_cloned(channel_id) == Some(append_id)
+                && self.live_context_pending_channel_by_append.get_cloned(append_id) == Some(channel_id)
+                && self.live_context_pending_previous_cursor_by_append.get_copied(append_id) == Some(previous_cursor)
+                && self.live_context_pending_next_cursor_by_append.get_copied(append_id) == Some(next_cursor)
+                && self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
+                && next_cursor == previous_cursor + 1
+                && !self.live_context_ambiguous_no_retry.contains(append_id)
+                && !self.live_context_delivered_append_ids.contains(append_id)
+            }
+            update {
+                self.live_context_ambiguous_no_retry.insert(append_id);
+                self.live_context_pending_append_by_channel.remove(channel_id);
+                self.live_context_pending_channel_by_append.remove(append_id);
+                self.live_context_pending_previous_cursor_by_append.remove(append_id);
+                self.live_context_pending_next_cursor_by_append.remove(append_id);
+            }
+            to Idle
+            emit LiveContextAppendResolved {
+                channel_id: channel_id, append_id: append_id,
+                cursor: previous_cursor,
+                observation: LiveContextAppendObservation::InterruptedByClose,
+                retry_allowed: false
             }
         }
 

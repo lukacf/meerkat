@@ -158,19 +158,65 @@ async fn complete_playback(
     Ok(())
 }
 
-#[tokio::test]
-#[ignore = "lane:e2e-smoke"]
-async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
--> Result<(), Box<dyn std::error::Error>> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat_live=debug,meerkat_rpc=debug,meerkat_runtime::meerkat_machine::runtime_control=debug,meerkat_mob_mcp::live_delegation=debug,meerkat_mob::runtime::delegation=debug",
-        )
-        .with_test_writer()
-        .try_init();
-    require_api_key()?;
+/// Everything both public-Live scenarios share: the runtime-backed RPC host,
+/// a turn-driven executor mob member, the session-bound public open
+/// authority, one open channel and one browser peer answering its offer.
+struct PublicLiveHarness {
+    rpc: JsonlRpcClient,
+    peer: BrowserPeer,
+    channel_id: Value,
+    session_id: meerkat_core::SessionId,
+    mob_id: String,
+    server_task: tokio::task::AbortHandle,
+    _temp: tempfile::TempDir,
+}
+
+impl PublicLiveHarness {
+    /// Close the current browser peer, open a second Live channel on the same
+    /// session and answer its offer with a fresh peer. The runtime seeds the
+    /// canonical dialogue into the new provider session at creation.
+    async fn reopen(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let old_peer = std::mem::replace(
+            &mut self.peer,
+            BrowserPeer::start(BrowserPeerProtocol::Public).await?,
+        );
+        old_peer.close().await;
+        let open = self
+            .rpc
+            .call(
+                "live/open",
+                json!({"session_id":self.session_id,"transport":"webrtc",
+                    "execution_identity":execution_identity(GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID)}),
+                60,
+            )
+            .await?;
+        self.channel_id = open["channel_id"].clone();
+        let offer = self.peer.call(json!({"type":"prepare"})).await?;
+        assert_eq!(offer["protocol"], "public");
+        let answer = self
+            .rpc
+            .call(
+                open["transport"]["answer_method"]
+                    .as_str()
+                    .unwrap_or("live/webrtc/answer"),
+                json!({"channel_id":self.channel_id,"token":open["transport"]["token"],
+                    "offer_sdp":offer["offer_sdp"]}),
+                90,
+            )
+            .await?;
+        self.peer
+            .call(json!({"type":"answer","answer_sdp":answer["answer_sdp"]}))
+            .await?;
+        Ok(())
+    }
+}
+
+async fn open_public_live(
+    temp_prefix: &str,
+    operator_principal: &'static str,
+) -> Result<PublicLiveHarness, Box<dyn std::error::Error>> {
     let temp = tempfile::Builder::new()
-        .prefix("gpt-live-public-e2e-")
+        .prefix(temp_prefix)
         .tempdir_in(support::test_tmp_root()?)?;
     let config = scenario_config();
     let binding = auth_binding();
@@ -296,7 +342,7 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
                 binding: binding.clone(),
                 auth_lease: runtime.generated_auth_lease_handle(),
                 mobs: Arc::clone(&mobs),
-                principal_id: "scenario-97-operator",
+                principal_id: operator_principal,
             }),
             execution_identity: meerkat_core::SessionLlmIdentity {
                 model: GPT_LIVE_PUBLIC_MODEL.to_string(),
@@ -405,6 +451,37 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
         })?;
     peer.call(json!({"type":"answer","answer_sdp":answer["answer_sdp"]}))
         .await?;
+
+    Ok(PublicLiveHarness {
+        rpc,
+        peer,
+        channel_id,
+        session_id,
+        mob_id,
+        server_task: server_task.abort_handle(),
+        _temp: temp,
+    })
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat_live=debug,meerkat_rpc=debug,meerkat_runtime::meerkat_machine::runtime_control=debug,meerkat_mob_mcp::live_delegation=debug,meerkat_mob::runtime::delegation=debug",
+        )
+        .with_test_writer()
+        .try_init();
+    require_api_key()?;
+    let PublicLiveHarness {
+        mut rpc,
+        mut peer,
+        channel_id,
+        mob_id,
+        server_task,
+        ..
+    } = open_public_live("gpt-live-public-e2e-", "scenario-97-operator").await?;
 
     // Phase A: greeting with a provider-native barge-in. The public API has
     // no turn identifiers, so the boundary is the first assistant output
@@ -621,6 +698,233 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
     println!(
         "GPT_LIVE_PUBLIC_E2E_OK delegation_ref_digest={provider_delegation_ref_digest} delegation_index={delegation_index} delegation_outputs={delegation_outputs} commentary_acks_seen_by_browser={commentary_acks} worker={}",
         worker_identity
+    );
+    Ok(())
+}
+
+/// Collect every transcript delta text after `start` in browser event order.
+fn output_transcript_text(events: &[Value], start: usize) -> String {
+    events[start..]
+        .iter()
+        .filter(|event| event["type"] == "session.output_transcript.delta")
+        .filter_map(|event| event["delta"].as_str().or_else(|| event["text"].as_str()))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Every string under `text` or `content` keys of the session history, so the
+/// check does not depend on one message shape (user text, assistant blocks).
+fn history_text(history: &Value) -> String {
+    fn walk(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, inner) in map {
+                    if (key == "text" || key == "content") && inner.is_string() {
+                        out.push(inner.as_str().unwrap_or_default().to_string());
+                    } else {
+                        walk(inner, out);
+                    }
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| walk(item, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(&history["messages"], &mut out);
+    out.join("\n")
+}
+
+/// Scenario 98: the public Live lifecycle facts that no provider event
+/// establishes on its own, driven against the real API.
+///
+/// 1. `live/playback_complete` is a caller-confirmed snapshot cut: the
+///    assistant text reaches canonical session history right after the call
+///    returns, without any provider turn-final event and without a quiet
+///    interval.
+/// 2. Later output in the same interaction gets a fresh one-use playback
+///    handle that settles the same way.
+/// 3. `live/close` drains and returns a closed status; the channel is gone
+///    afterwards.
+/// 4. Reopening the same session seeds the canonical dialogue as native
+///    startup input with roles intact: the voice model recalls a code word
+///    told to it before the close.
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat_live=debug,meerkat_rpc=debug",
+        )
+        .with_test_writer()
+        .try_init();
+    require_api_key()?;
+    let mut live = open_public_live("gpt-live-public-reopen-e2e-", "scenario-98-operator").await?;
+    let session_id = live.session_id.clone();
+
+    // Phase A: tell the model a code word and confirm playback of its reply.
+    let before = live.peer.events().await?.len();
+    let audio_baseline = live.peer.audio_evidence().await?;
+    live.peer
+        .call(json!({"type":"play","name":"remember"}))
+        .await?;
+    let first_output = live.rpc.wait_for_notification(OUTPUT_AVAILABLE, 60).await?;
+    assert_eq!(first_output["channel_id"], live.channel_id);
+    wait_for_spoken_output(&mut live.peer, audio_baseline, 45).await?;
+    let confirmed_at = Instant::now();
+    complete_playback(&mut live.rpc, &live.channel_id, &first_output).await?;
+    // The snapshot cut commits without a provider final: the assistant text
+    // must be in canonical history promptly, bounded well under the retired
+    // 1.5 s quiet heuristic plus its 2.5 s readout grace.
+    let settle_deadline = confirmed_at + Duration::from_secs(3);
+    let history = loop {
+        let history = live
+            .rpc
+            .call(
+                "session/history",
+                json!({"session_id":session_id,"offset":0,"limit":200}),
+                30,
+            )
+            .await?;
+        let text = history_text(&history);
+        if history["messages"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message["role"]
+                    .as_str()
+                    .is_some_and(|role| role.contains("assistant"))
+            })
+        }) && !text.trim().is_empty()
+        {
+            break history;
+        }
+        if Instant::now() >= settle_deadline {
+            return Err(format!(
+                "caller-confirmed playback did not settle into session history within 3 s; history: {}",
+                serde_json::to_string(&history)?
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(100)).await;
+    };
+    let settled_after = confirmed_at.elapsed();
+    let events = live.peer.events().await?;
+    assert!(
+        events[before..].iter().any(is_user_input),
+        "provider did not admit the code-word instruction; {}",
+        live.peer.event_summary(&events[before..])
+    );
+
+    // Phase B: later output in the same interaction gets a fresh handle.
+    let before_second = events.len();
+    let audio_baseline = live.peer.audio_evidence().await?;
+    live.peer
+        .call(json!({"type":"play","name":"greeting"}))
+        .await?;
+    let second_output = live.rpc.wait_for_notification(OUTPUT_AVAILABLE, 60).await?;
+    assert_eq!(second_output["channel_id"], live.channel_id);
+    assert_ne!(
+        second_output["output_id"], first_output["output_id"],
+        "continuation after a settled snapshot cut must carry a fresh one-use playback handle"
+    );
+    wait_for_spoken_output(&mut live.peer, audio_baseline, 45).await?;
+    complete_playback(&mut live.rpc, &live.channel_id, &second_output).await?;
+    // Any further outputs (the model may split its reply) settle the same way.
+    while let Some(output) = live
+        .rpc
+        .poll_notification(OUTPUT_AVAILABLE, Duration::from_secs(3))
+        .await?
+    {
+        complete_playback(&mut live.rpc, &live.channel_id, &output).await?;
+    }
+    let events = live.peer.events().await?;
+    assert!(
+        events[before_second..].iter().any(is_assistant_output),
+        "second exchange produced no assistant output; {}",
+        live.peer.event_summary(&events[before_second..])
+    );
+
+    // Phase C: close drains provider observations and confirms closure.
+    let status = live
+        .rpc
+        .call("live/status", json!({"channel_id":live.channel_id}), 30)
+        .await?;
+    assert_eq!(status["channel_id"], live.channel_id);
+    let closed = live
+        .rpc
+        .call("live/close", json!({"channel_id":live.channel_id}), 60)
+        .await?;
+    assert_eq!(
+        closed["status"], "closed",
+        "live/close must report a confirmed closure"
+    );
+    let after_close = live
+        .rpc
+        .call_raw("live/status", json!({"channel_id":live.channel_id}), 30)
+        .await?;
+    assert!(
+        !after_close["error"].is_null()
+            || after_close["result"]["status"]
+                .to_string()
+                .to_lowercase()
+                .contains("closed"),
+        "a closed channel must not report as live: {after_close}"
+    );
+    let history_after_close = live
+        .rpc
+        .call(
+            "session/history",
+            json!({"session_id":session_id,"offset":0,"limit":200}),
+            30,
+        )
+        .await?;
+    let committed_before_reopen = history_text(&history_after_close);
+    assert!(
+        committed_before_reopen.contains(&history_text(&history)),
+        "close must not lose transcript text committed by the earlier snapshot cut"
+    );
+
+    // Phase D: reopen the same session; the canonical dialogue is seeded as
+    // native startup input, so the model can answer from it.
+    live.reopen().await?;
+    let before_recall = live.peer.events().await?.len();
+    let audio_baseline = live.peer.audio_evidence().await?;
+    live.peer
+        .call(json!({"type":"play","name":"recall"}))
+        .await?;
+    let recall_output = live.rpc.wait_for_notification(OUTPUT_AVAILABLE, 60).await?;
+    assert_eq!(recall_output["channel_id"], live.channel_id);
+    let recalled = wait_for_events(&mut live.peer, 60, |events| {
+        output_transcript_text(events, before_recall)
+            .to_lowercase()
+            .contains("tangerine")
+    })
+    .await
+    .map_err(|error| {
+        format!("reopened session did not recall the code word from the seeded dialogue: {error}")
+    })?;
+    wait_for_spoken_output(&mut live.peer, audio_baseline, 45).await?;
+    complete_playback(&mut live.rpc, &live.channel_id, &recall_output).await?;
+    while let Some(output) = live
+        .rpc
+        .poll_notification(OUTPUT_AVAILABLE, Duration::from_secs(3))
+        .await?
+    {
+        complete_playback(&mut live.rpc, &live.channel_id, &output).await?;
+    }
+    let recall_text = output_transcript_text(&recalled, before_recall);
+    let closed = live
+        .rpc
+        .call("live/close", json!({"channel_id":live.channel_id}), 60)
+        .await?;
+    assert_eq!(closed["status"], "closed");
+    live.peer.close().await;
+    live.server_task.abort();
+    println!(
+        "GPT_LIVE_PUBLIC_REOPEN_E2E_OK settled_after_ms={} recall_transcript={:?} mob={}",
+        settled_after.as_millis(),
+        recall_text.trim(),
+        live.mob_id
     );
     Ok(())
 }

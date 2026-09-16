@@ -617,7 +617,7 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         provider_item_id: &str,
         content_index: u32,
     ) -> Result<Option<meerkat_core::InteractionId>, LiveProjectionError> {
-        let Some(target) = self
+        let target = self
             .runtime
             .live_assistant_playback_target(
                 session_id,
@@ -626,16 +626,30 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
                 content_index,
             )
             .await
-            .map_err(|err| session_error_to_projection(err, session_id))?
-        else {
-            return Ok(None);
-        };
-        if target.response_id() != response_id {
+            .map_err(|err| session_error_to_projection(err, session_id))?;
+        if target
+            .as_ref()
+            .is_some_and(|target| target.response_id() != response_id)
+        {
             return Err(LiveProjectionError::Rejected(
                 "assistant final did not match the active playback response".to_string(),
             ));
         }
-        let interaction_id = target.interaction_id();
+        let interaction_id = target.map(|target| target.interaction_id()).or_else(|| {
+            self.runtime
+                .runtime_adapter()
+                .live_assistant_output_handle_for_target(
+                    session_id,
+                    channel_id,
+                    response_id,
+                    provider_item_id,
+                    content_index,
+                )
+                .map(|handle| handle.interaction_id())
+        });
+        let Some(interaction_id) = interaction_id else {
+            return Ok(None);
+        };
         self.runtime
             .observe_live_assistant_playback_final(
                 session_id,

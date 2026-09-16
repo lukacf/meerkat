@@ -67,10 +67,12 @@ pub enum ExperimentalLiveReplacementRequired {
     CanonicalContext {
         open: LiveOpenResult,
         canonical_seed_cursor: u64,
+        pending_receipt: String,
     },
     DelegationResult {
         open: LiveOpenResult,
         canonical_seed_cursor: u64,
+        pending_receipt: String,
     },
 }
 
@@ -178,6 +180,19 @@ impl ExperimentalLivePlaybackOwnerReadiness {
 
 #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
 impl ExperimentalLiveReplacementRequired {
+    /// Existing machine-issued custody for registering the replacement's
+    /// playback owner before answering its WebRTC offer.
+    pub fn pending_receipt(&self) -> &str {
+        match self {
+            Self::CanonicalContext {
+                pending_receipt, ..
+            }
+            | Self::DelegationResult {
+                pending_receipt, ..
+            } => pending_receipt,
+        }
+    }
+
     #[must_use]
     pub fn open(&self) -> &LiveOpenResult {
         match self {
@@ -996,7 +1011,7 @@ impl<B: SessionAgentBuilder + 'static>
             .close_live_channel(Some(self.open_authority.as_ref()), binding.channel_id())
             .await;
         match close {
-            Ok(_) | Err(ExperimentalLiveChannelCloseError::PhysicalAuthority(_)) => {}
+            Ok(_) => {}
             Err(ExperimentalLiveChannelCloseError::BindingMismatch)
                 if self
                     .runtime
@@ -1690,6 +1705,25 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             .await
     }
 
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+    async fn stage_live_replacement_execution(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
+        canonical_seed_cursor: u64,
+    ) -> Result<
+        meerkat_runtime::meerkat_machine::ExperimentalLiveExecutionStageAuthority,
+        meerkat_runtime::RuntimeDriverError,
+    > {
+        self.runtime_adapter
+            .resolve_live_execution_profile_admission(session_id, channel_id, &profile)
+            .await?;
+        self.runtime_adapter
+            .stage_experimental_live_execution(session_id, channel_id, canonical_seed_cursor)
+            .await
+    }
+
     /// Realize generated ambiguity recovery without pretending an existing
     /// browser WebRTC peer can reconnect transparently. This closes the exact
     /// old channel, opens the generated replacement identity, and returns the
@@ -1739,37 +1773,39 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             .await?;
 
         let replacement_channel_id = LiveChannelId::new(&result.channel_id);
-        if self
-            .runtime_adapter
-            .stage_experimental_live_execution(
+        let stage = match self
+            .stage_live_replacement_execution(
                 recovery.session_id(),
                 &replacement_channel_id,
+                pending.execution_profile().clone(),
                 recovery.canonical_seed_cursor(),
             )
             .await
-            .is_err()
         {
-            let binding =
+            Ok(stage) => stage,
+            Err(_) => {
+                let binding =
                 crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError::ChannelBindingFailed;
-            authority
-                .unbind_channel(&replacement_channel_id, recovery.session_id())
-                .await;
-            if let Err(cleanup) = self
-                .orchestrator()
-                .close_live_channel(
-                    &self.host,
-                    &replacement_channel_id,
-                    Some(recovery.session_id()),
-                )
-                .await
-            {
-                return Err(ExperimentalLiveContextRecoveryError::BindingCleanup {
-                    binding,
-                    cleanup: cleanup.to_string(),
-                });
+                authority
+                    .unbind_channel(&replacement_channel_id, recovery.session_id())
+                    .await;
+                if let Err(cleanup) = self
+                    .orchestrator()
+                    .close_live_channel(
+                        &self.host,
+                        &replacement_channel_id,
+                        Some(recovery.session_id()),
+                    )
+                    .await
+                {
+                    return Err(ExperimentalLiveContextRecoveryError::BindingCleanup {
+                        binding,
+                        cleanup: cleanup.to_string(),
+                    });
+                }
+                return Err(ExperimentalLiveContextRecoveryError::Authority(binding));
             }
-            return Err(ExperimentalLiveContextRecoveryError::Authority(binding));
-        }
+        };
 
         if let Err(binding) = authority
             .register_context_recovery_for_answer(recovery.clone())
@@ -1816,6 +1852,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         Ok(ExperimentalLiveReplacementRequired::CanonicalContext {
             open: result,
             canonical_seed_cursor: recovery.canonical_seed_cursor(),
+            pending_receipt: stage.pending_receipt().to_string(),
         })
     }
 
@@ -1866,37 +1903,39 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             .await?;
 
         let replacement_channel_id = LiveChannelId::new(&result.channel_id);
-        if self
-            .runtime_adapter
-            .stage_experimental_live_execution(
+        let stage = match self
+            .stage_live_replacement_execution(
                 recovery.session_id(),
                 &replacement_channel_id,
+                pending.execution_profile().clone(),
                 recovery.canonical_seed_cursor(),
             )
             .await
-            .is_err()
         {
-            let binding =
+            Ok(stage) => stage,
+            Err(_) => {
+                let binding =
                 crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError::ChannelBindingFailed;
-            authority
-                .unbind_channel(&replacement_channel_id, recovery.session_id())
-                .await;
-            if let Err(cleanup) = self
-                .orchestrator()
-                .close_live_channel(
-                    &self.host,
-                    &replacement_channel_id,
-                    Some(recovery.session_id()),
-                )
-                .await
-            {
-                return Err(ExperimentalLiveContextRecoveryError::BindingCleanup {
-                    binding,
-                    cleanup: cleanup.to_string(),
-                });
+                authority
+                    .unbind_channel(&replacement_channel_id, recovery.session_id())
+                    .await;
+                if let Err(cleanup) = self
+                    .orchestrator()
+                    .close_live_channel(
+                        &self.host,
+                        &replacement_channel_id,
+                        Some(recovery.session_id()),
+                    )
+                    .await
+                {
+                    return Err(ExperimentalLiveContextRecoveryError::BindingCleanup {
+                        binding,
+                        cleanup: cleanup.to_string(),
+                    });
+                }
+                return Err(ExperimentalLiveContextRecoveryError::Authority(binding));
             }
-            return Err(ExperimentalLiveContextRecoveryError::Authority(binding));
-        }
+        };
 
         if let Err(binding) = authority
             .register_result_recovery_for_answer(recovery.clone())
@@ -1943,6 +1982,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         Ok(ExperimentalLiveReplacementRequired::DelegationResult {
             open: result,
             canonical_seed_cursor: recovery.canonical_seed_cursor(),
+            pending_receipt: stage.pending_receipt().to_string(),
         })
     }
 
@@ -1976,30 +2016,35 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             .await
             .ok_or(ExperimentalLiveChannelCloseError::BindingMismatch)?;
         let mut physical_bound = false;
-        let mut physical_error = None;
-        let lifecycle_lease = if let Some(authority) = authority {
-            let lease = self
-                .runtime_adapter
-                .acquire_live_open_lifecycle_lease(&session)
-                .await
-                .map_err(|error| {
-                    ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
-                })?;
+        if let Some(authority) = authority {
+            // Already-admitted publications acquire lifecycle custody at the
+            // writer. Drain them before taking the terminal commit lease.
             match authority.close_physical_if_bound(channel, &session).await {
                 Ok(ExperimentalLivePhysicalClose::Closed) => physical_bound = true,
                 Ok(ExperimentalLivePhysicalClose::NotBound) => {}
                 Err(error) => {
-                    // Physical failure must not prevent the generated semantic
-                    // close. Exact provider custody is force-retired by
-                    // `unbind_channel` only after that semantic close commits.
-                    physical_bound = true;
-                    physical_error = Some(error);
+                    // A missing provider/drain receipt is not terminality.
+                    // Preserve the exact binding and staged output for retry.
+                    return Err(ExperimentalLiveChannelCloseError::PhysicalAuthority(error));
                 }
             }
-            Some(lease)
-        } else {
-            None
-        };
+        }
+        let lifecycle_lease = self
+            .runtime_adapter
+            .acquire_live_open_lifecycle_lease(&session)
+            .await
+            .map_err(|error| {
+                ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
+            })?;
+        if self
+            .runtime_adapter
+            .live_session_for_active_channel(channel)
+            .await
+            .as_ref()
+            != Some(&session)
+        {
+            return Err(ExperimentalLiveChannelCloseError::BindingMismatch);
+        }
         let result = self
             .orchestrator()
             .close_live_channel(&self.host, channel, Some(&session))
@@ -2010,11 +2055,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             authority.unbind_channel(channel, &session).await;
         }
         drop(lifecycle_lease);
-        if let Some(error) = physical_error {
-            Err(ExperimentalLiveChannelCloseError::PhysicalAuthority(error))
-        } else {
-            Ok(result.status)
-        }
+        Ok(result.status)
     }
 
     /// Strict close from an exact pending handle.
@@ -2350,6 +2391,9 @@ pub fn member_live_error_from_verb(error: LiveChannelVerbError) -> MemberLiveErr
                 }
             }
         }
+        error @ LiveChannelVerbError::CloseSettlementBusy { .. } => MemberLiveError::Unavailable {
+            reason: error.to_string(),
+        },
         error @ (LiveChannelVerbError::RejectionAuthorityFailed { .. }
         | LiveChannelVerbError::ResultAuthority { .. }
         | LiveChannelVerbError::CommitOmitted

@@ -701,6 +701,11 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 input_variant: iv_id("ObserveLiveAssistantTurnStarted"),
             },
             EntryInput {
+                name: entry_input_id("advance_live_assistant_playback_segment"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AdvanceLiveAssistantPlaybackSegment"),
+            },
+            EntryInput {
                 name: entry_input_id("admit_live_interaction"),
                 machine: mi_id("meerkat"),
                 input_variant: iv_id("AdmitLiveInteraction"),

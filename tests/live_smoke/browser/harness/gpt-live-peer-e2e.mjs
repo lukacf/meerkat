@@ -39,6 +39,8 @@ async function prepare() {
   const fixtures = {
     greeting: audioDataUrl('no-delegation-greeting.wav'),
     delegation: audioDataUrl('delegate-working-directory.wav'),
+    remember: audioDataUrl('remember-code-word.wav'),
+    recall: audioDataUrl('recall-code-word.wav'),
   };
   const offerSdp = await page.evaluate(async ({ fixtures, protocol }) => {
     const audioContext = new AudioContext({ sampleRate: 24_000 });

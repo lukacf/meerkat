@@ -30,6 +30,32 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- Behavior-only: public GPT Live no longer synthesizes assistant completion
+  after 1.5 seconds without transcript output or a fixed delegation-readout
+  grace period. A quiet stream is not provider completion or playback evidence.
+- `LiveAssistantPlaybackEvidence`, `LiveAssistantPlaybackTruncationDisposition`,
+  and `RealtimeTranscriptEvent` gain snapshot-playback variants. Update exhaustive
+  matches; internal playback-authority events remain rejected at the public
+  wire-input boundary.
+- `GptLiveBrokerObservation` gains `SessionContextAppendRejected` and
+  `DelegationContextAppendRejected`; `LiveSidebandObservationKind` gains
+  `AppendRejected`. An explicit failed append is not an acknowledgement or
+  permission to retry blindly.
+- `ExperimentalLiveReplacementRequired::{CanonicalContext, DelegationResult}`
+  gain `pending_receipt`, also available through `pending_receipt()`, so a
+  replacement's playback owner can register against its generated staging
+  custody before answering the WebRTC offer.
+
+### Added
+
+- Turbo S scenario 98 (`gpt_live_public_e2e`) drives the public Live API for the
+  lifecycle facts this release changes: a caller-confirmed `live/playback_complete`
+  settles into session history within 3 s without a provider final, later output
+  gets a fresh playback handle, `live/close` reports a confirmed closure, and a
+  reopened session recalls a code word from the seeded startup dialogue.
+
 ### Changed
 
 - One documented worker-stack budget for every host binary. `rkat`,
@@ -47,6 +73,40 @@ them.
 
 ### Fixed
 
+- Public GPT Live preserves one assistant output identity across long pauses
+  and delayed delegated-result readouts instead of rejecting the continuation
+  as an unsolicited new turn.
+- Public GPT Live open/reopen sends canonical dialogue through native startup
+  `session.input`, preserving user/assistant roles instead of putting serialized
+  history into a limited, speech-prompting commentary append. Oversize startup
+  history is rejected rather than silently trimmed.
+- Public Live admission logs identify the failing stage and typed underlying
+  cause without exposing credential or provider payloads.
+- Cold mob restoration re-establishes the generated runtime placement needed
+  for Live execution after rebuilding the member session, including turn-driven
+  members. Missing or conflicting bindings fail explicitly instead of exposing
+  a restored-but-unusable member.
+- Caller-confirmed Live playback commits an observed transcript snapshot
+  without waiting for a provider turn-final event. Later output continues
+  through a new playback segment under the same interaction.
+- Live close drains provider observations and canonical projection before
+  teardown. A bare transport EOF is not confirmed provider closure; exact
+  pending-append rejections remain explicit while the close tail drains.
+  Closing during an ordinary active tool turn reports busy for retry instead
+  of waiting indefinitely or fabricating tool completion.
+- A pre-final Live playback terminal no longer counts staged snapshot text as
+  authoritative characters. On the public path transcript deltas are staged as
+  they arrive, so an unmeasured `live/truncate` before the provider final matched
+  no generated terminal transition, its target stayed active, and the next
+  assistant output's admission panicked the session task
+  (`assistant_playback_target_already_active`); scenario 97's barge-in reproduced
+  it against the real API.
+- A busy Live close settlement is the typed `SESSION_BUSY` RPC error
+  (`MemberLiveError::Unavailable` on the mob surface), not an internal error.
+  Protocol-validation rejections, including an oversize startup history seed,
+  are logged with their reason.
+- Ambiguous Live-context recovery admits the replacement execution profile
+  and retains the staging receipt needed to register its playback owner.
 - Debug worker-stack usage on the RPC dispatch path dropped from 24 MiB to
   4 MiB. `MethodRouter::dispatch_routed_with_request_context` reserved
   13.4 MiB of opt-level-0 frame by constructing all 163 handler futures

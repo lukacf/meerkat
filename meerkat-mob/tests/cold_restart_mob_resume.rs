@@ -6,9 +6,9 @@
 //! → `provision_member` → `create_session` → `persist_full_session_or_discard_live`)
 //! is exercised without API keys.
 //!
-//! Hunting: TranscriptContinuityViolation ("save rejected: incoming transcript
-//! is not a continuation of persisted revision") on the first post-restart
-//! persist of a resumed mob member session.
+//! Pins transcript continuity and the generated runtime placement required by
+//! Live admission. Restoring a session actor alone must not report a usable
+//! member while its runtime identity, generation, and fence remain unbound.
 
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -221,6 +221,103 @@ fn mob_definition(lead_mode: MobRuntimeMode) -> MobDefinition {
     definition
 }
 
+async fn admit_test_live_profile(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    session_id: &meerkat_core::SessionId,
+    identity: &meerkat_core::SessionLlmIdentity,
+) -> meerkat_core::LiveChannelId {
+    let channel_id = meerkat_core::LiveChannelId::new("restored-member-live");
+    let admission = runtime
+        .resolve_live_open_admission(session_id, &channel_id, identity)
+        .await
+        .expect("Live open admission");
+    assert!(admission.channel_open_authority().is_some());
+    let selection =
+        meerkat_runtime::live_execution::LiveExecutionProfileSelection::from_public_profile(
+            "cold-restart-client-context",
+            meerkat_core::LiveExecutionMode::ClientContext,
+            meerkat_core::LiveExecutionCapabilities {
+                function_bridge: false,
+                client_context: true,
+            },
+        )
+        .expect("test host profile");
+    runtime
+        .resolve_live_execution_profile_admission(session_id, &channel_id, &selection)
+        .await
+        .expect("Live execution profile admission");
+    channel_id
+}
+
+#[tokio::test]
+async fn live_staging_reports_missing_runtime_placement_without_logging_identity_material() {
+    use tracing::instrument::WithSubscriber;
+
+    #[derive(Clone)]
+    struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+    let session_id = meerkat_core::SessionId::new();
+    runtime
+        .prepare_local_session_bindings(session_id.clone())
+        .await
+        .expect("prepare local resources without member placement");
+    let identity = meerkat_core::SessionLlmIdentity {
+        model: "gpt-live-1".to_string(),
+        provider: meerkat_core::Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: None,
+    };
+    let channel_id = admit_test_live_profile(&runtime, &session_id, &identity).await;
+    let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = LogBuffer(logs.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || writer.clone())
+        .finish();
+    let error = runtime
+        .stage_experimental_live_execution(&session_id, &channel_id, 0)
+        .with_subscriber(subscriber)
+        .await
+        .expect_err("local resources alone cannot admit Live execution");
+    assert!(matches!(
+        error,
+        meerkat_runtime::RuntimeDriverError::ValidationFailed { ref reason }
+            if reason == "experimental live staging has no active runtime identity"
+    ));
+    assert!(
+        runtime
+            .live_execution_channel_phase(&session_id, &channel_id)
+            .await
+            .expect("read stage")
+            .is_none(),
+        "failed placement admission must not mint pending channel custody"
+    );
+    let logs = String::from_utf8(logs.lock().expect("log buffer").clone()).expect("UTF-8 logs");
+    assert!(logs.contains("live_execution_staging"), "{logs}");
+    assert!(logs.contains("missing_runtime_identity"), "{logs}");
+    assert!(!logs.contains(&identity.model), "{logs}");
+    assert!(!logs.contains("OpenAI"), "{logs}");
+    runtime
+        .abandon_live_open_admission(&session_id, &channel_id)
+        .await
+        .expect("release provider-free Live admission");
+}
+
 async fn member_entry(handle: &MobHandle, agent_identity: &str) -> MobMemberListEntry {
     handle
         .list_members()
@@ -363,8 +460,10 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
 
-    let runtime_store_1: Arc<dyn meerkat_runtime::RuntimeStore> =
-        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let runtime_store_1: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(&paths.realm_db_path)
+            .expect("open durable runtime store"),
+    );
 
     // ---------------- Lifetime 1 ----------------
     let (service_1, _store_1) = persistent_service(&paths, runtime_store_1.clone());
@@ -395,6 +494,18 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
         .resolve_bridge_session_id(&AgentIdentity::from("w-1"))
         .await
         .expect("w1 session id");
+    let runtime_1 = service_1.runtime_adapter().expect("runtime adapter");
+    let initial_binding = runtime_1
+        .live_webrtc_runtime_binding(&w1_sid)
+        .await
+        .expect("initial runtime binding")
+        .expect("fresh member must have a generated runtime binding");
+    let initial_lead_binding = runtime_1
+        .live_webrtc_runtime_binding(&lead_sid)
+        .await
+        .expect("initial lead runtime binding")
+        .expect("fresh lead must have a generated runtime binding");
+    drop(runtime_1);
 
     send_and_wait(
         &handle_1,
@@ -488,14 +599,33 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
     }
     drop(handle_1);
     drop(service_1);
+    drop(runtime_store_1);
 
     // ---------------- Lifetime 2 ----------------
     let runtime_store_2: Arc<dyn meerkat_runtime::RuntimeStore> = if reuse_runtime_store {
-        runtime_store_1.clone()
+        Arc::new(
+            meerkat_runtime::store::SqliteRuntimeStore::new_whole_blob(&paths.realm_db_path)
+                .expect("reopen durable runtime store"),
+        )
     } else {
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new())
     };
     let (service_2, _store_2) = persistent_service(&paths, runtime_store_2);
+    let runtime_2 = service_2.runtime_adapter().expect("new runtime adapter");
+    assert!(
+        runtime_2
+            .current_executor_attachment_witness(&w1_sid)
+            .await
+            .is_none(),
+        "a cold host must begin without the old executor attachment"
+    );
+    assert!(
+        runtime_2
+            .live_webrtc_runtime_binding(&w1_sid)
+            .await
+            .is_err(),
+        "restoration must start from an unregistered runtime, not a warm binding"
+    );
     let storage_2 = MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage");
     let handle_2 = MobBuilder::for_resume(storage_2)
         .with_session_service(service_2.clone())
@@ -512,11 +642,46 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
     if !reuse_runtime_store {
         assert_member_broken_after_authority_loss(&lead_after, "post-reset");
         assert_member_broken_after_authority_loss(&w1_after, "post-reset");
+        assert!(
+            runtime_2
+                .live_webrtc_runtime_binding(&w1_sid)
+                .await
+                .is_err(),
+            "an absent durable member must not acquire runtime authority"
+        );
+        assert!(matches!(
+            handle_2.member(&AgentIdentity::from("w-1")).await,
+            Err(meerkat_mob::MobError::MemberRestoreFailed { .. })
+        ));
         handle_2.shutdown().await.expect("final shutdown");
         return;
     }
     assert_member_active(&lead_after, "post-resume");
     assert_member_active(&w1_after, "post-resume");
+    assert!(
+        runtime_2
+            .current_executor_attachment_witness(&w1_sid)
+            .await
+            .is_some(),
+        "restoration must commit the exact session executor attachment as well as placement"
+    );
+    let resumed_binding = runtime_2
+        .live_webrtc_runtime_binding(&w1_sid)
+        .await
+        .expect("resumed runtime binding")
+        .expect("restored member must have a generated runtime binding before Live admission");
+    assert_eq!(resumed_binding.generation, initial_binding.generation);
+    assert_eq!(resumed_binding.fence, initial_binding.fence);
+    let resumed_lead_binding = runtime_2
+        .live_webrtc_runtime_binding(&lead_sid)
+        .await
+        .expect("resumed lead runtime binding")
+        .expect("restored lead must have a generated runtime binding in either runtime mode");
+    assert_eq!(
+        resumed_lead_binding.generation,
+        initial_lead_binding.generation
+    );
+    assert_eq!(resumed_lead_binding.fence, initial_lead_binding.fence);
 
     assert_eq!(
         handle_2
@@ -638,12 +803,43 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
     assert_member_active(&lead_entry_final, "final");
     assert_member_active(&w1_entry_final, "final");
 
+    // Exercise the same generated admission/staging seam as public GPT Live,
+    // without contacting a provider or granting transport custody.
+    let identity = service_2
+        .load_authoritative_session(&w1_sid)
+        .await
+        .expect("authoritative restored session")
+        .expect("restored session")
+        .session_metadata()
+        .expect("restored session metadata")
+        .llm_identity();
+    let channel_id = admit_test_live_profile(&runtime_2, &w1_sid, &identity).await;
+    let staged = runtime_2
+        .stage_experimental_live_execution(&w1_sid, &channel_id, 0)
+        .await
+        .expect("restored member must admit Live with its generated runtime placement");
+    assert_eq!(staged.binding().generation(), initial_binding.generation);
+    assert_eq!(staged.binding().fence_token(), initial_binding.fence);
+    let member_snapshot = handle_2
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("restored member snapshot");
+    let (member_runtime_id, _) = member_snapshot
+        .runtime_identity_fields()
+        .expect("restored member incarnation");
+    assert_eq!(
+        staged.binding().runtime_id().to_string(),
+        member_runtime_id.to_string()
+    );
+    runtime_2
+        .abandon_live_open_admission(&w1_sid, &channel_id)
+        .await
+        .expect("release provider-free Live admission");
     handle_2.shutdown().await.expect("final shutdown");
 }
 
-/// Runtime store contents survive the restart (durable realm-style runtime
-/// store, e.g. sqlite): the fresh runtime authority is rebuilt over the
-/// pre-kill runtime rows.
+/// Fresh runtime authority is rebuilt from a reopened SQLite RuntimeStore,
+/// rather than retaining the previous process's in-memory store or bindings.
 #[tokio::test(flavor = "multi_thread")]
 async fn mob_cold_restart_resume_with_durable_runtime_store() {
     run_cold_restart_scenario(true, MobRuntimeMode::TurnDriven).await;

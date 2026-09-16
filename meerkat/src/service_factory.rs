@@ -891,6 +891,23 @@ impl SessionAgent for FactoryAgent {
             .live_assistant_playback_target_for_channel(channel_id)
     }
 
+    fn live_assistant_playback_settlement(
+        &self,
+        channel_id: &meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+    ) -> Option<meerkat_core::LiveAssistantPlaybackSettlement> {
+        self.agent.session().live_assistant_playback_settlement(
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+        )
+    }
+
     fn resolve_live_assistant_playback_target(
         &mut self,
         channel_id: &meerkat_core::LiveChannelId,

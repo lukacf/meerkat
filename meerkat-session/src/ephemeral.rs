@@ -2347,6 +2347,17 @@ pub trait SessionAgent: Send {
         None
     }
 
+    fn live_assistant_playback_settlement(
+        &self,
+        _channel_id: &meerkat_core::LiveChannelId,
+        _interaction_id: meerkat_core::InteractionId,
+        _response_id: &str,
+        _item_id: &str,
+        _content_index: u32,
+    ) -> Option<meerkat_core::LiveAssistantPlaybackSettlement> {
+        None
+    }
+
     fn resolve_live_assistant_playback_target(
         &mut self,
         _channel_id: &meerkat_core::LiveChannelId,
@@ -4037,14 +4048,32 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .get(id)
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .command_tx
-            .send(SessionCommand::ResolveLiveAssistantPlaybackOnChannelClose {
-                channel_id,
-                reply_tx,
-            })
-            .await
-            .map_err(|_| SessionError::Agent(meerkat_core::error::AgentError::Cancelled))?;
+        {
+            // Serialize command enqueue with turn admission, not turn execution.
+            // A pending tool run owns the agent and must never strand close
+            // behind its own completion or acquire cancellation by this path.
+            let slot = lock_turn_admission(&handle.turn_admission);
+            if slot.phase() == TurnAdmissionPhase::ShuttingDown {
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::Cancelled,
+                ));
+            }
+            if slot.phase() != TurnAdmissionPhase::Idle {
+                return Err(SessionError::Busy { id: id.clone() });
+            }
+            handle
+                .command_tx
+                .try_send(SessionCommand::ResolveLiveAssistantPlaybackOnChannelClose {
+                    channel_id,
+                    reply_tx,
+                })
+                .map_err(|error| match error {
+                    mpsc::error::TrySendError::Full(_) => SessionError::Busy { id: id.clone() },
+                    mpsc::error::TrySendError::Closed(_) => {
+                        SessionError::Agent(meerkat_core::error::AgentError::Cancelled)
+                    }
+                })?;
+        }
         reply_rx
             .await
             .map_err(|_| SessionError::Agent(meerkat_core::error::AgentError::Cancelled))?
@@ -7735,6 +7764,18 @@ async fn session_task<A: SessionAgent>(
                     stop_reason,
                     usage,
                 );
+                if matches!(&result, Ok(crate::LiveAssistantPlaybackObservationResult::Resolved(receipt))
+                    if receipt.disposition() == meerkat_core::LiveAssistantPlaybackTruncationDisposition::CommittedSnapshot)
+                {
+                    let snap = agent.snapshot();
+                    control.publish_summary(SessionSummaryCache {
+                        updated_at: snap.updated_at,
+                        message_count: snap.message_count,
+                        total_tokens: snap.total_tokens,
+                        usage: snap.usage,
+                        last_assistant_text: snap.last_assistant_text,
+                    });
+                }
                 let _ = reply_tx.send(result);
             }
             SessionCommand::ObserveLiveAssistantPlaybackFinal {
@@ -10026,6 +10067,56 @@ mod archive_shutdown_drain_tests {
         assert!(
             matches!(pending.result, Err(AgentError::Cancelled)),
             "pending start-turn must resolve with the typed cancellation, got {pending:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_close_refuses_pending_turn_without_cancel_or_late_mutation() {
+        let hooks = DrainProbeHooks::new();
+        let service = Arc::new(EphemeralSessionService::new(
+            DrainProbeBuilder {
+                hooks: hooks.clone(),
+            },
+            1,
+        ));
+        let session_id = service
+            .create_session(create_request())
+            .await
+            .expect("create pending-turn fixture")
+            .session_id;
+        let turn_service = Arc::clone(&service);
+        let turn_session = session_id.clone();
+        let turn = tokio::spawn(async move {
+            turn_service
+                .start_turn(&turn_session, start_turn_request())
+                .await
+        });
+        hooks.entered_run.notified().await;
+        let channel_id = meerkat_core::LiveChannelId::new("pending-tool-close");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            service
+                .resolve_live_assistant_playback_on_channel_close(&session_id, channel_id.clone()),
+        )
+        .await
+        .expect("close must not wait for an ordinary pending tool turn");
+        assert!(matches!(result, Err(SessionError::Busy { .. })));
+        hooks.release_run.add_permits(1);
+        assert_eq!(
+            turn.await
+                .expect("join pending turn")
+                .expect("ordinary turn completes")
+                .text,
+            "ran",
+            "close cannot acquire cancellation authority for an ordinary run"
+        );
+        assert!(
+            service
+                .resolve_live_assistant_playback_on_channel_close(&session_id, channel_id)
+                .await
+                .expect("retry close after pending turn settles")
+                .is_none(),
+            "retry observes no manufactured playback target"
         );
     }
 

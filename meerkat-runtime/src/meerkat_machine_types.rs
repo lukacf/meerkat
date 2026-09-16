@@ -993,6 +993,7 @@ meerkat_machine_runtime_internal_inputs!(
         RevokeLiveChannelCloseCustody,
         ObserveLiveProviderTurnStarted,
         ObserveLiveAssistantTurnStarted,
+        AdvanceLiveAssistantPlaybackSegment,
         AdmitLiveInteraction,
         AdmitLiveDelegation,
         AdmitLiveInteractionDelegation,

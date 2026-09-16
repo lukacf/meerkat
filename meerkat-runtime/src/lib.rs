@@ -57,6 +57,8 @@ pub mod exact_operation;
 pub mod generated;
 pub mod handles;
 mod hook_observation;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod host_stack;
 pub mod identifiers;
 pub mod ingress_types;
 pub mod input;

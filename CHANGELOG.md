@@ -56,6 +56,21 @@ them.
   gets a fresh playback handle, `live/close` reports a confirmed closure, and a
   reopened session recalls a code word from the seeded startup dialogue.
 
+### Changed
+
+- One documented worker-stack budget for every host binary. `rkat`,
+  `rkat-rpc`, `rkat-rest` and `rkat-mcp` build their Tokio runtime through
+  `meerkat_runtime::host_stack` with 8 MiB worker stacks
+  (`HOST_WORKER_STACK_BUDGET`) and run their main future on a budgeted thread
+  instead of the platform main thread (1 MiB on Windows). `rkat-rpc` drops
+  from 32 MiB to 8 MiB; the other three move from Tokio's 2 MiB default to
+  8 MiB. The runtime's internal serving-loop and machine-cleanup runtimes use
+  the same constant (was 16 MiB). Measured on the RPC router harness: release
+  fits 1 MiB, debug fits 4 MiB; see the "Worker Stack Budget" section of the
+  deploying guide. `RKAT_WORKER_STACK_BYTES` overrides the budget for
+  diagnosis on every host; `rkat-rpc` still honours `RKAT_RPC_WORKER_STACK_BYTES`
+  when the shared variable is unset.
+
 ### Fixed
 
 - Public GPT Live preserves one assistant output identity across long pauses

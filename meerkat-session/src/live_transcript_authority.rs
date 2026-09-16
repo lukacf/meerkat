@@ -250,6 +250,49 @@ pub(crate) fn admit_live_assistant_playback_target(
             "live assistant playback target admission mismatch".to_string(),
         ));
     }
+    if let Some(superseded) = agent.live_assistant_playback_target_for_channel(&channel_id)
+        && (superseded.item_id() != item_id || superseded.content_index() != content_index)
+    {
+        // The provider started a new response before the caller reported
+        // playback of the previous one: a barge-in, or a follow-up the model
+        // volunteers. The generated machine admits the new output, so the
+        // earlier target must not keep the transcript's single active slot.
+        // It is retired as Unmeasured (no playback evidence was ever
+        // reported); a later caller report for it lands on this settlement as
+        // a replay and changes nothing. Before this, the reducer rejected the
+        // admission and the session task aborted mid-conversation.
+        if superseded.pending_terminal().is_some() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "live assistant playback target admission while the previous target awaits its provider final"
+                    .to_string(),
+            ));
+        }
+        tracing::debug!(
+            channel_id = %channel_id,
+            superseded_item_id = superseded.item_id(),
+            new_item_id = %item_id,
+            "retiring an unreported live assistant playback target superseded by new provider output"
+        );
+        match observe_live_assistant_playback_terminal(
+            agent,
+            session_id,
+            channel_id.clone(),
+            superseded.interaction_id(),
+            superseded.response_id().to_string(),
+            superseded.item_id().to_string(),
+            superseded.content_index(),
+            LiveAssistantPlaybackEvidence::Unmeasured,
+            None,
+        )? {
+            LiveAssistantPlaybackObservationResult::Resolved(_) => {}
+            LiveAssistantPlaybackObservationResult::Pending => {
+                return Err(meerkat_core::error::AgentError::InternalError(
+                    "superseded live assistant playback target did not retire as Unmeasured"
+                        .to_string(),
+                ));
+            }
+        }
+    }
     let session_key = SessionDocumentKey::new(session_id.to_string());
     let mut authority = SessionDocumentMachineAuthority::new();
     authority
@@ -568,6 +611,31 @@ fn observe_live_assistant_playback_terminal(
         &item_id,
         content_index,
     );
+    // An output retired as Unmeasured because newer provider output superseded
+    // it before anyone reported playback keeps that record; such a retirement
+    // carries no completion, unlike a caller's own Unmeasured truncate, which
+    // arrives with the provider's stop reason and usage. A caller report that
+    // lands afterwards cannot extend the record; it is replayed as the
+    // settlement that exists so the caller gets the committed disposition
+    // rather than an error. A conflicting report against a caller-made
+    // settlement is still rejected below.
+    let (evidence, completion) = match prior_settlement.as_ref() {
+        Some(prior)
+            if prior.evidence == LiveAssistantPlaybackEvidence::Unmeasured
+                && prior.completion.is_none() =>
+        {
+            tracing::debug!(
+                channel_id = %channel_id,
+                item_id = %item_id,
+                "late caller playback report for an output already retired as Unmeasured; replaying that settlement"
+            );
+            (
+                LiveAssistantPlaybackEvidence::Unmeasured,
+                prior.completion.clone(),
+            )
+        }
+        _ => (evidence, completion),
+    };
     if prior_settlement.as_ref().is_some_and(|prior| {
         prior.evidence != evidence
             || (evidence.snapshot_cut().is_none() && prior.completion != completion)
@@ -1748,6 +1816,96 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn new_provider_output_retires_an_unreported_target_and_accepts_the_late_report() {
+        let mut agent = PlaybackTestAgent::new();
+        let session_id = agent.session_id();
+        let channel = LiveChannelId::new("superseded");
+        let interaction = InteractionId::new();
+        let usage = || {
+            meerkat_core::TurnUsage::host_declared(
+                meerkat_core::Provider::OpenAI,
+                "gpt-live-1",
+                meerkat_core::Usage::default(),
+            )
+        };
+        admit_live_assistant_playback_target(
+            &mut agent,
+            &session_id,
+            channel.clone(),
+            interaction,
+            "response-0".to_string(),
+            "item-0".to_string(),
+            0,
+        )
+        .expect("first output admitted");
+        // The provider starts its next response (barge-in answer) before the
+        // caller reported playback of the first one.
+        let second = admit_live_assistant_playback_target(
+            &mut agent,
+            &session_id,
+            channel.clone(),
+            interaction,
+            "response-1".to_string(),
+            "item-1".to_string(),
+            0,
+        )
+        .expect("new provider output is admitted while the previous one is unreported");
+        assert_eq!(second.item_id(), "item-1");
+        assert!(
+            agent
+                .live_assistant_playback_target(&channel, "item-0", 0)
+                .is_none(),
+            "the superseded target must be retired, not left active"
+        );
+        let settlement = agent
+            .live_assistant_playback_settlement(&channel, interaction, "response-0", "item-0", 0)
+            .expect("the superseded output settles as Unmeasured");
+        assert!(matches!(
+            settlement.evidence,
+            LiveAssistantPlaybackEvidence::Unmeasured
+        ));
+        assert!(
+            agent.session.messages().is_empty(),
+            "an output nobody reported hearing commits no assistant text"
+        );
+        // The caller's late report for the superseded output is a replay
+        // against that settlement: accepted, and it commits nothing new.
+        let late = observe_live_assistant_playback_terminal_with_completion(
+            &mut agent,
+            &session_id,
+            channel.clone(),
+            interaction,
+            "response-0".to_string(),
+            "item-0".to_string(),
+            0,
+            LiveAssistantPlaybackEvidence::CallerConfirmedSnapshot(
+                "said before barge-in".to_string(),
+            ),
+            meerkat_core::StopReason::EndTurn,
+            usage(),
+        )
+        .expect("late caller report replays against the Unmeasured settlement");
+        assert!(late.is_resolved());
+        assert!(agent.session.messages().is_empty());
+        // The new output still settles normally.
+        let current = observe_live_assistant_playback_terminal_with_completion(
+            &mut agent,
+            &session_id,
+            channel,
+            interaction,
+            "response-1".to_string(),
+            "item-1".to_string(),
+            0,
+            LiveAssistantPlaybackEvidence::CallerConfirmedSnapshot("answer".to_string()),
+            meerkat_core::StopReason::EndTurn,
+            usage(),
+        )
+        .expect("the admitted output settles");
+        assert!(current.is_resolved());
+        assert_eq!(agent.session.messages().len(), 1);
     }
 
     #[test]

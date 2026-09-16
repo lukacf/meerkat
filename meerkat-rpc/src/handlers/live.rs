@@ -455,6 +455,9 @@ fn live_verb_error_response(id: Option<RpcId>, error: LiveChannelVerbError) -> R
             live_open_projection_error_code(&source),
             format!("failed to build session config: {source}"),
         ),
+        error @ LiveChannelVerbError::CloseSettlementBusy { .. } => {
+            RpcResponse::error(id, error::SESSION_BUSY, error.to_string())
+        }
         error @ (LiveChannelVerbError::CommitOmitted | LiveChannelVerbError::HostCommit { .. }) => {
             RpcResponse::error(id, error::INTERNAL_ERROR, error.to_string())
         }

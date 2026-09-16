@@ -333,6 +333,16 @@ pub enum LiveChannelVerbError {
     /// Close preparation, playback settlement, or host commit failed.
     #[error("live close settlement failed: {message}")]
     HostCommit { message: String },
+    /// The owning session is running an ordinary turn whose pending tools
+    /// block close-time playback settlement. Retry after that turn settles;
+    /// closing a live channel does not cancel the turn or fabricate results.
+    #[error(
+        "live close settlement for channel {channel_id} is busy: session {session_id} has a turn in progress; retry after it settles"
+    )]
+    CloseSettlementBusy {
+        channel_id: String,
+        session_id: String,
+    },
     /// A generated authority emitted a malformed/mismatched result;
     /// `message` is the frozen handler string.
     #[error("{message}")]

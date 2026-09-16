@@ -715,7 +715,18 @@ fn observe_live_assistant_playback_terminal(
             agent.staged_realtime_assistant_segment_is_final(&response_id, &item_id, content_index),
         )
     };
-    let authoritative_chars = authoritative_text.chars().count() as u64;
+    // Only a provider final is authoritative text. Before it, the staged
+    // segment is an ordered snapshot the public path lowers as deltas arrive;
+    // the generated authority models the pre-final state as "no authoritative
+    // text" (`authoritative_assistant_final == false && chars == 0 && digest
+    // == ""`). Counting staged characters here made an unmeasured truncate
+    // before the final fall through every terminal transition, so its target
+    // stayed active and the next assistant output's admission was rejected.
+    let authoritative_chars = if authoritative_final {
+        authoritative_text.chars().count() as u64
+    } else {
+        0
+    };
     let authoritative_digest = if authoritative_final {
         text_digest(&authoritative_text)
     } else {

@@ -2391,6 +2391,9 @@ pub fn member_live_error_from_verb(error: LiveChannelVerbError) -> MemberLiveErr
                 }
             }
         }
+        error @ LiveChannelVerbError::CloseSettlementBusy { .. } => MemberLiveError::Unavailable {
+            reason: error.to_string(),
+        },
         error @ (LiveChannelVerbError::RejectionAuthorityFailed { .. }
         | LiveChannelVerbError::ResultAuthority { .. }
         | LiveChannelVerbError::CommitOmitted

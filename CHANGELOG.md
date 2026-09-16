@@ -48,6 +48,14 @@ them.
   replacement's playback owner can register against its generated staging
   custody before answering the WebRTC offer.
 
+### Added
+
+- Turbo S scenario 98 (`gpt_live_public_e2e`) drives the public Live API for the
+  lifecycle facts this release changes: a caller-confirmed `live/playback_complete`
+  settles into session history within 3 s without a provider final, later output
+  gets a fresh playback handle, `live/close` reports a confirmed closure, and a
+  reopened session recalls a code word from the seeded startup dialogue.
+
 ### Fixed
 
 - Public GPT Live preserves one assistant output identity across long pauses
@@ -71,6 +79,17 @@ them.
   pending-append rejections remain explicit while the close tail drains.
   Closing during an ordinary active tool turn reports busy for retry instead
   of waiting indefinitely or fabricating tool completion.
+- A pre-final Live playback terminal no longer counts staged snapshot text as
+  authoritative characters. On the public path transcript deltas are staged as
+  they arrive, so an unmeasured `live/truncate` before the provider final matched
+  no generated terminal transition, its target stayed active, and the next
+  assistant output's admission panicked the session task
+  (`assistant_playback_target_already_active`); scenario 97's barge-in reproduced
+  it against the real API.
+- A busy Live close settlement is the typed `SESSION_BUSY` RPC error
+  (`MemberLiveError::Unavailable` on the mob surface), not an internal error.
+  Protocol-validation rejections, including an oversize startup history seed,
+  are logged with their reason.
 - Ambiguous Live-context recovery admits the replacement execution profile
   and retains the staging receipt needed to register its playback owner.
 - Debug worker-stack usage on the RPC dispatch path dropped from 24 MiB to

@@ -863,6 +863,13 @@ mod live_pipeline {
             member_live_error_from_verb(LiveChannelVerbError::CommitOmitted),
             MemberLiveError::Internal { .. }
         ));
+        assert!(matches!(
+            member_live_error_from_verb(LiveChannelVerbError::CloseSettlementBusy {
+                channel_id: "ch".to_string(),
+                session_id: "sess".to_string(),
+            }),
+            MemberLiveError::Unavailable { .. }
+        ));
     }
 
     /// T-L14 (+ the member-side reconciliation primitives, T-L24 unit

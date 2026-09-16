@@ -2867,10 +2867,16 @@ mod orchestrator {
             self.service
                 .resolve_live_assistant_playback_on_channel_close(&session_id, channel_id.clone())
                 .await
-                .map_err(|error| LiveChannelVerbError::HostCommit {
-                    message: format!(
-                        "failed to resolve pending assistant playback before close: {error}"
-                    ),
+                .map_err(|error| match error {
+                    SessionError::Busy { .. } => LiveChannelVerbError::CloseSettlementBusy {
+                        channel_id: channel_id.to_string(),
+                        session_id: session_id.to_string(),
+                    },
+                    error => LiveChannelVerbError::HostCommit {
+                        message: format!(
+                            "failed to resolve pending assistant playback before close: {error}"
+                        ),
+                    },
                 })?;
             let authority = self
                 .runtime_adapter

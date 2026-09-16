@@ -977,8 +977,18 @@ fn pending_event_id(token: GptLiveAppendToken) -> String {
 
 fn map_live_error(error: LiveError) -> GptLiveBrokerError {
     let class = match error {
-        LiveError::Invalid(_)
-        | LiveError::Json(_)
+        LiveError::Invalid(reason) => {
+            // Protocol-client validation, for example a startup history seed
+            // over the provider's 128-message / 8,192-token limit. The class
+            // alone is indistinguishable from a malformed provider event; the
+            // reason names no credential or dialogue content.
+            tracing::warn!(
+                %reason,
+                "public Live request rejected by protocol validation before it reached the provider"
+            );
+            GptLiveBrokerTerminalClass::Protocol
+        }
+        LiveError::Json(_)
         | LiveError::MalformedEvent { .. }
         | LiveError::Provider(_)
         | LiveError::SessionIdentityMismatch(_)

@@ -73,6 +73,16 @@ them.
 
 ### Fixed
 
+- Public Live no longer aborts the session task when the provider starts its
+  next response before the caller reported playback of the previous one (a
+  barge-in answer, or a follow-up the model volunteers). The transcript
+  reducer holds one active playback target; the new admission retires the
+  unreported target as `Unmeasured` instead of being rejected
+  (`assistant_playback_target_already_active`, which panicked the machine
+  cleanup thread). A caller report that lands after that retirement replays
+  the Unmeasured settlement and commits nothing; a conflicting report against a
+  caller-made settlement is still rejected. Reproduced with scenario 97's
+  barge-in on the remote Turbo S executors and locally.
 - `meerkat_runtime::stack_relief::box_in_own_frame` builds for wasm32 again. The
   `Send` bound the native helper needs cannot be met by wasm futures (they hold
   `JsFuture` handles), so the wasm32 form and the new `OwnFrameFuture` alias drop

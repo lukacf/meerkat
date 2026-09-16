@@ -805,7 +805,8 @@ are executor trace for generic mirroring: their result has the separate
 delegation-specific delivery path. Later ordinary background interactions
 remain eligible for generic context delivery.
 
-Ordinary runtime-backed turns, including RPC `turn/start`, notify an owned
+Ordinary runtime-backed turns, including RPC `turn/start` and the mob-owned
+executor used for asynchronous peer work, notify an owned
 context-projection task after the CoreExecutor acknowledges the committed
 boundary. That task reads the store-sealed canonical body after executor locks
 are released; it never reconstructs history from turn results or UI events.

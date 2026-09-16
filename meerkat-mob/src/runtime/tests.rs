@@ -72568,6 +72568,90 @@ async fn test_head_canonical_same_member_queue_admissions_serialize_committed_bo
         .await
         .expect("queued member handle");
 
+    #[cfg(feature = "openai-live")]
+    struct CommittedMobContextHost {
+        service: Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
+        appends: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[async_trait::async_trait]
+    impl meerkat_runtime::live_context_mirror::LiveContextMirrorHost for CommittedMobContextHost {
+        async fn committed_boundary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<
+            (
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+                String,
+            ),
+            String,
+        > {
+            self.service
+                .export_live_context_committed_boundary(session_id)
+                .await
+                .map_err(|error| error.to_string())
+        }
+
+        async fn append_context(
+            &self,
+            authority: meerkat_runtime::live_execution::LiveContextAppendAuthority,
+            context: String,
+        ) -> Result<
+            (
+                meerkat_runtime::live_execution::LiveContextAppendAuthority,
+                meerkat_core::LiveAppendDeliveryOutcome,
+            ),
+            String,
+        > {
+            self.appends.lock().expect("context appends").push(context);
+            Ok((
+                authority,
+                meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+            ))
+        }
+
+        async fn recover_ambiguous_append(
+            &self,
+            _authority: meerkat_runtime::live_execution::LiveContextAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            panic!("acknowledged fixture context must not recover");
+        }
+
+        async fn recover_ambiguous_delegation_result(
+            &self,
+            _authority: meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            panic!("ordinary queued turns are not delegation results");
+        }
+    }
+
+    #[cfg(feature = "openai-live")]
+    let context_host = Arc::new(CommittedMobContextHost {
+        service: Arc::clone(&service),
+        appends: std::sync::Mutex::new(Vec::new()),
+    });
+    #[cfg(feature = "openai-live")]
+    let context_adapter = service.runtime_adapter().expect("persistent runtime owner");
+    #[cfg(feature = "openai-live")]
+    let context_binding = {
+        let (seed, _) = service
+            .export_live_context_committed_boundary(&session_id)
+            .await
+            .expect("store-sealed HeadCanonical seed");
+        let seed_cursor = seed
+            .session()
+            .expect("materialized canonical seed")
+            .messages()
+            .len() as u64;
+        let binding = context_adapter
+            .__test_open_live_context_channel(&session_id, seed_cursor)
+            .await
+            .expect("generated live context binding");
+        context_adapter.set_live_context_mirror_host(context_host.clone());
+        binding
+    };
+
     let first = tokio::time::timeout(
         Duration::from_secs(30),
         member.start_turn(
@@ -72608,6 +72692,15 @@ async fn test_head_canonical_same_member_queue_admissions_serialize_committed_bo
         "back-to-back Queue admission must not start a second same-session turn \
          while the first owns the executor"
     );
+    #[cfg(feature = "openai-live")]
+    assert!(
+        context_host
+            .appends
+            .lock()
+            .expect("context appends")
+            .is_empty(),
+        "uncommitted member work must not be mirrored"
+    );
 
     client.release();
     for (index, turn) in turns.into_iter().enumerate() {
@@ -72647,6 +72740,37 @@ async fn test_head_canonical_same_member_queue_admissions_serialize_committed_bo
             "post-pipeline HeadCanonical store remains writable",
         )
         .await;
+
+    #[cfg(feature = "openai-live")]
+    {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            context_adapter.drain_live_context_outbox(&session_id),
+        )
+        .await
+        .expect("mob-owned post-commit projection finishes")
+        .expect("exact store-owned HeadCanonical context reaches the mirror");
+        let appends = context_host.appends.lock().expect("context appends");
+        for index in 0..PIPELINED_TURNS {
+            let expected = format!("queued-boundary-{index}");
+            assert_eq!(
+                appends
+                    .iter()
+                    .filter(|text| text.contains(&expected))
+                    .count(),
+                1,
+                "the actual mob executor must mirror each committed turn exactly once"
+            );
+        }
+        assert_eq!(
+            appends
+                .iter()
+                .filter(|text| text.contains("queued-boundary-follow-up"))
+                .count(),
+            1,
+            "later ordinary member work must also reach the current live channel"
+        );
+    }
 
     let durable = tokio::time::timeout(
         Duration::from_secs(30),
@@ -72737,6 +72861,11 @@ async fn test_head_canonical_same_member_queue_admissions_serialize_committed_bo
         "all queued turn candidates must be finalized after committed completion"
     );
 
+    #[cfg(feature = "openai-live")]
+    context_adapter
+        .__test_close_live_context_channel(&context_binding)
+        .await
+        .expect("retire transport-free live fixture before mob shutdown");
     tokio::time::timeout(Duration::from_secs(30), handle.shutdown())
         .await
         .expect("HeadCanonical queue mob shutdown timed out")

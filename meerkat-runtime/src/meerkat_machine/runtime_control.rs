@@ -6983,6 +6983,27 @@ impl MeerkatMachine {
             .await
     }
 
+    /// Retire a transport-free context fixture through generated close.
+    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[doc(hidden)]
+    pub async fn __test_close_live_context_channel(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+    ) -> Result<(), RuntimeDriverError> {
+        self.apply_session_dsl_input(
+            binding.session_id(),
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+                session_id: binding.session_id().to_string(),
+                channel_id: binding.channel_id().to_string(),
+                close_observation_sequence: 1,
+            },
+            "test:RecordLiveCloseClosed",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        Ok(())
+    }
+
     /// Admit a provisional user delegation without assuming that the separate
     /// session transcript owner has committed its final input.
     #[cfg(all(feature = "test-support", feature = "live"))]

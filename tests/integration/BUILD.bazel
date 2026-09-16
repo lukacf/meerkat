@@ -36,6 +36,7 @@ rust_library(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -84,6 +85,7 @@ rust_library(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -140,6 +142,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -203,6 +206,7 @@ rust_binary(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -261,6 +265,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -333,6 +338,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -408,6 +414,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -481,6 +488,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -573,6 +581,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -647,6 +656,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -722,6 +732,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -795,6 +806,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -869,6 +881,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -948,6 +961,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1024,6 +1038,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1095,6 +1110,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1164,6 +1180,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1233,6 +1250,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1306,6 +1324,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1378,6 +1397,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1447,6 +1467,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1516,6 +1537,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1585,6 +1607,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1656,6 +1679,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1730,6 +1754,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1800,6 +1825,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1874,6 +1900,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -1960,6 +1987,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",
@@ -2046,6 +2074,7 @@ rust_test(
     crate_features = [
         "experimental-gpt-live-e2e",
         "integration-real-tests",
+        "openai-live",
         "openai-live-e2e",
     ],
     edition = "2024",

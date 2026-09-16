@@ -10129,7 +10129,11 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 session_snapshot,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "openai-live")]
+        self.runtime_adapter
+            .notify_committed_live_context(&self.bridge_session_id);
+        Ok(())
     }
 
     async fn acknowledge_committed_session_boundary(
@@ -10142,7 +10146,11 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 authority,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "openai-live")]
+        self.runtime_adapter
+            .notify_committed_live_context(&self.bridge_session_id);
+        Ok(())
     }
 
     async fn reconcile_committed_compaction_projections(

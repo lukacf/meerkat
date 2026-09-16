@@ -169,16 +169,17 @@ fn observe_durable_tail(authority_len: usize, head: &Session) -> DurableTailObse
                 }
                 open_call_ids.extend(assistant.tool_calls().map(|call| call.id.to_string()));
                 let effective_stop = match assistant.stop_reason {
-                    StopReason::EndTurn => DurableTailStopReason::EndTurn,
-                    StopReason::ToolUse if assistant.has_tool_calls() => {
+                    Some(StopReason::EndTurn) => DurableTailStopReason::EndTurn,
+                    Some(StopReason::ToolUse) if assistant.has_tool_calls() => {
                         DurableTailStopReason::ToolUse
                     }
                     // The live agent decides the tool phase from actual call
                     // blocks, not the provider's stop label. A ToolUse label
                     // with no calls is operationally terminal and recovery
                     // must mirror that exact decision.
-                    StopReason::ToolUse => DurableTailStopReason::EndTurn,
-                    _ => DurableTailStopReason::Other,
+                    Some(StopReason::ToolUse) => DurableTailStopReason::EndTurn,
+                    Some(_) => DurableTailStopReason::Other,
+                    None => DurableTailStopReason::Absent,
                 };
                 last_assistant_stop = Some(effective_stop);
                 // ToolUse is an intermediate provider boundary: durable tool
@@ -186,7 +187,8 @@ fn observe_durable_tail(authority_len: usize, head: &Session) -> DurableTailObse
                 // the same run. Every other stop reason closes that run, so
                 // any later message makes the candidate ambiguous even when
                 // a later assistant reuses the same run id and ends cleanly.
-                terminal_seen = effective_stop != DurableTailStopReason::ToolUse;
+                terminal_seen = assistant.stop_reason.is_some()
+                    && effective_stop != DurableTailStopReason::ToolUse;
             }
             Message::ToolResults { results, .. } => {
                 for result in results {
@@ -2170,6 +2172,22 @@ mod store_authority_tests {
         message_timestamp_now,
     };
 
+    #[test]
+    fn nonterminal_transcript_snapshot_is_not_a_recovered_turn_end() {
+        let mut session = Session::new();
+        session.push(Message::BlockAssistant(BlockAssistantMessage::snapshot(
+            vec![AssistantBlock::Transcript {
+                text: "observed speech".into(),
+                source: meerkat_core::TranscriptSource::SpokenUnmeasured,
+                meta: None,
+            }],
+        )));
+        session.push(Message::User(UserMessage::text("continue")));
+        let observed = observe_durable_tail(0, &session);
+        assert_eq!(observed.terminal_stop_reason, DurableTailStopReason::Absent);
+        assert!(!observed.messages_after_terminal);
+    }
+
     fn observation(run_id: &RunId) -> DurableTailObservation {
         DurableTailObservation {
             tail_run_id: Some(run_id.clone()),
@@ -2325,7 +2343,7 @@ mod store_authority_tests {
                 text: "durable reply".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: TranscriptMessageIdentity::default().with_run_id(transcript_run),
             created_at: message_timestamp_now(),
         }));

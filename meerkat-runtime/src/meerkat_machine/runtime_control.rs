@@ -6238,22 +6238,13 @@ impl MeerkatMachine {
         }
     }
 
-    /// Test fixture: open/reuse a channel and admit one provisional user
-    /// delegation. Callers can commit real transcript evidence before worker
-    /// authorization instead of assuming canonical materialization.
+    /// Test fixture: bind a channel without pre-admitting any provider turn.
     #[cfg(all(feature = "test-support", feature = "live"))]
     #[doc(hidden)]
-    pub async fn __test_begin_live_delegation(
+    pub async fn __test_open_live_delegation_channel(
         &self,
         session_id: &SessionId,
-        task: &str,
-    ) -> Result<
-        (
-            meerkat_core::ExactOperationIdentity<meerkat_core::LiveUserTurnCorrelation>,
-            meerkat_core::ProvisionalLiveHandoff,
-        ),
-        RuntimeDriverError,
-    > {
+    ) -> Result<crate::live_execution::LiveDelegationRuntimeBinding, RuntimeDriverError> {
         use crate::meerkat_machine::dsl as mm;
 
         let invalid = |reason| RuntimeDriverError::ValidationFailed { reason };
@@ -6305,9 +6296,32 @@ impl MeerkatMachine {
             .map_err(invalid)?;
             channel_id
         };
-        let binding = self
-            .live_delegation_runtime_binding(session_id, &channel_id)
-            .await?;
+        self.live_delegation_runtime_binding(session_id, &channel_id)
+            .await
+    }
+
+    /// Admit a provisional user delegation without assuming that the separate
+    /// session transcript owner has committed its final input.
+    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[doc(hidden)]
+    pub async fn __test_begin_live_delegation(
+        &self,
+        session_id: &SessionId,
+        task: &str,
+    ) -> Result<
+        (
+            meerkat_core::ExactOperationIdentity<meerkat_core::LiveUserTurnCorrelation>,
+            meerkat_core::ProvisionalLiveHandoff,
+        ),
+        RuntimeDriverError,
+    > {
+        use crate::meerkat_machine::dsl as mm;
+        let invalid = |reason| RuntimeDriverError::ValidationFailed { reason };
+        let binding = self.__test_open_live_delegation_channel(session_id).await?;
+        let channel_id = binding.channel_id();
+        let runtime_id = mm::AgentRuntimeId::from_domain(binding.runtime_id());
+        let fence_token = mm::FenceToken::from_domain(binding.fence_token());
+        let generation = mm::Generation::from_domain(binding.generation());
         let interaction_id = meerkat_core::InteractionId::new();
         let provider_turn = uuid::Uuid::new_v4().to_string();
         let correlation = meerkat_core::LiveUserTurnCorrelation::new(

@@ -484,7 +484,8 @@ impl RealtimeTranscriptItemState {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct RealtimeAssistantCompletion {
-    stop_reason: StopReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_reason: Option<StopReason>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1846,16 +1847,16 @@ fn apply_assistant_playback_snapshot(
         }
     }
     {
-        // Materialization belongs to this local segment, not a provider-final
-        // event: no final-content marker or measured usage is installed.
-        state.assistant_completions.insert(
-            response_id.clone(),
-            RealtimeAssistantCompletion {
-                stop_reason: StopReason::EndTurn,
+        // Snapshot readiness does not invent provider stop/accounting facts.
+        // Independently observed terminal evidence, if present, is preserved.
+        state
+            .assistant_completions
+            .entry(response_id.clone())
+            .or_insert(RealtimeAssistantCompletion {
+                stop_reason: None,
                 usage: None,
                 usage_consumed: false,
-            },
-        );
+            });
     }
     let commit = materialize_realtime_transcript_ready_items(state)?;
     state.assistant_playback_settlements.insert(
@@ -1905,7 +1906,7 @@ fn apply_assistant_turn_completed(
                 .assistant_completions
                 .entry(response_id.clone())
                 .or_insert(RealtimeAssistantCompletion {
-                    stop_reason,
+                    stop_reason: Some(stop_reason),
                     usage: Some(usage),
                     usage_consumed: false,
                 });
@@ -1935,7 +1936,7 @@ fn apply_assistant_turn_interrupted(
                 .assistant_completions
                 .entry(response_id.clone())
                 .or_insert(RealtimeAssistantCompletion {
-                    stop_reason: StopReason::Cancelled,
+                    stop_reason: Some(StopReason::Cancelled),
                     usage: None,
                     usage_consumed: false,
                 });
@@ -2076,7 +2077,7 @@ fn materialize_realtime_transcript_ready_items(
     let mut committed_usage = Usage::default();
     let mut pending_blocks: Vec<AssistantBlock> = Vec::new();
     let mut pending_response_id: Option<String> = None;
-    let mut pending_stop_reason: StopReason = StopReason::EndTurn;
+    let mut pending_stop_reason: Option<StopReason> = None;
     let mut pending_usage: Option<crate::types::TurnUsage> = None;
 
     loop {
@@ -2255,7 +2256,7 @@ enum ResolvedMaterialization {
         item_id: String,
         response_id: String,
         text: String,
-        stop_reason: StopReason,
+        stop_reason: Option<StopReason>,
         usage: Option<crate::types::TurnUsage>,
         lane: TranscriptLane,
         consume_usage: bool,
@@ -2266,7 +2267,7 @@ fn flush_pending_assistant_blocks(
     messages: &mut Vec<Message>,
     committed_usage: &mut Usage,
     pending_blocks: &mut Vec<AssistantBlock>,
-    pending_stop_reason: StopReason,
+    pending_stop_reason: Option<StopReason>,
     pending_usage: &mut Option<crate::types::TurnUsage>,
 ) {
     if pending_blocks.is_empty() {
@@ -2274,10 +2275,11 @@ fn flush_pending_assistant_blocks(
         return;
     }
     let blocks = std::mem::take(pending_blocks);
-    messages.push(Message::BlockAssistant(BlockAssistantMessage::new(
-        blocks,
-        pending_stop_reason,
-    )));
+    let message = match pending_stop_reason {
+        Some(stop_reason) => BlockAssistantMessage::new(blocks, stop_reason),
+        None => BlockAssistantMessage::snapshot(blocks),
+    };
+    messages.push(Message::BlockAssistant(message));
     if let Some(turn_usage) = pending_usage.take() {
         let mut cumulative = crate::types::CumulativeUsage::from_usage(committed_usage.clone());
         cumulative.add_turn(&turn_usage);

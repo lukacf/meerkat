@@ -16609,7 +16609,7 @@ ORDER BY runtime_id";
                     text: "verbose answer".to_string(),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
+                stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
@@ -19521,7 +19521,7 @@ ORDER BY runtime_id";
                     text: "peer response already applied".to_string(),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
+                stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
@@ -19663,7 +19663,7 @@ ORDER BY runtime_id";
                     text: "Turn 1 answer".to_string(),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
+                stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
@@ -19681,7 +19681,7 @@ ORDER BY runtime_id";
                     text: "Turn 2 generated answer".to_string(),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
+                stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
@@ -19769,7 +19769,7 @@ ORDER BY runtime_id";
                             text: "first compact answer".to_string(),
                             meta: None,
                         }],
-                        stop_reason: StopReason::EndTurn,
+                        stop_reason: Some(StopReason::EndTurn),
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
                     })],
@@ -19788,7 +19788,7 @@ ORDER BY runtime_id";
                             text: "stale compact answer".to_string(),
                             meta: None,
                         }],
-                        stop_reason: StopReason::EndTurn,
+                        stop_reason: Some(StopReason::EndTurn),
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                         created_at: meerkat_core::types::message_timestamp_now(),
                     })],

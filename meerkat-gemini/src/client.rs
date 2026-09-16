@@ -3585,7 +3585,7 @@ mod tests {
                             thought_signature: "sig_123".to_string(),
                         })),
                     }],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -5650,7 +5650,7 @@ mod tests {
                             thought_signature: "sig_123".to_string(),
                         })),
                     }],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -5929,7 +5929,7 @@ mod tests {
                         args: args_raw,
                         meta: None,
                     }],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -6104,21 +6104,18 @@ mod tests {
             "gemini-3.5-flash",
             vec![
                 Message::User(UserMessage::text("listen")),
-                Message::BlockAssistant(BlockAssistantMessage::new(
-                    vec![
-                        AssistantBlock::Transcript {
-                            text: "spoken replay".to_string(),
-                            source: meerkat_core::TranscriptSource::Spoken,
-                            meta: None,
-                        },
-                        AssistantBlock::Transcript {
-                            text: "voice-only discussion".to_string(),
-                            source: meerkat_core::TranscriptSource::SpokenUnmeasured,
-                            meta: None,
-                        },
-                    ],
-                    StopReason::EndTurn,
-                )),
+                Message::BlockAssistant(BlockAssistantMessage::snapshot(vec![
+                    AssistantBlock::Transcript {
+                        text: "spoken replay".to_string(),
+                        source: meerkat_core::TranscriptSource::Spoken,
+                        meta: None,
+                    },
+                    AssistantBlock::Transcript {
+                        text: "voice-only discussion".to_string(),
+                        source: meerkat_core::TranscriptSource::SpokenUnmeasured,
+                        meta: None,
+                    },
+                ])),
                 Message::User(UserMessage::text("continue")),
             ],
         );

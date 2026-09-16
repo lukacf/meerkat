@@ -5749,6 +5749,37 @@ mod tests {
         events: Arc<std::sync::Mutex<Vec<&'static str>>>,
     }
 
+    struct RevocableBindingAuthority {
+        inner: ExactAllowBindingAuthority,
+        allowed: AtomicBool,
+        attempts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ExperimentalLiveSessionBindingAuthority for RevocableBindingAuthority {
+        async fn validate_live_durable_source_availability(
+            &self,
+            session_id: &meerkat_core::SessionId,
+        ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
+            self.inner
+                .validate_live_durable_source_availability(session_id)
+                .await
+        }
+
+        async fn authorize_binding_use(
+            &self,
+            session_id: &meerkat_core::SessionId,
+            binding: &meerkat_core::AuthBindingRef,
+        ) -> Result<ExperimentalLiveSessionBindingAuthorization, ExperimentalLiveOpenAuthorityError>
+        {
+            self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
+            if !self.allowed.load(Ordering::Acquire) {
+                return Err(ExperimentalLiveOpenAuthorityError::BindingUseDenied);
+            }
+            self.inner.authorize_binding_use(session_id, binding).await
+        }
+    }
+
     struct RejectingEligibilityBindingAuthority {
         eligibility_calls: Arc<AtomicUsize>,
         authorization_calls: Arc<AtomicUsize>,
@@ -9577,6 +9608,16 @@ mod tests {
                 .as_ref()
                 .cloned()
                 .expect("pump-exit adapter is retained");
+            let mut snapshot_events = if matches!(exit, ExitKind::ProviderManaged) {
+                Some(
+                    service
+                        .subscribe_session_events(&session_id)
+                        .await
+                        .expect("snapshot events"),
+                )
+            } else {
+                None
+            };
             let user_turn = LiveSidebandTurnRef::__from_provider_observation(
                 binding.channel_id(),
                 format!("matrix-user-{ordinal}"),
@@ -9624,6 +9665,7 @@ mod tests {
                 ));
             }
             if matches!(exit, ExitKind::ProviderManaged) {
+                use futures::{FutureExt as _, StreamExt as _};
                 let mut last_turn = assistant_turn.clone();
                 let mut prior_output = None;
                 for group in 0..4 {
@@ -9769,6 +9811,21 @@ mod tests {
                     assert!(context.contains("spoken_unmeasured"));
                 }
                 let old_output = prior_output.expect("generated continuation handle");
+                while let Some(Some(envelope)) = snapshot_events
+                    .as_mut()
+                    .expect("snapshot event subscription")
+                    .next()
+                    .now_or_never()
+                {
+                    assert!(
+                        !matches!(
+                            envelope.payload,
+                            meerkat_core::AgentEvent::TurnCompleted { .. }
+                                | meerkat_core::AgentEvent::TextComplete { .. }
+                        ),
+                        "nonterminal transcript snapshots must not emit completion events"
+                    );
+                }
                 let original_context = service
                     .load_authoritative_session(&session_id)
                     .await
@@ -11004,13 +11061,9 @@ mod tests {
             ),
             None => member_host,
         });
-        let identity = meerkat_core::SessionLlmIdentity {
-            model: "gpt-live-1".to_string(),
-            provider: Provider::OpenAI,
-            self_hosted_server_id: None,
-            provider_params: None,
-            auth_binding: None,
-        };
+        let readiness_realm = meerkat_core::RealmId::parse("active-readiness").unwrap();
+        let readiness_binding = public_live_binding(&readiness_realm);
+        let identity = public_live_identity(readiness_binding.clone());
         let mut authority = ScriptedStrictOpenAuthority::new(identity).with_client_context();
         if retain_voice {
             authority.snapshot_cuts = true;
@@ -11186,6 +11239,72 @@ mod tests {
             .active_binding(&session_id)
             .await
             .expect("old provider binding is physically active");
+        let custody = member_host
+            .validate_experimental_live_channel_custody(&old_channel, opened.pending_receipt())
+            .await
+            .expect("actual active source custody");
+        assert!(matches!(
+            custody.phase(),
+            crate::surface::ExperimentalLiveChannelPhaseStatus::Active { .. }
+        ));
+        let summary_calls = summary_producer
+            .as_ref()
+            .map(|producer| producer.calls.load(AtomicOrdering::SeqCst));
+        let readiness_auth = Arc::new(RevocableBindingAuthority {
+            inner: ExactAllowBindingAuthority {
+                session_id: session_id.clone(),
+                expected: readiness_binding.clone(),
+                calls: Arc::new(AtomicUsize::new(0)),
+                auth_lease: runtime.generated_auth_lease_handle(),
+                events: Arc::new(std::sync::Mutex::new(Vec::new())),
+            },
+            allowed: AtomicBool::new(true),
+            attempts: AtomicUsize::new(0),
+        });
+        let config_reads = Arc::new(AtomicUsize::new(0));
+        let readiness_authority =
+            ExperimentalGptLiveOpenAuthority::new_public(public_live_authority_config(
+                &readiness_realm,
+                "marin",
+                public_live_identity(readiness_binding),
+                Arc::new(CountingConfigSource {
+                    reads: Arc::clone(&config_reads),
+                    config: public_live_realm_config(&readiness_realm),
+                }),
+                readiness_auth.clone(),
+                Arc::clone(&authority.transport),
+            ))
+            .unwrap();
+        for _ in 0..2 {
+            readiness_authority
+                .probe_execution_readiness(&session_id, &public_profile_override())
+                .await
+                .expect("active voice does not consume per-target readiness");
+        }
+        readiness_auth.allowed.store(false, Ordering::Release);
+        assert!(matches!(
+            readiness_authority
+                .probe_execution_readiness(&session_id, &public_profile_override(),)
+                .await,
+            Err(ExperimentalLiveOpenAuthorityError::BindingUseDenied)
+        ));
+        assert_eq!(readiness_auth.attempts.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(config_reads.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(
+            authority.transport.active_binding(&session_id).await,
+            Some(stale_old_binding.clone())
+        );
+        assert_eq!(
+            authority.transport.registered_by_channel.lock().await.len(),
+            1
+        );
+        assert_eq!(
+            summary_producer
+                .as_ref()
+                .map(|producer| producer.calls.load(AtomicOrdering::SeqCst)),
+            summary_calls,
+            "readiness never starts a summary or second channel"
+        );
         let first_channel_a_turn = LiveSidebandTurnRef::__from_provider_observation(
             &old_channel,
             "turn:1".to_string(),

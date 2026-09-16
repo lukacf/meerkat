@@ -2794,6 +2794,12 @@ impl ExperimentalLiveDelegationCoordinator {
         // while the generated interaction is still active, then close the
         // conversational turn. Canonical transcript reconciliation and all
         // executor authority remain control-owned below.
+        self.supersede_previous_delegation(
+            &channel_key,
+            &runtime_binding,
+            operation.domain_correlation().interaction_id(),
+        )
+        .await?;
         self.runtime
             .admit_live_delegation(&runtime_binding, &operation, &provisional)
             .await
@@ -2839,6 +2845,73 @@ impl ExperimentalLiveDelegationCoordinator {
             .drain_live_context_outbox(finished.binding().session_id())
             .await
             .map_err(|error| error.to_string())
+    }
+
+    /// Close exact previous execution custody before either admitting a new
+    /// delegation or acquiring the source session's transcript mutation lane.
+    async fn supersede_previous_delegation(
+        &self,
+        channel_key: &ActiveChannelKey,
+        runtime_binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        superseding_interaction_id: meerkat_core::InteractionId,
+    ) -> Result<(), String> {
+        let previous = self.active.lock().await.remove(channel_key);
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+        if !previous.task.is_finished() {
+            let directive = match self
+                .runtime
+                .supersede_live_delegation(
+                    runtime_binding.runtime_id(),
+                    runtime_binding.fence_token(),
+                    runtime_binding.generation(),
+                    &previous.retained.admission,
+                    superseding_interaction_id,
+                )
+                .await
+            {
+                Ok(directive) => Some(directive),
+                Err(_) if previous.task.is_finished() => None,
+                Err(error) => {
+                    self.active
+                        .lock()
+                        .await
+                        .insert(channel_key.clone(), previous);
+                    return Err(error.to_string());
+                }
+            };
+            if let Some(LiveDelegationCancellationDirective::CancellationAuthorized(cancellation)) =
+                directive
+            {
+                let outcome = previous
+                    .cancellation
+                    .cancel(&cancellation)
+                    .await
+                    .unwrap_or(LiveDelegationCancellationOutcome::Failed);
+                if let Err(error) = self
+                    .runtime
+                    .resolve_live_delegation_cancellation(
+                        runtime_binding.runtime_id(),
+                        runtime_binding.fence_token(),
+                        runtime_binding.generation(),
+                        &cancellation,
+                        outcome,
+                    )
+                    .await
+                {
+                    self.active
+                        .lock()
+                        .await
+                        .insert(channel_key.clone(), previous);
+                    return Err(error.to_string());
+                }
+            }
+        }
+        previous
+            .task
+            .await
+            .map_err(|error| format!("live delegation terminal task failed: {error}"))
     }
 
     /// Client-context capability only. The provider-final transcript remains
@@ -2898,6 +2971,15 @@ impl ExperimentalLiveDelegationCoordinator {
             .ok_or_else(|| {
                 "live delegation requires a durable Meerkat-Mob member owner".to_string()
             })?;
+        // Existing-member execution holds this same session's finalization
+        // boundary. Cancellation must run before waiting to append the next
+        // canonical user transcript; it must never interrupt unrelated text.
+        self.supersede_previous_delegation(
+            &channel_key,
+            &runtime_binding,
+            operation.domain_correlation().interaction_id(),
+        )
+        .await?;
         let final_event = meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
             item_id: turn.adapter_key().to_string(),
             previous_item_id: None,
@@ -2915,61 +2997,6 @@ impl ExperimentalLiveDelegationCoordinator {
             "client-context control committed canonical final transcript"
         );
 
-        if let Some(previous) = self.active.lock().await.remove(&channel_key) {
-            if previous.task.is_finished() {
-                previous
-                    .task
-                    .await
-                    .map_err(|error| format!("live delegation terminal task failed: {error}"))?;
-            } else {
-                let directive = match self
-                    .runtime
-                    .supersede_live_delegation(
-                        runtime_binding.runtime_id(),
-                        runtime_binding.fence_token(),
-                        runtime_binding.generation(),
-                        &previous.retained.admission,
-                        operation.domain_correlation().interaction_id(),
-                    )
-                    .await
-                {
-                    Ok(directive) => Some(directive),
-                    Err(_error) if previous.task.is_finished() => None,
-                    Err(error) => {
-                        self.active.lock().await.insert(channel_key, previous);
-                        return Err(error.to_string());
-                    }
-                };
-                if let Some(LiveDelegationCancellationDirective::CancellationAuthorized(
-                    cancellation,
-                )) = directive
-                {
-                    let outcome = previous
-                        .cancellation
-                        .cancel(&cancellation)
-                        .await
-                        .unwrap_or(LiveDelegationCancellationOutcome::Failed);
-                    if let Err(error) = self
-                        .runtime
-                        .resolve_live_delegation_cancellation(
-                            runtime_binding.runtime_id(),
-                            runtime_binding.fence_token(),
-                            runtime_binding.generation(),
-                            &cancellation,
-                            outcome,
-                        )
-                        .await
-                    {
-                        self.active.lock().await.insert(channel_key, previous);
-                        return Err(error.to_string());
-                    }
-                }
-                previous
-                    .task
-                    .await
-                    .map_err(|error| format!("live delegation terminal task failed: {error}"))?;
-            }
-        }
         let reconciliation = self
             .runtime
             .reconcile_live_delegation_transcript(
@@ -4146,6 +4173,12 @@ mod tests {
     use super::*;
     use meerkat_core::exact_operation::ExactOperationIdentity;
     use meerkat_core::interaction::InteractionId;
+
+    #[cfg(all(
+        feature = "experimental-gpt-live-gate0-harness",
+        not(target_arch = "wasm32")
+    ))]
+    mod supersession;
 
     #[test]
     fn live_and_recovered_cancelled_terminals_keep_the_same_typed_class() {

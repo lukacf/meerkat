@@ -148,8 +148,8 @@ pub enum TranscriptRewriteMessage {
     #[serde(rename = "block_assistant")]
     BlockAssistant {
         blocks: Vec<WireAssistantBlock>,
-        #[serde(default)]
-        stop_reason: WireStopReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<WireStopReason>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created_at: Option<String>,
     },
@@ -918,8 +918,9 @@ pub enum WireAssistantBlock {
 #[non_exhaustive]
 pub enum WireTranscriptSource {
     Spoken,
-    /// Canonical assistant speech observation, without measured playback,
-    /// hearing, or provider-final utterance evidence.
+    /// Canonical assistant speech observation without measured playback or
+    /// hearing evidence. Provider termination uses the message's separate,
+    /// optional stop reason.
     SpokenUnmeasured,
     /// R7-4 (P3 dogma): explicit fail-loud variant for unknown core
     /// variants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;
@@ -1297,7 +1298,7 @@ impl TranscriptRewriteMessage {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Message::BlockAssistant(BlockAssistantMessage {
                     blocks,
-                    stop_reason: stop_reason.into(),
+                    stop_reason: stop_reason.map(Into::into),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: transcript_message_timestamp(created_at)?,
                 }))
@@ -1489,7 +1490,8 @@ pub enum WireSessionMessage {
     #[serde(rename = "block_assistant")]
     BlockAssistant {
         blocks: Vec<WireAssistantBlock>,
-        stop_reason: WireStopReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<WireStopReason>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         interaction_id: Option<InteractionId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1558,7 +1560,7 @@ impl From<Message> for WireSessionMessage {
             }
             Message::BlockAssistant(message) => Self::BlockAssistant {
                 blocks: message.blocks.into_iter().map(Into::into).collect(),
-                stop_reason: message.stop_reason.into(),
+                stop_reason: message.stop_reason.map(Into::into),
                 interaction_id: message.identity.interaction_id,
                 run_id: message.identity.run_id,
                 created_at: message.created_at.to_rfc3339(),
@@ -2368,7 +2370,7 @@ mod tests {
                             meta: None,
                         },
                     ],
-                    stop_reason: WireStopReason::EndTurn,
+                    stop_reason: Some(WireStopReason::EndTurn),
                     interaction_id: None,
                     run_id: None,
                     created_at: "2026-04-27T00:00:03Z".to_string(),
@@ -2975,6 +2977,28 @@ mod tests {
 
     /// R7-4 (P3 dogma): the typed `Unknown` variant must not poison
     /// known-variant round-trips.
+    #[test]
+    fn nonterminal_assistant_snapshot_wire_roundtrip_preserves_missing_stop_evidence() {
+        let message = Message::BlockAssistant(BlockAssistantMessage::snapshot(vec![
+            AssistantBlock::Transcript {
+                text: "still speaking".into(),
+                source: TranscriptSource::SpokenUnmeasured,
+                meta: None,
+            },
+        ]));
+        let wire = WireSessionMessage::from(message);
+        let encoded = serde_json::to_value(&wire).unwrap();
+        assert!(encoded.get("stop_reason").is_none());
+        let rewrite: TranscriptRewriteMessage = serde_json::from_value(encoded).unwrap();
+        let restored = rewrite.into_core().unwrap();
+        assert!(matches!(restored, Message::BlockAssistant(assistant)
+            if assistant.stop_reason.is_none()
+                && matches!(&assistant.blocks[0], AssistantBlock::Transcript {
+                    source: TranscriptSource::SpokenUnmeasured, ..
+                })
+        ));
+    }
+
     #[test]
     fn known_transcript_sources_round_trip() {
         let wire: WireTranscriptSource = TranscriptSource::Spoken.into();

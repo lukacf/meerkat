@@ -7590,7 +7590,7 @@ async fn session_task<A: SessionAgent>(
                     for materialized in &outcome.materialized_messages {
                         if let RealtimeTranscriptMaterializedMessage::Assistant {
                             text,
-                            stop_reason,
+                            stop_reason: Some(stop_reason),
                             usage,
                             ..
                         } = materialized
@@ -7765,7 +7765,7 @@ async fn session_task<A: SessionAgent>(
                     usage,
                 );
                 if matches!(&result, Ok(crate::LiveAssistantPlaybackObservationResult::Resolved(receipt))
-                    if receipt.disposition() == meerkat_core::LiveAssistantPlaybackTruncationDisposition::CommittedSnapshot)
+                    if receipt.continues_provider_group())
                 {
                     let snap = agent.snapshot();
                     control.publish_summary(SessionSummaryCache {

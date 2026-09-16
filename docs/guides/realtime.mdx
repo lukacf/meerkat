@@ -539,13 +539,6 @@ not proxy a placed member's host-local session in multi-host v1, and
 
 ## GPT Live (public OpenAI Live API)
 
-<Warning>
-This development checkpoint is for integration testing, not production
-activation. The provider-managed unmeasured path still needs its persisted
-`StopReason::EndTurn` reconciled with local snapshot semantics. A successful
-consumer build does not certify that remaining semantic gate.
-</Warning>
-
 `gpt-live-1` is OpenAI's continuous voice model on the public Live API. It is a
 different protocol from Realtime: audio runs continuously with provider-owned
 speech scheduling, and the voice model does not run tools. Instead the session is
@@ -736,15 +729,19 @@ does not publish an actionable playback output handle or wait for a browser
 apply. Ordinary observation transport acknowledgement is never playback or
 hearing evidence.
 
-This checkpoint retains observed assistant text as canonical `Transcript`
+Observed assistant text is retained as canonical `Transcript`
 blocks with `TranscriptSource::SpokenUnmeasured`, through a distinct
 `AssistantUnmeasuredSnapshotCommitted` event. Committed-live provenance advances
 coverage without echo before segment advancement. Ordinary
 `messages_for_model_boundary()`, summaries, compaction, and reload therefore
 consume the same canonical history; there is no separate observation-position
 ledger or `messages_for_live_context()` overlay. The source marker must remain
-unmeasured when rendering or summarizing these rows. The enclosing boundary's
-persisted stop-reason semantics remain the checkpoint limitation noted above.
+unmeasured when rendering or summarizing these rows. An observed snapshot has
+`BlockAssistantMessage.stop_reason: None`: it does not manufacture
+`StopReason::EndTurn`. Independently observed provider stop evidence remains
+optional throughout persistence and wire projection. Normal completed model
+responses still use `Some(stop_reason)`; consumers must not substitute a
+completion for an absent value.
 
 Public admission diagnostics include the failing stage and typed cause (for
 example, `missing_default_binding`, `lease_absent`, or

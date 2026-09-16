@@ -887,7 +887,7 @@ mod tests {
                 text: "old summary".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));

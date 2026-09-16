@@ -448,7 +448,7 @@ pub enum RealtimeTranscriptMaterializedMessage {
         item_id: String,
         response_id: String,
         text: String,
-        stop_reason: StopReason,
+        stop_reason: Option<StopReason>,
         usage: Option<crate::types::TurnUsage>,
         /// T9/T10: which output lane the staged content arrived on.
         /// Drives whether the materializer flushes

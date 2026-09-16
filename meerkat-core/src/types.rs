@@ -731,9 +731,9 @@ where
 pub enum TranscriptSource {
     /// Spoken-audio transcript (provider audio output → text).
     Spoken,
-    /// Observed assistant speech snapshot with no measured playback or
-    /// provider-final evidence. Any enclosing message boundary is a local
-    /// document segment boundary, not a provider utterance-completion claim.
+    /// Observed assistant speech without measured playback or hearing
+    /// evidence. Provider termination is independent: the enclosing message's
+    /// optional stop reason is absent for nonterminal snapshots.
     SpokenUnmeasured,
 }
 
@@ -2784,13 +2784,15 @@ impl UserMessage {
 /// Assistant message with ordered blocks - no billing metadata.
 ///
 /// The canonical transcript representation for assistant output: an ordered
-/// sequence of typed [`AssistantBlock`]s plus the stop reason.
+/// sequence of typed [`AssistantBlock`]s plus any observed stop reason.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlockAssistantMessage {
     /// Ordered sequence of content blocks
     pub blocks: Vec<AssistantBlock>,
-    /// How the turn ended
-    pub stop_reason: StopReason,
+    /// How the provider turn ended, when that boundary was observed. A
+    /// canonical transcript snapshot may have content without stop evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
     #[serde(default, skip_serializing_if = "TranscriptMessageIdentity::is_empty")]
     pub identity: TranscriptMessageIdentity,
     /// When this assistant message was committed to the transcript.
@@ -2806,7 +2808,17 @@ impl BlockAssistantMessage {
     pub fn new(blocks: Vec<AssistantBlock>, stop_reason: StopReason) -> Self {
         Self {
             blocks,
-            stop_reason,
+            stop_reason: Some(stop_reason),
+            identity: TranscriptMessageIdentity::default(),
+            created_at: message_timestamp_now(),
+        }
+    }
+
+    /// Commit observed content without manufacturing provider terminality.
+    pub fn snapshot(blocks: Vec<AssistantBlock>) -> Self {
+        Self {
+            blocks,
+            stop_reason: None,
             identity: TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         }

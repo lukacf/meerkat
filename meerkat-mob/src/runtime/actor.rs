@@ -2614,9 +2614,9 @@ impl DetachedMemberReadinessContext {
             .await?
         {
             let mut req = meerkat_core::service::StartTurnRequest {
-                // The admission barrier is steer-only; steer dispatch with
-                // injected context was rejected before the mode fork, so this
-                // carrier is invariantly empty here.
+                // Separate WorkSpec-injected context is rejected before the
+                // autonomous mode fork. Execution-content authorship is
+                // independently lowered to typed appends below.
                 injected_context: Vec::new(),
                 prompt: content,
                 system_prompt,
@@ -51031,7 +51031,7 @@ impl MobActor {
                     "dispatch_member_turn_after_machine_admission building turn request"
                 );
                 let mut req = meerkat_core::service::StartTurnRequest {
-                    // Turn-driven work requests carry no typed_turn_appends;
+                    // WorkSpec context uses its dedicated slot here;
                     // the injected-context field is the single lowering
                     // carrier here. Runtime-backed members re-lower it into
                     // the prompt input's typed slot

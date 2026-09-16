@@ -7297,7 +7297,7 @@ class TranscriptRewriteMessageBlockAssistant(TypedDict, total=False):
     blocks: Required[list[WireAssistantBlock]]
     created_at: NotRequired[Optional[str]]
     role: Required[Literal['block_assistant']]
-    stop_reason: NotRequired[WireStopReason]
+    stop_reason: NotRequired[Optional[WireStopReason]]
 
 class TranscriptRewriteMessageToolResults(TypedDict, total=False):
     created_at: NotRequired[Optional[str]]
@@ -8295,7 +8295,7 @@ class WireSessionMessageBlockAssistant(TypedDict, total=False):
     interaction_id: NotRequired[Optional[str]]
     role: Required[Literal['block_assistant']]
     run_id: NotRequired[Optional[RunId]]
-    stop_reason: Required[WireStopReason]
+    stop_reason: NotRequired[Optional[WireStopReason]]
 
 class WireSessionMessageToolResults(TypedDict, total=False):
     created_at: Required[str]

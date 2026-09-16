@@ -298,7 +298,7 @@ mod session_persistence {
                 text: "Hi there!".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
@@ -337,7 +337,7 @@ mod session_persistence {
                     text: "Response before crash".to_string(),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
+                stop_reason: Some(StopReason::EndTurn),
                 identity: TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }));
@@ -374,7 +374,7 @@ mod session_persistence {
                 text: "Hi!".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
@@ -1024,7 +1024,7 @@ mod combined {
                 .expect("valid args"),
                 meta: None,
             }],
-            stop_reason: StopReason::ToolUse,
+            stop_reason: Some(StopReason::ToolUse),
             identity: TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
@@ -1048,7 +1048,7 @@ mod combined {
                 text: "Based on the tool result...".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));

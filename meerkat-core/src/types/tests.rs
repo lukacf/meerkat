@@ -75,7 +75,7 @@ fn test_message_json_schema() {
             text: "Hi there!".to_string(),
             meta: None,
         }],
-        stop_reason: StopReason::EndTurn,
+        stop_reason: Some(StopReason::EndTurn),
         identity: crate::types::TranscriptMessageIdentity::default(),
         created_at: message_timestamp_now(),
     });
@@ -799,7 +799,7 @@ fn test_session_checkpoint_complex() {
                         meta: None,
                     },
                 ],
-                stop_reason: StopReason::ToolUse,
+                stop_reason: Some(StopReason::ToolUse),
                 identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: message_timestamp_now(),
             }));
@@ -815,7 +815,7 @@ fn test_session_checkpoint_complex() {
                     text: format!("Completed request {i} with tool result"),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
+                stop_reason: Some(StopReason::EndTurn),
                 identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: message_timestamp_now(),
             }));
@@ -826,7 +826,7 @@ fn test_session_checkpoint_complex() {
                     text: format!("Response to request {i}"),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
+                stop_reason: Some(StopReason::EndTurn),
                 identity: crate::types::TranscriptMessageIdentity::default(),
                 created_at: message_timestamp_now(),
             }));
@@ -1286,7 +1286,7 @@ mod ordered_transcript_types {
         match raw_message {
             Message::BlockAssistant(parsed_message) => {
                 assert_eq!(parsed_message.blocks.len(), 2);
-                assert_eq!(parsed_message.stop_reason, StopReason::ToolUse);
+                assert_eq!(parsed_message.stop_reason, Some(StopReason::ToolUse));
                 match &parsed_message.blocks[1] {
                     AssistantBlock::ToolUse { id, name, args, .. } => {
                         assert_eq!(id, expected_id);
@@ -1458,6 +1458,25 @@ mod ordered_transcript_types {
     }
 
     #[test]
+    fn assistant_snapshot_roundtrip_does_not_invent_a_stop_reason() {
+        let snapshot = BlockAssistantMessage::snapshot(vec![AssistantBlock::Transcript {
+            text: "still speaking".into(),
+            source: TranscriptSource::SpokenUnmeasured,
+            meta: None,
+        }]);
+        let encoded = serde_json::to_value(&snapshot).unwrap();
+        assert!(encoded.get("stop_reason").is_none());
+        let decoded: BlockAssistantMessage = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, snapshot);
+        assert_eq!(decoded.stop_reason, None);
+        let terminal = BlockAssistantMessage::new(Vec::new(), StopReason::EndTurn);
+        assert_eq!(
+            serde_json::to_value(terminal).unwrap()["stop_reason"],
+            "end_turn"
+        );
+    }
+
+    #[test]
     fn transcript_model_text_preserves_unmeasured_provenance_without_changing_ordinary_text() {
         let ordinary = TranscriptSource::Spoken.text_for_model("original speech");
         assert!(matches!(
@@ -1611,7 +1630,7 @@ mod ordered_transcript_types {
                     meta: None,
                 },
             ],
-            stop_reason: StopReason::ToolUse,
+            stop_reason: Some(StopReason::ToolUse),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
@@ -1631,7 +1650,7 @@ mod ordered_transcript_types {
                 text: "No tools needed".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
@@ -1651,7 +1670,7 @@ mod ordered_transcript_types {
                 args,
                 meta: None,
             }],
-            stop_reason: StopReason::ToolUse,
+            stop_reason: Some(StopReason::ToolUse),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
@@ -1662,7 +1681,7 @@ mod ordered_transcript_types {
                 text: "Hello".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
@@ -1689,7 +1708,7 @@ mod ordered_transcript_types {
                     meta: None,
                 },
             ],
-            stop_reason: StopReason::ToolUse,
+            stop_reason: Some(StopReason::ToolUse),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
@@ -1732,7 +1751,7 @@ mod ordered_transcript_types {
                     meta: None,
                 },
             ],
-            stop_reason: StopReason::ToolUse,
+            stop_reason: Some(StopReason::ToolUse),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
@@ -1745,7 +1764,7 @@ mod ordered_transcript_types {
     fn test_assistant_message_display_empty() {
         let msg = BlockAssistantMessage {
             blocks: vec![],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };
@@ -1783,7 +1802,7 @@ mod ordered_transcript_types {
                     meta: None,
                 },
             ],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         };

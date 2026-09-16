@@ -1860,7 +1860,7 @@ mod tests {
             );
             assert_eq!(agent.session.messages().len(), segment + 1);
             assert!(agent.session.messages().iter().all(|message| matches!(message,
-                meerkat_core::Message::BlockAssistant(assistant) if assistant.blocks.iter().all(|block| matches!(block,
+                meerkat_core::Message::BlockAssistant(assistant) if assistant.stop_reason.is_none() && assistant.blocks.iter().all(|block| matches!(block,
                     meerkat_core::AssistantBlock::Transcript { text, source: meerkat_core::types::TranscriptSource::SpokenUnmeasured, .. }
                         if text == "observed, never measured as played"
                 ))

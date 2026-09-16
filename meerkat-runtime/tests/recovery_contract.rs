@@ -1223,7 +1223,7 @@ async fn atomic_apply_recovery_boundary_commits_visible_effects_together() {
                 text: "durable tail reply".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         }));
@@ -1343,7 +1343,7 @@ async fn whole_blob_provisional_recovery_promotes_store_owned_candidate() {
             text: "durable whole-blob reply".to_string(),
             meta: None,
         }],
-        stop_reason: StopReason::EndTurn,
+        stop_reason: Some(StopReason::EndTurn),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
     }));
@@ -1426,7 +1426,7 @@ async fn whole_blob_interrupted_recovery_installs_one_sealed_repair_artifact() {
             args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
             meta: None,
         }],
-        stop_reason: StopReason::ToolUse,
+        stop_reason: Some(StopReason::ToolUse),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
     }));
@@ -1517,7 +1517,7 @@ async fn whole_blob_recovery_uses_latest_same_run_candidate_sequence() {
             args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
             meta: None,
         }],
-        stop_reason: StopReason::ToolUse,
+        stop_reason: Some(StopReason::ToolUse),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
     }));
@@ -1547,7 +1547,7 @@ async fn whole_blob_recovery_uses_latest_same_run_candidate_sequence() {
             text: "latest durable reply".to_string(),
             meta: None,
         }],
-        stop_reason: StopReason::EndTurn,
+        stop_reason: Some(StopReason::EndTurn),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
     }));
@@ -1703,7 +1703,7 @@ async fn head_canonical_recovery_uses_only_store_owned_source_and_migrates_floor
             text: "durable tail reply".to_string(),
             meta: None,
         }],
-        stop_reason: StopReason::EndTurn,
+        stop_reason: Some(StopReason::EndTurn),
         identity: meerkat_core::types::TranscriptMessageIdentity::default()
             .with_run_id(candidate_run.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
@@ -1946,7 +1946,7 @@ async fn head_canonical_incomplete_intent_is_discarded_without_advancing_the_ses
             text: "candidate that was never physically applied".to_string(),
             meta: None,
         }],
-        stop_reason: StopReason::EndTurn,
+        stop_reason: Some(StopReason::EndTurn),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
     }));
@@ -2055,7 +2055,7 @@ async fn head_canonical_recovery_uses_latest_same_run_physical_candidate() {
             args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
             meta: None,
         }],
-        stop_reason: StopReason::ToolUse,
+        stop_reason: Some(StopReason::ToolUse),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
     }));
@@ -2106,7 +2106,7 @@ async fn head_canonical_recovery_uses_latest_same_run_physical_candidate() {
             text: "latest durable reply".to_string(),
             meta: None,
         }],
-        stop_reason: StopReason::EndTurn,
+        stop_reason: Some(StopReason::EndTurn),
         identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
         created_at: meerkat_core::types::message_timestamp_now(),
     }));

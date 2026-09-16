@@ -6313,7 +6313,7 @@ export interface TranscriptRewriteMessageBlockAssistant {
   blocks: WireAssistantBlock[];
   created_at?: string | null;
   role: "block_assistant";
-  stop_reason?: WireStopReason;
+  stop_reason?: WireStopReason | null;
 }
 
 export interface TranscriptRewriteMessageToolResults {
@@ -6434,7 +6434,7 @@ export interface WireSessionMessageBlockAssistant {
   interaction_id?: string | null;
   role: "block_assistant";
   run_id?: RunId | null;
-  stop_reason: WireStopReason;
+  stop_reason?: WireStopReason | null;
 }
 
 export interface WireSessionMessageToolResults {

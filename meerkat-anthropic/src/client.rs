@@ -2734,7 +2734,7 @@ mod tests {
                     meta: None,
                 },
             ],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });
@@ -2849,7 +2849,7 @@ mod tests {
                     meta: None,
                 },
             ],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });
@@ -2893,7 +2893,7 @@ mod tests {
                     meta: None, // Tool use blocks don't have signatures in Anthropic
                 },
             ],
-            stop_reason: StopReason::ToolUse,
+            stop_reason: Some(StopReason::ToolUse),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });
@@ -3783,7 +3783,7 @@ mod tests {
                     meta: None,
                 },
             ],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });
@@ -3828,7 +3828,7 @@ mod tests {
                     meta: None,
                 },
             ],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: meerkat_core::types::TranscriptMessageIdentity::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         });
@@ -4865,21 +4865,18 @@ mod tests {
             "claude-sonnet-4-5",
             vec![
                 Message::User(UserMessage::text("listen")),
-                Message::BlockAssistant(BlockAssistantMessage::new(
-                    vec![
-                        AssistantBlock::Transcript {
-                            text: "spoken replay".to_string(),
-                            source: meerkat_core::TranscriptSource::Spoken,
-                            meta: None,
-                        },
-                        AssistantBlock::Transcript {
-                            text: "voice-only discussion".to_string(),
-                            source: meerkat_core::TranscriptSource::SpokenUnmeasured,
-                            meta: None,
-                        },
-                    ],
-                    StopReason::EndTurn,
-                )),
+                Message::BlockAssistant(BlockAssistantMessage::snapshot(vec![
+                    AssistantBlock::Transcript {
+                        text: "spoken replay".to_string(),
+                        source: meerkat_core::TranscriptSource::Spoken,
+                        meta: None,
+                    },
+                    AssistantBlock::Transcript {
+                        text: "voice-only discussion".to_string(),
+                        source: meerkat_core::TranscriptSource::SpokenUnmeasured,
+                        meta: None,
+                    },
+                ])),
                 Message::User(UserMessage::text("continue")),
             ],
         );

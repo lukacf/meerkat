@@ -1405,21 +1405,18 @@ mod tests {
     #[test]
     fn text_followup_keeps_unmeasured_voice_provenance_in_provider_request() {
         let messages = vec![
-            Message::BlockAssistant(BlockAssistantMessage::new(
-                vec![
-                    AssistantBlock::Transcript {
-                        text: "ordinary speech".into(),
-                        source: meerkat_core::TranscriptSource::Spoken,
-                        meta: None,
-                    },
-                    AssistantBlock::Transcript {
-                        text: "voice-only discussion".into(),
-                        source: meerkat_core::TranscriptSource::SpokenUnmeasured,
-                        meta: None,
-                    },
-                ],
-                StopReason::EndTurn,
-            )),
+            Message::BlockAssistant(BlockAssistantMessage::snapshot(vec![
+                AssistantBlock::Transcript {
+                    text: "ordinary speech".into(),
+                    source: meerkat_core::TranscriptSource::Spoken,
+                    meta: None,
+                },
+                AssistantBlock::Transcript {
+                    text: "voice-only discussion".into(),
+                    source: meerkat_core::TranscriptSource::SpokenUnmeasured,
+                    meta: None,
+                },
+            ])),
             Message::User(UserMessage::text("follow up on what we discussed")),
         ];
         let wire = OpenAiCompatibleClient::convert_to_chat_messages(&messages).unwrap();

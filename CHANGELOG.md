@@ -94,6 +94,13 @@ them.
 
 ### Fixed
 
+- **`MobSessionService::commit_live_delegation_final_transcript` is declared
+  unconditionally.** The trait gated it on `meerkat-mob`'s `openai-live` feature
+  while every implementor gated it on its own crate's feature, so any build
+  that unified `openai-live` into `meerkat-mob` without enabling it on the
+  implementing crate (the Bazel release lane building `rkat`) failed with
+  "not all trait items implemented". Without the feature the persistent
+  session service returns `SessionError::Unsupported`.
 - Public GPT Live close no longer retries the same transport error forever
   after the provider connection drops. A stream end without `session.closed`
   is retained as explicit unconfirmed EOF evidence and reported as

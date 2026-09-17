@@ -917,7 +917,6 @@ pub trait MobSessionService:
     /// The provider observation is not executor authority. Only the sealed
     /// evidence returned by this method may be reconciled by the live runtime
     /// before any delegated model or tool work starts.
-    #[cfg(feature = "openai-live")]
     async fn commit_live_delegation_final_transcript(
         &self,
         machine: &meerkat_runtime::MeerkatMachine,
@@ -1726,7 +1725,6 @@ where
         .await
     }
 
-    #[cfg(feature = "openai-live")]
     async fn commit_live_delegation_final_transcript(
         &self,
         _machine: &meerkat_runtime::MeerkatMachine,
@@ -2217,6 +2215,19 @@ where
             Some(final_event),
         )
         .await
+    }
+
+    #[cfg(not(feature = "openai-live"))]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        Err(SessionError::Unsupported(
+            "live delegation canonical projection requires the openai-live feature".into(),
+        ))
     }
 
     #[cfg(feature = "openai-live")]

@@ -4013,7 +4013,6 @@ mod tests {
 
     #[async_trait]
     impl meerkat_mob::MobSessionService for RealCommsSessionSvc {
-        #[cfg(feature = "openai-live")]
         async fn commit_live_delegation_final_transcript(
             &self,
             _machine: &meerkat_runtime::MeerkatMachine,

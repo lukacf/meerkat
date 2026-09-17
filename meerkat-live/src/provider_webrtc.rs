@@ -688,6 +688,12 @@ enum LiveSidebandCommandKind {
         cursor: u64,
         text: String,
     },
+    AppendInstructions {
+        binding: ProviderWebrtcBinding,
+        attempt: LiveSidebandAppendAttempt,
+        cursor: u64,
+        text: String,
+    },
     AppendSession {
         binding: ProviderWebrtcBinding,
         attempt: LiveSidebandAppendAttempt,
@@ -722,6 +728,12 @@ pub enum LiveSidebandProviderCommand {
         cursor: u64,
         text: String,
     },
+    AppendInstructionsContext {
+        binding: ProviderWebrtcBinding,
+        attempt: LiveSidebandAppendAttempt,
+        cursor: u64,
+        text: String,
+    },
     AppendSessionContext {
         binding: ProviderWebrtcBinding,
         attempt: LiveSidebandAppendAttempt,
@@ -741,6 +753,7 @@ impl fmt::Debug for LiveSidebandCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match &self.kind {
             LiveSidebandCommandKind::AppendThinking { .. } => "append_thinking_context",
+            LiveSidebandCommandKind::AppendInstructions { .. } => "append_instructions_context",
             LiveSidebandCommandKind::AppendSession { .. } => "append_session_context",
             LiveSidebandCommandKind::ReleaseDelegation { .. } => "release_delegation_context",
         };
@@ -762,6 +775,24 @@ impl LiveSidebandCommand {
         authority.consume_once()?;
         Ok(Self {
             kind: LiveSidebandCommandKind::AppendThinking {
+                binding: authority.binding,
+                attempt: authority.attempt,
+                cursor: authority.cursor,
+                text,
+            },
+        })
+    }
+
+    /// Trusted knowledge for the provider's instructions lane (the historical
+    /// bootstrap summary). Consumes the same generated append authority.
+    pub fn append_instructions_context(
+        authority: LiveSidebandAppendAuthority,
+        text: impl Into<String>,
+    ) -> Result<Self, LiveSidebandCommandError> {
+        let text = require_sideband_text(text)?;
+        authority.consume_once()?;
+        Ok(Self {
+            kind: LiveSidebandCommandKind::AppendInstructions {
                 binding: authority.binding,
                 attempt: authority.attempt,
                 cursor: authority.cursor,
@@ -815,6 +846,7 @@ impl LiveSidebandCommand {
     pub fn binding(&self) -> &ProviderWebrtcBinding {
         match &self.kind {
             LiveSidebandCommandKind::AppendThinking { binding, .. }
+            | LiveSidebandCommandKind::AppendInstructions { binding, .. }
             | LiveSidebandCommandKind::AppendSession { binding, .. }
             | LiveSidebandCommandKind::ReleaseDelegation { binding, .. } => binding,
         }
@@ -824,6 +856,7 @@ impl LiveSidebandCommand {
     pub fn attempt(&self) -> LiveSidebandAppendAttempt {
         match &self.kind {
             LiveSidebandCommandKind::AppendThinking { attempt, .. }
+            | LiveSidebandCommandKind::AppendInstructions { attempt, .. }
             | LiveSidebandCommandKind::AppendSession { attempt, .. }
             | LiveSidebandCommandKind::ReleaseDelegation { attempt, .. } => attempt.clone(),
         }
@@ -842,6 +875,17 @@ impl LiveSidebandCommand {
                 cursor,
                 text,
             } => LiveSidebandProviderCommand::AppendThinkingContext {
+                binding,
+                attempt,
+                cursor,
+                text,
+            },
+            LiveSidebandCommandKind::AppendInstructions {
+                binding,
+                attempt,
+                cursor,
+                text,
+            } => LiveSidebandProviderCommand::AppendInstructionsContext {
                 binding,
                 attempt,
                 cursor,

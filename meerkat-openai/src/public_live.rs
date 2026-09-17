@@ -768,6 +768,30 @@ impl PublicLiveBrokerSession {
         Ok(token)
     }
 
+    /// Append trusted background knowledge through the native instructions
+    /// lane. The provider treats instructions as authoritative context the
+    /// model may use to answer; unlike the thinking lane it is not limited to
+    /// quiet progress notes, and the provider may interrupt speech to apply
+    /// it. Fragmenting, receipts, rejection, and close semantics match the
+    /// thinking lane.
+    pub async fn append_instructions_context(
+        &self,
+        text: impl Into<String>,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        let text = require_context(text)?;
+        let fragments = thinking_fragments(&text);
+        let count = fragments
+            .clone()
+            .take(SessionState::MAX_PENDING_APPENDS + 1)
+            .count();
+        let token = self.state.lock().await.reserve_instructions_append(count)?;
+        for (index, content) in fragments.enumerate() {
+            let event = Self::instructions_event(token, index, content.to_owned());
+            self.deliver_append(token, event).await?;
+        }
+        Ok(token)
+    }
+
     /// Append executor context to an observed client delegation.
     ///
     /// The provider identifier remains inside the opaque delegation reference.
@@ -798,6 +822,16 @@ impl PublicLiveBrokerSession {
             command: Command::CommentaryAppend {
                 content,
                 delegation_id,
+            },
+        }
+    }
+
+    fn instructions_event(token: GptLiveAppendToken, index: usize, content: String) -> ClientEvent {
+        ClientEvent {
+            event_id: Field::Value(instructions_event_id(token, index)),
+            command: Command::InstructionsAppend {
+                content,
+                delegation_id: Nullable(None),
             },
         }
     }
@@ -928,6 +962,7 @@ enum PendingAppendLane {
     Session,
     Delegation,
     Thinking,
+    Instructions,
 }
 
 impl PendingAppendLane {
@@ -938,6 +973,9 @@ impl PendingAppendLane {
                 GptLiveBrokerObservation::DelegationContextAppendAcknowledged { token }
             }
             Self::Thinking => GptLiveBrokerObservation::ThinkingContextAppendAcknowledged { token },
+            Self::Instructions => {
+                GptLiveBrokerObservation::InstructionsContextAppendAcknowledged { token }
+            }
         }
     }
 
@@ -946,6 +984,28 @@ impl PendingAppendLane {
             Self::Session => GptLiveBrokerObservation::SessionContextAppendRejected { token },
             Self::Delegation => GptLiveBrokerObservation::DelegationContextAppendRejected { token },
             Self::Thinking => GptLiveBrokerObservation::ThinkingContextAppendRejected { token },
+            Self::Instructions => {
+                GptLiveBrokerObservation::InstructionsContextAppendRejected { token }
+            }
+        }
+    }
+}
+
+impl PendingAppendLane {
+    /// Lanes delivered as bounded UTF-8 fragments with one receipt each.
+    fn is_fragmented(self) -> bool {
+        matches!(self, Self::Thinking | Self::Instructions)
+    }
+
+    fn interrupted_by_close(self, token: GptLiveAppendToken) -> Option<GptLiveBrokerObservation> {
+        match self {
+            Self::Thinking => {
+                Some(GptLiveBrokerObservation::ThinkingContextAppendInterruptedByClose { token })
+            }
+            Self::Instructions => Some(
+                GptLiveBrokerObservation::InstructionsContextAppendInterruptedByClose { token },
+            ),
+            Self::Session | Self::Delegation => None,
         }
     }
 }
@@ -954,6 +1014,7 @@ impl PendingAppendLane {
 enum AppendReceiptKind {
     Commentary,
     Thinking,
+    Instructions,
 }
 
 impl AppendReceiptKind {
@@ -964,6 +1025,7 @@ impl AppendReceiptKind {
                 Self::Commentary,
                 PendingAppendLane::Session | PendingAppendLane::Delegation
             ) | (Self::Thinking, PendingAppendLane::Thinking)
+                | (Self::Instructions, PendingAppendLane::Instructions)
         )
     }
 }
@@ -1054,6 +1116,13 @@ impl SessionState {
         self.reserve_append_fragments(PendingAppendLane::Thinking, count)
     }
 
+    fn reserve_instructions_append(
+        &mut self,
+        count: usize,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        self.reserve_append_fragments(PendingAppendLane::Instructions, count)
+    }
+
     fn outstanding_receipt_count(&self) -> usize {
         self.pending_appends
             .iter()
@@ -1074,12 +1143,16 @@ impl SessionState {
         }
         let token = GptLiveAppendToken(self.next_append_token);
         self.next_append_token = self.next_append_token.saturating_add(1);
-        let outstanding_receipts = if lane == PendingAppendLane::Thinking {
-            (0..count)
+        let outstanding_receipts = match lane {
+            PendingAppendLane::Thinking => (0..count)
                 .map(|index| thinking_event_id(token, index))
-                .collect()
-        } else {
-            vec![pending_event_id(token)]
+                .collect(),
+            PendingAppendLane::Instructions => (0..count)
+                .map(|index| instructions_event_id(token, index))
+                .collect(),
+            PendingAppendLane::Session | PendingAppendLane::Delegation => {
+                vec![pending_event_id(token)]
+            }
         };
         self.pending_appends.push_back(PendingAppend {
             lane,
@@ -1108,15 +1181,11 @@ impl SessionState {
                 self.finish_open_turn();
                 let observations = &mut self.queued_observations;
                 self.pending_appends.retain(|pending| {
-                    if pending.lane != PendingAppendLane::Thinking {
+                    let Some(interrupted) = pending.lane.interrupted_by_close(pending.token) else {
                         return true;
-                    }
+                    };
                     if !pending.rejected {
-                        observations.push_back(
-                            GptLiveBrokerObservation::ThinkingContextAppendInterruptedByClose {
-                                token: pending.token,
-                            },
-                        );
+                        observations.push_back(interrupted);
                     }
                     false
                 });
@@ -1127,16 +1196,11 @@ impl SessionState {
             ServerEvent::ThinkingAppended { .. } => {
                 self.acknowledge_append(AppendReceiptKind::Thinking, client_event_id.as_deref())?;
             }
-            // This broker never appends instructions. An instruction receipt
-            // cannot settle any of its own append attempts.
             ServerEvent::InstructionsAppended { .. } => {
-                if client_event_id
-                    .as_deref()
-                    .is_some_and(|id| self.find_append_receipt(id).is_some())
-                {
-                    return Err(protocol_error());
-                }
-                tracing::debug!("public Live acknowledged an append this broker did not send");
+                self.acknowledge_append(
+                    AppendReceiptKind::Instructions,
+                    client_event_id.as_deref(),
+                )?;
             }
             ServerEvent::InputTranscriptDelta {
                 delta, start_ms, ..
@@ -1210,8 +1274,7 @@ impl SessionState {
                 {
                     let pending = &mut self.pending_appends[append_index.0];
                     pending.outstanding_receipts.remove(receipt_index.0);
-                    let report_rejection =
-                        self.close_requested || pending.lane == PendingAppendLane::Thinking;
+                    let report_rejection = self.close_requested || pending.lane.is_fragmented();
                     if report_rejection && !pending.rejected {
                         self.queued_observations
                             .push_back(pending.lane.rejected(pending.token));
@@ -1473,6 +1536,10 @@ fn pending_event_id(token: GptLiveAppendToken) -> String {
 
 fn thinking_event_id(token: GptLiveAppendToken, index: usize) -> String {
     format!("meerkat-thinking-{}-{index}", token.0)
+}
+
+fn instructions_event_id(token: GptLiveAppendToken, index: usize) -> String {
+    format!("meerkat-instructions-{}-{index}", token.0)
 }
 
 fn thinking_fragments(mut text: &str) -> impl Iterator<Item = &str> + Clone {

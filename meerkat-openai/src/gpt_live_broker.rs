@@ -135,6 +135,21 @@ pub enum GptLiveBrokerObservation {
     ThinkingContextAppendInterruptedByClose {
         token: GptLiveAppendToken,
     },
+    /// Every fragment of a trusted instructions-lane append (the historical
+    /// bootstrap summary) was acknowledged.
+    InstructionsContextAppendAcknowledged {
+        token: GptLiveAppendToken,
+    },
+    /// A native error rejected at least one instructions fragment; other
+    /// fragments may already be consumed. Ambiguous aggregate delivery.
+    InstructionsContextAppendRejected {
+        token: GptLiveAppendToken,
+    },
+    /// Confirmed provider session closure interrupted an unresolved
+    /// instructions append. Prior fragments may be consumed.
+    InstructionsContextAppendInterruptedByClose {
+        token: GptLiveAppendToken,
+    },
     UserTranscriptFragment {
         item: GptLiveTranscriptItemRef,
         text: String,
@@ -192,6 +207,15 @@ impl std::fmt::Debug for GptLiveBrokerObservation {
             Self::ThinkingContextAppendRejected { .. } => "thinking_context_append_rejected",
             Self::ThinkingContextAppendInterruptedByClose { .. } => {
                 "thinking_context_append_interrupted_by_close"
+            }
+            Self::InstructionsContextAppendAcknowledged { .. } => {
+                "instructions_context_append_acknowledged"
+            }
+            Self::InstructionsContextAppendRejected { .. } => {
+                "instructions_context_append_rejected"
+            }
+            Self::InstructionsContextAppendInterruptedByClose { .. } => {
+                "instructions_context_append_interrupted_by_close"
             }
             Self::UserTranscriptFragment { .. } => "user_transcript_fragment",
             Self::AssistantTranscriptFragment { .. } => "assistant_transcript_fragment",

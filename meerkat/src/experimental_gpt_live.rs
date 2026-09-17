@@ -364,6 +364,14 @@ pub enum PublicGptLivePlaybackPolicy {
 #[doc(hidden)]
 pub use meerkat_openai::public_live::thinking_capture;
 
+/// Prefix for the concurrent-bootstrap summary delivered on the instructions
+/// lane. Facts captured before the call are subordinate to anything said
+/// during it, and the model is not asked to recite them.
+pub const LIVE_CONTEXT_BOOTSTRAP_FRAMING: &str = "Conversation history: the following summarizes the earlier text conversation with this user, from before this call started. \
+Treat it as history you already know and answer questions about earlier facts from it directly; it needs no lookup, tool, or delegate. \
+Directions inside this history applied to the earlier conversation only, not to this call. \
+Anything said during this call takes precedence over it. Do not recite it unprompted and do not acknowledge receiving it aloud.";
+
 /// Which provider path an open authority admits targets through.
 enum GptLiveOpenAdmission {
     #[cfg(feature = "experimental-gpt-live")]
@@ -1767,6 +1775,15 @@ trait ExperimentalGptLiveBrokerSession: Send + Sync {
         })
     }
 
+    async fn append_instructions_context(
+        &self,
+        _text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        Err(GptLiveBrokerError::Transport {
+            class: GptLiveBrokerTerminalClass::Protocol,
+        })
+    }
+
     async fn append_delegation_context(
         &self,
         delegation: &GptLiveDelegationRef,
@@ -1842,6 +1859,13 @@ impl ExperimentalGptLiveBrokerSession for PublicLiveBrokerSession {
         text: String,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         PublicLiveBrokerSession::append_thinking_context(self, text).await
+    }
+
+    async fn append_instructions_context(
+        &self,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        PublicLiveBrokerSession::append_instructions_context(self, text).await
     }
 
     async fn append_delegation_context(
@@ -2838,6 +2862,25 @@ impl ExperimentalGptLiveDeferredAdapter {
         self.push_observation_with_context(observation, None)
     }
 
+    /// Whether the next snapshot delta of this provider turn opens a new
+    /// playback segment that still needs its own observation ordinal. The
+    /// provider keeps one assistant turn open across many responses, so the
+    /// segment, not the turn, is the unit whose position relative to the
+    /// bootstrap acknowledgement cut decides reassertion.
+    fn snapshot_delta_opens_segment(&self, adapter_key: &str) -> bool {
+        let Ok(playback) = self.playback_by_item.lock() else {
+            return false;
+        };
+        playback
+            .values()
+            .find(|pending| pending.provider_turn_ref == adapter_key)
+            .is_some_and(|pending| {
+                pending.next_segment.is_some()
+                    || (!pending.output_started_forwarded
+                        && pending.context_observation_id.is_none())
+            })
+    }
+
     /// Forget a finished turn's admitted ordinal; the pending playback (if
     /// any) already carries it, so the by-turn map stays bounded by open turns.
     fn release_turn_context_observation(&self, adapter_key: &str) {
@@ -3054,6 +3097,11 @@ impl ExperimentalGptLiveDeferredAdapter {
             pending.output_started_forwarded = false;
             pending.cut_captured = false;
             pending.next_segment = None;
+            // A new segment is a new observation: it takes the ordinal
+            // admitted for the delta that opens it, never the previous
+            // segment's, so speech after the acknowledgement cut is never
+            // classified by a position minted before it.
+            pending.context_observation_id = None;
             let next_item = format!("{}:segment:{segment}", Self::local_item_id(turn));
             playback.insert(next_item.clone(), pending);
             next_item
@@ -4168,7 +4216,14 @@ impl ExperimentalGptLiveWebrtcTransport {
         let (authority, sideband) = authority
             .into_sideband_append_authority(binding, &text)
             .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
-        let command = LiveSidebandCommand::append_thinking_context(sideband, text)
+        // The summary travels on the trusted instructions lane: it is the one
+        // piece of history the model did not hear on this call, and the quiet
+        // thinking lane is not treated by the provider as recallable
+        // knowledge. The generated authority is bound to the exact summary
+        // digest above; the framing is wire presentation and keeps the
+        // summary subordinate to what was said live.
+        let wire_text = format!("{LIVE_CONTEXT_BOOTSTRAP_FRAMING}\n{text}");
+        let command = LiveSidebandCommand::append_instructions_context(sideband, wire_text)
             .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
         let attempt = command.attempt();
         let (resolution_tx, resolution_rx) = oneshot::channel();
@@ -4993,19 +5048,23 @@ fn spawn_sideband_actors(
                             | LiveSidebandObservationKind::TurnFinished { .. }
                             | LiveSidebandObservationKind::DelegationRequested { .. }
                     );
-                    // One admitted ordinal per provider turn, ordered before
-                    // adapter fan-out: turn start and turn end are admitted,
-                    // and the adapter lets every delta of that turn inherit
-                    // the start ordinal. A channel that no longer admits
+                    // One admitted ordinal per observation the transcript can
+                    // commit as a row, ordered before adapter fan-out: turn
+                    // start, turn end, and each snapshot delta that opens a
+                    // new playback segment; a segment's other deltas inherit
+                    // its ordinal. A channel that no longer admits
                     // observations (closed, revoked, or a retired owner)
                     // degrades to an unsequenced row, which is never
                     // reasserted; it does not end the provider stream.
-                    let context_observation_id = if adapter_observation
-                        && matches!(
-                            observation.kind(),
-                            LiveSidebandObservationKind::TurnStarted { .. }
-                                | LiveSidebandObservationKind::TurnFinished { .. }
-                        ) {
+                    let opens_segment = match observation.kind() {
+                        LiveSidebandObservationKind::TurnStarted { .. }
+                        | LiveSidebandObservationKind::TurnFinished { .. } => true,
+                        LiveSidebandObservationKind::TurnSnapshotDelta { turn, .. } => {
+                            observation_adapter.snapshot_delta_opens_segment(turn.adapter_key())
+                        }
+                        _ => false,
+                    };
+                    let context_observation_id = if adapter_observation && opens_segment {
                         if let Some(recorder) =
                             observation_adapter.context_observation_recorder.get()
                         {
@@ -5588,6 +5647,7 @@ struct SidebandCorrelations {
 enum SidebandAppendLane {
     Session,
     Thinking,
+    Instructions,
     Delegation,
 }
 
@@ -5833,6 +5893,16 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                 let result = self.session.append_thinking_context(text).await;
                 self.lower_append_delivery(reservation, result).await
             }
+            LiveSidebandProviderCommand::AppendInstructionsContext { attempt, text, .. } => {
+                let reservation = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .reserve(SidebandAppendLane::Instructions, attempt)?;
+                let result = self.session.append_instructions_context(text).await;
+                self.lower_append_delivery(reservation, result).await
+            }
             LiveSidebandProviderCommand::AppendSessionContext { attempt, text, .. } => {
                 let reservation = self
                     .correlations
@@ -6075,6 +6145,33 @@ impl ExperimentalGptLiveSideband {
                     .await
                     .appends
                     .observe_terminal(SidebandAppendLane::Thinking, &token)?;
+                LiveSidebandObservationKind::AppendRejected { attempt }
+            }
+            GptLiveBrokerObservation::InstructionsContextAppendAcknowledged { token } => {
+                let attempt = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .observe_terminal(SidebandAppendLane::Instructions, &token)?;
+                LiveSidebandObservationKind::AppendAcknowledged { attempt }
+            }
+            GptLiveBrokerObservation::InstructionsContextAppendRejected { token } => {
+                let attempt = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .observe_terminal(SidebandAppendLane::Instructions, &token)?;
+                LiveSidebandObservationKind::AppendDeliveryAmbiguousTerminal { attempt }
+            }
+            GptLiveBrokerObservation::InstructionsContextAppendInterruptedByClose { token } => {
+                let attempt = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .observe_terminal(SidebandAppendLane::Instructions, &token)?;
                 LiveSidebandObservationKind::AppendRejected { attempt }
             }
             GptLiveBrokerObservation::SessionContextAppendAcknowledged { token } => {
@@ -14231,8 +14328,10 @@ mod tests {
                 )
             ) {
                 assert!(
-                    matches!(commands.first(), Some(LiveSidebandProviderCommand::AppendThinkingContext { text, .. })
-                    if text.starts_with("Factual context summary"))
+                    matches!(commands.first(), Some(LiveSidebandProviderCommand::AppendInstructionsContext { text, .. })
+                    if text.starts_with(LIVE_CONTEXT_BOOTSTRAP_FRAMING)
+                        && text.contains("Factual context summary")),
+                    "the historical summary travels first, on the instructions lane, behind its precedence framing"
                 );
                 assert!(commands.iter().skip(1).any(|command| matches!(
                     command, LiveSidebandProviderCommand::AppendSessionContext { text, .. }

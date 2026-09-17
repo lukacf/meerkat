@@ -264,6 +264,8 @@ struct State {
     attached_channels: Vec<u32>,
     /// Running count of owned thinking-append attempts seen on the wire.
     thinking_append_attempts: usize,
+    /// Bounded copy of the attempted thinking-append texts, for echo checks.
+    thinking_append_texts: Vec<String>,
 }
 
 struct Inner {
@@ -329,6 +331,7 @@ impl Journal {
                 exchange: 0,
                 attached_channels: Vec::new(),
                 thinking_append_attempts: 0,
+                thinking_append_texts: Vec::new(),
             }),
             started: Instant::now(),
             path,
@@ -456,15 +459,12 @@ impl Journal {
                     .attached_channels
                     .push(event.channel_ordinal);
             }
-            if matches!(
-                event.event,
-                thinking_capture::EventKind::ThinkingAppendAttempt { .. }
-            ) {
-                self.0
-                    .state
-                    .lock()
-                    .map_err(|_| Fault::Poisoned)?
-                    .thinking_append_attempts += 1;
+            if let thinking_capture::EventKind::ThinkingAppendAttempt { text, .. } = &event.event {
+                let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+                state.thinking_append_attempts += 1;
+                if state.thinking_append_texts.len() < thinking_capture::Capture::MAX_EVENTS {
+                    state.thinking_append_texts.push(text.clone());
+                }
             }
             self.record(Record::Thinking { event })?;
         }
@@ -490,6 +490,21 @@ impl Journal {
             .lock()
             .map_err(|_| Fault::Poisoned)?
             .thinking_append_attempts)
+    }
+
+    /// Texts of every owned thinking-append attempt so far. Pre-ACK causal
+    /// reassertions may trickle out for a while (the provider acknowledges
+    /// thinking appends at turn boundaries), so echo detection compares
+    /// content, not counts.
+    pub fn thinking_append_attempt_texts(&self) -> Result<Vec<String>, Fault> {
+        self.flush_wire()?;
+        Ok(self
+            .0
+            .state
+            .lock()
+            .map_err(|_| Fault::Poisoned)?
+            .thinking_append_texts
+            .clone())
     }
 
     pub fn require_attached(&self, channel: u32) -> Result<(), Fault> {

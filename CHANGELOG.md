@@ -52,6 +52,10 @@ them.
   causal reassertions travel through the quiet native thinking lane, and
   `LiveContextPreparationStatus` exposes capturing, generating, delivering,
   provider-acknowledged, and typed failure states independently of media.
+  The summary is delivered on the provider's trusted instructions lane,
+  framed as background that anything said during the call supersedes; the
+  quiet thinking lane, which the provider does not treat as recallable
+  knowledge, carries only the causal-tail reassertions.
 - Observation provenance for live transcripts: the generated MeerkatMachine
   admits every provider turn in stream order (`RecordLiveContextObservation`)
   and freezes the exact summary acknowledgement cut
@@ -138,9 +142,13 @@ them.
   `LiveSeedProjectionStatus::*` discriminants move);
   `RealtimeSessionOpenProjection` is no longer `UnwindSafe` or
   `RefUnwindSafe`. `GptLiveBrokerObservation` gains
-  `ThinkingContextAppendAcknowledged`, `ThinkingContextAppendRejected`, and
-  `ThinkingContextAppendInterruptedByClose` (`GptLiveBrokerObservation::*`
-  discriminants move). `MobError` gains `WorkInputCompletionUnavailable` and
+  `ThinkingContextAppendAcknowledged`, `ThinkingContextAppendRejected`,
+  `ThinkingContextAppendInterruptedByClose`,
+  `InstructionsContextAppendAcknowledged`, `InstructionsContextAppendRejected`,
+  and `InstructionsContextAppendInterruptedByClose`
+  (`GptLiveBrokerObservation::*` discriminants move);
+  `LiveSidebandProviderCommand` gains `AppendInstructionsContext` and
+  `LiveSidebandCommand::append_instructions_context` is new. `MobError` gains `WorkInputCompletionUnavailable` and
   `WorkInputIdempotencyConflict`;
   `MobSessionService::commit_live_delegation_final_transcript` takes the
   transcript identity and `MobSessionService` no longer provides a default for

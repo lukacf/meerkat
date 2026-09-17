@@ -53,6 +53,12 @@ async function prepare() {
     // conversation? If that history is not available yet, say I don't know
     // yet. Don't guess and don't ask a delegate."
     history: audioDataUrl('historical-vault-query.wav'),
+    // recall_history (OpenAI gpt-4o-mini-tts, alloy; PCM16 mono 24 kHz): "Now
+    // tell me my historical vault phrase from the earlier text conversation.
+    // Say the exact phrase, word for word. Do not guess and do not ask a
+    // delegate." Used after the summary is acknowledged: unlike `history` it
+    // offers no honest-unknown escape, so only real recall matches.
+    recall_history: audioDataUrl('recall-vault-phrase.wav'),
     // correction: "Correction: the current code word is Cobalt, replacing
     // every older code word. Please acknowledge Cobalt briefly. Do not delegate."
     correction: audioDataUrl('correct-code-word.wav'),

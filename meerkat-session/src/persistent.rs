@@ -17671,6 +17671,43 @@ mod tests {
             Ok(session.append_realtime_transcript_event_for_channel(event, channel_id))
         }
 
+        fn admit_live_assistant_playback_target_with_context_observation(
+            &mut self,
+            channel_id: &meerkat_core::LiveChannelId,
+            interaction_id: meerkat_core::InteractionId,
+            response_id: &str,
+            item_id: &str,
+            content_index: u32,
+            observation_id: Option<meerkat_core::LiveContextObservationId>,
+        ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, meerkat_core::error::AgentError>
+        {
+            self.inner
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .admit_live_assistant_playback_target_with_context_observation(
+                    channel_id,
+                    interaction_id,
+                    response_id,
+                    item_id,
+                    content_index,
+                    observation_id,
+                )
+        }
+
+        fn live_assistant_playback_target(
+            &self,
+            channel_id: &meerkat_core::LiveChannelId,
+            item_id: &str,
+            content_index: u32,
+        ) -> Option<meerkat_core::LiveAssistantPlaybackTarget> {
+            self.inner
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .live_assistant_playback_target(channel_id, item_id, content_index)
+        }
+
         fn interaction_event_injector(
             &self,
         ) -> Option<Arc<dyn meerkat_core::event_injector::SubscribableInjector>> {
@@ -25508,6 +25545,76 @@ mod tests {
                 .context_observation_id(),
             Some(&observation)
         );
+    }
+
+    #[cfg(feature = "live")]
+    #[tokio::test]
+    async fn opaque_observation_assistant_admission_is_atomic_and_replay_exact() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            store,
+            runtime_store,
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create");
+        let channel = meerkat_core::LiveChannelId::new("atomic-assistant");
+        let observation = meerkat_core::LiveContextObservationId::new("scope", channel.clone());
+        let interaction = meerkat_core::InteractionId::new();
+        let admitted = service
+            .admit_live_assistant_playback_target_with_context_observation(
+                &created.session_id,
+                channel.clone(),
+                interaction,
+                "response".into(),
+                "item".into(),
+                0,
+                Some(observation.clone()),
+            )
+            .await
+            .expect("atomic admission");
+        assert_eq!(admitted.context_observation_id(), Some(&observation));
+        assert!(
+            service
+                .admit_live_assistant_playback_target_with_context_observation(
+                    &created.session_id,
+                    channel.clone(),
+                    interaction,
+                    "response".into(),
+                    "item".into(),
+                    0,
+                    Some(meerkat_core::LiveContextObservationId::new(
+                        "scope",
+                        channel.clone()
+                    )),
+                )
+                .await
+                .is_err(),
+            "conflicting source cannot replace the admitted target"
+        );
+        let current = service
+            .live_assistant_playback_target(&created.session_id, channel.clone(), "item".into(), 0)
+            .await
+            .expect("read target")
+            .expect("target retained");
+        assert_eq!(current.context_observation_id(), Some(&observation));
+        let legacy_replay = service
+            .admit_live_assistant_playback_target(
+                &created.session_id,
+                channel,
+                interaction,
+                "response".into(),
+                "item".into(),
+                0,
+            )
+            .await
+            .expect("None preserves existing exact custody");
+        assert_eq!(legacy_replay.context_observation_id(), Some(&observation));
     }
 
     #[tokio::test]

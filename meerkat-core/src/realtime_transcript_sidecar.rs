@@ -855,6 +855,84 @@ mod tests {
     }
 
     #[test]
+    fn assistant_target_and_provenance_are_one_atomic_event() {
+        let mut session = crate::Session::with_id(SessionId::new());
+        let channel = crate::LiveChannelId::new("atomic-target");
+        let interaction = crate::InteractionId::new();
+        let id = crate::LiveContextObservationId::new("scope", channel.clone());
+        let target = session
+            .admit_live_assistant_playback_target_with_context_observation(
+                &channel,
+                interaction,
+                "response",
+                "item",
+                0,
+                Some(id.clone()),
+            )
+            .expect("atomic admission");
+        assert_eq!(target.context_observation_id(), Some(&id));
+        assert!(session.messages().is_empty());
+        let before = serde_json::to_vec(&session).expect("before");
+        assert!(
+            session
+                .admit_live_assistant_playback_target_with_context_observation(
+                    &channel,
+                    interaction,
+                    "response",
+                    "item",
+                    0,
+                    Some(crate::LiveContextObservationId::new(
+                        "scope",
+                        channel.clone()
+                    )),
+                )
+                .is_err(),
+            "replay cannot replace source identity"
+        );
+        assert_eq!(serde_json::to_vec(&session).expect("after"), before);
+        let replay = session
+            .admit_live_assistant_playback_target_with_context_observation(
+                &channel,
+                interaction,
+                "response",
+                "item",
+                0,
+                Some(id.clone()),
+            )
+            .expect("exact replay");
+        assert_eq!(replay.context_observation_id(), Some(&id));
+    }
+
+    #[test]
+    fn rejected_target_does_not_leave_a_new_provenance_binding() {
+        let channel = crate::LiveChannelId::new("atomic-rejection");
+        let mut projection = SessionRealtimeTranscriptProjection::empty(&SessionId::new());
+        let target = RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted {
+            channel_id: channel.to_string(),
+            interaction_id: crate::InteractionId::new(),
+            response_id: "response".into(),
+            item_id: "item".into(),
+            content_index: 0,
+        };
+        projection
+            .apply_event(target.clone())
+            .expect("legacy target");
+        assert!(!projection.state().has_context_observations());
+        assert!(
+            projection
+                .apply_event(target.with_context_observation(Some(
+                    crate::LiveContextObservationId::new("scope", channel),
+                )))
+                .is_err(),
+            "an exposed NoClaim target cannot be retroactively stamped"
+        );
+        assert!(
+            !projection.state().has_context_observations(),
+            "failed compound event rolls back its new metadata"
+        );
+    }
+
+    #[test]
     fn canonical_origin_roundtrips_opaque_id_and_keeps_legacy_none() {
         let session_id = SessionId::new();
         let channel = crate::LiveChannelId::new("origin");

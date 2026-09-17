@@ -355,6 +355,10 @@ pub struct SessionRealtimeTranscriptState {
 impl SessionRealtimeTranscriptState {
     pub(crate) fn has_context_observations(&self) -> bool {
         !self.context_observations.is_empty()
+            || self
+                .assistant_playback_target
+                .as_ref()
+                .is_some_and(|target| target.context_observation_id().is_some())
     }
     pub(crate) fn has_channel_origins(&self) -> bool {
         self.items
@@ -613,7 +617,14 @@ pub fn restore_realtime_transcript_state(
                 !item.is_empty()
                     && !id.namespace().is_empty()
                     && !id.channel_id().as_str().is_empty()
-            }),
+            })
+            && state
+                .assistant_playback_target
+                .as_ref()
+                .is_none_or(|target| {
+                    target.context_observation_id()
+                        == state.context_observations.get(target.item_id())
+                }),
         realtime_user_content_identity_keys_match(&state),
         realtime_user_content_identity_fields_valid(&state),
         realtime_user_content_identity_item_ids_unique(&state),
@@ -756,6 +767,17 @@ fn bind_context_observation(
     {
         return Err(RealtimeTranscriptShellError {
             op: "context_observation_cannot_relabel_materialized_item",
+        });
+    }
+    if state
+        .assistant_playback_target
+        .as_ref()
+        .is_some_and(|target| {
+            target.item_id() == item_id && target.context_observation_id() != Some(&observation_id)
+        })
+    {
+        return Err(RealtimeTranscriptShellError {
+            op: "context_observation_cannot_relabel_admitted_target",
         });
     }
     state.context_observations.insert(item_id, observation_id);

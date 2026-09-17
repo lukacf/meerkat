@@ -2305,8 +2305,12 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
 }
 
 struct SessionMutationGuard {
-    _turn_finalization_guard: tokio::sync::OwnedMutexGuard<()>,
-    _recovery_guard: tokio::sync::OwnedMutexGuard<()>,
+    /// Both are `None` only for a fork requested from the source's own running
+    /// turn: the runtime loop holds the turn-finalization boundary and the
+    /// service holds the recovery gate for that whole turn, so the caller is
+    /// already inside both.
+    _turn_finalization_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    _recovery_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 /// Small identity of the exact physical runtime session boundary prepared by
@@ -4666,6 +4670,41 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(session)
     }
 
+    /// Observe the source's last committed transcript for a fork requested
+    /// from the source's own running turn.
+    ///
+    /// Reads the committed runtime body exactly like
+    /// [`Self::source_session_for_transcript_edit_locked`] but accepts an
+    /// active source (its turn is the caller) and never persists a replayed
+    /// projection back onto the running session: a fork is read-only on the
+    /// source, and the running turn owns the next durable write.
+    async fn source_session_for_caller_turn_fork_locked(
+        &self,
+        id: &SessionId,
+    ) -> Result<Session, SessionError> {
+        let mut replay = self
+            .load_authoritative_session_base_with_replay_info(id)
+            .await?;
+        let session = match replay.session.take() {
+            Some(session) => {
+                self.verify_transcript_rewrite_audit_events_locked(&session, &replay)
+                    .await?;
+                session
+            }
+            None => match self.export_session_with_labels(id).await {
+                Ok(session) => session,
+                Err(SessionError::NotFound { .. }) => {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                }
+                Err(err) => return Err(err),
+            },
+        };
+        self.reject_if_archived_session(id, &session)
+            .await
+            .map_err(crate::control_error_into_session_error)?;
+        Ok(session)
+    }
+
     async fn persist_replayed_transcript_projection_for_mutation(
         &self,
         session: &Session,
@@ -4718,9 +4757,32 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         let _ = self.discard_stale_live_session_if_needed(id).await?;
         Ok(SessionMutationGuard {
-            _turn_finalization_guard: turn_finalization_guard,
-            _recovery_guard: recovery_guard,
+            _turn_finalization_guard: Some(turn_finalization_guard),
+            _recovery_guard: Some(recovery_guard),
         })
+    }
+
+    /// Serialize a durable fork requested from the source session's own
+    /// running turn (`DurableForkSourceAdmission::CallerTurn`).
+    ///
+    /// Takes no lock, refuses no admission, and discards no live session.
+    ///
+    /// Every boundary [`Self::transcript_edit_mutation_guard`] would take is
+    /// already held by the turn whose tool call is asking for the fork: the
+    /// runtime loop holds the session's turn-finalization boundary for the
+    /// whole lap that executes the turn (`process_queue` in meerkat-runtime),
+    /// and `apply_runtime_turn_with_recoverable_reserved_admission` holds the
+    /// recovery gate for the whole turn. Locking either here would wait on the
+    /// caller itself. Because that turn cannot finalize until the tool call
+    /// returns, no other writer can commit the source meanwhile, so the
+    /// committed transcript observed by the fork is stable without a lock of
+    /// its own. The stale-live-session discard is skipped because the source's
+    /// live session is in use by that running turn.
+    fn caller_turn_fork_mutation_guard() -> SessionMutationGuard {
+        SessionMutationGuard {
+            _turn_finalization_guard: None,
+            _recovery_guard: None,
+        }
     }
 
     /// Drive the canonical SessionDocumentMachine transcript-edit authorization.
@@ -5077,12 +5139,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
         target: Option<meerkat_core::DurableSessionForkTarget>,
     ) -> Result<DurableSessionForkWithProvenance, SessionError> {
-        let _mutation_guard = self
-            .transcript_edit_mutation_guard(source_session_id)
-            .await?;
-        let source = self
-            .source_session_for_transcript_edit_locked(source_session_id)
-            .await?;
+        let source_admission = target
+            .as_ref()
+            .map(|target| target.source_admission)
+            .unwrap_or_default();
+        let _mutation_guard = match source_admission {
+            meerkat_core::DurableForkSourceAdmission::Quiescent => {
+                self.transcript_edit_mutation_guard(source_session_id)
+                    .await?
+            }
+            meerkat_core::DurableForkSourceAdmission::CallerTurn => {
+                Self::caller_turn_fork_mutation_guard()
+            }
+        };
+        let source = match source_admission {
+            meerkat_core::DurableForkSourceAdmission::Quiescent => {
+                self.source_session_for_transcript_edit_locked(source_session_id)
+                    .await?
+            }
+            meerkat_core::DurableForkSourceAdmission::CallerTurn => {
+                self.source_session_for_caller_turn_fork_locked(source_session_id)
+                    .await?
+            }
+        };
         let source_metadata = source.try_session_metadata().map_err(|error| {
             SessionError::Agent(AgentError::InternalError(format!(
                 "failed to decode source session metadata while forking session {source_session_id}: {error}"
@@ -9062,8 +9141,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .map_err(crate::control_error_into_session_error)?;
         }
         Ok(SessionMutationGuard {
-            _turn_finalization_guard: turn_finalization_guard,
-            _recovery_guard: recovery_guard,
+            _turn_finalization_guard: Some(turn_finalization_guard),
+            _recovery_guard: Some(recovery_guard),
         })
     }
 
@@ -9112,8 +9191,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .map_err(crate::control_error_into_session_error)?;
         }
         Ok(SessionMutationGuard {
-            _turn_finalization_guard: turn_finalization_guard,
-            _recovery_guard: recovery_guard,
+            _turn_finalization_guard: Some(turn_finalization_guard),
+            _recovery_guard: Some(recovery_guard),
         })
     }
 
@@ -23398,6 +23477,149 @@ mod tests {
             .await
             .expect("active turn task should join")
             .expect("active turn should complete after fork rejection");
+    }
+
+    #[tokio::test]
+    async fn durable_fork_from_the_running_source_turn_branches_at_the_committed_boundary() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let builder = BlockingRunBuilder::new();
+        let service = Arc::new(PersistentSessionService::new(
+            builder.clone(),
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        ));
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let parent_id = created.session_id;
+        // A targeted durable fork copies canonical parent metadata onto the
+        // child, so seed it the way the runtime does at its first boundary.
+        let parent = service
+            .load_authoritative_session_base(&parent_id)
+            .await
+            .expect("load runtime-authoritative parent")
+            .expect("parent exists");
+        let parent = mutate_test_session(parent, "run boundary", |parent| {
+            parent
+                .set_session_metadata(meerkat_core::SessionMetadata {
+                    model_fallback: None,
+                    schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    structured_output_retries: 2,
+                    provider: meerkat_core::Provider::Anthropic,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    tooling: meerkat_core::SessionTooling::default(),
+                    keep_alive: false,
+                    comms_name: None,
+                    peer_meta: None,
+                    realm_id: None,
+                    instance_id: None,
+                    backend: None,
+                    config_generation: None,
+                    auth_binding: None,
+                    mob_member_binding: None,
+                })
+                .expect("seed canonical parent metadata");
+        });
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<BlockingRunBuilder>::runtime_id_for_session(&parent_id),
+                meerkat_runtime::store::SerializedSessionSnapshot {
+                    session_snapshot: (serde_json::to_vec(&parent)
+                        .expect("serialize parent metadata snapshot"))
+                    .into(),
+                },
+            )
+            .await
+            .expect("commit parent metadata snapshot");
+        let committed_len = service
+            .read_history(&parent_id, SessionHistoryQuery::default())
+            .await
+            .expect("parent history before the running turn")
+            .message_count;
+        let admission = service
+            .reserve_runtime_turn_admission(&parent_id)
+            .await
+            .expect("runtime turn admission should be reserved");
+        let turn_service = Arc::clone(&service);
+        let turn_id = parent_id.clone();
+        let active_turn = tokio::spawn(async move {
+            turn_service
+                .apply_runtime_turn_with_reserved_admission(
+                    &turn_id,
+                    RunId::new(),
+                    runtime_content_turn_request("slow follow up"),
+                    RunApplyBoundary::RunStart,
+                    vec![InputId::new()],
+                    admission,
+                )
+                .await
+        });
+        builder.wait_for_entered_runs(1).await;
+        let target = |source_admission| meerkat_core::DurableSessionForkTarget {
+            member_binding: meerkat_core::MobMemberBinding {
+                mob_id: "mob".to_string(),
+                role: "role".to_string(),
+                member: "child".to_string(),
+            },
+            cache_identity: None,
+            source_admission,
+        };
+
+        // An external fork of the running source is still refused.
+        let rejected = service
+            .fork_durable_session(
+                &parent_id,
+                None,
+                None,
+                Some(target(meerkat_core::DurableForkSourceAdmission::Quiescent)),
+            )
+            .await;
+        assert!(
+            matches!(rejected, Err(SessionError::Busy { ref id }) if id == &parent_id),
+            "a quiescent-admission fork must refuse a running source: {rejected:?}"
+        );
+
+        // The source's own turn may branch its committed transcript.
+        let forked = service
+            .fork_durable_session(
+                &parent_id,
+                None,
+                None,
+                Some(target(meerkat_core::DurableForkSourceAdmission::CallerTurn)),
+            )
+            .await
+            .expect("a caller-turn fork must succeed while the source turn is running");
+        assert_ne!(forked.session_id, parent_id);
+        assert_eq!(
+            forked.message_count, committed_len,
+            "the branch must end at the source's last committed boundary, not include the running turn"
+        );
+        let fork_history = service
+            .read_history(&forked.session_id, SessionHistoryQuery::default())
+            .await
+            .expect("fork history should be persisted");
+        assert_eq!(fork_history.message_count, committed_len);
+
+        builder.release_notify.add_permits(1);
+        active_turn
+            .await
+            .expect("active turn task should join")
+            .expect("the running turn must complete after the caller-turn fork");
+        let parent_history = service
+            .read_history(&parent_id, SessionHistoryQuery::default())
+            .await
+            .expect("parent history after the turn");
+        assert!(
+            parent_history.message_count >= committed_len,
+            "the caller-turn fork must not shrink or disturb the parent transcript"
+        );
     }
 
     #[tokio::test]

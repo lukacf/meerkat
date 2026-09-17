@@ -3,14 +3,15 @@
 //!
 //! Turbo S scenario 96: mob `fork_off` live vertical.
 //!
-//! One durable mob member builds a large cached prefix and is forked through
-//! `MobHandle::fork_member_then_run_bounded`, the upstream path the
-//! agent-facing `fork_off` tool wraps: once at its committed end, once while
-//! its own turn is running (must be refused with the typed `Running` cause),
-//! and once at an explicit earlier prefix. Both children are retired and the
-//! parent answers again. Every assertion reads authoritative state (mob
-//! roster, persisted sessions, per-call provider usage rows), never model
-//! narration.
+//! One durable mob member builds a large cached prefix, then forks itself
+//! three ways: through the real agent-facing `fork_off` tool from inside its
+//! own running turn (the branch is cut at its last committed boundary), as an
+//! external fork attempted while its turn is running (must be refused with
+//! the typed `Running` cause), and at an explicit earlier prefix through
+//! `MobHandle::fork_member_then_run_bounded`. Both children are retired and
+//! the parent answers again. Every assertion reads authoritative state (mob
+//! roster, persisted sessions, per-call provider usage rows, the tool result
+//! recorded in the parent transcript), never model narration.
 //!
 //! The child usage counters are the measured answer to "does a fork re-bill
 //! the whole parent prefix": the child's first request must report
@@ -172,6 +173,74 @@ async fn session_history(router: &MethodRouter, session_id: &SessionId) -> Value
     );
     let raw = response.result.as_ref().expect("session/history result");
     serde_json::from_str(raw.get()).expect("session/history result JSON")
+}
+
+/// Every string payload carried by a `tool_results` message, whether the
+/// wire content is a legacy string or a block array.
+fn tool_result_texts(message: &Value) -> Vec<String> {
+    let mut texts = Vec::new();
+    let Some(results) = message.get("results").and_then(Value::as_array) else {
+        return texts;
+    };
+    for result in results {
+        match result.get("content") {
+            Some(Value::String(text)) => texts.push(text.clone()),
+            Some(Value::Array(blocks)) => {
+                for block in blocks {
+                    if let Some(text) = block.get("text").and_then(Value::as_str) {
+                        texts.push(text.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    texts
+}
+
+/// Structured (non-text) block payloads carried by a `tool_results` message.
+fn tool_result_json_blocks(message: &Value) -> Vec<&Value> {
+    let mut payloads = Vec::new();
+    let Some(results) = message.get("results").and_then(Value::as_array) else {
+        return payloads;
+    };
+    for result in results {
+        if let Some(blocks) = result.get("content").and_then(Value::as_array) {
+            for block in blocks {
+                if let Some(data) = block.get("data").filter(|data| data.is_object()) {
+                    payloads.push(data);
+                }
+            }
+        }
+    }
+    payloads
+}
+
+/// The `fork_off` tool result the parent model received, parsed from the
+/// parent's persisted transcript. The tool encodes its result as a structured
+/// JSON block; a legacy text encoding is accepted too. Errors surface as
+/// `Err(text)` so a refused fork fails the scenario with the tool's own
+/// message.
+fn recorded_fork_off_result(history: &Value) -> Option<Result<Value, String>> {
+    for message in history_messages(history) {
+        for data in tool_result_json_blocks(message) {
+            if data.get("fork_session_id").is_some() {
+                return Some(Ok(data.clone()));
+            }
+        }
+        for text in tool_result_texts(message) {
+            if text.contains("fork_session_id") {
+                return Some(
+                    serde_json::from_str(&text)
+                        .map_err(|error| format!("fork_off result is not JSON ({error}): {text}")),
+                );
+            }
+            if text.contains("fork_off") && text.contains("failed") {
+                return Some(Err(text));
+            }
+        }
+    }
+    None
 }
 
 fn history_messages(history: &Value) -> &Vec<Value> {
@@ -380,46 +449,65 @@ async fn e2e_smoke_s96_mob_fork_off_vertical() {
         "parent transcript must hold the ledger exchange, got {prefix_after_ledger} messages"
     );
 
-    // Phase B: durable fork at the parent's committed end. This is the exact
-    // upstream path the agent-facing `fork_off` tool wraps
-    // (`MobHandle::fork_member_then_run_bounded`).
+    // Phase B: the parent calls the real `fork_off` tool from inside its own
+    // running turn. The durable fork owner admits the caller's active turn and
+    // cuts the branch at the parent's last committed boundary (the ledger
+    // exchange); the running fork turn itself is not part of the child.
     let phase_b = Instant::now();
-    let mut first = SpawnMemberSpec::new("keeper", AgentIdentity::from(FORK_ONE));
-    first.initial_message = Some(ContentInput::Text(
-        "Report the vault phrase recorded in the ledger you already hold. Reply with only the \
-         phrase, nothing else."
-            .to_string(),
-    ));
-    let first_outcome = handle
-        .fork_member_then_run_bounded(
-            &AgentIdentity::from(PARENT),
-            first,
-            None,
-            "vault-fork",
-            16 * 1024,
-        )
-        .await
-        .unwrap_or_else(|error| panic!("fork at committed end failed: {error:?}"));
+    let fork_instruction = format!(
+        "Call the fork_off tool exactly once with member_id \"{FORK_ONE}\", task \"Report the \
+         vault phrase recorded in the ledger you already hold. Reply with only the phrase, \
+         nothing else.\" and expected_output \"Only the phrase.\" After the tool returns, reply \
+         with exactly the text FORK_DONE and nothing else."
+    );
+    let fork_turn = bounded_turn(&handle, PARENT, fork_instruction, "fork-off-turn").await;
+    let parent_history = session_history(&router, &parent_session).await;
+    let fork_result = match recorded_fork_off_result(&parent_history) {
+        Some(Ok(result)) => result,
+        Some(Err(text)) => panic!("fork_off tool call failed inside the parent turn: {text}"),
+        None => panic!(
+            "parent transcript holds no fork_off tool result; reply={:?} history={}",
+            fork_turn.result().text(),
+            parent_history
+        ),
+    };
     let child_rows = turn_usages(&events, FORK_ONE).await;
     let child_usage = child_rows
         .first()
         .unwrap_or_else(|| panic!("fork child must emit a turn_completed usage row"));
     let (child_created, child_read) = cached_tokens(child_usage);
-    let child_text = first_outcome.turn.result().result().text().to_string();
+    let child_text = fork_result["bounded_result"]["text"]
+        .as_str()
+        .or_else(|| fork_result["bounded_result"].as_str())
+        .unwrap_or_else(|| panic!("fork_off result without bounded_result text: {fork_result}"))
+        .to_string();
+    let fork_session = SessionId::parse(
+        fork_result["fork_session_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("fork_off result without fork_session_id: {fork_result}")),
+    )
+    .expect("fork_session_id must parse");
     eprintln!(
-        "S96 B fork at end in {:?}: child input={} cache_creation={} cache_read={} inheritance={:?} reply={:?}",
+        "S96 B fork_off tool in {:?}: child input={} cache_creation={} cache_read={} inheritance={} reply={:?} parent_reply={:?}",
         phase_b.elapsed(),
         child_usage.input_tokens,
         child_created,
         child_read,
-        first_outcome.fork.cache_inheritance,
-        child_text
+        fork_result["cache_inheritance"],
+        child_text,
+        fork_turn.result().text()
     );
-    assert_eq!(first_outcome.fork.agent_identity.as_str(), FORK_ONE);
-    assert_ne!(
-        first_outcome.fork.session_id, parent_session,
-        "fork must mint a new session"
+    assert_eq!(
+        fork_result["agent_identity"].as_str(),
+        Some(FORK_ONE),
+        "fork_off result must name the child: {fork_result}"
     );
+    assert_eq!(
+        fork_result["mob_id"].as_str(),
+        Some(mob_id.as_str()),
+        "fork_off result must name the mob: {fork_result}"
+    );
+    assert_ne!(fork_session, parent_session, "fork must mint a new session");
     assert!(
         child_read > 0,
         "the fork child's first request must read the parent's cached prefix, usage {child_usage:?}"
@@ -428,12 +516,12 @@ async fn e2e_smoke_s96_mob_fork_off_vertical() {
         child_text.contains(VAULT_PHRASE),
         "fork child must answer from the inherited ledger: {child_text:?}"
     );
-    let first_len =
-        history_messages(&session_history(&router, &first_outcome.fork.session_id).await).len();
+    let first_len = history_messages(&session_history(&router, &fork_session).await).len();
     assert_eq!(
         first_len,
         prefix_after_ledger + 2,
-        "fork at committed end must carry the whole parent transcript plus its own exchange"
+        "a fork from the running turn must carry the parent's committed transcript (the ledger \
+         exchange, not the in-flight fork turn) plus its own exchange"
     );
     assert!(
         handle
@@ -443,10 +531,16 @@ async fn e2e_smoke_s96_mob_fork_off_vertical() {
             .is_some(),
         "fork child must be a roster member"
     );
+    assert!(
+        fork_turn.result().text().contains("FORK_DONE"),
+        "parent must finish its own turn after the tool call: {:?}",
+        fork_turn.result().text()
+    );
 
-    // Phase C: the parent keeps working after the fork, and a fork attempted
-    // while the parent's turn is running is refused with the typed cause
-    // instead of observing a half-committed transcript.
+    // Phase C: the parent keeps working after the fork, and an EXTERNAL fork
+    // attempted while the parent's turn is running is still refused with the
+    // typed cause: only the running turn itself may branch its committed
+    // transcript.
     let phase_c = Instant::now();
     let code_spec = BoundedResultSpec::new("code-word", 16 * 1024).expect("bounded result spec");
     let code_work = handle
@@ -465,27 +559,20 @@ async fn e2e_smoke_s96_mob_fork_off_vertical() {
         .await
         .expect("start code-word turn");
     sleep(Duration::from_millis(300)).await;
-    let mut racing = SpawnMemberSpec::new("keeper", AgentIdentity::from("fork-while-running"));
-    racing.initial_message = Some(ContentInput::Text("Reply with OK.".to_string()));
+    let racing = SpawnMemberSpec::new("keeper", AgentIdentity::from("fork-while-running"));
     let racing_result = handle
-        .fork_member_then_run_bounded(
-            &AgentIdentity::from(PARENT),
-            racing,
-            None,
-            "racing-fork",
-            1024,
-        )
+        .fork_member(&AgentIdentity::from(PARENT), racing, None)
         .await;
     match &racing_result {
-        Err(meerkat_mob::BoundedMemberRunError::Admission(
-            meerkat_mob::MobError::ForkSourceUnavailable { cause, .. },
-        )) => assert_eq!(
+        Err(meerkat_mob::MobError::ForkSourceUnavailable { cause, .. }) => assert_eq!(
             *cause,
             meerkat_mob::ForkSourceUnavailableCause::Running,
             "running-source refusal must carry the Running cause"
         ),
         other => {
-            panic!("fork of a running source must be refused with a typed cause, got {other:?}")
+            panic!(
+                "an external fork of a running source must be refused with a typed cause, got {other:?}"
+            )
         }
     }
     let code_turn =
@@ -534,6 +621,7 @@ async fn e2e_smoke_s96_mob_fork_off_vertical() {
             Some(prefix_after_ledger),
             "prefix-fork",
             16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
         )
         .await
         .unwrap_or_else(|error| panic!("explicit-prefix fork failed: {error:?}"));

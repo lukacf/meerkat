@@ -110,6 +110,18 @@ them.
   reports `unavailable` still hits the provider cache on its inherited prefix
   whenever the source entry is alive. The previous wording ("conservatively
   unavailable") read as a cost.
+- **The agent-facing `fork_off` tool can succeed.** Its source is the caller's own
+  session, which is always running a turn while the tool executes, and the
+  durable fork owner refused every running source with `SessionError::Busy`
+  (`ForkSourceUnavailable { cause: Running }`), so no live fork_off call had
+  ever completed. The persistent owner now admits a fork requested from the
+  source's own active turn (`DurableForkSourceAdmission::CallerTurn`): the
+  caller's turn already holds the turn-finalization and recovery boundaries
+  until the tool call returns, so the fork takes no lock, does not treat the
+  caller's admission as a competing writer, and cuts the branch at the
+  source's last committed transcript boundary. External forks (RPC, console,
+  `MobHandle::fork_member`) keep the `Quiescent` contract and are still refused
+  while the member runs.
 - **`MobSessionService::commit_live_delegation_final_transcript` is declared
   unconditionally.** The trait gated it on `meerkat-mob`'s `openai-live` feature
   while every implementor gated it on its own crate's feature, so any build
@@ -153,6 +165,11 @@ them.
 
 ### Breaking
 
+- `DurableSessionForkTarget` gains `source_admission` (new enum
+  `DurableForkSourceAdmission` with `Quiescent` and `CallerTurn`).
+  `MobHandle::fork_member_then_run_bounded` takes the admission as its last
+  argument; pass `Quiescent` unless the request comes from the source member's
+  own running turn.
 - `BlockAssistantMessage::stop_reason` is now `Option<StopReason>`:
   observation-only snapshots use `None`; ordinary completed runs retain required
   stop evidence. `TranscriptSource::SpokenUnmeasured` marks observed speech

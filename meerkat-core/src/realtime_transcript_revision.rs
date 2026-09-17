@@ -336,6 +336,8 @@ pub struct SessionRealtimeTranscriptState {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     assistant_playback_settlements: BTreeMap<String, PlaybackSettlementReceipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    assistant_observation_order: Vec<String>,
     /// Session-scoped idempotency bindings for committed non-text user input.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     user_content_identities: BTreeMap<String, RealtimeUserContentIdentity>,
@@ -377,6 +379,76 @@ pub fn playback_settlement(
                 && receipt.content_index == content_index
         })
         .map(|receipt| receipt.settlement.clone())
+}
+
+pub(crate) fn validate_unmeasured_observation_positions(
+    state: &SessionRealtimeTranscriptState,
+    canonical_message_count: usize,
+) -> Result<(), RealtimeTranscriptShellError> {
+    if !unmeasured_observation_bindings_valid(state)
+        || state.assistant_observation_order.iter().any(|item| {
+            state.assistant_playback_settlements[item]
+                .settlement
+                .observed_after_message_count
+                .is_none_or(|position| position > canonical_message_count as u64)
+        })
+    {
+        return Err(RealtimeTranscriptShellError {
+            op: "unmeasured_observation_position_invalid",
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn unmeasured_assistant_observations(
+    state: &SessionRealtimeTranscriptState,
+) -> impl Iterator<Item = crate::LiveUnmeasuredAssistantObservation<'_>> {
+    state.assistant_observation_order.iter().filter_map(|item| {
+        let receipt = state.assistant_playback_settlements.get(item)?;
+        let crate::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(text) =
+            &receipt.settlement.evidence
+        else {
+            return None;
+        };
+        Some(crate::LiveUnmeasuredAssistantObservation {
+            channel_id: &receipt.channel_id,
+            interaction_id: receipt.interaction_id,
+            text,
+            after_message_count: receipt.settlement.observed_after_message_count?,
+        })
+    })
+}
+
+fn unmeasured_observation_bindings_valid(state: &SessionRealtimeTranscriptState) -> bool {
+    let ordered = state
+        .assistant_observation_order
+        .iter()
+        .collect::<BTreeSet<_>>();
+    if ordered.len() != state.assistant_observation_order.len() {
+        return false;
+    }
+    let mut count = 0;
+    for (item, receipt) in &state.assistant_playback_settlements {
+        if let crate::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(text) =
+            &receipt.settlement.evidence
+        {
+            count += 1;
+            if text.is_empty()
+                || !ordered.contains(item)
+                || receipt.settlement.observed_after_message_count.is_none()
+                || receipt.settlement.authoritative_final.is_some()
+                || receipt.settlement.completion.is_some()
+            {
+                return false;
+            }
+        } else if receipt.settlement.observed_after_message_count.is_some() {
+            return false;
+        }
+    }
+    ordered.len() == count
+        && unmeasured_assistant_observations(state)
+            .map(|observation| observation.after_message_count)
+            .is_sorted()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -582,7 +654,8 @@ pub fn restore_realtime_transcript_state(
         causal.no_self_predecessor_references,
         causal.acyclic,
         causal.all_materialized_items_have_materialized_ancestry,
-        realtime_transcript_state_identity_fields_valid(&state),
+        realtime_transcript_state_identity_fields_valid(&state)
+            && unmeasured_observation_bindings_valid(&state),
         realtime_user_content_identity_keys_match(&state),
         realtime_user_content_identity_fields_valid(&state),
         realtime_user_content_identity_item_ids_unique(&state),
@@ -885,6 +958,27 @@ pub fn apply_realtime_transcript_event(
                 }
                 return Ok(RealtimeTranscriptApplyCommit::default());
             }
+            let retains_observation = matches!(
+                &settlement.evidence,
+                crate::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(_)
+            );
+            if let crate::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(text) =
+                &settlement.evidence
+            {
+                if text.is_empty()
+                    || settlement.observed_after_message_count.is_none()
+                    || settlement.authoritative_final.is_some()
+                    || settlement.completion.is_some()
+                {
+                    return Err(RealtimeTranscriptShellError {
+                        op: "unmeasured_observation_evidence_mismatch",
+                    });
+                }
+            } else if settlement.observed_after_message_count.is_some() {
+                return Err(RealtimeTranscriptShellError {
+                    op: "unexpected_observation_position",
+                });
+            }
             apply_assistant_playback_target_resolved(
                 state,
                 channel_id.clone(),
@@ -893,6 +987,9 @@ pub fn apply_realtime_transcript_event(
                 item_id.clone(),
                 content_index,
             )?;
+            if retains_observation {
+                state.assistant_observation_order.push(item_id.clone());
+            }
             state.assistant_playback_settlements.insert(
                 item_id,
                 PlaybackSettlementReceipt {
@@ -1389,6 +1486,8 @@ pub fn reconcile_realtime_transcript_state_after_rewrite(
     state.seen_delta_ids.clear();
     state.assistant_completions.clear();
     state.assistant_playback_settlements.clear();
+    state.assistant_observation_order.clear();
+    state.assistant_playback_target = None;
     state.discarded_assistant_response_ids.clear();
     state.user_content_identities = retained_identities;
     restore_realtime_transcript_state(state)
@@ -1811,6 +1910,7 @@ fn apply_assistant_playback_snapshot(
                 evidence,
                 authoritative_final: None,
                 completion: None,
+                observed_after_message_count: None,
             },
         },
     );

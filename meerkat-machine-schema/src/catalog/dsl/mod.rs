@@ -1195,6 +1195,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "LiveDelegationWorkerOwnership",
+                &["OwnedMember", "ExistingMember"],
+            ),
+            NamedTypeBinding::string_enum(
                 "LiveDelegationCancellationReason",
                 &[
                     "Abandoned",

@@ -1983,6 +1983,11 @@ pub mod inputs {
     #[allow(unused_imports)]
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyLiveObservationRewrite {
+        pub observations_present: bool,
+        pub full_context_replacement: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkSessionInitialTurnPending {
         pub session_id: SessionId,
     }
@@ -2216,6 +2221,8 @@ pub mod inputs {
         pub canonical_chars: u64,
         pub canonical_digest: String,
         pub prefix_matches_snapshot: bool,
+        pub observation_only: bool,
+        pub canonical_message_cursor: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ObserveLiveAssistantPlaybackFinal {
@@ -2369,6 +2376,7 @@ pub mod inputs {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Input {
+    ClassifyLiveObservationRewrite(inputs::ClassifyLiveObservationRewrite),
     MarkSessionInitialTurnPending(inputs::MarkSessionInitialTurnPending),
     StartSessionInitialTurn(inputs::StartSessionInitialTurn),
     StageSessionInitialPrompt(inputs::StageSessionInitialPrompt),
@@ -2424,6 +2432,7 @@ pub enum Input {
 impl Input {
     pub fn kind(&self) -> InputKind {
         match self {
+            Self::ClassifyLiveObservationRewrite(_) => InputKind::ClassifyLiveObservationRewrite,
             Self::MarkSessionInitialTurnPending(_) => InputKind::MarkSessionInitialTurnPending,
             Self::StartSessionInitialTurn(_) => InputKind::StartSessionInitialTurn,
             Self::StageSessionInitialPrompt(_) => InputKind::StageSessionInitialPrompt,
@@ -2530,6 +2539,7 @@ impl Input {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InputKind {
+    ClassifyLiveObservationRewrite,
     MarkSessionInitialTurnPending,
     StartSessionInitialTurn,
     StageSessionInitialPrompt,
@@ -2586,6 +2596,10 @@ pub enum InputKind {
 pub mod effects {
     #[allow(unused_imports)]
     use super::*;
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveObservationRewriteClassified {
+        pub rewrite_allowed: bool,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionFirstTurnPhaseResolved {
         pub phase: SessionFirstTurnPhase,
@@ -2752,6 +2766,9 @@ pub mod effects {
         pub canonical_chars: Option<u64>,
         pub canonical_text_digest: Option<String>,
         pub biological_hearing_claimed: bool,
+        pub continues_provider_group: bool,
+        pub observed_snapshot_digest: Option<String>,
+        pub observed_after_message_count: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveContextCommittedRowClassified {
@@ -2833,6 +2850,7 @@ pub mod effects {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Effect {
+    LiveObservationRewriteClassified(effects::LiveObservationRewriteClassified),
     SessionFirstTurnPhaseResolved(effects::SessionFirstTurnPhaseResolved),
     SessionFirstTurnOverridesResolved(effects::SessionFirstTurnOverridesResolved),
     SessionInitialPromptStageResolved(effects::SessionInitialPromptStageResolved),
@@ -2880,6 +2898,7 @@ pub enum Effect {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
+    LiveObservationRewriteClassified,
     SessionFirstTurnPhaseResolved,
     SessionFirstTurnOverridesResolved,
     SessionInitialPromptStageResolved,
@@ -2981,6 +3000,7 @@ pub enum TransitionId {
     ResolveRealtimeAssistantTurnCompletedToolUse,
     ResolveRealtimeAssistantTurnCompletedRecord,
     ResolveRealtimeAssistantPlaybackSnapshot,
+    ClassifyLiveObservationRewrite,
     ResolveRealtimeAssistantTurnInterruptedInvalid,
     ResolveRealtimeAssistantTurnInterruptedValid,
     ResolveRealtimeMaterializeAlreadyDone,

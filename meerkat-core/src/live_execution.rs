@@ -569,6 +569,11 @@ pub enum LiveAssistantPlaybackEvidence {
         prefix: String,
     },
     Unmeasured,
+    /// Opt-in observation-only bookkeeping release for continuous provider
+    /// media. No played text, provider final, interruption, or hearing claim.
+    /// The snapshot is retained for Live replacement context. The generated
+    /// receipt permits another segment in the same local group.
+    ProviderManagedUnmeasured(String),
 }
 
 impl LiveAssistantPlaybackEvidence {
@@ -585,7 +590,10 @@ impl LiveAssistantPlaybackEvidence {
             Self::ReportedPrefix(prefix) | Self::CallerConfirmedPrefix { prefix, .. } => {
                 Some(prefix)
             }
-            Self::PlaybackComplete | Self::CallerConfirmedSnapshot(_) | Self::Unmeasured => None,
+            Self::PlaybackComplete
+            | Self::CallerConfirmedSnapshot(_)
+            | Self::Unmeasured
+            | Self::ProviderManagedUnmeasured(_) => None,
         }
     }
 }
@@ -608,6 +616,18 @@ pub struct LiveAssistantPlaybackSettlement {
     pub authoritative_final: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<(crate::StopReason, crate::TurnUsage)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_after_message_count: Option<u64>,
+}
+
+/// Immutable observation data retained by the session document, not a played
+/// assistant message or evidence of provider utterance completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LiveUnmeasuredAssistantObservation<'a> {
+    pub channel_id: &'a str,
+    pub interaction_id: InteractionId,
+    pub text: &'a str,
+    pub after_message_count: u64,
 }
 
 /// Sealed evidence that SessionDocument authority classified one exact live
@@ -622,6 +642,8 @@ pub struct LiveAssistantPlaybackTruncationEvidence {
     content_index: u32,
     disposition: LiveAssistantPlaybackTruncationDisposition,
     canonical_prefix_chars: Option<u64>,
+    continues_provider_group: bool,
+    observed_after_message_count: Option<u64>,
 }
 
 impl std::fmt::Debug for LiveAssistantPlaybackTruncationEvidence {
@@ -676,6 +698,18 @@ impl LiveAssistantPlaybackTruncationEvidence {
     #[must_use]
     pub const fn canonical_prefix_chars(&self) -> Option<u64> {
         self.canonical_prefix_chars
+    }
+
+    /// Generated permission to advance local output bookkeeping while keeping
+    /// the original provider group and foreground interaction identity.
+    #[must_use]
+    pub const fn continues_provider_group(&self) -> bool {
+        self.continues_provider_group
+    }
+
+    #[must_use]
+    pub const fn observed_after_message_count(&self) -> Option<u64> {
+        self.observed_after_message_count
     }
 
     /// Playback evidence never proves what a person biologically heard.
@@ -877,6 +911,9 @@ pub(crate) extern "Rust" fn session_generated_live_playback_truncation_build(
         canonical_chars,
         canonical_text_digest: _,
         biological_hearing_claimed,
+        continues_provider_group,
+        observed_snapshot_digest,
+        observed_after_message_count,
     } = effect
     else {
         return Err(LiveAssistantPlaybackTruncationError::MissingTerminalEffect);
@@ -897,13 +934,23 @@ pub(crate) extern "Rust" fn session_generated_live_playback_truncation_build(
             "playback authority attempted to claim biological hearing".to_string(),
         ));
     }
+    if !matches!(
+        evidence,
+        LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(_)
+    ) && (observed_snapshot_digest.is_some() || observed_after_message_count.is_some())
+    {
+        return Err(LiveAssistantPlaybackTruncationError::Transition(
+            "measured playback evidence cannot acquire observation-only context authority"
+                .to_string(),
+        ));
+    }
 
     let (disposition, canonical_prefix_chars) = match (disposition, evidence, canonical_chars) {
         (
             LiveAssistantPlaybackTerminalDisposition::PlaybackComplete,
             LiveAssistantPlaybackEvidence::PlaybackComplete,
             Some(chars),
-        ) => (
+        ) if !continues_provider_group => (
             LiveAssistantPlaybackTruncationDisposition::PlaybackComplete,
             Some(*chars),
         ),
@@ -911,7 +958,7 @@ pub(crate) extern "Rust" fn session_generated_live_playback_truncation_build(
             LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,
             LiveAssistantPlaybackEvidence::ReportedPrefix(prefix),
             Some(chars),
-        ) if *chars == prefix.chars().count() as u64 => (
+        ) if !continues_provider_group && *chars == prefix.chars().count() as u64 => (
             LiveAssistantPlaybackTruncationDisposition::CommittedReportedPrefix,
             Some(*chars),
         ),
@@ -919,14 +966,34 @@ pub(crate) extern "Rust" fn session_generated_live_playback_truncation_build(
             LiveAssistantPlaybackTerminalDisposition::Unmeasured,
             LiveAssistantPlaybackEvidence::Unmeasured,
             None,
-        ) => (LiveAssistantPlaybackTruncationDisposition::Unmeasured, None),
+        ) if !continues_provider_group => {
+            (LiveAssistantPlaybackTruncationDisposition::Unmeasured, None)
+        }
+        (
+            LiveAssistantPlaybackTerminalDisposition::Unmeasured,
+            LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(snapshot),
+            None,
+        ) if *continues_provider_group
+            && observed_after_message_count.is_some()
+            && observed_snapshot_digest.as_ref().is_some_and(|digest| {
+                use sha2::Digest;
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(b"meerkat.live-assistant-playback-text.v1\0");
+                hasher.update((snapshot.len() as u64).to_be_bytes());
+                hasher.update(snapshot.as_bytes());
+                digest == &format!("sha256:{:x}", hasher.finalize())
+            }) =>
+        {
+            (LiveAssistantPlaybackTruncationDisposition::Unmeasured, None)
+        }
         (
             LiveAssistantPlaybackTerminalDisposition::CallerConfirmedSnapshot,
             evidence,
             Some(chars),
-        ) if evidence.snapshot_cut().is_some_and(|(snapshot, text)| {
-            snapshot.starts_with(text) && *chars == text.chars().count() as u64
-        }) =>
+        ) if *continues_provider_group
+            && evidence.snapshot_cut().is_some_and(|(snapshot, text)| {
+                snapshot.starts_with(text) && *chars == text.chars().count() as u64
+            }) =>
         {
             (
                 LiveAssistantPlaybackTruncationDisposition::CommittedSnapshot,
@@ -949,6 +1016,8 @@ pub(crate) extern "Rust" fn session_generated_live_playback_truncation_build(
         content_index,
         disposition,
         canonical_prefix_chars,
+        continues_provider_group: *continues_provider_group,
+        observed_after_message_count: *observed_after_message_count,
     })
 }
 

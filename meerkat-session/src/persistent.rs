@@ -6353,8 +6353,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             )
             .await?;
         if let crate::LiveAssistantPlaybackObservationResult::Resolved(receipt) = &outcome
-            && receipt.disposition()
-                == meerkat_core::LiveAssistantPlaybackTruncationDisposition::CommittedSnapshot
+            && receipt.continues_provider_group()
         {
             machine
                 .advance_live_assistant_playback_segment(receipt)

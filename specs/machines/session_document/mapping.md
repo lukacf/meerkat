@@ -181,6 +181,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveRealtimeAssistantPlaybackSnapshot`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyLiveObservationRewrite`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveRealtimeAssistantTurnInterruptedInvalid`
   - anchors: `session_document_authority`
   - scenarios: `session_realtime_transcript_event_resolve`
@@ -369,6 +372,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 
 ### Effects
+- `LiveObservationRewriteClassified`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SessionFirstTurnPhaseResolved`
   - anchors: `session_document_authority`
   - scenarios: `session_first_turn_pending_consume`, `session_initial_inputs_stage`, `session_first_turn_restore_recover`

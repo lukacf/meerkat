@@ -224,6 +224,8 @@ pub enum ExperimentalLiveContextRecoveryError {
     Authority(#[from] crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError),
     #[error("failed to project canonical replacement seed: {0}")]
     Projection(#[from] RealtimeSessionOpenProjectionError),
+    #[error(transparent)]
+    Summary(#[from] crate::session_runtime::live_summary::LiveContextSummaryError),
     #[error("failed to open exact replacement live channel: {0}")]
     Open(#[from] LiveOpenError),
     #[error("replacement canonical seed cursor did not match generated recovery authority")]
@@ -844,6 +846,8 @@ pub struct ServiceMemberLiveHost<B: SessionAgentBuilder + 'static = FactoryAgent
     realm_id: Option<RealmId>,
     instance_id: Option<String>,
     backend: Option<String>,
+    #[cfg(feature = "openai-live")]
+    context_summary_policy: Option<crate::session_runtime::live_summary::LiveContextSummaryPolicy>,
 }
 
 /// Shared production composition for canonical context mirroring. It wraps
@@ -1157,7 +1161,22 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             realm_id: config.realm_id,
             instance_id: config.instance_id,
             backend: config.backend,
+            #[cfg(feature = "openai-live")]
+            context_summary_policy: None,
         }
+    }
+
+    /// Apply one host-owned summary policy to strict initial and replacement
+    /// opens. Use a dedicated host for opt-in console voice; stock live opens
+    /// and the durable background session remain unchanged.
+    #[cfg(feature = "openai-live")]
+    #[must_use]
+    pub fn with_context_summary_policy(
+        mut self,
+        policy: crate::session_runtime::live_summary::LiveContextSummaryPolicy,
+    ) -> Self {
+        self.context_summary_policy = Some(policy);
+        self
     }
 
     #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
@@ -1691,6 +1710,21 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         seed_window: Option<LiveSeedWindow>,
         transport: Option<LiveOpenTransport>,
     ) -> Result<ExperimentalLivePendingChannel, ExperimentalLiveChannelOpenError> {
+        if let Some(policy) = &self.context_summary_policy {
+            if seed_window.is_some() {
+                return Err(crate::session_runtime::live_summary::LiveContextSummaryError::ConflictingSeedPolicy.into());
+            }
+            return self
+                .open_with_execution_identity_and_summary(
+                    authority,
+                    session,
+                    execution_identity,
+                    turning_mode,
+                    policy,
+                    transport,
+                )
+                .await;
+        }
         self.orchestrator()
             .open_live_channel_with_execution_identity(
                 &self.host,
@@ -1703,6 +1737,60 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 transport,
             )
             .await
+    }
+
+    /// Opt-in voice open with a generated factual summary of the selected
+    /// agent's exact current window, without changing its transcript or model.
+    #[cfg(feature = "openai-live")]
+    async fn open_with_execution_identity_and_summary(
+        &self,
+        authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+        session: &SessionId,
+        execution_identity: &WireLiveExecutionIdentityOverrideV1,
+        turning_mode: Option<RealtimeTurningMode>,
+        summary: &crate::session_runtime::live_summary::LiveContextSummaryPolicy,
+        transport: Option<LiveOpenTransport>,
+    ) -> Result<ExperimentalLivePendingChannel, ExperimentalLiveChannelOpenError> {
+        self.orchestrator()
+            .open_live_channel_with_execution_identity_and_summary(
+                &self.host,
+                self.transport_context(),
+                authority,
+                session,
+                execution_identity,
+                turning_mode,
+                summary,
+                transport,
+            )
+            .await
+    }
+
+    #[cfg(feature = "openai-live")]
+    async fn prepare_strict_replacement_projection(
+        &self,
+        session: &SessionId,
+        pending: &mut dyn crate::experimental_gpt_live::ExperimentalLivePendingOpen,
+    ) -> Result<RealtimeSessionOpenProjection, ExperimentalLiveContextRecoveryError> {
+        let mut projection = match &self.context_summary_policy {
+            Some(policy) => {
+                self.orchestrator()
+                    .live_open_summary_projection_for_session(
+                        session,
+                        RealtimeTurningMode::ProviderManaged,
+                        policy,
+                    )
+                    .await?
+            }
+            None => {
+                self.prepare_open_projection(session, RealtimeTurningMode::ProviderManaged, None)
+                    .await?
+            }
+        };
+        if let Some(summary) = projection.context_summary() {
+            pending.set_context_summary(summary.clone())?;
+        }
+        pending.apply_execution_identity(&mut projection);
+        Ok(projection)
     }
 
     #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
@@ -1745,20 +1833,15 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             version: WireLiveExecutionIdentityVersion::V1,
             profile_id,
         };
-        let pending = authority
+        let mut pending = authority
             .prepare_open(recovery.session_id(), &execution_identity)
             .await?;
-        let mut projection = self
-            .prepare_open_projection(
-                recovery.session_id(),
-                RealtimeTurningMode::ProviderManaged,
-                None,
-            )
+        let projection = self
+            .prepare_strict_replacement_projection(recovery.session_id(), pending.as_mut())
             .await?;
         if projection.open_config.canonical_message_cursor() != recovery.canonical_seed_cursor() {
             return Err(ExperimentalLiveContextRecoveryError::SeedCursorMismatch);
         }
-        pending.apply_execution_identity(&mut projection);
         let result = self
             .orchestrator()
             .open_live_channel_from_projection_for_recovery(
@@ -1875,20 +1958,15 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             version: WireLiveExecutionIdentityVersion::V1,
             profile_id,
         };
-        let pending = authority
+        let mut pending = authority
             .prepare_open(recovery.session_id(), &execution_identity)
             .await?;
-        let mut projection = self
-            .prepare_open_projection(
-                recovery.session_id(),
-                RealtimeTurningMode::ProviderManaged,
-                None,
-            )
+        let projection = self
+            .prepare_strict_replacement_projection(recovery.session_id(), pending.as_mut())
             .await?;
         if projection.open_config.canonical_message_cursor() != recovery.canonical_seed_cursor() {
             return Err(ExperimentalLiveContextRecoveryError::SeedCursorMismatch);
         }
-        pending.apply_execution_identity(&mut projection);
         let result = self
             .orchestrator()
             .open_live_channel_from_projection_for_result_recovery(

@@ -1148,6 +1148,11 @@ impl<'de> Deserialize<'de> for Session {
             }
             None => SessionRealtimeTranscriptProjection::empty(&serde_repr.id),
         };
+        realtime_transcript_revision::validate_unmeasured_observation_positions(
+            realtime_transcript.state(),
+            serde_repr.messages.len(),
+        )
+        .map_err(<D::Error as serde::de::Error>::custom)?;
         let history_wire_kind = transcript_history_wire_kind(&metadata)
             .map_err(<D::Error as serde::de::Error>::custom)?;
         if matches!(
@@ -3531,6 +3536,14 @@ impl Session {
         messages: Vec<Message>,
         authority: &crate::agent::compact::ValidatedCompactionRewrite,
     ) -> Result<Option<TranscriptRewriteCommit>, TranscriptEditError> {
+        let observations =
+            crate::agent::compact::CompactionObservationSource::from_session(self)
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        if !authority.authorizes_observations(&observations) {
+            return Err(TranscriptEditError::InvalidTranscriptShape(
+                "validated compaction witness does not cover the current voice observations".into(),
+            ));
+        }
         // Authority first. The parent side binds against the session
         // accumulator (O(delta), byte-identical to
         // `transcript_messages_digest(self.messages())`); the rebuilt side
@@ -3575,6 +3588,7 @@ impl Session {
             Some("meerkat-core".to_string()),
             Some(authority.parent_revision().to_string()),
             Some(authority.revision()),
+            true,
         )?;
         Ok(Some(commit))
     }
@@ -4358,6 +4372,18 @@ impl Session {
         &mut self,
         event: RealtimeTranscriptEvent,
     ) -> RealtimeTranscriptApplyOutcome {
+        if let RealtimeTranscriptEvent::AssistantPlaybackTerminalSettled { settlement, .. } = &event
+            && settlement
+                .observed_after_message_count
+                .is_some_and(|position| position > self.messages().len() as u64)
+        {
+            fail_closed_generated_restore(
+                "live-observation-position",
+                <serde_json::Error as serde::de::Error>::custom(
+                    "observation position exceeds canonical history",
+                ),
+            );
+        }
         let (commit, recorded) =
             self.realtime_transcript
                 .apply_event(event)
@@ -4781,7 +4807,66 @@ impl Session {
     /// only the latest version is selected. No request-local System message is
     /// synthesized or repositioned at this boundary.
     pub fn messages_for_model_boundary(&self) -> Vec<Message> {
+        if self
+            .live_unmeasured_assistant_observations()
+            .next()
+            .is_some()
+        {
+            return self.messages_for_live_context();
+        }
         let prompts = crate::types::materialize_latest_system_prompt_versions(self.messages());
+        match materialize_instruction_activation_messages(self.id(), &prompts) {
+            Ok(messages) => messages,
+            Err(_) => prompts,
+        }
+    }
+
+    pub fn live_unmeasured_assistant_observations(
+        &self,
+    ) -> impl Iterator<Item = crate::LiveUnmeasuredAssistantObservation<'_>> {
+        realtime_transcript_revision::validate_unmeasured_observation_positions(
+            self.realtime_transcript.state(),
+            self.messages().len(),
+        )
+        .unwrap_or_else(|error| {
+            fail_closed_generated_restore(
+                "live-observation-context",
+                <serde_json::Error as serde::de::Error>::custom(error),
+            )
+        });
+        realtime_transcript_revision::unmeasured_assistant_observations(
+            self.realtime_transcript.state(),
+        )
+    }
+
+    /// Deterministic model projection of canonical rows and document-owned
+    /// observation data. Positions refer to raw canonical rows, before System
+    /// version filtering. Observation messages are never canonical user input.
+    pub fn messages_for_live_context(&self) -> Vec<Message> {
+        let mut observations = self.live_unmeasured_assistant_observations().peekable();
+        let mut messages = Vec::with_capacity(self.messages().len());
+        for position in 0..=self.messages().len() {
+            while observations
+                .peek()
+                .is_some_and(|observation| observation.after_message_count == position as u64)
+            {
+                if let Some(observation) = observations.next() {
+                    let mut message = UserMessage::injected_context(format!(
+                        "Live dialogue observation: provider-generated assistant speech; playback UNMEASURED. \
+                         This is observed transcript data, not confirmed played or heard, \
+                         and not a provider-final utterance.\n{}",
+                        observation.text,
+                    ));
+                    message.created_at = chrono::DateTime::UNIX_EPOCH;
+                    message.identity.interaction_id = Some(observation.interaction_id);
+                    messages.push(Message::User(message));
+                }
+            }
+            if let Some(message) = self.messages().get(position) {
+                messages.push(message.clone());
+            }
+        }
+        let prompts = crate::types::materialize_latest_system_prompt_versions(&messages);
         match materialize_instruction_activation_messages(self.id(), &prompts) {
             Ok(messages) => messages,
             Err(_) => prompts,
@@ -6266,6 +6351,31 @@ impl Session {
         )
     }
 
+    /// Explicitly replace the complete context, including retained Live
+    /// observations. Generic edits cannot silently discard this component.
+    pub fn reset_transcript_context(
+        &mut self,
+        replacement: Vec<Message>,
+        reason: TranscriptRewriteReason,
+        actor: Option<String>,
+        expected_parent_revision: Option<String>,
+    ) -> Result<TranscriptRewriteCommit, TranscriptEditError> {
+        self.validate_generic_rewrite_prompt_versions(&replacement)?;
+        self.commit_transcript_rewrite_bound(
+            TranscriptRewriteSelection::MessageRange {
+                start: 0,
+                end: self.messages.len(),
+            }
+            .into_current_edit_semantic(),
+            replacement,
+            reason,
+            actor,
+            expected_parent_revision,
+            None,
+            true,
+        )
+    }
+
     /// Prove that a generic rewrite only reuses versioned System rows already
     /// owned by this session lineage.
     ///
@@ -6333,6 +6443,7 @@ impl Session {
             actor,
             expected_parent_revision,
             None,
+            false,
         )
     }
 
@@ -6342,6 +6453,10 @@ impl Session {
     /// token binds against the one digest this commit computes anyway
     /// instead of a second whole-document hash at the authorization seam. A
     /// mismatch fails closed before any state is touched.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "bind the exact rewrite request, optional compaction digest, and explicit full-context reset authority"
+    )]
     fn commit_transcript_rewrite_bound(
         &mut self,
         selection: TranscriptRewriteSelection,
@@ -6350,6 +6465,7 @@ impl Session {
         actor: Option<String>,
         expected_parent_revision: Option<String>,
         expected_revision: Option<&str>,
+        reset_observations: bool,
     ) -> Result<TranscriptRewriteCommit, TranscriptEditError> {
         let parent_revision = self
             .transcript_revision()
@@ -6426,6 +6542,25 @@ impl Session {
         }
         if revision == parent_revision {
             return Err(TranscriptEditError::NoOpRewrite { revision });
+        }
+        let mut observation_authority =
+            crate::generated::session_document::SessionDocumentMachineAuthority::new();
+        let decisions = observation_authority
+            .classify_live_observation_rewrite(
+                self.live_unmeasured_assistant_observations()
+                    .next()
+                    .is_some(),
+                reset_observations && start == 0 && end == message_count,
+            )
+            .map_err(|error| TranscriptEditError::InvalidTranscriptShape(error.to_string()))?;
+        if !decisions.iter().any(|effect| matches!(effect,
+            crate::generated::session_document::SessionDocumentEffect::LiveObservationRewriteClassified {
+                rewrite_allowed: true
+            }
+        )) {
+            return Err(TranscriptEditError::InvalidTranscriptShape(
+                "retained Live observations require an explicit full-context reset or source-validated compaction; generic edits cannot rebase their source".into(),
+            ));
         }
         let original_span_digest = if start == 0 && end == message_count {
             // The span IS the whole live transcript; the accumulator serves

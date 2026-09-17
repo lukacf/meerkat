@@ -619,6 +619,10 @@ machine! {
         }
 
         input SessionDocumentInput {
+            ClassifyLiveObservationRewrite {
+                observations_present: bool,
+                full_context_replacement: bool,
+            },
             MarkSessionInitialTurnPending { session_id: SessionId },
             StartSessionInitialTurn { session_id: SessionId },
             StageSessionInitialPrompt { session_id: SessionId, prompt_has_content: bool },
@@ -820,6 +824,8 @@ machine! {
                 canonical_chars: u64,
                 canonical_digest: String,
                 prefix_matches_snapshot: bool,
+                observation_only: bool,
+                canonical_message_cursor: u64,
             },
             ObserveLiveAssistantPlaybackFinal {
                 session_id: SessionId,
@@ -1074,6 +1080,9 @@ machine! {
         }
 
         effect SessionDocumentEffect {
+            LiveObservationRewriteClassified {
+                rewrite_allowed: bool,
+            },
             SessionFirstTurnPhaseResolved {
                 phase: Enum<SessionFirstTurnPhase>,
                 was_pending: bool,
@@ -1214,6 +1223,9 @@ machine! {
                 canonical_chars: Option<u64>,
                 canonical_text_digest: Option<String>,
                 biological_hearing_claimed: bool,
+                continues_provider_group: bool,
+                observed_snapshot_digest: Option<String>,
+                observed_after_message_count: Option<u64>,
             },
             LiveContextCommittedRowClassified {
                 session_id: SessionId,
@@ -1492,6 +1504,7 @@ machine! {
         disposition SessionConsumedInputsRestoreResolved => local seam NoOwnerRealization,
         disposition SessionFirstTurnPhaseRecovered => local seam NoOwnerRealization,
         disposition RealtimeTranscriptEventResolved => local seam NoOwnerRealization,
+        disposition LiveObservationRewriteClassified => local seam NoOwnerRealization,
         disposition RealtimeMaterializeCandidateResolved => local seam NoOwnerRealization,
         disposition RealtimeUserContentIdentityResolved => local seam NoOwnerRealization,
         disposition RealtimeUserContentBlobStageResolved => local seam NoOwnerRealization,
@@ -2838,6 +2851,7 @@ machine! {
             on input ResolveRealtimeAssistantPlaybackSnapshot {
                 target_matches, snapshot_present, response_discarded, item_materialized
             }
+
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && target_matches && snapshot_present
@@ -2853,6 +2867,16 @@ machine! {
                 remove_completion: false, record_completion: true,
                 discard_response: false, discard_response_by_lane: false,
                 mark_response_ready: false, materialize_ready_items: true
+            }
+        }
+
+        transition ClassifyLiveObservationRewrite {
+            on input ClassifyLiveObservationRewrite { observations_present, full_context_replacement }
+            guard { self.lifecycle_phase == Phase::Ready }
+            update {}
+            to Ready
+            emit LiveObservationRewriteClassified {
+                rewrite_allowed: !observations_present || full_context_replacement
             }
         }
 
@@ -3390,7 +3414,9 @@ machine! {
                 disposition: LiveAssistantPlaybackTerminalDisposition::Unmeasured,
                 canonical_chars: None,
                 canonical_text_digest: None,
-                biological_hearing_claimed: false
+                biological_hearing_claimed: false,
+                continues_provider_group: false,
+                observed_snapshot_digest: None, observed_after_message_count: None
             }
         }
 
@@ -3401,13 +3427,16 @@ machine! {
             on input ObserveLiveAssistantPlaybackSnapshot {
                 session_id, channel_id, interaction_id, response_id, item_id,
                 content_index, snapshot_chars, snapshot_digest,
-                canonical_chars, canonical_digest, prefix_matches_snapshot
+                canonical_chars, canonical_digest, prefix_matches_snapshot,
+                observation_only, canonical_message_cursor
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && snapshot_chars > 0 && snapshot_digest != ""
-                && prefix_matches_snapshot && canonical_chars <= snapshot_chars
-                && canonical_digest != ""
+                && ((observation_only && canonical_chars == 0 && canonical_digest == ""
+                        && !prefix_matches_snapshot)
+                    || (!observation_only && prefix_matches_snapshot
+                        && canonical_chars <= snapshot_chars && canonical_digest != ""))
                 && self.session_live_channel_id.get_cloned(session_id) == Some(channel_id)
                 && self.session_live_interaction_id.get_cloned(session_id) == Some(interaction_id)
                 && self.session_live_assistant_playback_response_id.get_cloned(session_id) == Some(response_id)
@@ -3427,10 +3456,14 @@ machine! {
                 session_id: session_id, channel_id: channel_id,
                 interaction_id: interaction_id, response_id: response_id,
                 item_id: item_id, content_index: content_index,
-                disposition: LiveAssistantPlaybackTerminalDisposition::CallerConfirmedSnapshot,
-                canonical_chars: Some(canonical_chars),
-                canonical_text_digest: Some(canonical_digest),
-                biological_hearing_claimed: false
+                disposition: if observation_only { LiveAssistantPlaybackTerminalDisposition::Unmeasured }
+                    else { LiveAssistantPlaybackTerminalDisposition::CallerConfirmedSnapshot },
+                canonical_chars: if observation_only { None } else { Some(canonical_chars) },
+                canonical_text_digest: if observation_only { None } else { Some(canonical_digest) },
+                biological_hearing_claimed: false,
+                continues_provider_group: true,
+                observed_snapshot_digest: if observation_only { Some(snapshot_digest) } else { None },
+                observed_after_message_count: if observation_only { Some(canonical_message_cursor) } else { None }
             }
         }
 
@@ -3620,7 +3653,9 @@ machine! {
                 disposition: LiveAssistantPlaybackTerminalDisposition::PlaybackComplete,
                 canonical_chars: Some(authoritative_assistant_chars),
                 canonical_text_digest: Some(authoritative_text_digest),
-                biological_hearing_claimed: false
+                biological_hearing_claimed: false,
+                continues_provider_group: false,
+                observed_snapshot_digest: None, observed_after_message_count: None
             }
         }
 
@@ -3668,7 +3703,9 @@ machine! {
                 disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,
                 canonical_chars: Some(pending_reported_prefix_chars),
                 canonical_text_digest: Some(pending_reported_prefix_digest),
-                biological_hearing_claimed: false
+                biological_hearing_claimed: false,
+                continues_provider_group: false,
+                observed_snapshot_digest: None, observed_after_message_count: None
             }
         }
 
@@ -3712,7 +3749,9 @@ machine! {
                 disposition: LiveAssistantPlaybackTerminalDisposition::PlaybackComplete,
                 canonical_chars: Some(authoritative_assistant_chars),
                 canonical_text_digest: Some(authoritative_text_digest),
-                biological_hearing_claimed: false
+                biological_hearing_claimed: false,
+                continues_provider_group: false,
+                observed_snapshot_digest: None, observed_after_message_count: None
             }
         }
 
@@ -3755,7 +3794,9 @@ machine! {
                 disposition: LiveAssistantPlaybackTerminalDisposition::TruncateToReportedPrefix,
                 canonical_chars: Some(reported_prefix_chars),
                 canonical_text_digest: Some(reported_prefix_digest),
-                biological_hearing_claimed: false
+                biological_hearing_claimed: false,
+                continues_provider_group: false,
+                observed_snapshot_digest: None, observed_after_message_count: None
             }
         }
 
@@ -3804,7 +3845,9 @@ machine! {
                 item_id: item_id, content_index: content_index,
                 disposition: LiveAssistantPlaybackTerminalDisposition::Unmeasured,
                 canonical_chars: None, canonical_text_digest: None,
-                biological_hearing_claimed: false
+                biological_hearing_claimed: false,
+                continues_provider_group: false,
+                observed_snapshot_digest: None, observed_after_message_count: None
             }
         }
 

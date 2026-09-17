@@ -2579,7 +2579,19 @@ pub enum RealtimeTranscriptLaneKind {
 }
 
 /// Bridging copy of the catalog-owned live delegation reconciliation state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationReconciliation {
     #[default]
     Provisional,
@@ -2589,7 +2601,19 @@ pub enum LiveDelegationReconciliation {
 }
 
 /// Bridging copy of the catalog-owned live delegation worker lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationWorkerPhase {
     #[default]
     StartAuthorized,
@@ -2601,8 +2625,40 @@ pub enum LiveDelegationWorkerPhase {
     Failed,
 }
 
+/// Bridging copy of the catalog-owned delegation member custody.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveDelegationWorkerOwnership {
+    #[default]
+    OwnedMember,
+    ExistingMember,
+}
+
 /// Bridging copy of the machine-derived live delegation cancellation reason.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationCancellationReason {
     #[default]
     Abandoned,
@@ -2621,7 +2677,19 @@ pub enum LiveDelegationCancellationOutcome {
 }
 
 /// Bridging copy of the shell-observed worker terminal kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationWorkerTerminalKind {
     #[default]
     Completed,

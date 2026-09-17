@@ -282,8 +282,9 @@ pub use live_execution::{
     LiveBridgeSubmissionObservation, LiveBridgeSubmissionState, LiveChannelId, LiveContextCursor,
     LiveExecutionCapabilities, LiveExecutionChannelPhase, LiveExecutionIdentityError,
     LiveExecutionMode, LiveHandoffInputProvenance, LiveHandoffReconciliation,
-    LiveResultDisposition, LiveUserTurnCorrelation, MeerkatExecutionTerminal,
-    NormalizedLiveUserInputDigest, OpaqueProviderCorrelation, ProvisionalLiveHandoff,
+    LiveResultDisposition, LiveUnmeasuredAssistantObservation, LiveUserTurnCorrelation,
+    MeerkatExecutionTerminal, NormalizedLiveUserInputDigest, OpaqueProviderCorrelation,
+    ProvisionalLiveHandoff,
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use memory::{

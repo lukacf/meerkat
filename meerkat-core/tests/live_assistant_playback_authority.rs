@@ -40,6 +40,156 @@ fn admit_target(authority: &mut SessionDocumentMachineAuthority) {
 }
 
 #[test]
+fn component_observations_refuse_generic_rewrite_and_reset_only_explicitly() {
+    use meerkat_core::service::{TranscriptRewriteReason, TranscriptRewriteSelection};
+    use meerkat_core::{
+        InteractionId, LiveAssistantPlaybackEvidence, LiveChannelId, Message,
+        RealtimeTranscriptEvent, Session, UserMessage,
+    };
+
+    let mut session = Session::new();
+    session.push(Message::User(UserMessage::text("original user context")));
+    let channel = LiveChannelId::new(CHANNEL);
+    let interaction = InteractionId::new();
+    session
+        .admit_live_assistant_playback_target(&channel, interaction, RESPONSE, ITEM, 0)
+        .expect("admit observed source");
+    session.append_realtime_transcript_event(
+        RealtimeTranscriptEvent::AssistantPlaybackTerminalSettled {
+            channel_id: channel.to_string(),
+            interaction_id: interaction,
+            response_id: RESPONSE.into(),
+            item_id: ITEM.into(),
+            content_index: 0,
+            settlement: Box::new(meerkat_core::LiveAssistantPlaybackSettlement {
+                evidence: LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(
+                    "voice facts remain meaningful".into(),
+                ),
+                authoritative_final: None,
+                completion: None,
+                observed_after_message_count: Some(1),
+            }),
+        },
+    );
+    session.push(Message::User(UserMessage::text("follow up")));
+    let revision = session.transcript_revision().expect("source revision");
+    let encoded = serde_json::to_vec(&session).expect("persist component source");
+    let mut invalid: serde_json::Value = serde_json::from_slice(&encoded).expect("component JSON");
+    let key = meerkat_core::SESSION_REALTIME_TRANSCRIPT_STATE_KEY;
+    invalid["metadata"][key]["assistant_playback_snapshots"][ITEM]["observed_after_message_count"] =
+        serde_json::json!(999);
+    assert!(
+        serde_json::from_value::<Session>(invalid).is_err(),
+        "out-of-bounds positions must fail decode, never clamp or silently disappear"
+    );
+    let mut invalid: serde_json::Value = serde_json::from_slice(&encoded).expect("component JSON");
+    invalid["metadata"][key]["assistant_observation_order"] =
+        serde_json::json!(["missing-receipt"]);
+    assert!(
+        serde_json::from_value::<Session>(invalid).is_err(),
+        "an observation order entry must bind to an exact retained receipt"
+    );
+    let partial = session.commit_transcript_rewrite(
+        TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+        vec![
+            Message::User(UserMessage::text("replacement context")),
+            Message::User(UserMessage::text("additional context")),
+        ],
+        TranscriptRewriteReason::new("edit only the unrelated user row"),
+        None,
+        Some(revision.clone()),
+    );
+    assert!(matches!(
+        partial,
+        Err(meerkat_core::session::TranscriptEditError::InvalidTranscriptShape(_))
+    ));
+    assert_eq!(
+        serde_json::to_vec(&session).expect("refusal preserves source"),
+        encoded
+    );
+    let same_count = session.commit_transcript_rewrite(
+        TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+        vec![Message::User(UserMessage::text(
+            "changed context at the same position",
+        ))],
+        TranscriptRewriteReason::new("same-count partial edit"),
+        None,
+        Some(revision.clone()),
+    );
+    assert!(
+        matches!(
+            same_count,
+            Err(meerkat_core::session::TranscriptEditError::InvalidTranscriptShape(_))
+        ),
+        "equal row counts cannot make old observation anchors current for a rewritten source"
+    );
+    assert_eq!(
+        serde_json::to_vec(&session).expect("same-count refusal"),
+        encoded
+    );
+    let reloaded: Session = serde_json::from_slice(&encoded).expect("reload observed source");
+    assert_eq!(reloaded.live_unmeasured_assistant_observations().count(), 1);
+    let projected = reloaded.messages_for_live_context();
+    assert!(matches!(&projected[1], Message::User(user)
+        if user.transcript_role.is_injected_context()
+            && user.text_content().contains("voice facts remain meaningful")
+            && user.text_content().contains("UNMEASURED")));
+    // Keep the original row-lineage authority for mutations; a bare serde
+    // read projection does not mint physical write authority.
+    let mut restored = session.clone();
+    restored.push(Message::User(UserMessage::text("later canonical context")));
+    let current_bytes = serde_json::to_vec(&restored).expect("persist later context");
+    let stale = restored.commit_transcript_rewrite(
+        TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+        vec![Message::User(UserMessage::text("stale edit"))],
+        TranscriptRewriteReason::new("stale request"),
+        None,
+        Some(revision),
+    );
+    assert!(matches!(
+        stale,
+        Err(meerkat_core::session::TranscriptEditError::RevisionConflict { .. })
+    ));
+    assert_eq!(
+        serde_json::to_vec(&restored).expect("unchanged stale source"),
+        current_bytes
+    );
+
+    let end = restored.messages().len();
+    let current = restored.transcript_revision().expect("current revision");
+    assert!(
+        restored
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end },
+                vec![Message::User(UserMessage::text("generic full replacement"))],
+                TranscriptRewriteReason::new("not an observation reset"),
+                None,
+                Some(current.clone()),
+            )
+            .is_err(),
+        "a generic edit cannot imply consent to erase observation data"
+    );
+    restored
+        .reset_transcript_context(
+            vec![Message::User(UserMessage::text("start over"))],
+            TranscriptRewriteReason::new("explicit full-context reset"),
+            None,
+            Some(current),
+        )
+        .expect("deliberate reset selects every canonical row");
+    assert_eq!(restored.messages().len(), 1);
+    assert_eq!(restored.live_unmeasured_assistant_observations().count(), 0);
+    assert!(
+        matches!(&restored.messages()[0], Message::User(user) if user.text_content() == "start over")
+    );
+    let restored: Session =
+        serde_json::from_slice(&serde_json::to_vec(&restored).expect("persist reset"))
+            .expect("reload explicit reset");
+    assert_eq!(restored.messages().len(), 1);
+    assert_eq!(restored.live_unmeasured_assistant_observations().count(), 0);
+}
+
+#[test]
 fn assistant_first_target_without_foreground_interaction_is_rejected() {
     let mut authority = SessionDocumentMachineAuthority::new();
     assert!(
@@ -55,6 +205,114 @@ fn assistant_first_target_without_foreground_interaction_is_rejected() {
             .is_err(),
         "assistant output cannot mint a shadow foreground interaction"
     );
+}
+
+#[test]
+fn unmeasured_continuation_is_generated_and_cannot_claim_played_text() {
+    for continues in [false, true] {
+        let observation = LiveAssistantPlaybackTerminalObservation::Unmeasured;
+        let mut authority = interaction_authority();
+        for segment in 0..4 {
+            let response = format!("{RESPONSE}-{segment}");
+            let item = format!("{ITEM}-{segment}");
+            authority
+                .admit_live_assistant_playback_target(
+                    key(),
+                    CHANNEL.to_string(),
+                    INTERACTION.to_string(),
+                    response.clone(),
+                    item.clone(),
+                    CONTENT_INDEX,
+                )
+                .expect("exact next observation target");
+            assert!(
+                authority
+                    .observe_live_assistant_playback_terminal(
+                        key(),
+                        CHANNEL.to_string(),
+                        INTERACTION.to_string(),
+                        response.clone(),
+                        item.clone(),
+                        CONTENT_INDEX,
+                        observation,
+                        1,
+                        "fabricated-played-prefix".to_string(),
+                        0,
+                        String::new(),
+                        false,
+                        true,
+                    )
+                    .is_err(),
+                "unmeasured release refuses any played-prefix claim"
+            );
+            let effects = if continues {
+                assert!(
+                    authority
+                        .observe_live_assistant_playback_snapshot(
+                            key(),
+                            CHANNEL.to_string(),
+                            INTERACTION.to_string(),
+                            response.clone(),
+                            item.clone(),
+                            CONTENT_INDEX,
+                            12,
+                            "observed-digest".to_string(),
+                            1,
+                            "forged-played-digest".to_string(),
+                            true,
+                            true,
+                            3,
+                        )
+                        .is_err()
+                );
+                authority
+                    .observe_live_assistant_playback_snapshot(
+                        key(),
+                        CHANNEL.to_string(),
+                        INTERACTION.to_string(),
+                        response,
+                        item,
+                        CONTENT_INDEX,
+                        12,
+                        "observed-digest".to_string(),
+                        0,
+                        String::new(),
+                        false,
+                        true,
+                        3,
+                    )
+                    .expect("generated observation release binds exact source digest")
+            } else {
+                authority
+                    .observe_live_assistant_playback_terminal(
+                        key(),
+                        CHANNEL.to_string(),
+                        INTERACTION.to_string(),
+                        response,
+                        item,
+                        CONTENT_INDEX,
+                        observation,
+                        0,
+                        String::new(),
+                        0,
+                        String::new(),
+                        false,
+                        false,
+                    )
+                    .expect("unmeasured release needs neither playback-complete nor provider-final")
+            };
+            assert!(matches!(effects.as_slice(), [
+                SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved {
+                    disposition: LiveAssistantPlaybackTerminalDisposition::Unmeasured,
+                    canonical_chars: None,
+                    canonical_text_digest: None,
+                    biological_hearing_claimed: false,
+                    continues_provider_group,
+                    ..
+                }
+            ] if *continues_provider_group == continues));
+        }
+    }
 }
 
 #[test]

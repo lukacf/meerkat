@@ -83,6 +83,8 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
 
     /// Return the exact rich public completion previously selected for this
     /// input, without registering a waiter or reviving an unregistered runtime.
+    /// Inputs archived out of an attached runtime are read from the same
+    /// durable receipt authority used after runtime teardown.
     ///
     /// `Ok(None)` means an admitted input has no finalized receipt yet,
     /// including the durable pre-finalization window. A terminal 0.8.10 row

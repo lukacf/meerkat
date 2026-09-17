@@ -537,6 +537,7 @@ fn record_playback_settlement(
                 evidence,
                 authoritative_final,
                 completion,
+                observed_after_message_count: receipt.observed_after_message_count(),
             }),
         },
     )?;
@@ -555,6 +556,12 @@ fn observe_live_assistant_playback_terminal(
     evidence: LiveAssistantPlaybackEvidence,
     completion: Option<(meerkat_core::StopReason, meerkat_core::TurnUsage)>,
 ) -> Result<LiveAssistantPlaybackObservationResult, meerkat_core::error::AgentError> {
+    // Observation-only releases carry no provider completion or usage facts.
+    let observation_only = matches!(
+        evidence,
+        LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(_)
+    );
+    let completion = if observation_only { None } else { completion };
     if response_id.trim().is_empty() || item_id.trim().is_empty() {
         return Err(meerkat_core::error::AgentError::ConfigError(
             "live playback truncation requires non-empty response and item identity".to_string(),
@@ -620,7 +627,13 @@ fn observe_live_assistant_playback_terminal(
         }
         return Ok(LiveAssistantPlaybackObservationResult::Pending);
     }
-    if let Some((snapshot, canonical)) = evidence.snapshot_cut() {
+    if let Some((snapshot, canonical)) = evidence.snapshot_cut().or({
+        if let LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(snapshot) = &evidence {
+            Some((snapshot.as_str(), ""))
+        } else {
+            None
+        }
+    }) {
         if snapshot.is_empty() || !snapshot.starts_with(canonical) {
             return Err(meerkat_core::error::AgentError::ConfigError(
                 "playback snapshot cut has no observed transcript".to_string(),
@@ -649,8 +662,17 @@ fn observe_live_assistant_playback_terminal(
                 snapshot.chars().count() as u64,
                 text_digest(snapshot),
                 canonical.chars().count() as u64,
-                text_digest(canonical),
-                snapshot.starts_with(canonical),
+                if observation_only {
+                    String::new()
+                } else {
+                    text_digest(canonical)
+                },
+                !observation_only && snapshot.starts_with(canonical),
+                observation_only,
+                prior_settlement
+                    .as_ref()
+                    .and_then(|prior| prior.observed_after_message_count)
+                    .unwrap_or(agent.snapshot().message_count as u64),
             )
             .map_err(session_document_error)?;
         let effect = effects
@@ -677,18 +699,33 @@ fn observe_live_assistant_playback_terminal(
             effect,
         )
         .map_err(|error| meerkat_core::error::AgentError::InternalError(error.to_string()))?;
+        if observation_only {
+            if prior_settlement.is_none() {
+                if agent
+                    .staged_realtime_assistant_segment_text(&response_id, &item_id, content_index)
+                    .is_some()
+                {
+                    agent.append_realtime_transcript_event(
+                        RealtimeTranscriptEvent::AssistantTurnInterrupted {
+                            response_id: response_id.clone(),
+                        },
+                    )?;
+                }
+                record_playback_settlement(agent, &receipt, evidence, None, None)?;
+            }
+            return Ok(LiveAssistantPlaybackObservationResult::Resolved(receipt));
+        }
         if prior_settlement.is_none() {
-            agent.append_realtime_transcript_event(
-                RealtimeTranscriptEvent::AssistantPlaybackSnapshotCommitted {
-                    channel_id: channel_id.to_string(),
-                    interaction_id,
-                    response_id: response_id.clone(),
-                    item_id: item_id.clone(),
-                    content_index,
-                    text: canonical.to_string(),
-                    evidence: evidence.clone(),
-                },
-            )?;
+            let event = RealtimeTranscriptEvent::AssistantPlaybackSnapshotCommitted {
+                channel_id: channel_id.to_string(),
+                interaction_id,
+                response_id: response_id.clone(),
+                item_id: item_id.clone(),
+                content_index,
+                text: canonical.to_string(),
+                evidence: evidence.clone(),
+            };
+            agent.append_realtime_transcript_event(event)?;
         }
         if target.is_some() {
             agent.resolve_live_assistant_playback_target(
@@ -742,7 +779,8 @@ fn observe_live_assistant_playback_terminal(
             String::new(),
             false,
         ),
-        LiveAssistantPlaybackEvidence::CallerConfirmedSnapshot(_)
+        LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(_)
+        | LiveAssistantPlaybackEvidence::CallerConfirmedSnapshot(_)
         | LiveAssistantPlaybackEvidence::CallerConfirmedPrefix { .. } => {
             return Err(meerkat_core::error::AgentError::InternalError(
                 "snapshot cut escaped its generated settlement path".to_string(),
@@ -897,7 +935,20 @@ fn observe_live_assistant_playback_terminal(
         (
             LiveAssistantPlaybackEvidence::Unmeasured,
             LiveAssistantPlaybackTruncationDisposition::Unmeasured,
-        ) => {}
+        ) => {
+            // Release staging, not audio. This internal discard cannot
+            // canonicalize text or signal provider interruption/completion.
+            if agent
+                .staged_realtime_assistant_segment_text(&response_id, &item_id, content_index)
+                .is_some()
+            {
+                agent.append_realtime_transcript_event(
+                    RealtimeTranscriptEvent::AssistantTurnInterrupted {
+                        response_id: response_id.clone(),
+                    },
+                )?;
+            }
+        }
         _ => {
             return Err(meerkat_core::error::AgentError::InternalError(
                 "generated live playback disposition disagreed with input evidence".to_string(),
@@ -988,6 +1039,7 @@ pub(crate) fn observe_live_assistant_playback_final(
             authoritative_text.starts_with(prefix),
         ),
         LiveAssistantPlaybackEvidence::Unmeasured
+        | LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(_)
         | LiveAssistantPlaybackEvidence::CallerConfirmedSnapshot(_)
         | LiveAssistantPlaybackEvidence::CallerConfirmedPrefix { .. } => {
             return Err(meerkat_core::error::AgentError::InternalError(
@@ -1089,6 +1141,7 @@ pub(crate) fn observe_live_assistant_playback_final(
             )?;
         }
         LiveAssistantPlaybackEvidence::Unmeasured
+        | LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(_)
         | LiveAssistantPlaybackEvidence::CallerConfirmedSnapshot(_)
         | LiveAssistantPlaybackEvidence::CallerConfirmedPrefix { .. } => {
             return Err(meerkat_core::error::AgentError::InternalError(
@@ -1148,6 +1201,7 @@ mod tests {
     struct PlaybackTestAgent {
         session: Session,
         transient: meerkat_core::TransientTurnContextStateHandle,
+        completed_events: usize,
     }
 
     impl PlaybackTestAgent {
@@ -1155,6 +1209,7 @@ mod tests {
             Self {
                 session: Session::new(),
                 transient: meerkat_core::TransientTurnContextStateHandle::new(),
+                completed_events: 0,
             }
         }
     }
@@ -1232,6 +1287,12 @@ mod tests {
             event: RealtimeTranscriptEvent,
         ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError>
         {
+            if matches!(
+                &event,
+                RealtimeTranscriptEvent::AssistantTurnCompleted { .. }
+            ) {
+                self.completed_events += 1;
+            }
             Ok(self.session.append_realtime_transcript_event(event))
         }
 
@@ -1559,6 +1620,10 @@ mod tests {
         );
         assert_eq!(unmeasured.canonical_prefix_chars(), None);
         assert!(!unmeasured.biological_hearing_claimed());
+        assert!(
+            !unmeasured.continues_provider_group(),
+            "ordinary unmeasured truncation must not acquire provider-managed continuation"
+        );
         assert_eq!(
             unmeasured_agent
                 .staged_realtime_assistant_segment_text(
@@ -1567,7 +1632,7 @@ mod tests {
                     0,
                 )
                 .as_deref(),
-            Some(full_provider_output)
+            None
         );
         assert!(unmeasured_agent.session.messages().is_empty());
     }
@@ -1740,6 +1805,133 @@ mod tests {
     }
 
     #[test]
+    fn provider_managed_unmeasured_releases_staging_without_completion_and_replays() {
+        let mut agent = PlaybackTestAgent::new();
+        let session_id = agent.session_id();
+        let channel = LiveChannelId::new("continuous-observations");
+        let interaction = InteractionId::new();
+        for segment in 0..4 {
+            let response = format!("unmeasured-response-{segment}");
+            let item = format!("unmeasured-item-{segment}");
+            admit_live_assistant_playback_target(
+                &mut agent,
+                &session_id,
+                channel.clone(),
+                interaction,
+                response.clone(),
+                item.clone(),
+                0,
+            )
+            .expect("same group admits another observation segment");
+            agent
+                .append_realtime_transcript_event(
+                    RealtimeTranscriptEvent::AssistantTranscriptFinalText {
+                        response_id: response.clone(),
+                        item_id: item.clone(),
+                        content_index: 0,
+                        text: "observed, never measured as played".to_string(),
+                    },
+                )
+                .expect("stage text independently of playback");
+            let receipt = commit_live_assistant_playback_truncation(
+                &mut agent,
+                &session_id,
+                channel.clone(),
+                interaction,
+                response.clone(),
+                item.clone(),
+                0,
+                LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(
+                    "observed, never measured as played".to_string(),
+                ),
+            )
+            .expect("generated unmeasured release needs no playback-complete call");
+            assert_eq!(
+                agent.completed_events, 0,
+                "observation snapshots cannot manufacture turn-completed events"
+            );
+            assert_eq!(
+                receipt.disposition(),
+                LiveAssistantPlaybackTruncationDisposition::Unmeasured
+            );
+            assert!(receipt.continues_provider_group());
+            assert_eq!(receipt.canonical_prefix_chars(), None);
+            assert!(!receipt.biological_hearing_claimed());
+            assert!(
+                agent
+                    .staged_realtime_assistant_segment_text(&response, &item, 0)
+                    .is_none()
+            );
+            assert!(
+                agent
+                    .live_assistant_playback_target_for_channel(&channel)
+                    .is_none()
+            );
+            assert!(agent.session.messages().is_empty());
+            assert_eq!(
+                agent
+                    .session
+                    .live_unmeasured_assistant_observations()
+                    .count(),
+                segment + 1
+            );
+            let model_context = serde_json::to_string(&agent.session.messages_for_live_context())
+                .expect("observation projection");
+            assert!(
+                model_context.contains("observed, never measured as played")
+                    && model_context.contains("UNMEASURED")
+            );
+            let bytes = serde_json::to_vec(&agent.session).expect("persist unmeasured receipt");
+            agent.session = serde_json::from_slice(&bytes).expect("recover receipt");
+            let replay = commit_live_assistant_playback_truncation(
+                &mut agent,
+                &session_id,
+                channel.clone(),
+                interaction,
+                response.clone(),
+                item.clone(),
+                0,
+                LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(
+                    "observed, never measured as played".to_string(),
+                ),
+            )
+            .expect("same unmeasured evidence replays after staging was discarded");
+            assert_eq!(receipt, replay);
+            assert_eq!(
+                serde_json::to_vec(&agent.session).expect("replayed observation snapshot"),
+                bytes,
+                "durable retry must not append another transcript row or change provenance"
+            );
+            assert_eq!(
+                agent
+                    .session
+                    .live_unmeasured_assistant_observations()
+                    .count(),
+                segment + 1
+            );
+            assert!(
+                commit_live_assistant_playback_truncation(
+                    &mut agent,
+                    &session_id,
+                    channel.clone(),
+                    interaction,
+                    response,
+                    item,
+                    0,
+                    LiveAssistantPlaybackEvidence::Unmeasured,
+                )
+                .is_err(),
+                "ordinary unmeasured close is not same-group continuation authority"
+            );
+        }
+        assert!(
+            resolve_live_assistant_playback_on_channel_close(&mut agent, &session_id, channel,)
+                .expect("released channel closes with no pending target")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn snapshot_cut_commits_without_final_and_preserves_interaction_for_next_segment() {
         let mut agent = PlaybackTestAgent::new();
         let session_id = agent.session_id();
@@ -1788,6 +1980,7 @@ mod tests {
                 LiveAssistantPlaybackTruncationDisposition::CommittedSnapshot
             );
             assert_eq!(receipt.interaction_id(), interaction);
+            assert!(receipt.continues_provider_group());
             assert!(!receipt.biological_hearing_claimed());
             assert_eq!(agent.session.messages().len(), segment + 1);
             let bytes = serde_json::to_vec(&agent.session).expect("persist cut");
@@ -1966,6 +2159,7 @@ mod tests {
         let mut restored = PlaybackTestAgent {
             session: restored_session,
             transient: meerkat_core::TransientTurnContextStateHandle::new(),
+            completed_events: 0,
         };
         restored
             .append_realtime_transcript_event(

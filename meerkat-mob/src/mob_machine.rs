@@ -206,8 +206,21 @@ pub(crate) enum MobMachineCommand {
 pub(crate) enum SubmitWorkAckMode {
     /// Return once the turn has been accepted by the runtime/session ingress.
     IngressAccepted,
+    /// Require exact runtime input admission, including for an autonomous
+    /// member. Unlike inbox acceptance, this carries scoped terminal custody.
+    ExactInputAccepted,
     /// Return after the member turn completes.
     TurnCompleted,
+}
+
+/// Authorship of the work content, independent of admission acknowledgement.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum WorkContentAttribution {
+    #[default]
+    Conversational,
+    /// Host execution instructions, not a second user utterance. Lowered to
+    /// the core-owned InjectedContext transcript role before runtime admission.
+    InjectedExecutionContext,
 }
 
 /// Payload for [`MobMachineCommand::SubmitWork`].
@@ -225,6 +238,7 @@ pub(crate) struct SubmitWorkCommand {
     pub bounded_result_spec: Option<crate::runtime::BoundedResultSpec>,
     pub llm_identity_applied_tx: Option<crate::runtime::MemberTurnLlmIdentityAppliedSender>,
     pub ack_mode: SubmitWorkAckMode,
+    pub content_attribution: WorkContentAttribution,
 }
 
 #[allow(clippy::large_enum_variant)]

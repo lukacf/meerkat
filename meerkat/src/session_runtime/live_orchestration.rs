@@ -41,6 +41,8 @@ use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
 use std::num::NonZeroUsize;
 
 use crate::session_runtime::errors::LiveOpenPrecheckError;
+#[cfg(feature = "openai-live")]
+use crate::session_runtime::live_summary;
 
 /// Apply the B19 (realtime-capability) gate to a resolved LLM identity.
 /// Shared between the staged-session and live-session branches of
@@ -361,6 +363,8 @@ impl LiveSeedWindow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveSeedProjectionStatus {
     Complete,
+    /// A bounded generated factual summary, not a lossless transcript replay.
+    Summarized,
     Windowed {
         dropped_messages: usize,
         included_compaction_summary: bool,
@@ -370,7 +374,7 @@ pub enum LiveSeedProjectionStatus {
 impl LiveSeedProjectionStatus {
     #[must_use]
     pub fn has_known_gaps(self) -> bool {
-        matches!(self, Self::Windowed { .. })
+        matches!(self, Self::Windowed { .. } | Self::Summarized)
     }
 }
 
@@ -403,9 +407,16 @@ pub struct RealtimeSessionOpenProjection {
     pub open_config: RealtimeSessionOpenConfig,
     pub seed_status: LiveSeedProjectionStatus,
     owner_session_id: SessionId,
+    #[cfg(feature = "openai-live")]
+    summary: Option<super::live_summary::LiveContextSummary>,
 }
 
 impl RealtimeSessionOpenProjection {
+    #[cfg(feature = "openai-live")]
+    pub(crate) fn context_summary(&self) -> Option<&super::live_summary::LiveContextSummary> {
+        self.summary.as_ref()
+    }
+
     /// Apply a legacy per-open System overlay while retaining the durable
     /// session's canonical drift witness and projection-owner seal.
     #[doc(hidden)]
@@ -425,6 +436,9 @@ pub enum RealtimeSessionOpenProjectionError {
     Seed(#[from] LiveSeedProjectionError),
     #[error(transparent)]
     Llm(#[from] meerkat_llm_core::LlmError),
+    #[cfg(feature = "openai-live")]
+    #[error(transparent)]
+    Summary(#[from] super::live_summary::LiveContextSummaryError),
     #[error(
         "live open projection belongs to session {projection_session_id}, not requested session {requested_session_id}"
     )]
@@ -444,6 +458,8 @@ pub enum ExperimentalLiveChannelOpenError {
     Authority(#[from] crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError),
     #[error(transparent)]
     Projection(#[from] RealtimeSessionOpenProjectionError),
+    #[error(transparent)]
+    Summary(#[from] super::live_summary::LiveContextSummaryError),
     #[error(transparent)]
     Open(#[from] crate::session_runtime::errors::LiveOpenError),
     #[error("experimental live execution profile admission failed: {0}")]
@@ -517,7 +533,7 @@ impl ExperimentalLivePendingChannel {
 }
 
 fn realtime_projection_messages_full(session: &Session) -> Result<Vec<Message>, SessionError> {
-    Ok(session.messages_for_model_boundary())
+    Ok(session.messages_for_live_context())
 }
 
 /// Project replayable dialogue/tool history for realtime delivery.
@@ -1205,7 +1221,80 @@ mod orchestrator {
                 open_config,
                 seed_status: seed_projection.status,
                 owner_session_id: session_id.clone(),
+                #[cfg(feature = "openai-live")]
+                summary: None,
             })
+        }
+
+        /// Project a factual summary of the entire current model window. Media
+        /// references remain typed references: summary production does not
+        /// replay or hydrate images into the audio-only provider.
+        #[cfg(feature = "openai-live")]
+        pub(crate) async fn live_open_summary_projection_for_session(
+            &self,
+            session_id: &SessionId,
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+            policy: &super::live_summary::LiveContextSummaryPolicy,
+        ) -> Result<RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError> {
+            let lease = RealtimeOpenProjectionAdmission::global()
+                .try_acquire()
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(error.to_string()))
+                })?;
+            Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+            let session = self
+                .service
+                .export_realtime_refresh_session_snapshot(session_id)
+                .await?;
+            let identity = self.service.live_session_llm_identity(session_id).await?;
+            let tools = self.service.live_visible_tool_defs(session_id).await?;
+            let generation = session
+                .transcript_rewrite_generation()
+                .map_err(super::live_summary::LiveContextSummaryError::from)?;
+            let config = RealtimeSessionOpenConfig::for_open_from_messages(
+                turning_mode,
+                identity,
+                tools,
+                session.messages_for_live_context(),
+                session.messages(),
+            )?
+            .with_open_projection_lease(lease)
+            .with_user_content_identities(session.realtime_user_content_identities())
+            .with_user_content_tombstones(session.realtime_user_content_tombstones())
+            .with_transcript_rewrite_generation(generation);
+            let summary = policy
+                .summarize(
+                    session,
+                    &config,
+                    Arc::new(super::live_summary::ServiceLiveSummarySource(Arc::clone(
+                        self.service,
+                    ))),
+                )
+                .await?;
+            self.validate_live_summary_current(&summary).await?;
+            Ok(RealtimeSessionOpenProjection {
+                open_config: config,
+                seed_status: LiveSeedProjectionStatus::Summarized,
+                owner_session_id: session_id.clone(),
+                summary: Some(summary),
+            })
+        }
+
+        #[cfg(feature = "openai-live")]
+        async fn validate_live_summary_current(
+            &self,
+            summary: &super::live_summary::LiveContextSummary,
+        ) -> Result<(), RealtimeSessionOpenProjectionError> {
+            let current = self
+                .service
+                .export_realtime_refresh_session_snapshot(summary.session_id())
+                .await?;
+            let identity = self
+                .service
+                .live_session_llm_identity(summary.session_id())
+                .await?;
+            summary.validate_current(&current, &identity)?;
+            Ok(())
         }
 
         /// Compatibility wrapper retaining the pre-window full-history config.
@@ -1948,18 +2037,84 @@ mod orchestrator {
             requested_transport: Option<LiveOpenTransport>,
         ) -> Result<super::ExperimentalLivePendingChannel, super::ExperimentalLiveChannelOpenError>
         {
+            self.open_live_channel_with_execution_identity_seed_policy(
+                host,
+                transport_ctx,
+                authority,
+                session_id,
+                execution_identity,
+                turning_mode,
+                seed_window,
+                None,
+                requested_transport,
+            )
+            .await
+        }
+
+        #[cfg(feature = "openai-live")]
+        #[allow(clippy::too_many_arguments)]
+        pub async fn open_live_channel_with_execution_identity_and_summary(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            session_id: &SessionId,
+            execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
+            turning_mode: Option<RealtimeTurningMode>,
+            summary: &super::live_summary::LiveContextSummaryPolicy,
+            requested_transport: Option<LiveOpenTransport>,
+        ) -> Result<super::ExperimentalLivePendingChannel, super::ExperimentalLiveChannelOpenError>
+        {
+            self.open_live_channel_with_execution_identity_seed_policy(
+                host,
+                transport_ctx,
+                authority,
+                session_id,
+                execution_identity,
+                turning_mode,
+                None,
+                Some(summary),
+                requested_transport,
+            )
+            .await
+        }
+
+        #[cfg(feature = "openai-live")]
+        #[allow(clippy::too_many_arguments)]
+        async fn open_live_channel_with_execution_identity_seed_policy(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            session_id: &SessionId,
+            execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
+            turning_mode: Option<RealtimeTurningMode>,
+            seed_window: Option<LiveSeedWindow>,
+            summary: Option<&super::live_summary::LiveContextSummaryPolicy>,
+            requested_transport: Option<LiveOpenTransport>,
+        ) -> Result<super::ExperimentalLivePendingChannel, super::ExperimentalLiveChannelOpenError>
+        {
             if requested_transport != Some(LiveOpenTransport::Webrtc) {
                 return Err(super::ExperimentalLiveChannelOpenError::InvalidTransport);
             }
-            let pending = authority
+            let mut pending = authority
                 .prepare_open(session_id, execution_identity)
                 .await
                 .map_err(super::ExperimentalLiveChannelOpenError::Authority)?;
             let turning_mode = turning_mode.unwrap_or(RealtimeTurningMode::ProviderManaged);
-            let mut projection = self
-                .live_open_projection_for_session(session_id, turning_mode, seed_window)
-                .await
-                .map_err(super::ExperimentalLiveChannelOpenError::Projection)?;
+            let mut projection = match summary {
+                Some(policy) => {
+                    self.live_open_summary_projection_for_session(session_id, turning_mode, policy)
+                        .await?
+                }
+                None => {
+                    self.live_open_projection_for_session(session_id, turning_mode, seed_window)
+                        .await?
+                }
+            };
+            if let Some(summary) = projection.summary.as_ref() {
+                pending.set_context_summary(summary.clone())?;
+            }
             pending.apply_execution_identity(&mut projection);
             let canonical_seed_cursor = projection.open_config.canonical_message_cursor();
             let result = self
@@ -2258,6 +2413,16 @@ mod orchestrator {
                         projection_session_id: prepared_projection.owner_session_id,
                     },
                 ));
+            }
+            #[cfg(feature = "openai-live")]
+            if let Some(summary) = prepared_projection.summary.as_ref() {
+                summary
+                    .validate_projection(session_id, &prepared_projection.open_config)
+                    .map_err(RealtimeSessionOpenProjectionError::from)
+                    .map_err(LiveOpenError::OpenConfig)?;
+                self.validate_live_summary_current(summary)
+                    .await
+                    .map_err(LiveOpenError::OpenConfig)?;
             }
             let seed_status = prepared_projection.seed_status;
             let prepared_open_config = prepared_projection.open_config;

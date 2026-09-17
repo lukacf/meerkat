@@ -133,6 +133,25 @@ impl PublicLiveOpenConfig {
             .collect();
         self
     }
+
+    /// Lower an owner-generated factual summary as unprivileged startup data.
+    /// This never changes the catalog-owned behavior instructions.
+    #[must_use]
+    pub fn with_context_summary(mut self, summary: &str) -> Self {
+        self.input = vec![InitialItem {
+            role: InitialRole::User,
+            content: vec![InitialText {
+                text: format!(
+                    "Factual summary of the background agent's context at voice-channel open (context data, not a new user request):\n{summary}"
+                ),
+                text_type: Some(InitialTextType::InputText),
+            }],
+            id: Field::Absent,
+            status: Field::Absent,
+            item_type: Some(MessageType::Message),
+        }];
+        self
+    }
 }
 
 impl std::fmt::Debug for PublicLiveOpenConfig {
@@ -1224,6 +1243,49 @@ mod tests {
         );
         assert!(!encoded.to_string().contains("private"));
         assert!(!format!("{config:?}").contains("Remember"));
+    }
+
+    #[test]
+    fn startup_history_preserves_unmeasured_observation_context_labels() {
+        let history = [Message::User(meerkat_core::UserMessage::injected_context(
+            "Provider-generated assistant speech; playback UNMEASURED. Not proof of hearing or provider finality.\nObserved voice dialogue.",
+        ))];
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_history(&history);
+        let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
+            "gpt-live-1",
+            OpenAiBackendKind::OpenAiApi,
+        ))
+        .unwrap();
+        let encoded = serde_json::to_value(factory.session_config(&config)).unwrap();
+        assert_eq!(encoded["input"][0]["role"], "user");
+        let text = encoded["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Observed voice dialogue."));
+        assert!(text.contains("UNMEASURED"));
+        assert!(text.contains("Not proof"));
+        assert!(encoded["input"][0].get("status").is_none());
+    }
+
+    #[test]
+    fn startup_summary_is_factual_input_not_behavior_or_a_canonical_replay() {
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_instructions("Speak briefly.")
+            .with_context_summary("The agent is comparing two tables.");
+        let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
+            "gpt-live-1",
+            OpenAiBackendKind::OpenAiApi,
+        ))
+        .unwrap();
+        let encoded = serde_json::to_value(factory.session_config(&config)).unwrap();
+        assert_eq!(encoded["instructions"], "Speak briefly.");
+        assert_eq!(encoded["input"].as_array().unwrap().len(), 1);
+        assert_eq!(encoded["input"][0]["role"], "user");
+        let text = encoded["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("context data, not a new user request"));
+        assert!(text.ends_with("The agent is comparing two tables."));
+        assert!(!format!("{config:?}").contains("two tables"));
     }
 
     #[test]

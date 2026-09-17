@@ -2038,6 +2038,7 @@ struct AutonomousDispatchMaterial {
     member_ref: MemberRef,
     bridge_session_id: SessionId,
     content: ContentInput,
+    injected_context: Vec<ContentInput>,
     system_prompt: Option<String>,
     turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     handling_mode: meerkat_core::types::HandlingMode,
@@ -2589,6 +2590,7 @@ impl DetachedMemberReadinessContext {
             member_ref,
             bridge_session_id,
             content,
+            injected_context,
             system_prompt,
             turn_metadata,
             handling_mode,
@@ -2604,20 +2606,18 @@ impl DetachedMemberReadinessContext {
         let render_metadata = turn_metadata
             .as_ref()
             .and_then(|metadata| metadata.render_metadata.clone());
-        if self
-            .autonomous_steer_requires_admission_barrier(
-                agent_identity,
-                &member_ref,
-                handling_mode,
-                ack_mode,
-            )
-            .await?
+        if content_attribution == crate::mob_machine::WorkContentAttribution::HostHuman
+            || self
+                .autonomous_steer_requires_admission_barrier(
+                    agent_identity,
+                    &member_ref,
+                    handling_mode,
+                    ack_mode,
+                )
+                .await?
         {
             let mut req = meerkat_core::service::StartTurnRequest {
-                // Separate WorkSpec-injected context is rejected before the
-                // autonomous mode fork. Execution-content authorship is
-                // independently lowered to typed appends below.
-                injected_context: Vec::new(),
+                injected_context,
                 prompt: content,
                 system_prompt,
                 event_tx,
@@ -2628,6 +2628,12 @@ impl DetachedMemberReadinessContext {
                 ),
             };
             lower_work_content_attribution(&mut req, content_attribution);
+            if content_attribution == crate::mob_machine::WorkContentAttribution::HostHuman {
+                return self
+                    .provisioner
+                    .admit_host_human_turn(&member_ref, req, completion_tx)
+                    .await;
+            }
             return if let Some(completion_tx) = completion_tx {
                 self.provisioner
                     .admit_tracked_turn(&member_ref, req, completion_tx, llm_identity_applied_tx)
@@ -2989,6 +2995,7 @@ fn validate_member_turn_carriers(
     has_event_sender: bool,
     has_completion_sender: bool,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
+    content_attribution: crate::mob_machine::WorkContentAttribution,
 ) -> Result<(), MobError> {
     let peer_only = remotely_hosted
         || matches!(
@@ -2999,6 +3006,18 @@ fn validate_member_turn_carriers(
             }
         );
     let autonomous = entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
+    let host_human = content_attribution == crate::mob_machine::WorkContentAttribution::HostHuman;
+    if host_human
+        && (peer_only
+            || !matches!(&entry.member_ref, crate::event::MemberRef::Session { .. })
+            || !has_external_delivery_identity)
+    {
+        return Err(MobError::UnsupportedForMode {
+            mode: entry.runtime_mode,
+            reason: "host human input requires a local session-backed runtime member and stable delivery identity"
+                .to_string(),
+        });
+    }
     let exact_runtime_input = ack_mode == crate::mob_machine::SubmitWorkAckMode::ExactInputAccepted;
     if exact_runtime_input
         && (peer_only
@@ -3033,7 +3052,7 @@ fn validate_member_turn_carriers(
         });
     }
     if has_completion_sender
-        && ((!remotely_hosted && peer_only) || (autonomous && !exact_runtime_input))
+        && ((!remotely_hosted && peer_only) || (autonomous && !exact_runtime_input && !host_human))
     {
         return Err(MobError::UnsupportedForMode {
             mode: entry.runtime_mode,
@@ -3049,6 +3068,13 @@ fn validate_member_turn_carriers(
     let Some(metadata) = turn_metadata else {
         return Ok(());
     };
+    if host_human && metadata.transient_turn_context.is_some() {
+        return Err(MobError::UnsupportedForMode {
+            mode: entry.runtime_mode,
+            reason: "host human input does not support transient turn context on this session-agent path"
+                .to_string(),
+        });
+    }
     if metadata
         .handling_mode
         .is_some_and(|metadata_mode| metadata_mode != handling_mode)
@@ -3073,7 +3099,7 @@ fn validate_member_turn_carriers(
         unsupported_turn_metadata_fields(metadata, handling_mode, false, true, true)
     } else if peer_only {
         unsupported_turn_metadata_fields(metadata, handling_mode, false, false, true)
-    } else if autonomous && !exact_runtime_input {
+    } else if autonomous && !exact_runtime_input && !host_human {
         unsupported_turn_metadata_fields(metadata, handling_mode, true, true, false)
     } else {
         Vec::new()
@@ -3368,6 +3394,7 @@ enum SubmitWorkIngressAuthority {
         session_id: mob_dsl::SessionId,
         work_id: mob_dsl::WorkId,
         origin: mob_dsl::WorkOrigin,
+        content_attribution: mob_dsl::WorkContentAttribution,
     },
     PeerRuntime {
         agent_runtime_id: mob_dsl::AgentRuntimeId,
@@ -3375,6 +3402,7 @@ enum SubmitWorkIngressAuthority {
         generation: Option<mob_dsl::Generation>,
         work_id: mob_dsl::WorkId,
         origin: mob_dsl::WorkOrigin,
+        content_attribution: mob_dsl::WorkContentAttribution,
     },
 }
 
@@ -3397,6 +3425,7 @@ impl SubmitWorkIngressAuthority {
                     session_id,
                     work_id,
                     origin,
+                    content_attribution,
                 } => Self::Runtime {
                     agent_runtime_id: agent_runtime_id.clone(),
                     fence_token: *fence_token,
@@ -3404,6 +3433,7 @@ impl SubmitWorkIngressAuthority {
                     session_id: session_id.clone(),
                     work_id: work_id.clone(),
                     origin: *origin,
+                    content_attribution: *content_attribution,
                 },
                 mob_dsl::MobMachineEffect::RequestPeerRuntimeIngress {
                     agent_runtime_id,
@@ -3411,12 +3441,14 @@ impl SubmitWorkIngressAuthority {
                     generation,
                     work_id,
                     origin,
+                    content_attribution,
                 } => Self::PeerRuntime {
                     agent_runtime_id: agent_runtime_id.clone(),
                     fence_token: *fence_token,
                     generation: *generation,
                     work_id: work_id.clone(),
                     origin: *origin,
+                    content_attribution: *content_attribution,
                 },
                 _ => continue,
             };
@@ -3483,6 +3515,19 @@ impl SubmitWorkIngressAuthority {
     fn origin(&self) -> mob_dsl::WorkOrigin {
         match self {
             Self::Runtime { origin, .. } | Self::PeerRuntime { origin, .. } => *origin,
+        }
+    }
+
+    fn content_attribution(&self) -> mob_dsl::WorkContentAttribution {
+        match self {
+            Self::Runtime {
+                content_attribution,
+                ..
+            }
+            | Self::PeerRuntime {
+                content_attribution,
+                ..
+            } => *content_attribution,
         }
     }
 
@@ -15293,6 +15338,7 @@ impl MobActor {
                 fence_token: dsl_fence_token,
                 work_id: mob_dsl::WorkId::from_work_ref(work_ref),
                 origin: mob_dsl::WorkOrigin::from(origin),
+                content_attribution: mob_dsl::WorkContentAttribution::Conversational,
             },
         )
         .map(|_| ())
@@ -15826,6 +15872,7 @@ impl MobActor {
                     fence_token: fence,
                     work_id: mob_dsl::WorkId::from_work_ref(&payload.work_ref),
                     origin: mob_dsl::WorkOrigin::from(payload.origin),
+                    content_attribution: payload.content_attribution,
                 },
                 MobState::Running,
                 "submit_work_command_admission",
@@ -49705,6 +49752,7 @@ impl MobActor {
                 fence_token: declared_dsl_fence_token,
                 work_id: mob_dsl::WorkId::from_work_ref(&work_ref),
                 origin: mob_dsl::WorkOrigin::from(origin),
+                content_attribution,
             },
             MobState::Running,
             "submit_work_command_admission",
@@ -49749,7 +49797,9 @@ impl MobActor {
                 e
             }
             None => {
-                if matches!(origin, WorkOrigin::Internal) {
+                if matches!(origin, WorkOrigin::Internal)
+                    || content_attribution == crate::mob_machine::WorkContentAttribution::HostHuman
+                {
                     let current_state = self.state();
                     return Err(Self::resolve_submit_work_projection_missing_or_rejection(
                         &mut self.dsl_authority,
@@ -49830,6 +49880,13 @@ impl MobActor {
             handling_mode,
         );
         if handling_mode != requested_handling_mode {
+            if content_attribution == crate::mob_machine::WorkContentAttribution::HostHuman {
+                return Err(MobError::UnsupportedForMode {
+                    mode: entry.runtime_mode,
+                    reason: "host human Steer cannot be changed to Queue during unresolved kickoff"
+                        .to_string(),
+                });
+            }
             tracing::debug!(
                 agent_identity = %agent_identity,
                 runtime_id = %entry.agent_runtime_id,
@@ -49915,6 +49972,7 @@ impl MobActor {
             event_tx.is_some(),
             completion_tx.is_some(),
             ack_mode,
+            content_attribution,
         )?;
         #[cfg(feature = "runtime-adapter")]
         let local_external_identity_supported = self.runtime_adapter.is_some();
@@ -49971,7 +50029,9 @@ impl MobActor {
                     reason: "steer dispatch carries no transcript boundary for injected context",
                 });
             }
-            if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
+            if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
+                && content_attribution != crate::mob_machine::WorkContentAttribution::HostHuman
+            {
                 return Err(MobError::InjectedContextUndeliverable {
                     member_id: AgentIdentity::from(agent_identity.as_str()),
                     reason: "autonomous inbox delivery carries no user-channel work boundary",
@@ -49981,11 +50041,21 @@ impl MobActor {
         if system_prompt.is_some()
             && !remotely_hosted
             && entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
+            && content_attribution != crate::mob_machine::WorkContentAttribution::HostHuman
         {
             return Err(MobError::UnsupportedForMode {
                 mode: entry.runtime_mode,
                 reason: "autonomous inbox delivery carries no admitted turn boundary for ordinary System content"
                     .to_string(),
+            });
+        }
+        if system_prompt.is_some()
+            && content_attribution == crate::mob_machine::WorkContentAttribution::HostHuman
+            && handling_mode == meerkat_core::types::HandlingMode::Steer
+        {
+            return Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "host human System content requires a queued executor turn".to_string(),
             });
         }
         if super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity)
@@ -50010,6 +50080,7 @@ impl MobActor {
             fence_token: dsl_fence_token,
             work_id: dsl_work_id.clone(),
             origin: dsl_origin,
+            content_attribution,
         };
 
         // Completion-specific admission is a prerequisite of authoritative
@@ -50783,6 +50854,11 @@ impl MobActor {
             placed_completion_obligation,
             placed_completion_context,
         } = request;
+        if ingress_authority.content_attribution() != content_attribution {
+            return Err(MobError::Internal(
+                "generated ingress authorship does not match admitted work".to_string(),
+            ));
+        }
         tracing::debug!(
             agent_identity = %entry.agent_identity,
             runtime_id = %entry.agent_runtime_id,
@@ -50950,15 +51026,16 @@ impl MobActor {
             };
         }
 
-        match entry.runtime_mode {
-            crate::MobRuntimeMode::AutonomousHost => {
-                if ingress_authority.is_peer_runtime() {
-                    return Err(MobError::Internal(format!(
-                        "autonomous direct turn delivery requires generated RequestRuntimeIngress authority for '{}'",
-                        entry.agent_identity
-                    )));
-                }
-                let bridge_session_id = machine_member_ref
+        if entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
+            || content_attribution == crate::mob_machine::WorkContentAttribution::HostHuman
+        {
+            if ingress_authority.is_peer_runtime() {
+                return Err(MobError::Internal(format!(
+                    "autonomous direct turn delivery requires generated RequestRuntimeIngress authority for '{}'",
+                    entry.agent_identity
+                )));
+            }
+            let bridge_session_id = machine_member_ref
                     .bridge_session_id()
                     .cloned()
                     .ok_or_else(|| {
@@ -50968,54 +51045,48 @@ impl MobActor {
                         ))
                     })?;
 
-                // Runtime readiness, the steer admission-barrier probe, and
-                // the admit-or-inject decision are member-local and run in
-                // the member's admission lane (#1102). Injected context on the
-                // autonomous inbox path was rejected pre-admission in
-                // `handle_submit_work`, so the carrier is invariantly empty.
-                debug_assert!(injected_context.is_empty());
-                Ok(SubmitWorkDispatchCompletion::AwaitAutonomousDispatch {
-                    agent_identity: entry.agent_identity.clone(),
-                    readiness,
-                    material: Box::new(AutonomousDispatchMaterial {
-                        member_ref: machine_member_ref,
-                        bridge_session_id,
-                        content,
-                        system_prompt,
-                        turn_metadata,
-                        handling_mode,
-                        external_delivery_identity,
-                        interaction_id,
-                        objective_id,
-                        event_tx,
-                        completion_tx,
-                        llm_identity_applied_tx,
-                        ack_mode,
-                        content_attribution,
-                    }),
-                })
-            }
-            crate::MobRuntimeMode::TurnDriven => {
-                tracing::debug!(
-                    agent_identity = %entry.agent_identity,
-                    ingress_is_peer_runtime = ingress_authority.is_peer_runtime(),
-                    "dispatch_member_turn_after_machine_admission entering turn-driven dispatch"
-                );
-                let machine_member_ref = if ingress_authority.is_peer_runtime() {
-                    self.authorize_peer_only_member_ref_for_behavior(
-                        &machine_member_ref,
-                        "turn-driven direct turn delivery",
-                    )
-                    .await?
-                } else if placed_identity.is_some() {
-                    // §19.L5/§15.3: the machine authorized runtime ingress at
-                    // the MEMBER HOST's session; the phase-3 transport to that
-                    // session is the member peer (`DeliverMemberInput` over
-                    // comms — the provisioner's peer arm authorizes the
-                    // supervisor itself). Projecting the remote session into
-                    // the delivery ref would route the LOCAL session arms at
-                    // a session this realm does not hold.
-                    Self::project_member_ref_session_binding(&entry.member_ref, None).ok_or_else(
+            Ok(SubmitWorkDispatchCompletion::AwaitAutonomousDispatch {
+                agent_identity: entry.agent_identity.clone(),
+                readiness,
+                material: Box::new(AutonomousDispatchMaterial {
+                    member_ref: machine_member_ref,
+                    bridge_session_id,
+                    content,
+                    injected_context,
+                    system_prompt,
+                    turn_metadata,
+                    handling_mode,
+                    external_delivery_identity,
+                    interaction_id,
+                    objective_id,
+                    event_tx,
+                    completion_tx,
+                    llm_identity_applied_tx,
+                    ack_mode,
+                    content_attribution,
+                }),
+            })
+        } else {
+            tracing::debug!(
+                agent_identity = %entry.agent_identity,
+                ingress_is_peer_runtime = ingress_authority.is_peer_runtime(),
+                "dispatch_member_turn_after_machine_admission entering turn-driven dispatch"
+            );
+            let machine_member_ref = if ingress_authority.is_peer_runtime() {
+                self.authorize_peer_only_member_ref_for_behavior(
+                    &machine_member_ref,
+                    "turn-driven direct turn delivery",
+                )
+                .await?
+            } else if placed_identity.is_some() {
+                // §19.L5/§15.3: the machine authorized runtime ingress at
+                // the MEMBER HOST's session; the phase-3 transport to that
+                // session is the member peer (`DeliverMemberInput` over
+                // comms — the provisioner's peer arm authorizes the
+                // supervisor itself). Projecting the remote session into
+                // the delivery ref would route the LOCAL session arms at
+                // a session this realm does not hold.
+                Self::project_member_ref_session_binding(&entry.member_ref, None).ok_or_else(
                         || {
                             MobError::Internal(format!(
                                 "direct turn delivery requires a peer-shaped ref for placed member '{}'",
@@ -51023,86 +51094,85 @@ impl MobActor {
                             ))
                         },
                     )?
-                } else {
-                    machine_member_ref
-                };
-                tracing::debug!(
-                    agent_identity = %entry.agent_identity,
-                    member_ref = ?machine_member_ref,
-                    "dispatch_member_turn_after_machine_admission building turn request"
-                );
-                let mut req = meerkat_core::service::StartTurnRequest {
-                    // WorkSpec context uses its dedicated slot here;
-                    // the injected-context field is the single lowering
-                    // carrier here. Runtime-backed members re-lower it into
-                    // the prompt input's typed slot
-                    // (`runtime_input_from_turn_request`); direct
-                    // session-service members materialize it in the runner.
-                    injected_context,
-                    prompt: content,
-                    system_prompt,
-                    event_tx,
-                    runtime: submit_work_runtime_semantics(
-                        handling_mode,
-                        turn_metadata,
-                        external_delivery_identity.as_ref(),
-                    ),
-                };
-                lower_work_content_attribution(&mut req, content_attribution);
-                tracing::debug!(
-                    agent_identity = %entry.agent_identity,
-                    ack_mode = ?ack_mode,
-                    "dispatch_member_turn_after_machine_admission built turn request"
-                );
-                match ack_mode {
-                    crate::mob_machine::SubmitWorkAckMode::IngressAccepted
-                    | crate::mob_machine::SubmitWorkAckMode::ExactInputAccepted => {
-                        tracing::debug!(
-                            agent_identity = %entry.agent_identity,
-                            "dispatch_member_turn_after_machine_admission boxing turn admission request"
-                        );
-                        let req = Box::new(req);
-                        tracing::debug!(
-                            agent_identity = %entry.agent_identity,
-                            "dispatch_member_turn_after_machine_admission boxed turn admission request"
-                        );
-                        Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
-                            operation_id,
-                            agent_identity: entry.agent_identity.clone(),
-                            readiness,
-                            member_ref: machine_member_ref,
-                            req,
-                            completion_tx,
-                            llm_identity_applied_tx,
-                            placed_identity,
-                            placed_incarnation,
-                            placed_input_id,
-                        })
-                    }
-                    crate::mob_machine::SubmitWorkAckMode::TurnCompleted => {
-                        tracing::debug!(
-                            agent_identity = %entry.agent_identity,
-                            "dispatch_member_turn_after_machine_admission boxing turn completion request"
-                        );
-                        let req = Box::new(req);
-                        tracing::debug!(
-                            agent_identity = %entry.agent_identity,
-                            "dispatch_member_turn_after_machine_admission boxed turn completion request"
-                        );
-                        Ok(SubmitWorkDispatchCompletion::AwaitTurnCompletion {
-                            agent_identity: entry.agent_identity.clone(),
-                            readiness,
-                            member_ref: machine_member_ref,
-                            req,
-                            completion_tx,
-                            bounded_result_spec,
-                            placed_identity,
-                            placed_incarnation,
-                            placed_input_id,
-                            placed_completion_obligation,
-                            placed_completion_context,
-                        })
-                    }
+            } else {
+                machine_member_ref
+            };
+            tracing::debug!(
+                agent_identity = %entry.agent_identity,
+                member_ref = ?machine_member_ref,
+                "dispatch_member_turn_after_machine_admission building turn request"
+            );
+            let mut req = meerkat_core::service::StartTurnRequest {
+                // WorkSpec context uses its dedicated slot here;
+                // the injected-context field is the single lowering
+                // carrier here. Runtime-backed members re-lower it into
+                // the prompt input's typed slot
+                // (`runtime_input_from_turn_request`); direct
+                // session-service members materialize it in the runner.
+                injected_context,
+                prompt: content,
+                system_prompt,
+                event_tx,
+                runtime: submit_work_runtime_semantics(
+                    handling_mode,
+                    turn_metadata,
+                    external_delivery_identity.as_ref(),
+                ),
+            };
+            lower_work_content_attribution(&mut req, content_attribution);
+            tracing::debug!(
+                agent_identity = %entry.agent_identity,
+                ack_mode = ?ack_mode,
+                "dispatch_member_turn_after_machine_admission built turn request"
+            );
+            match ack_mode {
+                crate::mob_machine::SubmitWorkAckMode::IngressAccepted
+                | crate::mob_machine::SubmitWorkAckMode::ExactInputAccepted => {
+                    tracing::debug!(
+                        agent_identity = %entry.agent_identity,
+                        "dispatch_member_turn_after_machine_admission boxing turn admission request"
+                    );
+                    let req = Box::new(req);
+                    tracing::debug!(
+                        agent_identity = %entry.agent_identity,
+                        "dispatch_member_turn_after_machine_admission boxed turn admission request"
+                    );
+                    Ok(SubmitWorkDispatchCompletion::AwaitTurnAdmission {
+                        operation_id,
+                        agent_identity: entry.agent_identity.clone(),
+                        readiness,
+                        member_ref: machine_member_ref,
+                        req,
+                        completion_tx,
+                        llm_identity_applied_tx,
+                        placed_identity,
+                        placed_incarnation,
+                        placed_input_id,
+                    })
+                }
+                crate::mob_machine::SubmitWorkAckMode::TurnCompleted => {
+                    tracing::debug!(
+                        agent_identity = %entry.agent_identity,
+                        "dispatch_member_turn_after_machine_admission boxing turn completion request"
+                    );
+                    let req = Box::new(req);
+                    tracing::debug!(
+                        agent_identity = %entry.agent_identity,
+                        "dispatch_member_turn_after_machine_admission boxed turn completion request"
+                    );
+                    Ok(SubmitWorkDispatchCompletion::AwaitTurnCompletion {
+                        agent_identity: entry.agent_identity.clone(),
+                        readiness,
+                        member_ref: machine_member_ref,
+                        req,
+                        completion_tx,
+                        bounded_result_spec,
+                        placed_identity,
+                        placed_incarnation,
+                        placed_input_id,
+                        placed_completion_obligation,
+                        placed_completion_context,
+                    })
                 }
             }
         }
@@ -56474,6 +56544,7 @@ mod routed_effect_containment_tests {
                 generation: None,
                 work_id: mob_dsl::WorkId::from("work-1"),
                 origin: mob_dsl::WorkOrigin::External,
+                content_attribution: mob_dsl::WorkContentAttribution::Conversational,
             },
         ];
         for effect in &routed {

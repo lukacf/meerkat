@@ -12715,9 +12715,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .map_err(corrupt_metadata_error)
             }
             RuntimeSessionAuthority::HeadCanonical(authority) => {
-                let metadata = authority
-                    .boundary_head()
-                    .materialized_metadata()
+                let metadata = self.runtime_store
+                    .load_head_canonical_metadata(&authority)
+                    .await
                     .map_err(|error| {
                         SessionError::Agent(AgentError::InternalError(format!(
                             "failed to materialize committed HeadCanonical metadata for session {id}: {error}"

@@ -17,6 +17,7 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
                     session_id: session_id.clone(),
                     input,
                     register_completion: false,
+                    replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                     member_residency: MemberResidencyExpectation::Unfenced,
                     expected_attachment: None,
                 },

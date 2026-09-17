@@ -3832,6 +3832,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("WiringLifecycleKind", &["Wired", "Unwired"]),
             NamedTypeBinding::string("WorkId"),
             NamedTypeBinding::string_enum("WorkOrigin", &["External", "Internal", "Ingest"]),
+            NamedTypeBinding::string_enum(
+                "WorkContentAttribution",
+                &["Conversational", "InjectedExecutionContext", "HostHuman"],
+            ),
             NamedTypeBinding::type_path(
                 "PeerAddress",
                 "crate::catalog::dsl::mob_machine::PeerAddress",

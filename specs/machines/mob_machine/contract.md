@@ -302,7 +302,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `UnwireMembers`(edge: WiringEdge)
 - `WireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
 - `UnwireExternalPeer`(key: ExternalPeerKey, edge: ExternalPeerEdge)
-- `SubmitWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
+- `SubmitWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin, content_attribution: WorkContentAttribution)
 - `CancelWork`(work_id: WorkId)
 - `CancelAllWork`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `Stop`
@@ -594,8 +594,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DefinitionEpochAdvanced`(previous_epoch: u64, epoch: u64)
 - `RequestRuntimeBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId)
 - `SpawnProfileAuthorized`(agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: Bool, resolved_spec_digest: Option<String>)
-- `RequestRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId, work_id: WorkId, origin: WorkOrigin)
-- `RequestPeerRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, work_id: WorkId, origin: WorkOrigin)
+- `RequestRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId, work_id: WorkId, origin: WorkOrigin, content_attribution: WorkContentAttribution)
+- `RequestPeerRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, work_id: WorkId, origin: WorkOrigin, content_attribution: WorkContentAttribution)
 - `SubmitWorkRejected`(agent_runtime_id: AgentRuntimeId, origin: WorkOrigin, reason: SubmitWorkRejectReasonKind, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>)
 - `CancelAllWorkRejected`(agent_runtime_id: AgentRuntimeId, reason: CancelAllWorkRejectReasonKind, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>)
 - `RequestRuntimeRetire`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId)
@@ -6579,7 +6579,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SubmitWorkRunningExternal`
 - From: `Running`
-- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin)
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin, content_attribution)
 - Guards:
   - `placed_completion_origin_open`
   - `active_members_present`
@@ -6597,7 +6597,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SubmitWorkRunningExternalPeerOnly`
 - From: `Running`
-- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin)
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin, content_attribution)
 - Guards:
   - `placed_completion_origin_open`
   - `active_members_present`
@@ -6615,7 +6615,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SubmitWorkRunningInternal`
 - From: `Running`
-- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin)
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin, content_attribution)
 - Guards:
   - `placed_completion_origin_open`
   - `active_members_present`
@@ -6632,7 +6632,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SubmitWorkRunningInternalPeerOnly`
 - From: `Running`
-- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin)
+- On: `SubmitWork`(agent_identity, agent_runtime_id, fence_token, work_id, origin, content_attribution)
 - Guards:
   - `placed_completion_origin_open`
   - `active_members_present`

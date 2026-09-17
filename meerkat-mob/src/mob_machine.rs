@@ -213,15 +213,7 @@ pub(crate) enum SubmitWorkAckMode {
     TurnCompleted,
 }
 
-/// Authorship of the work content, independent of admission acknowledgement.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum WorkContentAttribution {
-    #[default]
-    Conversational,
-    /// Host execution instructions, not a second user utterance. Lowered to
-    /// the core-owned InjectedContext transcript role before runtime admission.
-    InjectedExecutionContext,
-}
+pub(crate) use crate::machines::mob_machine::WorkContentAttribution;
 
 /// Payload for [`MobMachineCommand::SubmitWork`].
 pub(crate) struct SubmitWorkCommand {

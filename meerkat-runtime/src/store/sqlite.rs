@@ -11785,6 +11785,39 @@ ORDER BY runtime_id";
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
         }
 
+        async fn load_head_canonical_metadata(
+            &self,
+            authority: &HeadCanonicalStoreAuthority,
+        ) -> Result<serde_json::Map<String, serde_json::Value>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let authority = authority.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = conn
+                    .transaction()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let runtime_id = LogicalRuntimeId::for_session(authority.session_id());
+                let current = load_head_canonical_authority(&tx, &runtime_id)?;
+                if current
+                    .as_ref()
+                    .and_then(RuntimeSessionAuthority::head_canonical)
+                    != Some(&authority)
+                {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "metadata read authority is no longer current",
+                    ));
+                }
+                meerkat_store::sqlite_store::materialize_runtime_boundary_metadata_in_txn(
+                    &tx,
+                    authority.boundary_head(),
+                )
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
         async fn load_session_resume_observation(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -15621,6 +15654,16 @@ ORDER BY runtime_id";
                 current.head_canonical().unwrap().committed_head_token(),
                 verified.head_token()
             );
+            assert_eq!(
+                RuntimeStore::load_head_canonical_metadata(
+                    &runtime_store,
+                    current.head_canonical().unwrap(),
+                )
+                .await
+                .unwrap(),
+                verified.head().materialized_metadata().unwrap(),
+                "separate-database runtime metadata must use its retained standalone owner",
+            );
         }
 
         fn file_journal_mode(path: &Path) -> String {
@@ -16459,6 +16502,73 @@ ORDER BY runtime_id";
                 let current: Session = serde_json::from_slice(current.as_ref().as_slice()).unwrap();
                 assert_eq!(current.messages(), session.messages());
             }
+        }
+
+        #[tokio::test]
+        async fn head_canonical_metadata_read_preserves_compact_authority_and_refuses_stale_identity()
+         {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("metadata.sqlite3");
+            let store = SqliteRuntimeStore::new_head_canonical(&path).unwrap();
+            let mut session = session_with_user("human intent");
+            session.set_metadata("host_metadata", serde_json::json!("exact metadata"));
+            let runtime_id = LogicalRuntimeId::for_session(session.id());
+            let mutation = PreparedHeadCanonicalMutation::prepare(&session, None).unwrap();
+            let request = PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::head_canonical_from_session(&session, mutation).unwrap(),
+            );
+            RuntimeStore::commit_prepared_session_boundary(&store, &runtime_id, request)
+                .await
+                .unwrap();
+            let authority = RuntimeStore::load_session_boundary_authority(&store, &runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let head = authority.head_canonical().unwrap();
+            assert!(head.boundary_head().metadata_projection().is_none());
+            let metadata = RuntimeStore::load_head_canonical_metadata(&store, head)
+                .await
+                .unwrap();
+            assert_eq!(
+                metadata.get("host_metadata"),
+                Some(&serde_json::json!("exact metadata"))
+            );
+            let polled = RuntimeStore::load_session_boundary_authority(&store, &runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                polled
+                    .head_canonical()
+                    .unwrap()
+                    .boundary_head()
+                    .metadata_projection()
+                    .is_none()
+            );
+
+            let wrong_revision = HeadCanonicalStoreAuthority::issued(
+                head.session_id().clone(),
+                head.store_revision() + 1,
+                head.boundary_head().clone(),
+                head.committed_head_token().to_string(),
+            )
+            .unwrap();
+            assert!(matches!(
+                RuntimeStore::load_head_canonical_metadata(&store, &wrong_revision).await,
+                Err(RuntimeStoreError::SessionPersistenceAuthorityConflict { .. }),
+            ));
+            let conn = open_runtime_connection(&path).unwrap();
+            conn.execute(
+                "DELETE FROM session_head_metadata_refs WHERE session_id = ?1 AND owner = 'runtime_boundary'",
+                [session.id().to_string()],
+            ).unwrap();
+            assert!(
+                matches!(
+                    RuntimeStore::load_head_canonical_metadata(&store, head).await,
+                    Err(RuntimeStoreError::ReadFailed(_)),
+                ),
+                "missing exact metadata owner must not fall back to the latest physical head"
+            );
         }
 
         #[tokio::test]

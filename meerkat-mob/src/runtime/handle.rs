@@ -1972,6 +1972,8 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         // are conditions of the spawn's follow-on operations, never a spawn
         // verdict.
         MobError::MemberAdmissionBacklogFull { .. }
+        | MobError::WorkInputIdempotencyConflict { .. }
+        | MobError::WorkInputCompletionUnavailable { .. }
         | MobError::ActorCommandTimedOut { .. }
         | MobError::MemberReloadRefused { .. }
         | MobError::MemberReloadTimedOut { .. } => {
@@ -11258,6 +11260,160 @@ impl MobHandle {
             content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
         });
         self.submit_work_command_bounded(cmd, deadline).await
+    }
+
+    /// Submit conversational human input explicitly designated by a trusted host.
+    ///
+    /// This Rust-only seam must not be exposed as an agent-authored flag.
+    /// Unlike generic work, an autonomous member receives a canonical User
+    /// input through runtime admission, not an ExternalEvent inbox notice.
+    /// `spec.origin` still controls addressability; it does not assign authorship.
+    ///
+    /// Local session-backed runtime members support Queue and Steer. Queue
+    /// preserves the separate System and injected-context slots. Steer rejects
+    /// those slots and unresolved kickoff mode changes. Transient turn context
+    /// is unsupported on both modes and is rejected before admission.
+    /// Remote and peer-only members reject this designation.
+    ///
+    /// The receipt proves admission, not completion. On replay it proves the
+    /// original admission, not that the work is still queued or succeeded.
+    /// `ActorCommandTimedOut`
+    /// means unknown execution fate: admission already in progress may finish.
+    /// Retry only with the SAME delivery identity. The supplied runtime/fence
+    /// is checked by MobMachine and is never silently retargeted.
+    #[cfg(feature = "runtime-adapter")]
+    pub async fn submit_host_human_input_bounded(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+        deadline: Instant,
+    ) -> Result<WorkDeliveryReceipt, MobError> {
+        let cmd = self.host_human_input_command(
+            runtime_id,
+            fence_token,
+            spec,
+            handling_mode,
+            delivery_identity,
+        )?;
+        self.submit_work_command_bounded(cmd, deadline).await
+    }
+
+    /// Completion-bearing counterpart to [`Self::submit_host_human_input_bounded`].
+    ///
+    /// Only admission is bounded by `deadline`. The returned handle observes
+    /// the existing runtime-owned exact completion; dropping it does not cancel
+    /// the input or any other member work.
+    #[cfg(feature = "runtime-adapter")]
+    pub async fn start_host_human_input_bounded(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+        deadline: Instant,
+    ) -> Result<WorkTurnHandle, MobError> {
+        let session_id = {
+            let state = self.machine_state_watch_rx.borrow();
+            Self::machine_bridge_session_id_for_identity(&runtime_id.identity, &state)
+        };
+        let mut cmd = self.host_human_input_command(
+            runtime_id,
+            fence_token,
+            spec,
+            handling_mode,
+            delivery_identity,
+        )?;
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        cmd.completion_tx = Some(completion_tx);
+        let receipt = self.submit_work_command_bounded(cmd, deadline).await?;
+        let session_id = session_id.ok_or_else(|| {
+            MobError::Internal(
+                "admitted host human input has no machine-owned session binding".to_string(),
+            )
+        })?;
+        Ok(WorkTurnHandle {
+            receipt,
+            session_id,
+            completion_rx,
+        })
+    }
+
+    /// Resolve one identity's current binding, then submit through the same
+    /// fenced host-human seam. Hosts holding a delivery lease should instead
+    /// pass its exact binding to [`Self::submit_host_human_input_bounded`].
+    #[cfg(feature = "runtime-adapter")]
+    pub async fn submit_host_human_input_for_identity_bounded(
+        &self,
+        identity: AgentIdentity,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+        deadline: Instant,
+    ) -> Result<WorkDeliveryReceipt, MobError> {
+        let remaining = deadline.checked_duration_since(Instant::now()).ok_or(
+            MobError::ActorCommandTimedOut {
+                command_kind: "SubmitWork",
+                stage: "identity_resolution",
+            },
+        )?;
+        let (runtime_id, fence_token) = tokio::time::timeout(
+            remaining,
+            self.resolve_submit_work_runtime_binding(
+                &identity,
+                spec.origin,
+                "submit_host_human_input_for_identity_bounded",
+            ),
+        )
+        .await
+        .map_err(|_| MobError::ActorCommandTimedOut {
+            command_kind: "SubmitWork",
+            stage: "identity_resolution",
+        })??;
+        self.submit_host_human_input_bounded(
+            runtime_id,
+            fence_token,
+            spec,
+            handling_mode,
+            delivery_identity,
+            deadline,
+        )
+        .await
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    fn host_human_input_command(
+        &self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
+        spec: WorkSpec,
+        handling_mode: HandlingMode,
+        delivery_identity: crate::store::MobDeliveryIdentity,
+    ) -> Result<Box<crate::mob_machine::SubmitWorkCommand>, MobError> {
+        delivery_identity.validate()?;
+        let work_ref = WorkRef::for_delivery(
+            &self.definition.id,
+            &runtime_id.identity,
+            &delivery_identity.idempotency_key,
+        );
+        Ok(Box::new(crate::mob_machine::SubmitWorkCommand {
+            runtime_id,
+            fence_token,
+            work_ref,
+            spec,
+            handling_mode,
+            external_delivery_identity: Some(delivery_identity),
+            turn_metadata: None,
+            event_tx: None,
+            completion_tx: None,
+            bounded_result_spec: None,
+            llm_identity_applied_tx: None,
+            ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+            content_attribution: crate::mob_machine::WorkContentAttribution::HostHuman,
+        }))
     }
 
     async fn submit_work_command_bounded(

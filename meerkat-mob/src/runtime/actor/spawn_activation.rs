@@ -2864,6 +2864,7 @@ impl MobActor {
                 fence_token: dsl_fence_token,
                 work_id: dsl_work_id.clone(),
                 origin: dsl_origin,
+                content_attribution: mob_dsl::WorkContentAttribution::Conversational,
             },
         ) {
             Ok(transition) => transition,

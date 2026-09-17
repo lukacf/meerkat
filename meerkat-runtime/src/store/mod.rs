@@ -7743,6 +7743,35 @@ pub trait RuntimeSessionAuthorityOps: Send + Sync {
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<RuntimeSessionAuthority>, RuntimeStoreError>;
 
+    /// Read metadata for an exact store-issued HeadCanonical boundary without
+    /// materializing transcript rows. Compact backends must hydrate the
+    /// authenticated metadata projection at their own transactional seam.
+    async fn load_head_canonical_metadata(
+        &self,
+        authority: &HeadCanonicalStoreAuthority,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, RuntimeStoreError> {
+        let runtime_id = LogicalRuntimeId::for_session(authority.session_id());
+        let current = self.load_session_boundary_authority(&runtime_id).await?;
+        if current
+            .as_ref()
+            .and_then(RuntimeSessionAuthority::head_canonical)
+            != Some(authority)
+        {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: runtime_id.to_string(),
+                detail: "metadata read authority is no longer current".to_string(),
+            });
+        }
+        authority
+            .boundary_head()
+            .materialized_metadata()
+            .map_err(|error| {
+                RuntimeStoreError::ReadFailed(format!(
+                    "exact HeadCanonical metadata unavailable: {error}"
+                ))
+            })
+    }
+
     async fn load_session_resume_observation(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -7929,6 +7958,16 @@ pub trait RuntimeStore: Send + Sync {
     ) -> Result<Option<RuntimeSessionAuthority>, RuntimeStoreError> {
         self.session_authority_ops()
             .load_session_boundary_authority(runtime_id)
+            .await
+    }
+
+    /// Materialize only the metadata named by this exact boundary authority.
+    async fn load_head_canonical_metadata(
+        &self,
+        authority: &HeadCanonicalStoreAuthority,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, RuntimeStoreError> {
+        self.session_authority_ops()
+            .load_head_canonical_metadata(authority)
             .await
     }
 

@@ -69,6 +69,7 @@ impl RunlessTerminalConvergenceError {
             | RuntimeDriverError::MaterializationRegistrationNotCurrent { .. }
             | RuntimeDriverError::StaleAuthority { .. }) => Self::StaleAuthority { context, error },
             error @ (RuntimeDriverError::ValidationFailed { .. }
+            | RuntimeDriverError::InputIdempotencyConflict { .. }
             | RuntimeDriverError::RecoveryCorruption { .. }
             | RuntimeDriverError::RecoveryRepairBlocked { .. }) => Self::Corrupt { context, error },
             error @ (RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }

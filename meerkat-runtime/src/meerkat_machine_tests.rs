@@ -11432,6 +11432,7 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
                 session_id: session_id.clone(),
                 input: first,
                 register_completion: true,
+                replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             },
@@ -11463,6 +11464,7 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
                 session_id: session_id.clone(),
                 input: duplicate,
                 register_completion: true,
+                replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             },
@@ -41597,6 +41599,7 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
                 session_id: session_id.clone(),
                 input: runtime_parity_steered_prompt("modeled attached steer"),
                 register_completion: true,
+                replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             },
@@ -41693,6 +41696,7 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
                 session_id: session_id.clone(),
                 input: runtime_parity_prompt("modeled idle queued admission"),
                 register_completion: true,
+                replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             },
@@ -41985,6 +41989,7 @@ async fn modeled_meerkat_accept_with_completion_running_steer_signal_matches_run
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_steered_prompt("modeled running steer admission"),
                 register_completion: true,
+                replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             },
@@ -42587,6 +42592,7 @@ async fn modeled_meerkat_accept_with_completion_running_peer_interrupt_signal_ma
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_peer_message("modeled running peer wake admission"),
                 register_completion: true,
+                replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             },
@@ -43042,6 +43048,7 @@ fn runtime_parity_probe_command(
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_prompt("runtime parity accept with completion"),
                 register_completion: true,
+                replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: None,
             }
@@ -43170,6 +43177,9 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         }
         RuntimeDriverError::ValidationFailed { reason } => {
             format!("validation_failed:{reason}")
+        }
+        RuntimeDriverError::InputIdempotencyConflict { existing_id } => {
+            format!("input_idempotency_conflict:{existing_id}")
         }
         RuntimeDriverError::NotFound { runtime_id } => {
             format!("not_found:{runtime_id}")

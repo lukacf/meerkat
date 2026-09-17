@@ -740,6 +740,7 @@ impl InteractionTerminalPublicationError {
             | crate::RuntimeDriverError::MaterializationRegistrationNotCurrent { .. }
             | crate::RuntimeDriverError::StaleAuthority { .. } => Self::StaleAuthority(detail),
             crate::RuntimeDriverError::ValidationFailed { .. }
+            | crate::RuntimeDriverError::InputIdempotencyConflict { .. }
             | crate::RuntimeDriverError::RecoveryCorruption { .. }
             | crate::RuntimeDriverError::RecoveryRepairBlocked { .. } => Self::Corrupt(detail),
             crate::RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }

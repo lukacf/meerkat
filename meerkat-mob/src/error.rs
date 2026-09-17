@@ -289,6 +289,20 @@ pub enum MobError {
     #[error("mob member not found: {0}")]
     MemberNotFound(AgentIdentity),
 
+    /// A stable delivery key already owns different or unprovable input
+    /// semantics. Reusing the key cannot reclassify old work as human input.
+    #[error("work delivery conflicts with input {input_id} in session {session_id}")]
+    WorkInputIdempotencyConflict {
+        session_id: meerkat_core::SessionId,
+        input_id: meerkat_core::InputId,
+    },
+
+    #[error("exact work completion is unavailable for input {input_id} in session {session_id}")]
+    WorkInputCompletionUnavailable {
+        session_id: meerkat_core::SessionId,
+        input_id: meerkat_core::InputId,
+    },
+
     /// A durable session could not serve a resume — typed so surfaces can
     /// distinguish archived-but-intact from genuinely absent instead of
     /// parsing prose out of an internal error.
@@ -1554,7 +1568,9 @@ impl MobError {
             | Self::MemberReloadRefused { .. }
             | Self::MemberReloadTimedOut { .. }
             | Self::FlowTurnTimedOut => MobFailureClass::Transport,
-            Self::Internal(_) | Self::ExternalMemberCleanupUncertain { .. } => {
+            Self::Internal(_)
+            | Self::WorkInputCompletionUnavailable { .. }
+            | Self::ExternalMemberCleanupUncertain { .. } => {
                 MobFailureClass::Internal
             }
             Self::CallbackPending { .. }
@@ -1574,6 +1590,7 @@ impl MobError {
             // `SupervisorProtocolUpgradeRequired`, not ordinary backoff.
             | Self::MemberReloadRequired { .. }
             | Self::DirectMemberAdoptionPending { .. }
+            | Self::WorkInputIdempotencyConflict { .. }
             | Self::RuntimeEffectRefused { .. } => MobFailureClass::RuntimeRejected,
             _ => MobFailureClass::MobRejected,
         }

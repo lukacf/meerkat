@@ -11802,6 +11802,32 @@ impl MeerkatMachine {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
+        self.accept_input_with_completion_for_attachment_and_replay_policy(
+            witness,
+            input,
+            crate::accept::InputReplayPolicy::KeyOnly,
+        )
+        .await
+    }
+
+    /// Exact-attachment ingress with an explicit request-only replay contract.
+    /// `ExactPrompt` refuses a non-prompt, missing key, or an old admission
+    /// whose retained witness cannot prove the same prompt and context.
+    pub async fn accept_input_with_completion_for_attachment_and_replay_policy(
+        &self,
+        witness: &RuntimeExecutorAttachmentWitness,
+        input: Input,
+        replay_policy: crate::accept::InputReplayPolicy,
+    ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
+    {
+        if replay_policy == crate::accept::InputReplayPolicy::ExactPrompt
+            && (!matches!(input, Input::Prompt(_)) || input.header().idempotency_key.is_none())
+        {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "exact prompt replay requires a prompt with a stable idempotency key"
+                    .to_string(),
+            });
+        }
         if !witness.belongs_to(self) {
             return Err(RuntimeDriverError::StaleAuthority {
                 reason: "input admission attachment witness belongs to another machine".to_string(),
@@ -11812,6 +11838,7 @@ impl MeerkatMachine {
                 session_id: witness.session_id().clone(),
                 input,
                 register_completion: true,
+                replay_policy,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: Some(witness.clone()),
             })
@@ -11856,6 +11883,7 @@ impl MeerkatMachine {
                 session_id: witness.session_id().clone(),
                 input,
                 register_completion: true,
+                replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                 member_residency,
                 expected_attachment: Some(witness.clone()),
             })
@@ -11895,6 +11923,7 @@ impl MeerkatMachine {
                 session_id: session_id.clone(),
                 input,
                 register_completion: true,
+                replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                 member_residency,
                 expected_attachment: None,
             })
@@ -12416,6 +12445,7 @@ impl MeerkatMachine {
                         session_id: session_id.clone(),
                         input,
                         register_completion: true,
+                        replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                         member_residency: MemberResidencyExpectation::Unfenced,
                         expected_attachment: None,
                     },

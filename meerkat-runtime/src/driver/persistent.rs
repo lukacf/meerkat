@@ -625,6 +625,7 @@ impl PersistentRuntimeDriver {
     async fn durable_idempotency_duplicate(
         &self,
         input: &Input,
+        replay_policy: crate::accept::InputReplayPolicy,
     ) -> Result<Option<(InputId, InputStateSeed)>, RuntimeDriverError> {
         let Some(key) = input.header().idempotency_key.as_ref() else {
             return Ok(None);
@@ -668,6 +669,11 @@ impl PersistentRuntimeDriver {
                 ),
             });
         }
+        crate::input_state::PromptReplayIdentity::verify_replay(
+            &stored.state,
+            input,
+            replay_policy,
+        )?;
         Ok(Some((stored.state.input_id, stored.seed)))
     }
 
@@ -1709,8 +1715,9 @@ impl PersistentRuntimeDriver {
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         self.require_durability_ready()?;
         self.inner.ensure_contract_session_authority()?;
-        if let Some((existing_id, existing_seed)) =
-            self.durable_idempotency_duplicate(&input).await?
+        if let Some((existing_id, existing_seed)) = self
+            .durable_idempotency_duplicate(&input, resolved.replay_policy())
+            .await?
         {
             let input_id = input.id().clone();
             self.inner
@@ -1875,8 +1882,9 @@ impl PersistentRuntimeDriver {
         resolved: &crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
         self.require_durability_ready()?;
-        if let Some((existing_id, existing_seed)) =
-            self.durable_idempotency_duplicate(&input).await?
+        if let Some((existing_id, existing_seed)) = self
+            .durable_idempotency_duplicate(&input, resolved.replay_policy())
+            .await?
         {
             return Ok(AcceptOutcome::Deduplicated {
                 input_id: input.id().clone(),
@@ -2842,6 +2850,84 @@ mod tests {
             typed_turn_appends: Vec::new(),
             turn_metadata: None,
         })
+    }
+
+    #[tokio::test]
+    async fn strict_prompt_replay_uses_durable_witness_after_terminal_payload_retirement() {
+        use crate::accept::InputReplayPolicy;
+        use crate::identifiers::IdempotencyKey;
+        use crate::input_state::InputAbandonReason;
+
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let blobs: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let runtime_id = LogicalRuntimeId::new("strict-prompt-replay");
+        let mut driver =
+            PersistentRuntimeDriver::new(runtime_id.clone(), store.clone(), blobs.clone());
+        let mut input = make_prompt("CURRENT_VALUE hazelpinedeltagold");
+        if let Input::Prompt(prompt) = &mut input {
+            prompt.header.idempotency_key = Some(IdempotencyKey::new("human-one"));
+        }
+        let input_id = input.id().clone();
+        let resolved = driver
+            .resolve_admission(&input)
+            .unwrap()
+            .with_replay_policy(InputReplayPolicy::ExactPrompt);
+        assert!(
+            driver
+                .accept_resolved_input(input.clone(), resolved)
+                .await
+                .unwrap()
+                .is_accepted()
+        );
+        assert!(
+            driver
+                .abandon_queued_input(&input_id, InputAbandonReason::Cancelled)
+                .await
+                .unwrap()
+        );
+
+        let stored = store
+            .load_input_state(&runtime_id, &input_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            stored.state.persisted_input.is_none(),
+            "terminal payload must really retire"
+        );
+        assert!(stored.state.prompt_replay_identity.is_some());
+        let encoded = serde_json::to_vec(&stored).unwrap();
+        let decoded: crate::input_state::StoredInputState =
+            serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            stored.state.prompt_replay_identity,
+            decoded.state.prompt_replay_identity
+        );
+
+        let cold = PersistentRuntimeDriver::new(runtime_id, store, blobs);
+        assert_eq!(
+            cold.durable_idempotency_duplicate(&input, InputReplayPolicy::ExactPrompt)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            input_id,
+        );
+        if let Input::Prompt(prompt) = &mut input {
+            prompt.header.id = InputId::new();
+            prompt.content = "changed human intent".into();
+        }
+        assert!(matches!(
+            cold.durable_idempotency_duplicate(&input, InputReplayPolicy::ExactPrompt).await,
+            Err(RuntimeDriverError::InputIdempotencyConflict { existing_id }) if existing_id == input_id,
+        ));
+        assert!(
+            cold.durable_idempotency_duplicate(&input, InputReplayPolicy::KeyOnly)
+                .await
+                .unwrap()
+                .is_some(),
+            "ordinary key-only replay must remain unchanged"
+        );
     }
 
     async fn recover_after_registration_authority(

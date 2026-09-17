@@ -22,7 +22,7 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     MemberHealthClass, MemberProgressEventKind, MobLifecycleJournalKind,
     PlacedCompletionLifecycleIntentKind, PolicyDecision, ResumeMemberOutcomeDisposition,
     SpawnExecPhase, StepFaultDispositionKind, StepOutputFaultKind,
-    SupervisorEscalationFailureCause, TurnTimeoutDisposition,
+    SupervisorEscalationFailureCause, TurnTimeoutDisposition, WorkContentAttribution,
 };
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
@@ -4817,6 +4817,7 @@ mod tests {
                 fence_token: FenceToken(7),
                 work_id: WorkId::from("before-retire"),
                 origin: WorkOrigin::External,
+                content_attribution: WorkContentAttribution::Conversational,
             },
         )
         .expect("live externally addressable member should accept work");
@@ -4838,6 +4839,7 @@ mod tests {
                 fence_token: FenceToken(7),
                 work_id: WorkId::from("during-retire"),
                 origin: WorkOrigin::External,
+                content_attribution: WorkContentAttribution::Conversational,
             },
         );
         assert!(
@@ -5115,6 +5117,7 @@ mod tests {
                 fence_token: FenceToken(99),
                 work_id: WorkId::from("stale"),
                 origin: WorkOrigin::Internal,
+                content_attribution: WorkContentAttribution::Conversational,
             },
         );
         assert!(

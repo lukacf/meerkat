@@ -649,6 +649,7 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         input: Input,
         register_completion: bool,
+        replay_policy: crate::accept::InputReplayPolicy,
         member_residency: MemberResidencyExpectation,
         expected_attachment: Option<RuntimeExecutorAttachmentWitness>,
     },

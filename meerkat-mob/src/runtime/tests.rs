@@ -2,6 +2,7 @@ use super::*;
 
 #[cfg(feature = "openai-live")]
 mod existing_live_delegation;
+mod host_human_input;
 use crate::definition::{
     BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowSpec,
     FlowStepSpec, LimitsSpec, MobDefinition, OrchestratorConfig, PolicyMode, RoleWiringRule,
@@ -67124,6 +67125,12 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "identity_convergence_admission_closed".to_string()
         }
         MobError::NotExternallyAddressable(_) => "not_externally_addressable".to_string(),
+        MobError::WorkInputIdempotencyConflict { .. } => {
+            "work_input_idempotency_conflict".to_string()
+        }
+        MobError::WorkInputCompletionUnavailable { .. } => {
+            "work_input_completion_unavailable".to_string()
+        }
         MobError::InvalidTransition { from, to } => {
             format!("invalid_transition:{}->{}", from.as_str(), to.as_str())
         }

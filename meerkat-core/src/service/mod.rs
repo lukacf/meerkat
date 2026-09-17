@@ -2403,6 +2403,45 @@ pub enum ForkCacheInheritance {
 pub struct DurableSessionForkTarget {
     pub member_binding: crate::MobMemberBinding,
     pub cache_identity: Option<crate::SessionLlmIdentity>,
+    /// How the durable fork owner treats a source session whose runtime is
+    /// currently running a turn.
+    pub source_admission: DurableForkSourceAdmission,
+}
+
+/// Runtime-state admission the durable fork owner applies to the source
+/// session before it observes the transcript to branch.
+///
+/// A durable fork never mutates the source. What the owner protects is the
+/// meaning of "the source's current committed end" while the child is being
+/// observed and committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DurableForkSourceAdmission {
+    /// Refuse a source that is running a turn with `SessionError::Busy`.
+    ///
+    /// This is the external-caller contract: an RPC or console fork of a
+    /// member whose turn is in flight is refused rather than observing a
+    /// transcript that the running turn is about to extend.
+    #[default]
+    Quiescent,
+    /// The request originates from the source session's own active turn, for
+    /// example the `fork_off` tool call the source's agent is executing.
+    ///
+    /// The owner takes no lock and does not refuse the active admission: the
+    /// caller's turn already holds the turn-finalization and recovery
+    /// boundaries and cannot finalize while one of its tool calls is
+    /// executing, so the committed transcript is stable for the duration of
+    /// the fork. The owner also never writes to the source from this path
+    /// (no replayed-projection persist, no audit receipt repair; a missing
+    /// receipt fails the fork closed). The branch is cut at the source's last
+    /// committed snapshot: ordinarily the previous turn end, so the running
+    /// turn's own input and in-flight output are not part of the child and
+    /// the caller carries the task in the child's first message instead. A
+    /// compaction checkpoint inside the running turn can advance that
+    /// snapshot to a later complete round boundary, in which case the child
+    /// carries those committed rows too. An explicit `message_count` keeps
+    /// its ordinary meaning and is still refused when it splits a tool-use
+    /// group.
+    CallerTurn,
 }
 
 /// Result of creating an edited transcript branch.

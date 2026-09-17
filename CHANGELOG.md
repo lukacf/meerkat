@@ -34,6 +34,16 @@ them.
 
 ### Added
 
+- Release Turbo S scenario 96 is now the mob fork live vertical
+  (`tests/integration/tests/smoke_mob_fork_off.rs`, Anthropic API key only): one
+  durable member loads a cached ledger prefix, is forked at its committed end
+  through `MobHandle::fork_member_then_run_bounded`, a fork attempted while the
+  parent turn runs must be refused with `ForkSourceUnavailableCause::Running`,
+  an explicit-prefix fork must not see the later exchange, both children are
+  retired and the parent answers again. The children's `turn_completed` usage
+  rows must report provider `cache_read_tokens` against the parent prefix,
+  which measures that a fork's first call does not re-bill the inherited
+  prefix even though `ForkCacheInheritance` reports `Unavailable`.
 - Shared existing-member live delegation with explicit `ExistingMember` policy;
   the default remains `DurableFork`. Execution context is injected without
   duplicating conversational input, and supersession cancels the exact prior
@@ -100,6 +110,18 @@ them.
   reports `unavailable` still hits the provider cache on its inherited prefix
   whenever the source entry is alive. The previous wording ("conservatively
   unavailable") read as a cost.
+- **The agent-facing `fork_off` tool can succeed.** Its source is the caller's own
+  session, which is always running a turn while the tool executes, and the
+  durable fork owner refused every running source with `SessionError::Busy`
+  (`ForkSourceUnavailable { cause: Running }`), so no live fork_off call had
+  ever completed. The persistent owner now admits a fork requested from the
+  source's own active turn (`DurableForkSourceAdmission::CallerTurn`): the
+  caller's turn already holds the turn-finalization and recovery boundaries
+  until the tool call returns, so the fork takes no lock, does not treat the
+  caller's admission as a competing writer, and cuts the branch at the
+  source's last committed transcript boundary. External forks (RPC, console,
+  `MobHandle::fork_member`) keep the `Quiescent` contract and are still refused
+  while the member runs.
 - **`MobSessionService::commit_live_delegation_final_transcript` is declared
   unconditionally.** The trait gated it on `meerkat-mob`'s `openai-live` feature
   while every implementor gated it on its own crate's feature, so any build
@@ -131,8 +153,23 @@ them.
 - Runtime-applied live transcripts preserve actual run attribution while
   rejecting conflicting requested run identities.
 
+### Removed
+
+- The deprecated experimental GPT Live client-context Turbo S scenario 96
+  (`gpt_live_client_e2e`, ChatGPT OAuth) and the
+  `MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON` release secret requirement,
+  together with the scenario-96-only diagnostic workflow. The public GPT Live
+  scenarios 97 to 99 cover that vertical with a plain OpenAI API key. Nothing in
+  the workspace activates `experimental-gpt-live` for the Bazel graph any more;
+  Cargo all-features lanes still compile it.
+
 ### Breaking
 
+- `DurableSessionForkTarget` gains `source_admission` (new enum
+  `DurableForkSourceAdmission` with `Quiescent` and `CallerTurn`).
+  `MobHandle::fork_member_then_run_bounded` takes the admission as its last
+  argument; pass `Quiescent` unless the request comes from the source member's
+  own running turn.
 - `BlockAssistantMessage::stop_reason` is now `Option<StopReason>`:
   observation-only snapshots use `None`; ordinary completed runs retain required
   stop evidence. `TranscriptSource::SpokenUnmeasured` marks observed speech

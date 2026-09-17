@@ -87,9 +87,8 @@ name = "smoke_shared_realm"
 path = "tests/smoke_shared_realm.rs"
 
 [[test]]
-name = "gpt_live_client_e2e"
-path = "tests/gpt_live_client_e2e.rs"
-required-features = ["experimental-gpt-live-e2e"]
+name = "smoke_mob_fork_off"
+path = "tests/smoke_mob_fork_off.rs"
 
 [[test]]
 name = "gpt_live_public_e2e"

@@ -34,7 +34,6 @@ rust_library(
     crate_name = "meerkat_integration_tests",
     crate_root = "src/lib.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -83,7 +82,6 @@ rust_library(
     crate_name = "meerkat_integration_tests",
     crate_root = "src/lib.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -140,7 +138,6 @@ rust_test(
     crate_name = "meerkat_integration_tests",
     crate_root = "src/lib.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -204,7 +201,6 @@ rust_binary(
     crate_name = "e2e_artifacts",
     crate_root = "src/bin/e2e_artifacts.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -263,7 +259,6 @@ rust_test(
     crate_name = "copilot_live_e2e",
     crate_root = "tests/copilot_live_e2e.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -336,7 +331,6 @@ rust_test(
     crate_name = "e2e_auth_lane",
     crate_root = "tests/e2e_auth_lane.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -412,7 +406,6 @@ rust_test(
     crate_name = "e2e_build_lane",
     crate_root = "tests/e2e_build_lane.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -486,7 +479,6 @@ rust_test(
     crate_name = "e2e_fast_lane",
     crate_root = "tests/e2e_fast_lane.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -579,7 +571,6 @@ rust_test(
     crate_name = "e2e_live_lane",
     crate_root = "tests/e2e_live_lane.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -654,7 +645,6 @@ rust_test(
     crate_name = "e2e_models_lane",
     crate_root = "tests/e2e_models_lane.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -730,7 +720,6 @@ rust_test(
     crate_name = "e2e_smoke_lane",
     crate_root = "tests/e2e_smoke_lane.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -804,7 +793,6 @@ rust_test(
     crate_name = "e2e_system_lane",
     crate_root = "tests/e2e_system_lane.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -868,87 +856,6 @@ rust_test(
 )
 
 rust_test(
-    name = "gpt_live_client_e2e_test",
-    aliases = aliases(
-        package_name = "tests/integration",
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    crate_name = "gpt_live_client_e2e",
-    crate_root = "tests/gpt_live_client_e2e.rs",
-    crate_features = [
-        "experimental-gpt-live-e2e",
-        "integration-real-tests",
-        "openai-live",
-        "openai-live-e2e",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-    ],
-    srcs = [
-        "tests/gpt_live_client_e2e.rs",
-        "tests/support/gpt_live_e2e.rs",
-        "tests/support/gpt_live_evidence.rs",
-    ],
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
-        "CARGO_BIN_NAME": "gpt_live_client_e2e",
-        "CARGO_MANIFEST_DIR": "./tests/integration",
-    },
-    tags = [
-        "e2e",
-        "integration",
-        "live",
-        "required-feature",
-    ],
-    data = [
-        ":package_runfiles",
-        "//:workspace_cargo_manifests",
-        "//:workspace_metadata",
-        "//meerkat:cargo_manifest",
-        "//meerkat:package_runfiles",
-    ],
-    env = {
-        "RUST_MIN_STACK": "8388608",
-    },
-    proc_macro_deps = all_crate_deps(
-        package_name = "tests/integration",
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
-        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
-        "//meerkat-rpc:meerkat_rpc_with_runtime_test_support",
-        "//meerkat:meerkat_auth_core_agent_factory_build",
-        "//meerkat:meerkat_client_agent_factory_build",
-        "//meerkat:meerkat_comms_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_copilot_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_live_agent_factory_build",
-        "//meerkat:meerkat_machine_kernels_agent_factory_build",
-        "//meerkat:meerkat_machine_schema_agent_factory_build",
-        "//meerkat:meerkat_models_agent_factory_build",
-        "//meerkat:meerkat_providers_agent_factory_build",
-        "//meerkat:meerkat_runtime_agent_factory_build_test_support",
-        "//meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
-        "//meerkat:meerkat_store_agent_factory_build",
-        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
-        "//meerkat:meerkat_with_runtime_test_support",
-        "//tests/integration:meerkat_integration_tests_with_runtime_test_support",
-    ] + all_crate_deps(
-        package_name = "tests/integration",
-        normal = True,
-        normal_dev = True,
-    ),
-)
-
-rust_test(
     name = "gpt_live_public_e2e_test",
     aliases = aliases(
         package_name = "tests/integration",
@@ -960,7 +867,6 @@ rust_test(
     crate_name = "gpt_live_public_e2e",
     crate_root = "tests/gpt_live_public_e2e.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1038,7 +944,6 @@ rust_test(
     crate_name = "live_mob_tools",
     crate_root = "tests/live_mob_tools.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1110,7 +1015,6 @@ rust_test(
     crate_name = "phase1_wiring",
     crate_root = "tests/phase1_wiring.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1180,7 +1084,6 @@ rust_test(
     crate_name = "phase2_mode_routing",
     crate_root = "tests/phase2_mode_routing.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1250,7 +1153,6 @@ rust_test(
     crate_name = "phase6_cleanup_sweep",
     crate_root = "tests/phase6_cleanup_sweep.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1324,7 +1226,6 @@ rust_test(
     crate_name = "provider_tool_schema_compat",
     crate_root = "tests/provider_tool_schema_compat.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1397,7 +1298,6 @@ rust_test(
     crate_name = "reserve_interaction_subscriber_fires",
     crate_root = "tests/reserve_interaction_subscriber_fires.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1467,7 +1367,6 @@ rust_test(
     crate_name = "session_tool_visibility_kernel",
     crate_root = "tests/session_tool_visibility_kernel.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1537,7 +1436,6 @@ rust_test(
     crate_name = "session_turn_admission_kernel",
     crate_root = "tests/session_turn_admission_kernel.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1596,6 +1494,77 @@ rust_test(
 )
 
 rust_test(
+    name = "smoke_mob_fork_off_test",
+    aliases = aliases(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "smoke_mob_fork_off",
+    crate_root = "tests/smoke_mob_fork_off.rs",
+    crate_features = [
+        "integration-real-tests",
+        "openai-live",
+        "openai-live-e2e",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/smoke_mob_fork_off.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_BIN_NAME": "smoke_mob_fork_off",
+        "CARGO_MANIFEST_DIR": "./tests/integration",
+    },
+    tags = [
+        "integration",
+    ],
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "tests/integration",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-mob-mcp:meerkat_mob_mcp_with_runtime_test_support",
+        "//meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//meerkat-rpc:meerkat_rpc_with_runtime_test_support",
+        "//meerkat:meerkat_auth_core_agent_factory_build",
+        "//meerkat:meerkat_client_agent_factory_build",
+        "//meerkat:meerkat_comms_agent_factory_build",
+        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//meerkat:meerkat_copilot_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
+        "//meerkat:meerkat_machine_kernels_agent_factory_build",
+        "//meerkat:meerkat_machine_schema_agent_factory_build",
+        "//meerkat:meerkat_models_agent_factory_build",
+        "//meerkat:meerkat_providers_agent_factory_build",
+        "//meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//meerkat:meerkat_store_agent_factory_build",
+        "//meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
+        "//meerkat:meerkat_with_runtime_test_support",
+        "//tests/integration:meerkat_integration_tests_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "tests/integration",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "smoke_model_fallback_test",
     aliases = aliases(
         package_name = "tests/integration",
@@ -1607,7 +1576,6 @@ rust_test(
     crate_name = "smoke_model_fallback",
     crate_root = "tests/smoke_model_fallback.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1679,7 +1647,6 @@ rust_test(
     crate_name = "smoke_shared_realm",
     crate_root = "tests/smoke_shared_realm.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1754,7 +1721,6 @@ rust_test(
     crate_name = "system_realm_inheritance",
     crate_root = "tests/system_realm_inheritance.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1825,7 +1791,6 @@ rust_test(
     crate_name = "system_shared_realm",
     crate_root = "tests/system_shared_realm.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1900,7 +1865,6 @@ rust_test(
     crate_name = "system_shared_realm",
     crate_root = "tests/system_shared_realm.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -1987,7 +1951,6 @@ rust_test(
     crate_name = "system_shared_realm",
     crate_root = "tests/system_shared_realm.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",
@@ -2074,7 +2037,6 @@ rust_test(
     crate_name = "system_shared_realm",
     crate_root = "tests/system_shared_realm.rs",
     crate_features = [
-        "experimental-gpt-live-e2e",
         "integration-real-tests",
         "openai-live",
         "openai-live-e2e",

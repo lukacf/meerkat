@@ -21803,7 +21803,14 @@ async fn fork_member_then_run_bounded_keeps_bare_fork_provisioning_only_and_resu
     child.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
     child.initial_message = Some(ContentInput::Text("exact child task".to_string()));
     let outcome = handle
-        .fork_member_then_run_bounded(&source_identity, child, None, "fork_child_result", 256)
+        .fork_member_then_run_bounded(
+            &source_identity,
+            child,
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+        )
         .await
         .expect("fork and exact child turn succeed");
 

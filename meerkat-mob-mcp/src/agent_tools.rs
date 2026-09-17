@@ -1240,6 +1240,9 @@ impl AgentMobToolSurface {
                     args.message_count,
                     args.result_label,
                     args.max_text_bytes,
+                    // fork_off runs inside the source member's own turn, so its
+                    // active admission is the caller, not a competing writer.
+                    meerkat_core::DurableForkSourceAdmission::CallerTurn,
                 )
                 .await
         })

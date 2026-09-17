@@ -12545,11 +12545,33 @@ impl MobHandle {
     /// tool-use/result group. The fork commits before resume provisioning; if
     /// provisioning fails the typed error retains the durable child session id
     /// so the branch remains recoverable rather than being silently deleted.
+    ///
+    /// The source is admitted as
+    /// [`meerkat_core::DurableForkSourceAdmission::Quiescent`]: a source whose
+    /// turn is running is refused with
+    /// `MobError::ForkSourceUnavailable { cause: Running }`. This is the
+    /// external (RPC, console, operator) fork contract.
     pub async fn fork_member(
+        &self,
+        source_identity: &AgentIdentity,
+        member: SpawnMemberSpec,
+        message_count: Option<usize>,
+    ) -> Result<ForkMemberResult, MobError> {
+        self.fork_member_with_source_admission(
+            source_identity,
+            member,
+            message_count,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+        )
+        .await
+    }
+
+    async fn fork_member_with_source_admission(
         &self,
         source_identity: &AgentIdentity,
         mut member: SpawnMemberSpec,
         message_count: Option<usize>,
+        source_admission: meerkat_core::DurableForkSourceAdmission,
     ) -> Result<ForkMemberResult, MobError> {
         self.admit_control_scope(mob_dsl::ControlScope::SendCommand)
             .await?;
@@ -12585,6 +12607,7 @@ impl MobHandle {
             // cache whenever the source's entry is still alive. See
             // `ForkCacheInheritance`.
             cache_identity: None,
+            source_admission,
         };
         let fork = self
             .session_service
@@ -12654,6 +12677,13 @@ impl MobHandle {
     /// same message exactly once through the internal exact work carrier instead.
     /// The bounded-result request is validated before any fork or member
     /// admission occurs.
+    ///
+    /// `source_admission` states where the request comes from. The agent-facing
+    /// `fork_off` tool runs inside the source member's own turn and passes
+    /// [`meerkat_core::DurableForkSourceAdmission::CallerTurn`], so the source's
+    /// active admission is not a refusal and the child branches from the last
+    /// committed transcript boundary. Every other caller passes `Quiescent`,
+    /// which refuses a running source exactly like [`Self::fork_member`].
     pub async fn fork_member_then_run_bounded(
         &self,
         source_identity: &AgentIdentity,
@@ -12661,6 +12691,7 @@ impl MobHandle {
         message_count: Option<usize>,
         result_label: impl Into<String>,
         max_text_bytes: usize,
+        source_admission: meerkat_core::DurableForkSourceAdmission,
     ) -> Result<ForkMemberBoundedRunOutcome, BoundedMemberRunError> {
         let result_spec = BoundedResultSpec::new(result_label, max_text_bytes)?;
         let task = member.initial_message.take().ok_or_else(|| {
@@ -12671,7 +12702,12 @@ impl MobHandle {
         })?;
         let objective_id = member.objective_id;
         let fork = self
-            .fork_member(source_identity, member, message_count)
+            .fork_member_with_source_admission(
+                source_identity,
+                member,
+                message_count,
+                source_admission,
+            )
             .await?;
         let mut work = WorkSpec::new(task, WorkOrigin::Internal);
         if let Some(objective_id) = objective_id {

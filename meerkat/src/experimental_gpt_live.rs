@@ -6353,6 +6353,8 @@ mod tests {
         block_close: AtomicBool,
         close_started: AtomicBool,
         acknowledge_after_fragment_flood: AtomicBool,
+        acknowledge_context: AtomicBool,
+        received_context: std::sync::Mutex<Vec<String>>,
         hold_context_ack: AtomicBool,
     }
 
@@ -6372,6 +6374,8 @@ mod tests {
                 block_close: AtomicBool::new(false),
                 close_started: AtomicBool::new(false),
                 acknowledge_after_fragment_flood: AtomicBool::new(false),
+                acknowledge_context: AtomicBool::new(false),
+                received_context: std::sync::Mutex::new(Vec::new()),
                 hold_context_ack: AtomicBool::new(false),
             }
         }
@@ -6409,6 +6413,25 @@ mod tests {
             &self,
             command: LiveSidebandCommand,
         ) -> Result<LiveSidebandCommandDelivery, ProviderWebrtcBrokerError> {
+            if self.acknowledge_context.load(Ordering::Acquire) {
+                self.push(LiveSidebandObservation::new(
+                    command.binding().clone(),
+                    LiveSidebandObservationKind::AppendAcknowledged {
+                        attempt: command.attempt(),
+                    },
+                ));
+                if let meerkat_live::LiveSidebandProviderCommand::AppendSessionContext {
+                    text,
+                    ..
+                } = command.__into_provider_command()
+                {
+                    self.received_context
+                        .lock()
+                        .expect("context commands")
+                        .push(text);
+                }
+                return Ok(LiveSidebandCommandDelivery::Accepted);
+            }
             if self.hold_context_ack.load(Ordering::Acquire) {
                 return Ok(LiveSidebandCommandDelivery::Accepted);
             }
@@ -10148,11 +10171,45 @@ mod tests {
     ))]
     #[tokio::test]
     async fn shipping_close_matrix_preserves_history_or_retains_failed_custody() {
+        run_shipping_close_matrix(None).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn shipping_context_first_typed_speech_continues_and_reopens_without_native_user() {
+        run_shipping_close_matrix(Some(false)).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn shipping_context_first_peer_speech_continues_and_reopens_without_native_user() {
+        run_shipping_close_matrix(Some(true)).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    async fn run_shipping_close_matrix(context_first_peer: Option<bool>) {
         use meerkat_contracts::{LiveOpenTransport, WireLiveTransportBootstrap};
         use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 
         #[derive(Clone, Copy)]
         enum ExitKind {
+            ContextFirstTyped,
+            ContextFirstPeer,
             ChannelAddressedCloseWithDelayedContext,
             ContextReceiptWhileControlBusy,
             ContextAppendPendingClose,
@@ -10182,6 +10239,8 @@ mod tests {
         }
 
         for (ordinal, exit) in [
+            ExitKind::ContextFirstTyped,
+            ExitKind::ContextFirstPeer,
             ExitKind::ChannelAddressedCloseWithDelayedContext,
             ExitKind::ContextReceiptWhileControlBusy,
             ExitKind::ContextAppendPendingClose,
@@ -10211,7 +10270,14 @@ mod tests {
         ]
         .into_iter()
         .enumerate()
-        {
+        .filter(|(_, exit)| match context_first_peer {
+            Some(false) => matches!(exit, ExitKind::ContextFirstTyped),
+            Some(true) => matches!(exit, ExitKind::ContextFirstPeer),
+            None => !matches!(
+                exit,
+                ExitKind::ContextFirstTyped | ExitKind::ContextFirstPeer
+            ),
+        }) {
             let persistence = crate::PersistenceBundle::new(
                 Arc::new(crate::MemoryStore::new()),
                 Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
@@ -10324,15 +10390,28 @@ mod tests {
                 });
             authority.snapshot_cuts = matches!(
                 exit,
-                ExitKind::SnapshotCut
+                ExitKind::ContextFirstTyped
+                    | ExitKind::ContextFirstPeer
+                    | ExitKind::SnapshotCut
                     | ExitKind::ProviderManaged
                     | ExitKind::PrefixCut
                     | ExitKind::UnmeasuredCut
                     | ExitKind::UnmeasuredRetry
                     | ExitKind::ProjectionRetry
             );
-            if matches!(exit, ExitKind::ProviderManaged) {
+            if matches!(
+                exit,
+                ExitKind::ProviderManaged
+                    | ExitKind::ContextFirstTyped
+                    | ExitKind::ContextFirstPeer
+            ) {
                 authority.playback_policy = PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured;
+            }
+            if matches!(
+                exit,
+                ExitKind::ContextFirstTyped | ExitKind::ContextFirstPeer
+            ) {
+                authority = authority.with_client_context();
             }
             let authority = Arc::new(authority);
             let authority_trait: Arc<dyn ExperimentalLiveOpenAuthorityProvider> = authority.clone();
@@ -10351,7 +10430,7 @@ mod tests {
             );
             let execution_identity = meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
                 version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
-                profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
+                profile_id: authority.execution_profile.profile_id().to_string(),
             };
 
             let opened = member_host
@@ -10398,7 +10477,14 @@ mod tests {
             );
             assert_eq!(
                 pending_status.execution_mode(),
-                meerkat_core::LiveExecutionMode::FunctionBridge
+                if matches!(
+                    exit,
+                    ExitKind::ContextFirstTyped | ExitKind::ContextFirstPeer
+                ) {
+                    meerkat_core::LiveExecutionMode::ClientContext
+                } else {
+                    meerkat_core::LiveExecutionMode::FunctionBridge
+                }
             );
             assert!(
                 member_host
@@ -10462,6 +10548,276 @@ mod tests {
                 .as_ref()
                 .cloned()
                 .expect("pump-exit adapter is retained");
+            if matches!(
+                exit,
+                ExitKind::ContextFirstTyped | ExitKind::ContextFirstPeer
+            ) {
+                let mut channel_id = channel_id;
+                let mut binding = binding;
+                let mut sideband = sideband;
+                let mut prior_interactions = std::collections::BTreeSet::new();
+                for incarnation in 0..2 {
+                    sideband.acknowledge_context.store(true, Ordering::Release);
+                    for update in 0..3 {
+                        let text = format!("canonical background update {update}");
+                        let mut prompt = meerkat_runtime::PromptInput::new(
+                            text.clone(),
+                            Some(
+                                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                                    execution_kind: Some(
+                                        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                                    ),
+                                    ..Default::default()
+                                },
+                            ),
+                        );
+                        let input = if matches!(exit, ExitKind::ContextFirstPeer) {
+                            prompt.header.source = meerkat_runtime::InputOrigin::Peer {
+                                peer_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+                                display_identity: Some("keeper".into()),
+                                runtime_id: None,
+                            };
+                            meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                                header: prompt.header,
+                                directed_interaction_id: None,
+                                convention: Some(meerkat_runtime::PeerConvention::Message),
+                                content: text.clone().into(),
+                                payload: None,
+                                handling_mode: Some(meerkat_core::HandlingMode::Queue),
+                                sender_taint: None,
+                                objective_id: None,
+                                system_prompts: Vec::new(),
+                                injected_context: Vec::new(),
+                            })
+                        } else {
+                            meerkat_runtime::Input::Prompt(prompt)
+                        };
+                        let (_, completion) = runtime
+                            .accept_input_with_completion(&session_id, input)
+                            .await
+                            .expect("actual typed or peer input enters shared runtime");
+                        let outcome = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            completion.expect("runtime completion waiter").try_wait(),
+                        )
+                        .await
+                        .expect("background input completes")
+                        .expect("background completion");
+                        assert!(matches!(
+                            outcome,
+                            meerkat_runtime::CompletionOutcome::Completed(_)
+                        ));
+                        let (committed, token) = service
+                            .export_live_context_committed_boundary(&session_id)
+                            .await
+                            .expect("store-sealed canonical source");
+                        runtime
+                            .enqueue_committed_parent_session_boundary(
+                                &session_id,
+                                &committed,
+                                &token,
+                            )
+                            .await
+                            .expect("enqueue actual committed typed/peer boundary");
+                        runtime
+                            .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+                            .await
+                            .expect("generated outbox delivers committed canonical context");
+                        {
+                            let delivered =
+                                sideband.received_context.lock().expect("context commands");
+                            assert!(
+                                delivered
+                                    .iter()
+                                    .any(|context| context.contains("\"text\":\"ok\"")),
+                                "real text executor answer, not peer notice, reaches provider control: {delivered:?}"
+                            );
+                            if matches!(exit, ExitKind::ContextFirstTyped) {
+                                assert!(delivered.iter().any(|context| context.contains(&text)));
+                            } else {
+                                assert!(
+                                    !delivered.iter().any(|context| context.contains(&text)),
+                                    "peer notice is not promoted to conversational user text"
+                                );
+                            }
+                        }
+                        let assistant = LiveSidebandTurnRef::__from_provider_observation(
+                            binding.channel_id(),
+                            format!("context-only-{update}"),
+                            format!("private-context-only-{update}"),
+                        )
+                        .expect("assistant-only provider evidence");
+                        sideband.push(LiveSidebandObservation::new(
+                            binding.clone(),
+                            LiveSidebandObservationKind::TurnStarted {
+                                turn: assistant.clone(),
+                                role: LiveSidebandTurnRole::Assistant,
+                            },
+                        ));
+                        sideband.push(LiveSidebandObservation::new(
+                            binding.clone(),
+                            LiveSidebandObservationKind::TurnSnapshotDelta {
+                                turn: assistant.clone(),
+                                delta: format!("Observed background answer {update}."),
+                            },
+                        ));
+                        let handle = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                        loop {
+                            if let Some(handle) = runtime.live_assistant_output_handle_for_turn(
+                                &session_id, &channel_id, assistant.adapter_key(),
+                            ) && handle.__playback_segment() >= 1 {
+                                break handle;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("fresh context-first speech must enter generated output authority without a native user turn");
+                        assert!(prior_interactions.insert(handle.interaction_id().to_string()));
+                        assert_eq!(handle.origin(),
+                        meerkat_runtime::meerkat_machine::dsl::LiveAssistantTurnOrigin::ProviderInitiated);
+                        let canonical = service
+                            .load_authoritative_session(&session_id)
+                            .await
+                            .expect("canonical read")
+                            .expect("session remains");
+                        assert_eq!(
+                            canonical
+                                .messages()
+                                .iter()
+                                .filter(|message| matches!(message, meerkat_core::Message::User(_)))
+                                .count(),
+                            if matches!(exit, ExitKind::ContextFirstTyped) {
+                                incarnation * 3 + update + 1
+                            } else {
+                                0
+                            },
+                            "native provider speech must not manufacture a user row"
+                        );
+                        assert_eq!(
+                            unmeasured_fragments(&canonical).count(),
+                            incarnation * 3 + update + 1
+                        );
+                        for message in canonical.messages() {
+                            if let meerkat_core::Message::BlockAssistant(assistant) = message
+                            && assistant.blocks.iter().any(|block| matches!(block,
+                                meerkat_core::AssistantBlock::Transcript {
+                                    source: meerkat_core::types::TranscriptSource::SpokenUnmeasured, ..
+                                }))
+                        {
+                            assert_eq!(assistant.stop_reason, None);
+                        }
+                        }
+                        sideband.push(LiveSidebandObservation::new(
+                            binding.clone(),
+                            LiveSidebandObservationKind::TurnFinished {
+                                turn: assistant,
+                                role: LiveSidebandTurnRole::Assistant,
+                                transcript: format!("Observed background answer {update}."),
+                            },
+                        ));
+                    }
+                    member_host
+                        .close_live_channel(Some(authority.as_ref()), &channel_id)
+                        .await
+                        .expect("ordinary close after context-first speech");
+                    assert!(
+                        runtime
+                            .live_active_channel_for_session(&session_id)
+                            .await
+                            .is_none()
+                    );
+                    let stale = LiveSidebandObservation::new(
+                        binding.clone(),
+                        LiveSidebandObservationKind::TurnStarted {
+                            turn: LiveSidebandTurnRef::__from_provider_observation(
+                                &channel_id,
+                                "late-closed-output".into(),
+                                "private-late-output".into(),
+                            )
+                            .expect("late typed provider output"),
+                            role: LiveSidebandTurnRole::Assistant,
+                        },
+                    );
+                    assert!(
+                        runtime
+                            .observe_live_assistant_turn_started(&stale)
+                            .await
+                            .is_err()
+                    );
+                    if incarnation == 0 {
+                        let reopened = member_host
+                            .open_with_execution_identity(
+                                authority.as_ref(),
+                                &session_id,
+                                &execution_identity,
+                                None,
+                                None,
+                                Some(LiveOpenTransport::Webrtc),
+                            )
+                            .await
+                            .expect("ordinary explicit reopen of same canonical agent");
+                        assert_ne!(reopened.channel_id(), &channel_id);
+                        channel_id = reopened.channel_id().clone();
+                        let WireLiveTransportBootstrap::Webrtc { token, .. } =
+                            &reopened.open().transport
+                        else {
+                            panic!("reopen must remain WebRTC")
+                        };
+                        let binder = authority
+                            .bound_ready_binder_for(
+                                Arc::clone(&mirror_host)
+                                    as Arc<dyn ExperimentalLiveBoundChannelActivator>,
+                                Arc::clone(&live_adapter_host),
+                                Arc::new(NoopPublicObservationPublisher),
+                            )
+                            .expect("same shared binder on explicit reopen");
+                        let ready = member_host
+                            .register_experimental_live_playback_owner(
+                                &channel_id,
+                                reopened.pending_receipt(),
+                            )
+                            .await
+                            .expect("new channel playback custody");
+                        let answer = member_host
+                            .answer_experimental_live_webrtc_offer(
+                                Arc::clone(&authority.transport)
+                                    as Arc<dyn LiveWebrtcAnswerTransport>,
+                                binder,
+                                channel_id.clone(),
+                                reopened.pending_receipt(),
+                                ready.readiness_receipt(),
+                                token.clone(),
+                                "ordinary-reopen".into(),
+                            )
+                            .await
+                            .expect("fresh provider answer");
+                        answer
+                            .delivery_custody
+                            .delivered()
+                            .await
+                            .expect("publish fresh answer");
+                        binding = authority
+                            .transport
+                            .active_binding(&session_id)
+                            .await
+                            .expect("new binding");
+                        sideband = authority
+                            .latest_sideband
+                            .lock()
+                            .await
+                            .as_ref()
+                            .cloned()
+                            .expect("new sideband");
+                        assert!(
+                            runtime
+                                .observe_live_assistant_turn_started(&stale)
+                                .await
+                                .is_err(),
+                            "old-channel evidence cannot borrow new-channel authority"
+                        );
+                    }
+                }
+                continue;
+            }
             if matches!(exit, ExitKind::ChannelAddressedCloseWithDelayedContext) {
                 assert_channel_close_fences_delayed_canonical_read(
                     &service,
@@ -11700,6 +12056,7 @@ mod tests {
             };
             let provider_loss_started = std::time::Instant::now();
             match exit {
+                ExitKind::ContextFirstTyped | ExitKind::ContextFirstPeer => unreachable!(),
                 ExitKind::ChannelAddressedCloseWithDelayedContext => unreachable!(),
                 ExitKind::ContextReceiptWhileControlBusy | ExitKind::ContextAppendPendingClose => {
                     unreachable!()

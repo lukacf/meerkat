@@ -1702,6 +1702,14 @@ pub enum LiveExecutionChannelPhase {
     Revoked,
 }
 
+/// Attribution of observed assistant output, not proof of its causal prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveAssistantTurnOrigin {
+    #[default]
+    ForegroundCorrelated,
+    ProviderInitiated,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveExecutionMode {
     #[default]
@@ -3687,6 +3695,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_provider_turn_channel_by_ref: Map<String, String>,
             live_awaiting_assistant_interaction_by_channel: Map<String, String>,
             live_assistant_interaction_by_turn: Map<String, String>,
+            live_assistant_origin_by_turn: Map<String, Enum<LiveAssistantTurnOrigin>>,
             live_assistant_turn_channel_by_ref: Map<String, String>,
             live_assistant_playback_segment_by_turn: Map<String, u64>,
             live_abandoned_interactions: Set<String>,
@@ -4267,6 +4276,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_provider_turn_channel_by_ref = EmptyMap,
             live_awaiting_assistant_interaction_by_channel = EmptyMap,
             live_assistant_interaction_by_turn = EmptyMap,
+            live_assistant_origin_by_turn = EmptyMap,
             live_assistant_playback_segment_by_turn = EmptyMap,
             live_assistant_turn_channel_by_ref = EmptyMap,
             live_abandoned_interactions = EmptySet,
@@ -5417,6 +5427,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 fence_token: FenceToken,
                 generation: Generation,
                 assistant_turn_ref: String,
+                candidate_interaction_id: String,
             },
             AdvanceLiveAssistantPlaybackSegment {
                 channel_id: String,
@@ -6928,6 +6939,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 channel_id: String,
                 interaction_id: String,
                 assistant_turn_ref: String,
+                origin: Enum<LiveAssistantTurnOrigin>,
             },
             LiveAssistantPlaybackSegmentAdvanced {
                 channel_id: String,
@@ -8411,9 +8423,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                     == self.live_provider_turn_channel_by_ref.get_cloned(provider_turn_ref))
         }
 
-        invariant live_assistant_turn_is_frozen_to_exact_foreground_interaction {
+        invariant live_assistant_turn_has_frozen_typed_attribution {
             self.live_assistant_interaction_by_turn.keys()
                 == self.live_assistant_turn_channel_by_ref.keys()
+            && self.live_assistant_interaction_by_turn.keys()
+                == self.live_assistant_origin_by_turn.keys()
             && for_all(channel_id in self.live_awaiting_assistant_interaction_by_channel.keys(),
                 self.live_interaction_channel_by_id.get_cloned(
                     self.live_awaiting_assistant_interaction_by_channel.get_cloned(channel_id).get("value"))
@@ -23871,15 +23885,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // Freeze an assistant output to the exact foreground InteractionId
-        // placed in the one-response awaiting slot by typed user TurnFinished.
-        // A new user start clears an unconsumed slot, and a later user turn
-        // cannot rewrite an already frozen assistant-turn correlation.
+        // Prefer an exact awaiting foreground interaction. Without one, typed
+        // provider output owns a fresh assistant-only interaction; neither a
+        // user turn nor causal context-consumption evidence is invented.
         transition ObserveLiveAssistantTurnStarted {
             per_phase [Idle, Attached, Running]
             on input ObserveLiveAssistantTurnStarted {
                 channel_id, runtime_id, fence_token, generation,
-                assistant_turn_ref
+                assistant_turn_ref, candidate_interaction_id
             }
             guard "identity_present" { assistant_turn_ref != "" }
             guard "runtime_binding_matches" {
@@ -23891,19 +23904,40 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
             }
-            guard "foreground_interaction_exists" {
+            guard "assistant_attribution_available" {
                 self.live_awaiting_assistant_interaction_by_channel.contains_key(channel_id)
+                || (!self.live_provider_turn_by_channel.contains_key(channel_id)
+                    && !self.live_active_interaction_by_channel.contains_key(channel_id)
+                    && candidate_interaction_id != ""
+                    && !self.live_interaction_channel_by_id.contains_key(candidate_interaction_id)
+                    && !self.live_abandoned_interactions.contains(candidate_interaction_id))
             }
             guard "assistant_turn_is_new" {
                 !self.live_assistant_interaction_by_turn.contains_key(assistant_turn_ref)
                 && !self.live_assistant_turn_channel_by_ref.contains_key(assistant_turn_ref)
             }
             update {
-                self.live_assistant_interaction_by_turn.insert(
-                    assistant_turn_ref,
-                    self.live_awaiting_assistant_interaction_by_channel
-                        .get_cloned(channel_id).get("value")
-                );
+                if self.live_awaiting_assistant_interaction_by_channel.contains_key(channel_id) {
+                    self.live_assistant_interaction_by_turn.insert(
+                        assistant_turn_ref,
+                        self.live_awaiting_assistant_interaction_by_channel
+                            .get_cloned(channel_id).get("value")
+                    );
+                    self.live_assistant_origin_by_turn.insert(
+                        assistant_turn_ref,
+                        LiveAssistantTurnOrigin::ForegroundCorrelated
+                    );
+                } else {
+                    self.live_interaction_channel_by_id.insert(candidate_interaction_id, channel_id);
+                    self.live_assistant_interaction_by_turn.insert(
+                        assistant_turn_ref,
+                        candidate_interaction_id
+                    );
+                    self.live_assistant_origin_by_turn.insert(
+                        assistant_turn_ref,
+                        LiveAssistantTurnOrigin::ProviderInitiated
+                    );
+                }
                 self.live_assistant_turn_channel_by_ref.insert(assistant_turn_ref, channel_id);
                 self.live_assistant_playback_segment_by_turn.insert(assistant_turn_ref, 0);
                 self.live_awaiting_assistant_interaction_by_channel.remove(channel_id);
@@ -23913,7 +23947,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 channel_id: channel_id,
                 interaction_id: self.live_assistant_interaction_by_turn
                     .get_cloned(assistant_turn_ref).get("value"),
-                assistant_turn_ref: assistant_turn_ref
+                assistant_turn_ref: assistant_turn_ref,
+                origin: self.live_assistant_origin_by_turn
+                    .get_copied(assistant_turn_ref).get("value")
             }
         }
 

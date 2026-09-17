@@ -2705,6 +2705,14 @@ pub enum LiveExecutionChannelPhase {
     Revoked,
 }
 
+/// Attribution of observed assistant output, not proof of its causal prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveAssistantTurnOrigin {
+    #[default]
+    ForegroundCorrelated,
+    ProviderInitiated,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveExecutionMode {
     #[default]

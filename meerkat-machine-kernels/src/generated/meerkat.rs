@@ -2777,6 +2777,56 @@ impl std::fmt::Display for InteractionStreamState {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveAssistantTurnOrigin {
+    #[default]
+    #[serde(rename = "ForegroundCorrelated")]
+    ForegroundCorrelated,
+    #[serde(rename = "ProviderInitiated")]
+    ProviderInitiated,
+}
+impl LiveAssistantTurnOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ForegroundCorrelated => "ForegroundCorrelated",
+            Self::ProviderInitiated => "ProviderInitiated",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveAssistantTurnOrigin {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ForegroundCorrelated" => Ok(Self::ForegroundCorrelated),
+            "ProviderInitiated" => Ok(Self::ProviderInitiated),
+            other => Err(format!("invalid LiveAssistantTurnOrigin value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveAssistantTurnOrigin {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveAssistantTurnOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveBridgeCancellationReason {
     #[default]
     #[serde(rename = "BargeIn")]
@@ -12844,6 +12894,7 @@ pub struct State {
     pub live_provider_turn_channel_by_ref: std::collections::BTreeMap<String, String>,
     pub live_awaiting_assistant_interaction_by_channel: std::collections::BTreeMap<String, String>,
     pub live_assistant_interaction_by_turn: std::collections::BTreeMap<String, String>,
+    pub live_assistant_origin_by_turn: std::collections::BTreeMap<String, LiveAssistantTurnOrigin>,
     pub live_assistant_turn_channel_by_ref: std::collections::BTreeMap<String, String>,
     pub live_assistant_playback_segment_by_turn: std::collections::BTreeMap<String, u64>,
     pub live_abandoned_interactions: std::collections::BTreeSet<String>,
@@ -14424,6 +14475,7 @@ pub mod inputs {
         pub fence_token: FenceToken,
         pub generation: Generation,
         pub assistant_turn_ref: String,
+        pub candidate_interaction_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdvanceLiveAssistantPlaybackSegment {
@@ -17615,6 +17667,7 @@ pub mod effects {
         pub channel_id: String,
         pub interaction_id: String,
         pub assistant_turn_ref: String,
+        pub origin: LiveAssistantTurnOrigin,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveAssistantPlaybackSegmentAdvanced {
@@ -21774,6 +21827,7 @@ pub fn initial_state() -> State {
         live_provider_turn_channel_by_ref: Default::default(),
         live_awaiting_assistant_interaction_by_channel: Default::default(),
         live_assistant_interaction_by_turn: Default::default(),
+        live_assistant_origin_by_turn: Default::default(),
         live_assistant_turn_channel_by_ref: Default::default(),
         live_assistant_playback_segment_by_turn: Default::default(),
         live_abandoned_interactions: Default::default(),

@@ -4232,6 +4232,13 @@ mod tests {
                                 variant: enum_variant_id("Internal"),
                             },
                         ),
+                        (
+                            field_id("content_attribution"),
+                            KernelValue::NamedVariant {
+                                enum_name: enum_type_id("WorkContentAttribution"),
+                                variant: enum_variant_id("Conversational"),
+                            },
+                        ),
                     ]),
                 },
             )

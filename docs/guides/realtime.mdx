@@ -589,6 +589,14 @@ frozen to the transcript prefix observed before the delegation offset; the
 resulting delegated transcript is a Meerkat-derived fact. Transcript
 boundaries never prove playback completed.
 
+Assistant output may begin on a fresh channel from startup context or later
+canonical updates, without microphone input. Generated runtime authority keeps
+an existing foreground correlation when present; otherwise it admits a fresh
+assistant-only interaction with `ProviderInitiated` attribution. That attribution
+does not claim which context append caused the speech or prove provider
+consumption. It never creates a user transcript row. Later user input cannot
+rewrite an already admitted assistant output's interaction or playback handle.
+
 Missing transcript events do not establish silence or completion. In particular,
 Meerkat does not finish assistant output after a quiet interval or after a
 delegation-result acknowledgement: a delayed readout retains its output identity.

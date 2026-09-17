@@ -6878,6 +6878,7 @@ impl LiveProviderTurnStartedAuthority {
 pub struct LiveAssistantOutputHandle {
     binding: crate::live_execution::LiveDelegationRuntimeBinding,
     interaction_id: meerkat_core::InteractionId,
+    origin: dsl::LiveAssistantTurnOrigin,
     assistant_turn_ref: String,
     playback_segment: u64,
     output_id: String,
@@ -6892,6 +6893,7 @@ impl std::fmt::Debug for LiveAssistantOutputHandle {
         f.debug_struct("LiveAssistantOutputHandle")
             .field("binding", &self.binding)
             .field("interaction_id", &self.interaction_id)
+            .field("origin", &self.origin)
             .field("assistant_turn_ref", &"<opaque>")
             .field("output_id", &self.output_id)
             .field(
@@ -6938,6 +6940,13 @@ impl LiveAssistantOutputHandle {
     #[must_use]
     pub fn output_id(&self) -> &str {
         &self.output_id
+    }
+
+    /// Machine-owned attribution; provider-initiated output does not prove
+    /// consumption of any particular context append.
+    #[must_use]
+    pub const fn origin(&self) -> dsl::LiveAssistantTurnOrigin {
+        self.origin
     }
 
     #[doc(hidden)]

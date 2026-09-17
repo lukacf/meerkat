@@ -4922,6 +4922,7 @@ mod tests {
                 fence_token,
                 generation,
                 assistant_turn_ref: first_assistant_turn.clone(),
+                candidate_interaction_id: "unused-assistant-candidate".to_string(),
             },
             // This is the full-duplex ordering under review: the next user
             // turn starts before assistant turn 1 reaches playback terminal.

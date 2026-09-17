@@ -1223,6 +1223,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Pending", "Active", "Revoked"],
             ),
             NamedTypeBinding::string_enum(
+                "LiveAssistantTurnOrigin",
+                &["ForegroundCorrelated", "ProviderInitiated"],
+            ),
+            NamedTypeBinding::string_enum(
                 "LiveExecutionMode",
                 &["FunctionBridge", "ClientContext"],
             ),

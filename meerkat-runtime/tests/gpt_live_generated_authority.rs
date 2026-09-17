@@ -455,6 +455,7 @@ fn assistant_turn_freezes_completed_user_interaction_before_next_user_turn() {
                 fence_token: fence(),
                 generation: generation(),
                 assistant_turn_ref: assistant_turn_one.to_string(),
+                candidate_interaction_id: "unused-candidate".to_string(),
             },
         )
         .is_err(),
@@ -480,23 +481,36 @@ fn assistant_turn_freezes_completed_user_interaction_before_next_user_turn() {
             fence_token: fence(),
             generation: generation(),
             assistant_turn_ref: assistant_turn_one.to_string(),
+            candidate_interaction_id: "unused-candidate".to_string(),
         },
     )
     .expect("assistant start consumes the exact awaiting response slot");
 
-    assert!(
-        apply(
-            &mut authority,
-            mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
-                channel_id: CHANNEL.to_string(),
-                runtime_id: runtime_id(),
-                fence_token: fence(),
-                generation: generation(),
-                assistant_turn_ref: "unsolicited-assistant-turn".to_string(),
-            },
-        )
-        .is_err(),
-        "a prior user interaction does not authorize unsolicited later assistant output"
+    let context_only = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            assistant_turn_ref: "unsolicited-assistant-turn".to_string(),
+            candidate_interaction_id: "assistant-only-interaction".to_string(),
+        },
+    )
+    .expect("later output receives its own provider-initiated attribution");
+    assert!(context_only.effects().iter().any(|effect| matches!(effect,
+        mm::MeerkatMachineEffect::LiveAssistantTurnStarted {
+            interaction_id,
+            origin: mm::LiveAssistantTurnOrigin::ProviderInitiated,
+            ..
+        } if interaction_id == "assistant-only-interaction"
+    )));
+    assert_eq!(
+        authority
+            .state()
+            .live_assistant_origin_by_turn
+            .get(assistant_turn_one),
+        Some(&mm::LiveAssistantTurnOrigin::ForegroundCorrelated),
     );
 
     apply(
@@ -1037,6 +1051,7 @@ fn newer_user_turn_suppresses_old_result_while_worker_is_still_running() {
                 fence_token: fence(),
                 generation: generation(),
                 assistant_turn_ref: "stale-worker-result-assistant".to_string(),
+                candidate_interaction_id: "assistant-only-interaction".to_string(),
             },
         )
         .is_err(),
@@ -1166,6 +1181,7 @@ fn newer_user_turn_suppresses_late_old_result_speech_without_cancelling_completi
                 fence_token: fence(),
                 generation: generation(),
                 assistant_turn_ref: "stale-old-result-assistant".to_string(),
+                candidate_interaction_id: "assistant-only-interaction".to_string(),
             },
         )
         .is_err(),
@@ -1199,6 +1215,7 @@ fn delivered_deferred_result_authorizes_one_exact_resumed_assistant_turn() {
             fence_token: fence(),
             generation: generation(),
             assistant_turn_ref: "assistant-acknowledgement".to_string(),
+            candidate_interaction_id: "unused-candidate".to_string(),
         },
     )
     .expect("assistant acknowledgement consumes the user-turn response slot");
@@ -1255,6 +1272,7 @@ fn delivered_deferred_result_authorizes_one_exact_resumed_assistant_turn() {
             fence_token: fence(),
             generation: generation(),
             assistant_turn_ref: "assistant-result-response".to_string(),
+            candidate_interaction_id: "unused-candidate".to_string(),
         },
     )
     .expect("resumed speech is frozen to the exact delegated interaction");
@@ -1266,19 +1284,149 @@ fn delivered_deferred_result_authorizes_one_exact_resumed_assistant_turn() {
             .map(String::as_str),
         Some(INTERACTION)
     );
+    let subsequent = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            assistant_turn_ref: "unsolicited-after-result".to_string(),
+            candidate_interaction_id: "assistant-after-result-interaction".to_string(),
+        },
+    )
+    .expect("subsequent provider output cannot borrow the prior result interaction");
+    assert!(subsequent.effects().iter().any(|effect| matches!(effect,
+        mm::MeerkatMachineEffect::LiveAssistantTurnStarted {
+            interaction_id,
+            origin: mm::LiveAssistantTurnOrigin::ProviderInitiated,
+            ..
+        } if interaction_id == "assistant-after-result-interaction"
+    )));
+}
+
+#[test]
+fn assistant_only_attribution_is_fresh_exact_and_drains_until_physical_close() {
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    let start = |channel: &str, turn: &str, candidate: &str, fence_token, generation| {
+        mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
+            channel_id: channel.to_string(),
+            runtime_id: runtime_id(),
+            fence_token,
+            generation,
+            assistant_turn_ref: turn.to_string(),
+            candidate_interaction_id: candidate.to_string(),
+        }
+    };
+    for (turn, candidate) in [
+        ("first-context-output", "first-output-interaction"),
+        ("later-context-output", "later-output-interaction"),
+    ] {
+        let result = apply(
+            &mut authority,
+            start(CHANNEL, turn, candidate, fence(), generation()),
+        )
+        .expect("typed assistant output on fresh bound channel needs no native user input");
+        assert!(result.effects().iter().any(|effect| matches!(effect,
+            mm::MeerkatMachineEffect::LiveAssistantTurnStarted {
+                interaction_id,
+                origin: mm::LiveAssistantTurnOrigin::ProviderInitiated,
+                ..
+            } if interaction_id == candidate
+        )));
+    }
+    assert!(
+        authority
+            .state()
+            .live_provider_interaction_by_turn
+            .is_empty()
+    );
+    assert!(
+        authority
+            .state()
+            .live_active_interaction_by_channel
+            .is_empty()
+    );
+    assert!(
+        authority
+            .state()
+            .live_awaiting_assistant_interaction_by_channel
+            .is_empty()
+    );
+    for input in [
+        start(
+            "foreign-channel",
+            "fresh",
+            "fresh-id",
+            fence(),
+            generation(),
+        ),
+        start(
+            CHANNEL,
+            "fresh",
+            "fresh-id",
+            mm::FenceToken(42),
+            generation(),
+        ),
+        start(CHANNEL, "fresh", "fresh-id", fence(), mm::Generation(8)),
+        start(
+            CHANNEL,
+            "first-context-output",
+            "fresh-id",
+            fence(),
+            generation(),
+        ),
+        start(
+            CHANNEL,
+            "fresh",
+            "first-output-interaction",
+            fence(),
+            generation(),
+        ),
+        start(CHANNEL, "", "fresh-id", fence(), generation()),
+        start(CHANNEL, "fresh", "", fence(), generation()),
+    ] {
+        assert!(
+            apply(&mut authority, input).is_err(),
+            "invalid evidence is fail-closed"
+        );
+    }
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RevokeLiveChannelCloseCustody {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+            pending_receipt: Some("pending-receipt".to_string()),
+            activation_receipt: None,
+        },
+    )
+    .expect("explicit close revokes provider-affecting custody first");
+    apply(
+        &mut authority,
+        start(
+            CHANNEL,
+            "buffered-output",
+            "buffered-id",
+            fence(),
+            generation(),
+        ),
+    )
+    .expect("retained exact binding still drains already accepted provider observations");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AbandonLiveOpenAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+        },
+    )
+    .expect("physical close removes exact binding");
     assert!(
         apply(
             &mut authority,
-            mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
-                channel_id: CHANNEL.to_string(),
-                runtime_id: runtime_id(),
-                fence_token: fence(),
-                generation: generation(),
-                assistant_turn_ref: "unsolicited-after-result".to_string(),
-            },
+            start(CHANNEL, "closed-output", "closed-id", fence(), generation())
         )
-        .is_err(),
-        "one delivered result cannot authorize an unbounded stream of assistant turns"
+        .is_err()
     );
 }
 

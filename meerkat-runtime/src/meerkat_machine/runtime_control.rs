@@ -2354,6 +2354,7 @@ mod live_context_mirror_tests {
         let handle = LiveAssistantOutputHandle {
             binding: binding.clone(),
             interaction_id: meerkat_core::InteractionId::new(),
+            origin: crate::meerkat_machine::dsl::LiveAssistantTurnOrigin::ForegroundCorrelated,
             assistant_turn_ref: assistant_turn_ref.to_string(),
             playback_segment: 0,
             output_id: output_id.to_string(),
@@ -6192,8 +6193,8 @@ impl MeerkatMachine {
     }
 
     /// Freeze one typed provider Assistant TurnStarted observation to the
-    /// foreground InteractionId that was current at that exact boundary.
-    /// Later user turns cannot rewrite the returned opaque output handle.
+    /// generated foreground correlation or a fresh provider-initiated
+    /// interaction. Later user turns cannot rewrite the opaque output handle.
     #[cfg(feature = "live")]
     pub async fn observe_live_assistant_turn_started(
         &self,
@@ -6287,26 +6288,32 @@ impl MeerkatMachine {
                     fence_token: *fence,
                     generation: *generation,
                     assistant_turn_ref: assistant_turn_ref.clone(),
+                    candidate_interaction_id: meerkat_core::InteractionId::new().to_string(),
                 },
                 "ObserveLiveAssistantTurnStarted",
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-        let interaction = effects.as_slice().iter().find_map(|effect| {
+        let attribution = effects.as_slice().iter().find_map(|effect| {
             let crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveAssistantTurnStarted {
                 channel_id: effect_channel,
                 interaction_id,
                 assistant_turn_ref: effect_turn,
+                origin,
             } = effect
             else {
                 return None;
             };
             (effect_channel == &channel && effect_turn == &assistant_turn_ref)
-                .then_some(interaction_id.as_str())
+                .then_some((interaction_id.as_str(), *origin))
         });
-        let interaction_id = interaction
-            .and_then(|value| value.parse::<uuid::Uuid>().ok())
-            .map(meerkat_core::InteractionId)
+        let (interaction_id, origin) = attribution
+            .and_then(|(value, origin)| {
+                value
+                    .parse::<uuid::Uuid>()
+                    .ok()
+                    .map(|id| (meerkat_core::InteractionId(id), origin))
+            })
             .ok_or_else(|| {
                 RuntimeDriverError::Internal(
                     "generated assistant turn start emitted no matching interaction authority"
@@ -6316,6 +6323,7 @@ impl MeerkatMachine {
         let handle = LiveAssistantOutputHandle {
             binding: runtime_binding,
             interaction_id,
+            origin,
             assistant_turn_ref,
             playback_segment: 0,
             output_id: uuid::Uuid::new_v4().to_string(),
@@ -6450,6 +6458,7 @@ impl MeerkatMachine {
         let next = LiveAssistantOutputHandle {
             binding: previous.binding().clone(),
             interaction_id: previous.interaction_id(),
+            origin: previous.origin(),
             assistant_turn_ref: previous.__assistant_turn_ref().to_string(),
             playback_segment: segment,
             output_id: uuid::Uuid::new_v4().to_string(),

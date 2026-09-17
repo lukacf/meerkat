@@ -7929,7 +7929,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `live_provider_turn_occupancy_has_exact_interaction`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `live_assistant_turn_is_frozen_to_exact_foreground_interaction`
+- `live_assistant_turn_has_frozen_typed_attribution`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_pending_delegation_is_serialized_and_complete`

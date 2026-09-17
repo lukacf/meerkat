@@ -215,6 +215,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_provider_turn_channel_by_ref`: `Map<String, String>`
 - `live_awaiting_assistant_interaction_by_channel`: `Map<String, String>`
 - `live_assistant_interaction_by_turn`: `Map<String, String>`
+- `live_assistant_origin_by_turn`: `Map<String, LiveAssistantTurnOrigin>`
 - `live_assistant_turn_channel_by_ref`: `Map<String, String>`
 - `live_assistant_playback_segment_by_turn`: `Map<String, u64>`
 - `live_abandoned_interactions`: `Set<String>`
@@ -661,7 +662,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RevokeLivePlaybackOwner`(session_id: String, channel_id: String, owner_id: String, readiness_id: String)
 - `RevokeLiveChannelCloseCustody`(session_id: String, channel_id: String, pending_receipt: Option<String>, activation_receipt: Option<String>)
 - `ObserveLiveProviderTurnStarted`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, provider_turn_ref: String)
-- `ObserveLiveAssistantTurnStarted`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, assistant_turn_ref: String)
+- `ObserveLiveAssistantTurnStarted`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, assistant_turn_ref: String, candidate_interaction_id: String)
 - `AdvanceLiveAssistantPlaybackSegment`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, assistant_turn_ref: String, interaction_id: String, previous_segment: u64)
 - `AdmitLiveInteraction`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String)
 - `AdmitLiveDelegation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, delegation_identity_present: Bool, actionable_input_present: Bool, exact_join: Bool)
@@ -963,7 +964,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveInteractionSupersededWithoutCancellation`(channel_id: String, interaction_id: String, operation_id: OperationId, superseding_interaction_id: String)
 - `LiveInteractionCompleted`(channel_id: String, interaction_id: String)
 - `LiveProviderTurnStarted`(channel_id: String, interaction_id: String, provider_turn_ref: String)
-- `LiveAssistantTurnStarted`(channel_id: String, interaction_id: String, assistant_turn_ref: String)
+- `LiveAssistantTurnStarted`(channel_id: String, interaction_id: String, assistant_turn_ref: String, origin: LiveAssistantTurnOrigin)
 - `LiveAssistantPlaybackSegmentAdvanced`(channel_id: String, interaction_id: String, assistant_turn_ref: String, segment: u64)
 - `LiveProviderTurnFinished`(channel_id: String, interaction_id: String, provider_turn_ref: String)
 - `LiveConsequentialEffectAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, authority_id: String)
@@ -1301,7 +1302,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_experimental_execution_custody_is_exact`
 - `live_active_interaction_is_exactly_channel_bound`
 - `live_provider_turn_occupancy_has_exact_interaction`
-- `live_assistant_turn_is_frozen_to_exact_foreground_interaction`
+- `live_assistant_turn_has_frozen_typed_attribution`
 - `live_pending_delegation_is_serialized_and_complete`
 - `live_delegation_operation_has_exact_join_identity`
 - `live_delegation_worker_binding_is_exact`
@@ -14366,39 +14367,39 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ObserveLiveAssistantTurnStartedIdle`
 - From: `Idle`
-- On: `ObserveLiveAssistantTurnStarted`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref)
+- On: `ObserveLiveAssistantTurnStarted`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref, candidate_interaction_id)
 - Guards:
   - `identity_present`
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
-  - `foreground_interaction_exists`
+  - `assistant_attribution_available`
   - `assistant_turn_is_new`
 - Emits: `LiveAssistantTurnStarted`
 - To: `Idle`
 
 ### `ObserveLiveAssistantTurnStartedAttached`
 - From: `Attached`
-- On: `ObserveLiveAssistantTurnStarted`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref)
+- On: `ObserveLiveAssistantTurnStarted`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref, candidate_interaction_id)
 - Guards:
   - `identity_present`
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
-  - `foreground_interaction_exists`
+  - `assistant_attribution_available`
   - `assistant_turn_is_new`
 - Emits: `LiveAssistantTurnStarted`
 - To: `Attached`
 
 ### `ObserveLiveAssistantTurnStartedRunning`
 - From: `Running`
-- On: `ObserveLiveAssistantTurnStarted`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref)
+- On: `ObserveLiveAssistantTurnStarted`(channel_id, runtime_id, fence_token, generation, assistant_turn_ref, candidate_interaction_id)
 - Guards:
   - `identity_present`
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
-  - `foreground_interaction_exists`
+  - `assistant_attribution_available`
   - `assistant_turn_is_new`
 - Emits: `LiveAssistantTurnStarted`
 - To: `Running`

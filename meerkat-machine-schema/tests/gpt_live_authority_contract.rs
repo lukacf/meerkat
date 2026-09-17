@@ -232,7 +232,7 @@ fn meerkat_machine_owns_live_fence_delegation_and_delivery_authority() {
     for required in [
         "live_execution_binding_is_complete_and_channel_scoped",
         "live_active_interaction_is_exactly_channel_bound",
-        "live_assistant_turn_is_frozen_to_exact_foreground_interaction",
+        "live_assistant_turn_has_frozen_typed_attribution",
         "live_pending_delegation_is_serialized_and_complete",
         "live_delegation_operation_has_exact_join_identity",
         "live_delegation_worker_binding_is_exact",

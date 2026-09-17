@@ -34,6 +34,16 @@ them.
 
 ### Added
 
+- Release Turbo S scenario 96 is now the mob fork live vertical
+  (`tests/integration/tests/smoke_mob_fork_off.rs`, Anthropic API key only): one
+  durable member loads a cached ledger prefix, is forked at its committed end
+  through `MobHandle::fork_member_then_run_bounded`, a fork attempted while the
+  parent turn runs must be refused with `ForkSourceUnavailableCause::Running`,
+  an explicit-prefix fork must not see the later exchange, both children are
+  retired and the parent answers again. The children's `turn_completed` usage
+  rows must report provider `cache_read_tokens` against the parent prefix,
+  which measures that a fork's first call does not re-bill the inherited
+  prefix even though `ForkCacheInheritance` reports `Unavailable`.
 - Shared existing-member live delegation with explicit `ExistingMember` policy;
   the default remains `DurableFork`. Execution context is injected without
   duplicating conversational input, and supersession cancels the exact prior
@@ -130,6 +140,16 @@ them.
   without creating a second channel or invoking the summary producer.
 - Runtime-applied live transcripts preserve actual run attribution while
   rejecting conflicting requested run identities.
+
+### Removed
+
+- The deprecated experimental GPT Live client-context Turbo S scenario 96
+  (`gpt_live_client_e2e`, ChatGPT OAuth) and the
+  `MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON` release secret requirement,
+  together with the scenario-96-only diagnostic workflow. The public GPT Live
+  scenarios 97 to 99 cover that vertical with a plain OpenAI API key. Nothing in
+  the workspace activates `experimental-gpt-live` for the Bazel graph any more;
+  Cargo all-features lanes still compile it.
 
 ### Breaking
 

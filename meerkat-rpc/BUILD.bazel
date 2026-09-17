@@ -35,7 +35,6 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -86,7 +85,6 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -147,7 +145,6 @@ rust_test(
     crate_root = "src/lib.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -215,7 +212,6 @@ rust_binary(
     crate_root = "src/main.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -278,7 +274,6 @@ rust_test(
     crate_root = "tests/atif_export_contract.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -359,7 +354,6 @@ rust_test(
     crate_root = "tests/binary_fatal_error_display.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -440,7 +434,6 @@ rust_test(
     crate_root = "tests/integration_server.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -520,7 +513,6 @@ rust_test(
     crate_root = "tests/live_dependency_guards.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -605,7 +597,6 @@ rust_test(
     crate_root = "tests/live_rpc_regression.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -690,7 +681,6 @@ rust_test(
     crate_root = "tests/live_smoke_rpc.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -775,7 +765,6 @@ rust_test(
     crate_root = "tests/realm_config_ingress.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -857,7 +846,6 @@ rust_test(
     crate_root = "tests/regression_rpc.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -938,7 +926,6 @@ rust_test(
     crate_root = "tests/rpc_auth_methods.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",
@@ -1019,7 +1006,6 @@ rust_test(
     crate_root = "tests/runtime_backed_ingress.rs",
     crate_features = [
         "comms",
-        "experimental-gpt-live",
         "live-webrtc",
         "mcp",
         "mob",

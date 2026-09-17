@@ -48,7 +48,6 @@ rust_library(
     crate_name = "meerkat_mob_mcp",
     crate_root = "src/lib.rs",
     crate_features = [
-        "experimental-gpt-live",
         "openai-live",
     ],
     edition = "2024",
@@ -87,7 +86,6 @@ rust_library(
     crate_name = "meerkat_mob_mcp",
     crate_root = "src/lib.rs",
     crate_features = [
-        "experimental-gpt-live",
         "openai-live",
     ],
     edition = "2024",
@@ -140,7 +138,6 @@ rust_test(
     crate_name = "meerkat_mob_mcp",
     crate_root = "src/lib.rs",
     crate_features = [
-        "experimental-gpt-live",
         "openai-live",
     ],
     edition = "2024",
@@ -194,7 +191,6 @@ rust_binary(
     crate_name = "rkat_mob_mcp",
     crate_root = "src/main.rs",
     crate_features = [
-        "experimental-gpt-live",
         "openai-live",
     ],
     edition = "2024",
@@ -243,7 +239,6 @@ rust_test(
     crate_name = "temporary_council",
     crate_root = "tests/temporary_council.rs",
     crate_features = [
-        "experimental-gpt-live",
         "openai-live",
     ],
     edition = "2024",

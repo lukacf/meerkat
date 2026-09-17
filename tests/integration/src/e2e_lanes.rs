@@ -218,7 +218,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s93_remote_mob_two_host_constellation_join, 93);
             scenario(e2e_smoke_s94_cli_shorthand_prompt, 94);
             scenario(e2e_smoke_s95_cli_slow_mcp_resume_journey, 95);
-            scenario(e2e_smoke_s96_gpt_live_client_context_vertical, 96);
+            scenario(e2e_smoke_s96_mob_fork_off_vertical, 96);
             scenario(e2e_smoke_s97_gpt_live_public_client_context_vertical, 97);
             scenario(e2e_smoke_s98_gpt_live_public_playback_settlement_and_reopen, 98);
             scenario(e2e_smoke_s99_gpt_live_public_concurrent_context, 99);
@@ -2509,8 +2509,8 @@ fn bazel_rust_test_relative(key: &str) -> Result<&'static str, String> {
         "meerkat-integration-tests:smoke_model_fallback" => {
             Ok("tests/integration/smoke_model_fallback_test")
         }
-        "meerkat-integration-tests:gpt_live_client_e2e" => {
-            Ok("tests/integration/gpt_live_client_e2e_test")
+        "meerkat-integration-tests:smoke_mob_fork_off" => {
+            Ok("tests/integration/smoke_mob_fork_off_test")
         }
         "meerkat-integration-tests:gpt_live_public_e2e" => {
             Ok("tests/integration/gpt_live_public_e2e_test")
@@ -4103,26 +4103,19 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
         96 => Some(&Spec {
             id: Some(96),
             lane: Lane::Smoke,
-            title: "GPT Live client-context production delegation vertical",
-            timeout_secs: 1200,
-            required_env: &[&["MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON"]],
-            required_bins: &["cargo", "node", "npm"],
-            cwd: "tests/live_smoke/browser",
-            // This vertical composes the full RPC, Mob, live-machine, and
-            // provider authority graph in one libtest thread. The repository
-            // default 16 MiB test stack is insufficient for that production
-            // composition before the first provider effect.
-            env: &[("RUST_MIN_STACK", "67108864")],
+            title: "Mob fork_off live vertical: durable fork inherits transcript and provider cache",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
             cargo_bin_env: &[],
-            pre_commands: &[
-                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
-                &["npx", "playwright", "install", "chromium"],
-            ],
+            pre_commands: &[],
             command: CommandSpec::CargoTest {
                 package: "meerkat-integration-tests",
-                test_target: "gpt_live_client_e2e",
-                test_name: "e2e_scenario_96_gpt_live_client_context_vertical",
-                features: &["experimental-gpt-live-e2e"],
+                test_target: "smoke_mob_fork_off",
+                test_name: "e2e_smoke_s96_mob_fork_off_vertical",
+                features: &["integration-real-tests"],
                 all_features: false,
             },
         }),
@@ -4136,8 +4129,9 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
             required_bins: &["cargo", "node", "npm"],
             cwd: "tests/live_smoke/browser",
-            // Same production composition as scenario 96 in one libtest
-            // thread; the default 16 MiB test stack is insufficient.
+            // This vertical composes the full RPC, Mob, live-machine, and
+            // provider authority graph in one libtest thread; the default
+            // 16 MiB test stack is insufficient for that composition.
             env: &[("RUST_MIN_STACK", "67108864")],
             cargo_bin_env: &[],
             pre_commands: &[
@@ -6375,14 +6369,15 @@ mod tests {
     }
 
     #[test]
-    fn gpt_live_client_context_smoke_is_one_strict_oauth_shard() {
-        let spec = scenario_spec(96).expect("GPT Live client-context scenario");
+    fn mob_fork_off_smoke_is_one_anthropic_key_shard() {
+        let spec = scenario_spec(96).expect("mob fork_off live vertical scenario");
         assert_eq!(spec.lane, Lane::Smoke);
         assert_eq!(
             spec.required_env,
-            &[&["MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON"]]
+            &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]]
         );
-        assert_eq!(spec.cwd, "tests/live_smoke/browser");
+        assert_eq!(spec.cwd, ".");
+        assert!(spec.pre_commands.is_empty());
         match spec.command {
             CommandSpec::CargoTest {
                 package,
@@ -6392,12 +6387,9 @@ mod tests {
                 all_features,
             } => {
                 assert_eq!(package, "meerkat-integration-tests");
-                assert_eq!(test_target, "gpt_live_client_e2e");
-                assert_eq!(
-                    test_name,
-                    "e2e_scenario_96_gpt_live_client_context_vertical"
-                );
-                assert_eq!(features, &["experimental-gpt-live-e2e"]);
+                assert_eq!(test_target, "smoke_mob_fork_off");
+                assert_eq!(test_name, "e2e_smoke_s96_mob_fork_off_vertical");
+                assert_eq!(features, &["integration-real-tests"]);
                 assert!(!all_features);
             }
             _ => panic!("scenario 96 must remain one sequential Cargo test shard"),
@@ -6413,7 +6405,13 @@ mod tests {
             &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]]
         );
         assert_eq!(spec.cwd, "tests/live_smoke/browser");
-        assert_eq!(spec.pre_commands, scenario_spec(96).unwrap().pre_commands);
+        assert_eq!(
+            spec.pre_commands,
+            &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"][..],
+                &["npx", "playwright", "install", "chromium"][..],
+            ]
+        );
         match spec.command {
             CommandSpec::CargoTest {
                 package,

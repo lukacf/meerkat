@@ -94,6 +94,12 @@ them.
 
 ### Fixed
 
+- `ForkCacheInheritance` documentation now states what the value is: provider-
+  authored breakpoint evidence carried for accounting continuity, not a
+  request-time lever. Request lowering never reads it, so a mob fork that
+  reports `unavailable` still hits the provider cache on its inherited prefix
+  whenever the source entry is alive. The previous wording ("conservatively
+  unavailable") read as a cost.
 - **`MobSessionService::commit_live_delegation_final_transcript` is declared
   unconditionally.** The trait gated it on `meerkat-mob`'s `openai-live` feature
   while every implementor gated it on its own crate's feature, so any build

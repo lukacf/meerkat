@@ -1255,6 +1255,46 @@ mod live_context_mirror_tests {
             }
             .with_context_observation(Some(post.observation_id().clone())),
         );
+        // Fresh assistant output after the cut: the provider produced it after
+        // acknowledging the summary, so it is excluded from live context and
+        // must never be reasserted (the 73a0b869 self-echo).
+        let post_assistant = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("post assistant source");
+        // The deferred pre-cut target is still the channel's single active
+        // playback target here, so the fresh output is modelled as a
+        // provider-final assistant item (R5-7) rather than a second target.
+        for event in [
+            meerkat_core::RealtimeTranscriptEvent::ContextObservationBound {
+                channel_id: channel_id.clone(),
+                item_id: "fresh-assistant".into(),
+                observation_id: post_assistant.observation_id().clone(),
+            },
+            meerkat_core::RealtimeTranscriptEvent::ItemObserved {
+                item_id: "fresh-assistant".into(),
+                previous_item_id: Some("fresh-live".into()),
+                role: meerkat_core::RealtimeTranscriptRole::Assistant,
+                response_id: Some("fresh-response".into()),
+            },
+            meerkat_core::RealtimeTranscriptEvent::AssistantTranscriptFinalText {
+                response_id: "fresh-response".into(),
+                item_id: "fresh-assistant".into(),
+                content_index: 0,
+                text: "fresh assistant speech after ack".into(),
+            },
+            meerkat_core::RealtimeTranscriptEvent::AssistantTurnCompleted {
+                response_id: "fresh-response".into(),
+                stop_reason: meerkat_core::StopReason::EndTurn,
+                usage: meerkat_core::types::TurnUsage::host_declared(
+                    meerkat_core::Provider::OpenAI,
+                    "gpt-live-1",
+                    meerkat_core::Usage::default(),
+                ),
+            },
+        ] {
+            session.append_realtime_transcript_event(event);
+        }
         let committed =
             meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
                 .expect("commit");
@@ -1272,6 +1312,8 @@ mod live_context_mirror_tests {
             assert!(rows[&(session_id.clone(), 3)].is_causal_reassertion());
             assert!(!rows[&(session_id.clone(), 4)].is_causal_reassertion());
             assert!(rows[&(session_id.clone(), 4)].provider_context().is_none());
+            assert!(!rows[&(session_id.clone(), 5)].is_causal_reassertion());
+            assert!(rows[&(session_id.clone(), 5)].provider_context().is_none());
         }
         let host = Arc::new(RecordingMirrorHost::default());
         machine.set_live_context_mirror_host(host.clone());
@@ -1290,6 +1332,12 @@ mod live_context_mirror_tests {
                 !appends
                     .iter()
                     .any(|(_, text)| text.contains("fresh already heard output"))
+            );
+            assert!(
+                !appends
+                    .iter()
+                    .any(|(_, text)| text.contains("fresh assistant speech after ack")),
+                "fresh post-ack assistant output must never echo back as thinking context"
             );
         }
         let other_session = SessionId::new();

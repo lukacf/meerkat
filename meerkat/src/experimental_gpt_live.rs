@@ -2748,7 +2748,7 @@ struct ExperimentalGptLiveDeferredAdapter {
     context_observation_recorder: std::sync::OnceLock<
         Arc<crate::session_runtime::live_summary::LiveContextObservationRecorder>,
     >,
-    user_context_observations:
+    turn_context_observations:
         std::sync::Mutex<HashMap<String, meerkat_core::LiveContextObservationId>>,
     identity: meerkat_core::SessionLlmIdentity,
     status: std::sync::Mutex<LiveAdapterStatus>,
@@ -2814,7 +2814,7 @@ impl ExperimentalGptLiveDeferredAdapter {
         let (observation_tx, observation_rx) = mpsc::unbounded_channel();
         Self {
             context_observation_recorder: std::sync::OnceLock::new(),
-            user_context_observations: std::sync::Mutex::new(HashMap::new()),
+            turn_context_observations: std::sync::Mutex::new(HashMap::new()),
             identity,
             status: std::sync::Mutex::new(LiveAdapterStatus::Opening),
             observation_tx,
@@ -2830,11 +2830,20 @@ impl ExperimentalGptLiveDeferredAdapter {
         }
     }
 
+    #[cfg(any(test, feature = "experimental-gpt-live-gate0-harness"))]
     fn push_observation(
         &self,
         observation: LiveSidebandObservation,
     ) -> Result<(), ProviderWebrtcBrokerError> {
         self.push_observation_with_context(observation, None)
+    }
+
+    /// Forget a finished turn's admitted ordinal; the pending playback (if
+    /// any) already carries it, so the by-turn map stays bounded by open turns.
+    fn release_turn_context_observation(&self, adapter_key: &str) {
+        if let Ok(mut observations) = self.turn_context_observations.lock() {
+            observations.remove(adapter_key);
+        }
     }
 
     fn push_observation_with_context(
@@ -3059,7 +3068,9 @@ impl ExperimentalGptLiveDeferredAdapter {
         }
         pending.snapshot.push_str(delta);
         if !pending.output_started_forwarded && !pending.snapshot.is_empty() {
-            pending.context_observation_id = context_observation_id;
+            if pending.context_observation_id.is_none() {
+                pending.context_observation_id = context_observation_id;
+            }
             pending.output_started_forwarded = true;
             return Ok(Some(with_live_context_observation(
                 LiveAdapterObservation::AssistantOutputStarted {
@@ -3120,7 +3131,7 @@ impl ExperimentalGptLiveDeferredAdapter {
             .ok_or("assistant final conflicts with committed playback prefix")?;
         pending.snapshot = suffix.to_string();
         pending.final_forwarded = true;
-        if !pending.output_started_forwarded {
+        if !pending.output_started_forwarded && pending.context_observation_id.is_none() {
             pending.context_observation_id = context_observation_id;
         }
         let final_observation = with_live_context_observation(
@@ -3197,6 +3208,7 @@ impl ExperimentalGptLiveDeferredAdapter {
                     });
                 };
                 playback.retain(|_, pending| pending.provider_turn_ref != turn.adapter_key());
+                self.release_turn_context_observation(turn.adapter_key());
                 None
             }
             LiveSidebandObservationKind::TurnSnapshotDelta { turn, delta }
@@ -3214,14 +3226,17 @@ impl ExperimentalGptLiveDeferredAdapter {
                 turn,
                 role: LiveSidebandTurnRole::Assistant,
                 transcript,
-            } if self.snapshot_cuts => self
-                .lower_snapshot_final(&turn, &transcript, context_observation_id)
-                .unwrap_or_else(|message| {
-                    Some(LiveAdapterObservation::Error {
-                        code: LiveAdapterErrorCode::ProviderError,
-                        message,
+            } if self.snapshot_cuts => {
+                // The pending playback already inherited the turn's ordinal.
+                self.release_turn_context_observation(turn.adapter_key());
+                self.lower_snapshot_final(&turn, &transcript, context_observation_id)
+                    .unwrap_or_else(|message| {
+                        Some(LiveAdapterObservation::Error {
+                            code: LiveAdapterErrorCode::ProviderError,
+                            message,
+                        })
                     })
-                }),
+            }
             LiveSidebandObservationKind::SessionReady => {
                 if !self.closed.load(Ordering::Acquire) {
                     self.replace_status(LiveAdapterStatus::Ready);
@@ -3233,7 +3248,7 @@ impl ExperimentalGptLiveDeferredAdapter {
                 role: LiveSidebandTurnRole::User,
             } => {
                 if let Some(observation_id) = context_observation_id {
-                    let Ok(mut observations) = self.user_context_observations.lock() else {
+                    let Ok(mut observations) = self.turn_context_observations.lock() else {
                         return Some(LiveAdapterObservation::Error {
                             code: LiveAdapterErrorCode::InternalError,
                             message: "user source-observation custody is unavailable".into(),
@@ -3250,6 +3265,13 @@ impl ExperimentalGptLiveDeferredAdapter {
                 let response_id = Self::local_response_id(&turn);
                 let item_id = Self::local_item_id(&turn);
                 let provider_turn_ref = turn.adapter_key().to_string();
+                if let Some(observation_id) = context_observation_id.clone()
+                    && let Ok(mut observations) = self.turn_context_observations.lock()
+                {
+                    // One admitted ordinal per provider turn: later events of
+                    // this turn (deltas, final) inherit it.
+                    observations.insert(provider_turn_ref.clone(), observation_id);
+                }
                 let pending = PendingExperimentalGptLivePlayback {
                     context_observation_id: context_observation_id.clone(),
                     provider_turn_ref: provider_turn_ref.clone(),
@@ -3300,7 +3322,7 @@ impl ExperimentalGptLiveDeferredAdapter {
                 transcript,
             } => match role {
                 LiveSidebandTurnRole::User => {
-                    let Ok(mut observations) = self.user_context_observations.lock() else {
+                    let Ok(mut observations) = self.turn_context_observations.lock() else {
                         return Some(LiveAdapterObservation::Error {
                             code: LiveAdapterErrorCode::InternalError,
                             message: "user source-observation custody is unavailable".into(),
@@ -3348,6 +3370,12 @@ impl ExperimentalGptLiveDeferredAdapter {
                                 .to_string(),
                         });
                     };
+                    let source = self
+                        .turn_context_observations
+                        .lock()
+                        .ok()
+                        .and_then(|mut observations| observations.remove(turn.adapter_key()))
+                        .or(context_observation_id);
                     Some(with_live_context_observation(
                         LiveAdapterObservation::AssistantTranscriptFinal {
                             provider_item_id: item_id,
@@ -3358,7 +3386,7 @@ impl ExperimentalGptLiveDeferredAdapter {
                             stop_reason: StopReason::EndTurn,
                             usage: Usage::default(),
                         },
-                        context_observation_id,
+                        source,
                     ))
                 }
                 LiveSidebandTurnRole::Unknown => None,
@@ -4965,20 +4993,30 @@ fn spawn_sideband_actors(
                             | LiveSidebandObservationKind::TurnFinished { .. }
                             | LiveSidebandObservationKind::DelegationRequested { .. }
                     );
-                    let context_observation_id = if matches!(
-                        observation.kind(),
-                        LiveSidebandObservationKind::TurnStarted { .. }
-                            | LiveSidebandObservationKind::TurnFinished { .. }
-                            | LiveSidebandObservationKind::TurnSnapshotDelta { .. }
-                    ) {
+                    // One admitted ordinal per provider turn, ordered before
+                    // adapter fan-out: turn start and turn end are admitted,
+                    // and the adapter lets every delta of that turn inherit
+                    // the start ordinal. A channel that no longer admits
+                    // observations (closed, revoked, or a retired owner)
+                    // degrades to an unsequenced row, which is never
+                    // reasserted; it does not end the provider stream.
+                    let context_observation_id = if adapter_observation
+                        && matches!(
+                            observation.kind(),
+                            LiveSidebandObservationKind::TurnStarted { .. }
+                                | LiveSidebandObservationKind::TurnFinished { .. }
+                        ) {
                         if let Some(recorder) =
                             observation_adapter.context_observation_recorder.get()
                         {
                             match recorder.admit().await {
                                 Ok(observation_id) => Some(observation_id),
                                 Err(error) => {
-                                    tracing::error!(%error, "live source-observation admission failed closed");
-                                    break;
+                                    tracing::warn!(
+                                        %error,
+                                        "live source-observation admission unavailable; observation continues unsequenced"
+                                    );
+                                    None
                                 }
                             }
                         } else {
@@ -9241,36 +9279,45 @@ mod tests {
 
         assert!(
             adapter
-                .lower_observation(LiveSidebandObservation::new(
-                    binding.clone(),
-                    LiveSidebandObservationKind::AssistantTranscriptFragment {
-                        item: fragment_item,
-                        text: "transport fragment".to_string(),
-                    },
-                ))
+                .lower_observation(
+                    LiveSidebandObservation::new(
+                        binding.clone(),
+                        LiveSidebandObservationKind::AssistantTranscriptFragment {
+                            item: fragment_item,
+                            text: "transport fragment".to_string(),
+                        },
+                    ),
+                    None
+                )
                 .is_none(),
             "provider transcript fragments are never staged adapter output"
         );
         assert!(
             adapter
-                .lower_observation(LiveSidebandObservation::new(
-                    binding.clone(),
-                    LiveSidebandObservationKind::TurnSnapshotDelta {
-                        turn: turn.clone(),
-                        delta: "unqualified snapshot".to_string(),
-                    },
-                ))
+                .lower_observation(
+                    LiveSidebandObservation::new(
+                        binding.clone(),
+                        LiveSidebandObservationKind::TurnSnapshotDelta {
+                            turn: turn.clone(),
+                            delta: "unqualified snapshot".to_string(),
+                        },
+                    ),
+                    None
+                )
                 .is_none(),
             "turn.delta remains noncanonical until Gate0 qualifies its role semantics"
         );
         let started = adapter
-            .lower_observation(LiveSidebandObservation::new(
-                binding.clone(),
-                LiveSidebandObservationKind::TurnStarted {
-                    turn: turn.clone(),
-                    role: LiveSidebandTurnRole::Assistant,
-                },
-            ))
+            .lower_observation(
+                LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnStarted {
+                        turn: turn.clone(),
+                        role: LiveSidebandTurnRole::Assistant,
+                    },
+                ),
+                None,
+            )
             .expect("assistant turn start publishes a redacted output handle");
         assert!(matches!(
             started,
@@ -9284,14 +9331,17 @@ mod tests {
                 && provider_item_id == ExperimentalGptLiveDeferredAdapter::local_item_id(&turn)
         ));
         let projected = adapter
-            .lower_observation(LiveSidebandObservation::new(
-                binding,
-                LiveSidebandObservationKind::TurnFinished {
-                    turn: turn.clone(),
-                    role: LiveSidebandTurnRole::Assistant,
-                    transcript: "authoritative assistant final".to_string(),
-                },
-            ))
+            .lower_observation(
+                LiveSidebandObservation::new(
+                    binding,
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn: turn.clone(),
+                        role: LiveSidebandTurnRole::Assistant,
+                        transcript: "authoritative assistant final".to_string(),
+                    },
+                ),
+                None,
+            )
             .expect("assistant turn.done projects one typed staged final");
         let LiveAdapterObservation::AssistantTranscriptFinal {
             provider_item_id,
@@ -9346,14 +9396,17 @@ mod tests {
         )
         .expect("assistant-first turn");
         assert!(matches!(
-            adapter.lower_observation(LiveSidebandObservation::new(
-                binding,
-                LiveSidebandObservationKind::TurnFinished {
-                    turn,
-                    role: LiveSidebandTurnRole::Assistant,
-                    transcript: "unadmitted greeting".to_string(),
-                },
-            )),
+            adapter.lower_observation(
+                LiveSidebandObservation::new(
+                    binding,
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn,
+                        role: LiveSidebandTurnRole::Assistant,
+                        transcript: "unadmitted greeting".to_string(),
+                    },
+                ),
+                None
+            ),
             Some(LiveAdapterObservation::Error {
                 code: LiveAdapterErrorCode::ProviderError,
                 ..
@@ -9397,24 +9450,30 @@ mod tests {
         )
         .expect("complete turn");
         assert!(matches!(
-            adapter.lower_observation(LiveSidebandObservation::new(
-                binding.clone(),
-                LiveSidebandObservationKind::TurnStarted {
-                    turn: complete_turn.clone(),
-                    role: LiveSidebandTurnRole::Assistant,
-                },
-            )),
+            adapter.lower_observation(
+                LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnStarted {
+                        turn: complete_turn.clone(),
+                        role: LiveSidebandTurnRole::Assistant,
+                    },
+                ),
+                None
+            ),
             Some(LiveAdapterObservation::AssistantOutputStarted { .. })
         ));
         let complete_final = adapter
-            .lower_observation(LiveSidebandObservation::new(
-                binding.clone(),
-                LiveSidebandObservationKind::TurnFinished {
-                    turn: complete_turn.clone(),
-                    role: LiveSidebandTurnRole::Assistant,
-                    transcript: "played in full".to_string(),
-                },
-            ))
+            .lower_observation(
+                LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn: complete_turn.clone(),
+                        role: LiveSidebandTurnRole::Assistant,
+                        transcript: "played in full".to_string(),
+                    },
+                ),
+                None,
+            )
             .expect("stage full assistant final");
         let LiveAdapterObservation::AssistantTranscriptFinal {
             provider_item_id: complete_item,
@@ -9465,13 +9524,16 @@ mod tests {
         )
         .expect("early truncate turn");
         let early_started = adapter
-            .lower_observation(LiveSidebandObservation::new(
-                binding.clone(),
-                LiveSidebandObservationKind::TurnStarted {
-                    turn: early_turn.clone(),
-                    role: LiveSidebandTurnRole::Assistant,
-                },
-            ))
+            .lower_observation(
+                LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnStarted {
+                        turn: early_turn.clone(),
+                        role: LiveSidebandTurnRole::Assistant,
+                    },
+                ),
+                None,
+            )
             .expect("early output handle");
         let LiveAdapterObservation::AssistantOutputStarted {
             response_id: early_response,
@@ -9506,14 +9568,17 @@ mod tests {
                 && prefix == "early heard prefix"
         ));
         assert!(matches!(
-            adapter.lower_observation(LiveSidebandObservation::new(
-                binding.clone(),
-                LiveSidebandObservationKind::TurnFinished {
-                    turn: early_turn,
-                    role: LiveSidebandTurnRole::Assistant,
-                    transcript: "full late provider final".to_string(),
-                },
-            )),
+            adapter.lower_observation(
+                LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn: early_turn,
+                        role: LiveSidebandTurnRole::Assistant,
+                        transcript: "full late provider final".to_string(),
+                    },
+                ),
+                None
+            ),
             Some(LiveAdapterObservation::AssistantTranscriptFinal { .. })
         ));
         for (suffix, reported_prefix) in [
@@ -9527,24 +9592,30 @@ mod tests {
             )
             .expect("truncate turn");
             assert!(matches!(
-                adapter.lower_observation(LiveSidebandObservation::new(
-                    binding.clone(),
-                    LiveSidebandObservationKind::TurnStarted {
-                        turn: turn.clone(),
-                        role: LiveSidebandTurnRole::Assistant,
-                    },
-                )),
+                adapter.lower_observation(
+                    LiveSidebandObservation::new(
+                        binding.clone(),
+                        LiveSidebandObservationKind::TurnStarted {
+                            turn: turn.clone(),
+                            role: LiveSidebandTurnRole::Assistant,
+                        },
+                    ),
+                    None
+                ),
                 Some(LiveAdapterObservation::AssistantOutputStarted { .. })
             ));
             let projected = adapter
-                .lower_observation(LiveSidebandObservation::new(
-                    binding.clone(),
-                    LiveSidebandObservationKind::TurnFinished {
-                        turn,
-                        role: LiveSidebandTurnRole::Assistant,
-                        transcript: "full but not canonical yet".to_string(),
-                    },
-                ))
+                .lower_observation(
+                    LiveSidebandObservation::new(
+                        binding.clone(),
+                        LiveSidebandObservationKind::TurnFinished {
+                            turn,
+                            role: LiveSidebandTurnRole::Assistant,
+                            transcript: "full but not canonical yet".to_string(),
+                        },
+                    ),
+                    None,
+                )
                 .expect("stage assistant final before truncation");
             let LiveAdapterObservation::AssistantTranscriptFinal {
                 provider_item_id,
@@ -9604,13 +9675,16 @@ mod tests {
                     text: format!("delta-{index}"),
                 },
             );
-            assert!(adapter.lower_observation(fragment).is_none());
+            assert!(adapter.lower_observation(fragment, None).is_none());
         }
         let terminal = adapter
-            .lower_observation(LiveSidebandObservation::new(
-                binding,
-                LiveSidebandObservationKind::UnsupportedProviderEvent,
-            ))
+            .lower_observation(
+                LiveSidebandObservation::new(
+                    binding,
+                    LiveSidebandObservationKind::UnsupportedProviderEvent,
+                ),
+                None,
+            )
             .expect("unsupported terminal remains typed");
         assert!(matches!(terminal, LiveAdapterObservation::Error { .. }));
     }

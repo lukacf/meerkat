@@ -262,6 +262,8 @@ struct State {
     job: u32,
     exchange: u32,
     attached_channels: Vec<u32>,
+    /// Running count of owned thinking-append attempts seen on the wire.
+    thinking_append_attempts: usize,
 }
 
 struct Inner {
@@ -326,6 +328,7 @@ impl Journal {
                 job: 0,
                 exchange: 0,
                 attached_channels: Vec::new(),
+                thinking_append_attempts: 0,
             }),
             started: Instant::now(),
             path,
@@ -453,6 +456,16 @@ impl Journal {
                     .attached_channels
                     .push(event.channel_ordinal);
             }
+            if matches!(
+                event.event,
+                thinking_capture::EventKind::ThinkingAppendAttempt { .. }
+            ) {
+                self.0
+                    .state
+                    .lock()
+                    .map_err(|_| Fault::Poisoned)?
+                    .thinking_append_attempts += 1;
+            }
             self.record(Record::Thinking { event })?;
         }
         if let Some(fault) = self.0.wire.fault() {
@@ -463,6 +476,20 @@ impl Journal {
             });
         }
         self.check()
+    }
+
+    /// Owned thinking-append attempts observed so far (summary fragments and
+    /// causal-tail reassertions). Fresh post-acknowledgement speech must not
+    /// add to it: a growing count between two post-ACK exchanges is the
+    /// self-echo the 73a0b869 baseline shipped.
+    pub fn thinking_append_attempts(&self) -> Result<usize, Fault> {
+        self.flush_wire()?;
+        Ok(self
+            .0
+            .state
+            .lock()
+            .map_err(|_| Fault::Poisoned)?
+            .thinking_append_attempts)
     }
 
     pub fn require_attached(&self, channel: u32) -> Result<(), Fault> {

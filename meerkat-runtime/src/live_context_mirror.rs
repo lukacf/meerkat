@@ -203,9 +203,19 @@ impl CommittedLiveContextRow {
                 Message::BlockAssistant(assistant) => assistant.identity.realtime_origin.as_ref(),
                 _ => None,
             };
-            origin
+            let claim = origin
                 .and_then(|origin| origin.context_observation_id())
-                .cloned()
+                .cloned();
+            if claim.is_none() {
+                // An unsequenced live transcript row is never reasserted after
+                // a bootstrap summary. That is the honest default for legacy
+                // history; for a fresh row it means the channel stopped
+                // admitting observations, which is worth seeing in logs.
+                tracing::debug!(
+                    "live transcript row carries no observation claim and will not be reasserted"
+                );
+            }
+            claim
         } else {
             None
         };

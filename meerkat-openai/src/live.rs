@@ -4580,6 +4580,10 @@ fn json_value_payload_bytes(value: &serde_json::Value) -> usize {
 
 fn realtime_transcript_payload_bytes(event: &RealtimeTranscriptEvent) -> usize {
     match event {
+        RealtimeTranscriptEvent::WithContextObservation { event, .. } => {
+            realtime_transcript_payload_bytes(event)
+        }
+        RealtimeTranscriptEvent::ContextObservationBound { .. } => 0,
         RealtimeTranscriptEvent::UserTranscriptFinal { text, .. }
         | RealtimeTranscriptEvent::AssistantPlaybackSnapshotCommitted { text, .. }
         | RealtimeTranscriptEvent::AssistantUnmeasuredSnapshotCommitted { text, .. }

@@ -888,6 +888,27 @@ impl SessionAgent for FactoryAgent {
             )
     }
 
+    fn admit_live_assistant_playback_target_with_context_observation(
+        &mut self,
+        channel_id: &meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+        observation_id: Option<meerkat_core::LiveContextObservationId>,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, meerkat_core::error::AgentError> {
+        self.agent
+            .session_mut()
+            .admit_live_assistant_playback_target_with_context_observation(
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                observation_id,
+            )
+    }
+
     fn live_assistant_playback_target(
         &self,
         channel_id: &meerkat_core::LiveChannelId,

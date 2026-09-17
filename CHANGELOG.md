@@ -43,8 +43,43 @@ them.
 - Public GPT Live `ProviderManagedUnmeasured` playback policy retains marked
   observed dialogue as normal model context without claiming playback or
   synthesizing provider completion.
+- `LiveContextBootstrapMode::Concurrent` (opt-in; `BeforeOpen` stays the
+  default) opens live media while a bounded summary of the historical
+  conversation is generated in the background. Reserved canonical history is
+  kept separate from provider-acknowledged coverage, the summary and the
+  causal reassertions travel through the quiet native thinking lane, and
+  `LiveContextPreparationStatus` exposes capturing, generating, delivering,
+  provider-acknowledged, and typed failure states independently of media.
+- Observation provenance for live transcripts: the generated MeerkatMachine
+  admits every provider turn in stream order (`RecordLiveContextObservation`)
+  and freezes the exact summary acknowledgement cut
+  (`RecordLiveContextBootstrapAckCut`). Canonical rows carry an opaque
+  `LiveContextObservationId`; only rows admitted before the cut are reasserted
+  after the summary, rows without a claim are honestly unsequenced, and
+  transcript sidecars gain schema V3 for the claim.
+- Hosts can admit host-designated conversational human input into a mob
+  member through the generated fenced work admission, preserving actual
+  `Message::User` attribution and interaction identity.
+- Provider-initiated assistant output (a turn the model starts without new
+  user input) is admitted through generated authority without inventing user
+  input or context-consumption causality.
 
 ### Fixed
+
+- Public GPT Live close no longer retries the same transport error forever
+  after the provider connection drops. A stream end without `session.closed`
+  is retained as explicit unconfirmed EOF evidence and reported as
+  `ConnectionLost` after exact local cleanup; a known terminal drain finishes a
+  pending remote-close observation instead of waiting for an acknowledgement
+  that can no longer arrive, and the failed transport is retired through the
+  exact close authority so the channel is released.
+- After a concurrent bootstrap summary is acknowledged, fresh assistant output
+  is no longer re-sent to the provider as thinking context. The 0.8.39
+  eligibility rule reasserted every later utterance for the channel lifetime,
+  which flooded the provider with echoes of its own speech and broke recall.
+- Explicit close revokes close custody before physical retirement, keeps
+  sealed context and result recovery closes separate, and refuses late revoked
+  publication for recovery replacements.
 
 - Exact receipt-close retires never-activated replacement bootstraps and cancels
   only the known channel's in-flight recovery lineage, including an already

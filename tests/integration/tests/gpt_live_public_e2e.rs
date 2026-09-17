@@ -1917,6 +1917,9 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     })
     .await?;
     assert!(s99_recalls_phrase(&recalled, &phrase));
+    // Everything the owner had to say through the quiet thinking lane (the
+    // summary fragments and the pre-ACK causal tail) is on the wire by now.
+    let thinking_after_recall = evidence.thinking_append_attempts()?;
     evidence.stage(EvidenceStage::CurrentFactsRecall)?;
     let current = s99_native_exchange(&mut live, "current", |text| {
         text.contains("cobalt") && text.contains("marigold")
@@ -1925,6 +1928,17 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     assert!(!current.to_lowercase().contains("tangerine"));
     assert!(!current.to_lowercase().contains("violet"));
     assert!(!current.to_lowercase().contains("daffodil"));
+    // The provider heard both post-ACK answers itself; neither may be echoed
+    // back as new thinking context.
+    let thinking_after_current = evidence.thinking_append_attempts()?;
+    assert_eq!(
+        thinking_after_current, thinking_after_recall,
+        "fresh post-acknowledgement speech was re-sent as thinking context ({} new attempts)",
+        thinking_after_current.saturating_sub(thinking_after_recall)
+    );
+    println!(
+        "GPT_LIVE_PUBLIC_NO_ECHO thinking_append_attempts={thinking_after_current}"
+    );
     live.assert_existing_text_identity().await?;
 
     // A closed channel's late summary must neither acknowledge nor populate

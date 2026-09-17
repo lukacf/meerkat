@@ -125310,7 +125310,7 @@
         ]
       },
       "ForkCacheInheritance": {
-        "description": "Provider cache inheritance disposition for a durable fork.",
+        "description": "Provider cache inheritance disposition for a durable fork.\n\nThis is evidence continuity for accounting, not a request-time lever.\n`Available` means the child carries the source's revalidated\nprovider-authored breakpoint at the fork boundary, so cache-discard\nobservability on the child's later turns can attribute against it.\n`Unavailable` means no such proof was copied. Neither value changes the\nbytes the child sends: request lowering never reads this evidence, and\nproviders key their caches on the request itself. A child whose first\nrequest repeats the source prefix (the ordinary mob fork) hits the\nprovider cache whenever the source's entry is still alive, regardless of\nthis disposition. A fork re-bills the full prefix only when the entry's\nTTL lapsed, the child resolves a different provider or model, or the\nprefix is below the provider's minimum cacheable size.",
         "oneOf": [
           {
             "properties": {
@@ -125353,7 +125353,7 @@
         ]
       },
       "ForkCacheInheritanceUnavailableReason": {
-        "description": "Why a durable transcript fork could not inherit a provider cache entry.\n\nThe fork itself may still be valid and durable. This typed result prevents\ncallers from interpreting a byte-identical transcript prefix as proof that\na provider actually authored a cache breakpoint there.",
+        "description": "Why a durable transcript fork could not inherit provider-authored cache\nevidence.\n\nThe fork itself may still be valid and durable. This typed result prevents\ncallers from interpreting a byte-identical transcript prefix as proof that\na provider actually authored a cache breakpoint there. It says nothing\nabout whether the child's first request will hit the provider cache: see\n[`ForkCacheInheritance`].",
         "oneOf": [
           {
             "const": "no_authored_breakpoint_at_boundary",
@@ -125472,7 +125472,7 @@
     "properties": {
       "cache_inheritance": {
         "$ref": "#/$defs/ForkCacheInheritance",
-        "description": "Exact cache-breakpoint inheritance disposition for the selected prefix."
+        "description": "Exact cache-breakpoint evidence disposition for the selected prefix.\nAccounting continuity only; it does not predict or change whether the\nchild's first request hits the provider cache (see\n[`ForkCacheInheritance`])."
       },
       "message_count": {
         "format": "uint",

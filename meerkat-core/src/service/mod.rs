@@ -2334,11 +2334,14 @@ pub enum ForkPointError {
     CacheEvidence(#[from] crate::CacheBreakpointEvidenceError),
 }
 
-/// Why a durable transcript fork could not inherit a provider cache entry.
+/// Why a durable transcript fork could not inherit provider-authored cache
+/// evidence.
 ///
 /// The fork itself may still be valid and durable. This typed result prevents
 /// callers from interpreting a byte-identical transcript prefix as proof that
-/// a provider actually authored a cache breakpoint there.
+/// a provider actually authored a cache breakpoint there. It says nothing
+/// about whether the child's first request will hit the provider cache: see
+/// [`ForkCacheInheritance`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -2363,6 +2366,19 @@ pub enum ForkCacheInheritanceUnavailableReason {
 }
 
 /// Provider cache inheritance disposition for a durable fork.
+///
+/// This is evidence continuity for accounting, not a request-time lever.
+/// `Available` means the child carries the source's revalidated
+/// provider-authored breakpoint at the fork boundary, so cache-discard
+/// observability on the child's later turns can attribute against it.
+/// `Unavailable` means no such proof was copied. Neither value changes the
+/// bytes the child sends: request lowering never reads this evidence, and
+/// providers key their caches on the request itself. A child whose first
+/// request repeats the source prefix (the ordinary mob fork) hits the
+/// provider cache whenever the source's entry is still alive, regardless of
+/// this disposition. A fork re-bills the full prefix only when the entry's
+/// TTL lapsed, the child resolves a different provider or model, or the
+/// prefix is below the provider's minimum cacheable size.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -2398,7 +2414,10 @@ pub struct SessionForkResult {
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub session_id: SessionId,
     pub message_count: usize,
-    /// Exact cache-breakpoint inheritance disposition for the selected prefix.
+    /// Exact cache-breakpoint evidence disposition for the selected prefix.
+    /// Accounting continuity only; it does not predict or change whether the
+    /// child's first request hits the provider cache (see
+    /// [`ForkCacheInheritance`]).
     pub cache_inheritance: ForkCacheInheritance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_ref: Option<String>,

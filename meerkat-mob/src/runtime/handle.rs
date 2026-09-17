@@ -12577,10 +12577,13 @@ impl MobHandle {
                 member: child_identity.as_str().to_string(),
             },
             // Profile resolution and resume override masks are actor-owned and
-            // occur after this handle admits the spawn. Until that resolved
-            // identity is moved ahead of durable commit, cache inheritance is
-            // conservatively unavailable. The persistent owner therefore
-            // installs no provider proof on this mob child.
+            // occur after this handle admits the spawn, so the exact child
+            // identity is not provable here and the persistent owner installs
+            // no provider-authored breakpoint proof on this mob child. That
+            // only withholds accounting evidence: the child's first request
+            // repeats the source prefix byte for byte and hits the provider
+            // cache whenever the source's entry is still alive. See
+            // `ForkCacheInheritance`.
             cache_identity: None,
         };
         let fork = self

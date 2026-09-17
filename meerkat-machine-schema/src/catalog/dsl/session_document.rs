@@ -202,6 +202,8 @@ pub enum LiveContextCommittedRowKind {
     #[default]
     UserText,
     AssistantText,
+    /// Transcript-only assistant content with its original typed source.
+    AssistantTranscript,
     NonText,
 }
 
@@ -218,13 +220,14 @@ pub enum LiveContextCommittedTextProvenance {
 }
 
 /// Generated disposition for one exact canonical committed row. Every row
-/// advances canonical coverage exactly once, while only ordinary parent text
-/// is eligible for a provider context append.
+/// advances canonical coverage exactly once. Assistant observations make no
+/// channel-presence claim; their optional quiet reassertion is runtime-owned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveContextCommittedRowDisposition {
     #[default]
     MirrorParentText,
     AlreadyPresentInLiveChannel,
+    AssistantObservation,
     ExcludedFromLiveContext,
 }
 
@@ -3856,7 +3859,10 @@ machine! {
                 canonical_row_sequence: canonical_row_sequence,
                 row_kind: row_kind,
                 provenance: provenance,
-                disposition: if provenance == LiveContextCommittedTextProvenance::ParentSessionServiceTurn
+                disposition: if row_kind == LiveContextCommittedRowKind::AssistantTranscript
+                    && provenance != LiveContextCommittedTextProvenance::ExecutorTrace {
+                    LiveContextCommittedRowDisposition::AssistantObservation
+                } else { if provenance == LiveContextCommittedTextProvenance::ParentSessionServiceTurn
                     && (row_kind == LiveContextCommittedRowKind::UserText
                         || row_kind == LiveContextCommittedRowKind::AssistantText) {
                     LiveContextCommittedRowDisposition::MirrorParentText
@@ -3866,7 +3872,7 @@ machine! {
                     } else {
                         LiveContextCommittedRowDisposition::ExcludedFromLiveContext
                     }
-                },
+                } },
                 content_digest: content_digest,
                 store_commit_authority: store_commit_authority,
             }

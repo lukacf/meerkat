@@ -4754,6 +4754,72 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverLiveBridgeSubmissionExactReplayStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ObserveLiveContextDeliveryReadinessIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveContextDeliveryReadinessAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveContextDeliveryReadinessRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveContextDeliveryReadinessRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveContextDeliveryReadinessStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginLiveContextPreparationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginLiveContextPreparationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginLiveContextPreparationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `GenerateLiveContextPreparationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `GenerateLiveContextPreparationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `GenerateLiveContextPreparationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextBootstrapAppendIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextBootstrapAppendAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextBootstrapAppendRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextBootstrapAppendIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextBootstrapAppendAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextBootstrapAppendRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailLiveContextPreparationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailLiveContextPreparationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailLiveContextPreparationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailLiveContextPreparationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailLiveContextPreparationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EnqueueLiveContextRowIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7723,6 +7789,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveBridgeSubmissionRecoveredAmbiguous`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveContextPreparationChanged`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextDeliveryReadinessObserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextBootstrapAppendAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveContextAppendAuthorized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7969,6 +8044,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_pending_context_append_is_exact_and_channel_scoped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_context_bootstrap_reservation_is_not_delivery`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_context_outbox_is_exact_and_session_scoped`

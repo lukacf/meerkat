@@ -365,6 +365,9 @@ pub enum LiveSeedProjectionStatus {
     Complete,
     /// A bounded generated factual summary, not a lossless transcript replay.
     Summarized,
+    /// Media opens with no historical seed; a separate owner obligation
+    /// retains the source prefix until quiet provider acknowledgement.
+    ContextPending,
     Windowed {
         dropped_messages: usize,
         included_compaction_summary: bool,
@@ -374,7 +377,10 @@ pub enum LiveSeedProjectionStatus {
 impl LiveSeedProjectionStatus {
     #[must_use]
     pub fn has_known_gaps(self) -> bool {
-        matches!(self, Self::Windowed { .. } | Self::Summarized)
+        matches!(
+            self,
+            Self::Windowed { .. } | Self::Summarized | Self::ContextPending
+        )
     }
 }
 
@@ -1289,6 +1295,62 @@ mod orchestrator {
         }
 
         #[cfg(feature = "openai-live")]
+        pub(crate) async fn live_open_concurrent_summary_projection_for_session(
+            &self,
+            session_id: &SessionId,
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+            policy: &super::live_summary::LiveContextSummaryPolicy,
+        ) -> Result<
+            (
+                RealtimeSessionOpenProjection,
+                super::live_summary::LiveContextSummaryCapture,
+            ),
+            RealtimeSessionOpenProjectionError,
+        > {
+            Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+            let (session, identity) = self
+                .service
+                .export_live_context_summary_snapshot(session_id)
+                .await?;
+            let generation = session
+                .transcript_rewrite_generation()
+                .map_err(super::live_summary::LiveContextSummaryError::from)?;
+            let source_config = RealtimeSessionOpenConfig::for_open_from_messages(
+                turning_mode,
+                identity.clone(),
+                Vec::new(),
+                session.messages_for_model_boundary(),
+                session.messages(),
+            )?
+            .with_transcript_rewrite_generation(generation);
+            let capture = policy.capture(
+                session,
+                &source_config,
+                Arc::new(super::live_summary::ConcurrentServiceLiveSummarySource(
+                    Arc::clone(self.service),
+                )),
+            )?;
+            let lease = RealtimeOpenProjectionAdmission::global()
+                .try_acquire()
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(error.to_string()))
+                })?;
+            let config =
+                RealtimeSessionOpenConfig::new(turning_mode, identity, Vec::new(), Vec::new())?
+                    .with_open_projection_lease(lease)
+                    .with_transcript_rewrite_generation(generation);
+            Ok((
+                RealtimeSessionOpenProjection {
+                    open_config: config,
+                    seed_status: LiveSeedProjectionStatus::ContextPending,
+                    owner_session_id: session_id.clone(),
+                    summary: None,
+                },
+                capture,
+            ))
+        }
+
+        #[cfg(feature = "openai-live")]
         async fn validate_live_summary_current(
             &self,
             summary: &super::live_summary::LiveContextSummary,
@@ -2110,15 +2172,31 @@ mod orchestrator {
                 .await
                 .map_err(super::ExperimentalLiveChannelOpenError::Authority)?;
             let turning_mode = turning_mode.unwrap_or(RealtimeTurningMode::ProviderManaged);
-            let mut projection = match summary {
-                Some(policy) => {
+            let (mut projection, capture) = match summary {
+                Some(policy)
+                    if policy.bootstrap_mode()
+                        == super::live_summary::LiveContextBootstrapMode::Concurrent =>
+                {
+                    pending.enable_concurrent_context()?;
+                    let (projection, capture) = self
+                        .live_open_concurrent_summary_projection_for_session(
+                            session_id,
+                            turning_mode,
+                            policy,
+                        )
+                        .await?;
+                    (projection, Some(capture))
+                }
+                Some(policy) => (
                     self.live_open_summary_projection_for_session(session_id, turning_mode, policy)
-                        .await?
-                }
-                None => {
+                        .await?,
+                    None,
+                ),
+                None => (
                     self.live_open_projection_for_session(session_id, turning_mode, seed_window)
-                        .await?
-                }
+                        .await?,
+                    None,
+                ),
             };
             if let Some(summary) = projection.summary.as_ref() {
                 pending.set_context_summary(summary.clone())?;
@@ -2162,11 +2240,27 @@ mod orchestrator {
                     error.to_string(),
                 ));
             }
-            let stage_authority = match self
-                .runtime_adapter
-                .stage_experimental_live_execution(session_id, &channel_id, canonical_seed_cursor)
-                .await
-            {
+            let staged = match capture.as_ref() {
+                Some(capture) => self
+                    .runtime_adapter
+                    .stage_experimental_live_execution_with_preparation(
+                        session_id,
+                        &channel_id,
+                        capture.canonical_message_cursor(),
+                    )
+                    .await
+                    .map(|(stage, lease)| (stage, Some(lease))),
+                None => self
+                    .runtime_adapter
+                    .stage_experimental_live_execution(
+                        session_id,
+                        &channel_id,
+                        canonical_seed_cursor,
+                    )
+                    .await
+                    .map(|stage| (stage, None)),
+            };
+            let (stage_authority, preparation_lease) = match staged {
                 Ok(authority) => authority,
                 Err(_) => {
                     let binding = crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError::ChannelBindingFailed;
@@ -2183,6 +2277,23 @@ mod orchestrator {
                     return Err(super::ExperimentalLiveChannelOpenError::Authority(binding));
                 }
             };
+            if let (Some(capture), Some(lease)) = (capture, preparation_lease)
+                && let Err(error) = self
+                    .start_live_context_preparation(pending.as_mut(), lease, capture)
+                    .await
+            {
+                authority.unbind_channel(&channel_id, session_id).await;
+                if let Err(cleanup) = self
+                    .close_live_channel(host, &channel_id, Some(session_id))
+                    .await
+                {
+                    return Err(super::ExperimentalLiveChannelOpenError::BindingCleanup {
+                        binding: crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError::ChannelBindingFailed,
+                        cleanup: cleanup.to_string(),
+                    });
+                }
+                return Err(error);
+            }
             if let Err(binding) = pending.bind_opened(&result).await {
                 authority.unbind_channel(&channel_id, session_id).await;
                 if let Err(cleanup) = self
@@ -2203,6 +2314,34 @@ mod orchestrator {
                 pending_receipt: stage_authority.pending_receipt().to_string(),
                 execution_mode: execution_profile.mode(),
             })
+        }
+
+        #[cfg(feature = "openai-live")]
+        pub(crate) async fn start_live_context_preparation(
+            &self,
+            pending: &mut dyn crate::experimental_gpt_live::ExperimentalLivePendingOpen,
+            lease: meerkat_runtime::live_execution::LiveContextPreparationLease,
+            capture: super::live_summary::LiveContextSummaryCapture,
+        ) -> Result<(), super::ExperimentalLiveChannelOpenError> {
+            if lease.reserved_cursor() != capture.canonical_message_cursor() {
+                return Err(
+                    super::live_summary::LiveContextSummaryError::ConflictingProjection.into(),
+                );
+            }
+            self.runtime_adapter
+                .mark_live_context_preparation_generating(&lease)
+                .await
+                .map_err(|error| {
+                    super::ExperimentalLiveChannelOpenError::ExecutionProfile(error.to_string())
+                })?;
+            pending.retain_context_preparation_job(
+                super::live_summary::LiveContextSummaryJob::spawn(
+                    capture,
+                    lease,
+                    Arc::clone(self.runtime_adapter),
+                ),
+            )?;
+            Ok(())
         }
 
         /// Retire a bound experimental channel that cannot be published by

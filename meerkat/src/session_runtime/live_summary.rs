@@ -53,6 +53,16 @@ impl LiveContextSummarySnapshot<'_> {
     }
 }
 
+/// Whether historical context gates media activation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LiveContextBootstrapMode {
+    /// Generate and validate historical context before opening media.
+    #[default]
+    BeforeOpen,
+    /// Open media independently while the owner prepares historical context.
+    Concurrent,
+}
+
 /// Host opt-in policy. Both sizes are UTF-8 bytes (input is serialized JSON);
 /// overflow refuses rather than selecting an unannounced partial window.
 #[derive(Clone)]
@@ -61,6 +71,7 @@ pub struct LiveContextSummaryPolicy {
     max_input_bytes: usize,
     max_output_bytes: usize,
     timeout: Duration,
+    bootstrap_mode: LiveContextBootstrapMode,
 }
 
 impl LiveContextSummaryPolicy {
@@ -78,6 +89,41 @@ impl LiveContextSummaryPolicy {
             max_input_bytes,
             max_output_bytes,
             timeout,
+            bootstrap_mode: LiveContextBootstrapMode::BeforeOpen,
+        })
+    }
+
+    #[must_use]
+    pub fn with_bootstrap_mode(mut self, mode: LiveContextBootstrapMode) -> Self {
+        self.bootstrap_mode = mode;
+        self
+    }
+
+    #[must_use]
+    pub const fn bootstrap_mode(&self) -> LiveContextBootstrapMode {
+        self.bootstrap_mode
+    }
+
+    pub(crate) fn capture(
+        &self,
+        session: Session,
+        config: &RealtimeSessionOpenConfig,
+        source_reader: Arc<dyn LiveSummarySource>,
+    ) -> Result<LiveContextSummaryCapture, LiveContextSummaryError> {
+        let revision = session.canonical_context_revision()?;
+        let projection_digest = LiveContextSummarySourceDigest(
+            meerkat_core::session::transcript_messages_digest(config.seed_messages())?,
+        );
+        let rewrite_generation = session.transcript_rewrite_generation()?;
+        Ok(LiveContextSummaryCapture {
+            source: Arc::new(session),
+            source_identity: config.llm_identity.clone(),
+            messages: config.seed_messages().to_vec(),
+            revision,
+            projection_digest,
+            rewrite_generation,
+            source_reader,
+            policy: self.clone(),
         })
     }
 
@@ -87,53 +133,212 @@ impl LiveContextSummaryPolicy {
         config: &RealtimeSessionOpenConfig,
         source_reader: Arc<dyn LiveSummarySource>,
     ) -> Result<LiveContextSummary, LiveContextSummaryError> {
+        self.capture(session, config, source_reader)?
+            .generate()
+            .await
+    }
+}
+
+/// Exact source custody, not evidence of provider knowledge.
+pub(crate) struct LiveContextSummaryCapture {
+    source: Arc<Session>,
+    source_identity: SessionLlmIdentity,
+    messages: Vec<Message>,
+    revision: CanonicalContextRevision,
+    projection_digest: LiveContextSummarySourceDigest,
+    rewrite_generation: u64,
+    source_reader: Arc<dyn LiveSummarySource>,
+    policy: LiveContextSummaryPolicy,
+}
+
+impl std::fmt::Debug for LiveContextSummaryCapture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LiveContextSummaryCapture([REDACTED])")
+    }
+}
+
+impl LiveContextSummaryCapture {
+    pub(crate) fn canonical_message_cursor(&self) -> u64 {
+        self.source.messages().len() as u64
+    }
+
+    pub(crate) async fn generate(self) -> Result<LiveContextSummary, LiveContextSummaryError> {
         let mut size = BoundedSize {
-            remaining: self.max_input_bytes,
+            remaining: self.policy.max_input_bytes,
             exceeded: false,
         };
-        if let Err(error) = serde_json::to_writer(&mut size, config.seed_messages()) {
+        if let Err(error) = serde_json::to_writer(&mut size, &self.messages) {
             return Err(if size.exceeded {
                 LiveContextSummaryError::InputTooLarge {
-                    max_bytes: self.max_input_bytes,
+                    max_bytes: self.policy.max_input_bytes,
                 }
             } else {
                 LiveContextSummaryError::Serialization(error)
             });
         }
-        let revision = session.canonical_context_revision()?;
-        let projection_digest = LiveContextSummarySourceDigest(
-            meerkat_core::session::transcript_messages_digest(config.seed_messages())?,
-        );
-        let rewrite_generation = session.transcript_rewrite_generation()?;
         let text = tokio::time::timeout(
-            self.timeout,
-            self.summarizer.summarize(LiveContextSummarySnapshot {
-                session_id: session.id(),
-                messages: config.seed_messages(),
-                llm_identity: &config.llm_identity,
-                canonical_message_cursor: config.canonical_message_cursor(),
-                max_output_bytes: self.max_output_bytes,
-            }),
+            self.policy.timeout,
+            self.policy
+                .summarizer
+                .summarize(LiveContextSummarySnapshot {
+                    session_id: self.source.id(),
+                    messages: &self.messages,
+                    llm_identity: &self.source_identity,
+                    canonical_message_cursor: self.canonical_message_cursor(),
+                    max_output_bytes: self.policy.max_output_bytes,
+                }),
         )
         .await
         .map_err(|_| LiveContextSummaryError::TimedOut)??;
-        if text.len() > self.max_output_bytes {
+        if text.len() > self.policy.max_output_bytes {
             return Err(LiveContextSummaryError::OutputTooLarge {
-                max_bytes: self.max_output_bytes,
+                max_bytes: self.policy.max_output_bytes,
             });
         }
         if text.trim().is_empty() {
             return Err(LiveContextSummaryError::Empty);
         }
         Ok(LiveContextSummary {
-            source: Arc::new(session),
-            source_identity: config.llm_identity.clone(),
-            revision,
-            projection_digest,
-            rewrite_generation,
+            source: self.source,
+            source_identity: self.source_identity,
+            revision: self.revision,
+            projection_digest: self.projection_digest,
+            rewrite_generation: self.rewrite_generation,
             text,
-            source_reader,
+            source_reader: self.source_reader,
         })
+    }
+}
+
+/// Mechanical task custody retained by the exact registered provider channel.
+/// Preparation truth and cancellation are projected from generated authority.
+#[doc(hidden)]
+pub struct LiveContextSummaryJob {
+    task: tokio::task::JoinHandle<()>,
+    provenance: Arc<std::sync::Mutex<Option<LiveContextSummaryProvenance>>>,
+}
+
+impl Drop for LiveContextSummaryJob {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl LiveContextSummaryJob {
+    pub(crate) fn spawn(
+        capture: LiveContextSummaryCapture,
+        lease: meerkat_runtime::live_execution::LiveContextPreparationLease,
+        runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    ) -> Self {
+        use futures::FutureExt;
+        use meerkat_runtime::live_execution::LiveContextPreparationFailure;
+
+        let provenance = Arc::new(std::sync::Mutex::new(None));
+        let produced_provenance = Arc::clone(&provenance);
+        let task = tokio::spawn(async move {
+            let cancellation = lease.cancellation_token();
+            let generation = std::panic::AssertUnwindSafe(capture.generate()).catch_unwind();
+            let generated = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return,
+                result = generation => result,
+            };
+            let summary = match generated {
+                Ok(Ok(summary)) => summary,
+                Ok(Err(error)) => {
+                    record_preparation_failure(&runtime, &lease, preparation_failure(&error)).await;
+                    return;
+                }
+                Err(_) => {
+                    record_preparation_failure(
+                        &runtime,
+                        &lease,
+                        LiveContextPreparationFailure::ProducerPanicked,
+                    )
+                    .await;
+                    return;
+                }
+            };
+            if let Err(error) = runtime.wait_live_context_preparation_ready(&lease).await {
+                if !cancellation.is_cancelled() {
+                    tracing::error!(%error, "live context preparation readiness failed");
+                    record_preparation_failure(
+                        &runtime,
+                        &lease,
+                        LiveContextPreparationFailure::DeliveryRejected,
+                    )
+                    .await;
+                }
+                return;
+            }
+            let current = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return,
+                result = summary.validate_provider_source() => result,
+            };
+            if let Err(error) = current {
+                record_preparation_failure(&runtime, &lease, preparation_failure(&error)).await;
+                return;
+            }
+            *produced_provenance
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(summary.provenance());
+            if let Err(error) = runtime
+                .deliver_live_context_preparation(&lease, summary.text().to_string())
+                .await
+                && !cancellation.is_cancelled()
+            {
+                tracing::error!(%error, "live context preparation delivery failed");
+                record_preparation_failure(
+                    &runtime,
+                    &lease,
+                    LiveContextPreparationFailure::DeliveryAmbiguous,
+                )
+                .await;
+            }
+        });
+        Self { task, provenance }
+    }
+
+    pub(crate) fn provenance(&self) -> Option<LiveContextSummaryProvenance> {
+        self.provenance
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+fn preparation_failure(
+    error: &LiveContextSummaryError,
+) -> meerkat_runtime::live_execution::LiveContextPreparationFailure {
+    use meerkat_runtime::live_execution::LiveContextPreparationFailure as Failure;
+    match error {
+        LiveContextSummaryError::TimedOut => Failure::TimedOut,
+        LiveContextSummaryError::InputTooLarge { .. } => Failure::InputTooLarge,
+        LiveContextSummaryError::OutputTooLarge { .. } => Failure::OutputTooLarge,
+        LiveContextSummaryError::Empty => Failure::Empty,
+        LiveContextSummaryError::StaleSnapshot | LiveContextSummaryError::ConflictingProjection => {
+            Failure::StaleSnapshot
+        }
+        LiveContextSummaryError::Unsupported => Failure::Unsupported,
+        LiveContextSummaryError::Session(_) => Failure::SourceRead,
+        LiveContextSummaryError::Producer(_) => Failure::Generation,
+        LiveContextSummaryError::InvalidBounds
+        | LiveContextSummaryError::ConflictingSeedPolicy
+        | LiveContextSummaryError::Serialization(_) => Failure::Capture,
+    }
+}
+
+async fn record_preparation_failure(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    lease: &meerkat_runtime::live_execution::LiveContextPreparationLease,
+    reason: meerkat_runtime::live_execution::LiveContextPreparationFailure,
+) {
+    tracing::warn!(?reason, "live historical context preparation failed");
+    if let Err(error) = runtime.fail_live_context_preparation(lease, reason).await
+        && !lease.cancellation_token().is_cancelled()
+    {
+        tracing::error!(%error, "failed to retain live context preparation failure");
     }
 }
 
@@ -327,6 +532,22 @@ pub(crate) trait LiveSummarySource: Send + Sync {
 pub(super) struct ServiceLiveSummarySource<B: crate::SessionAgentBuilder>(
     pub Arc<crate::PersistentSessionService<B>>,
 );
+
+pub(super) struct ConcurrentServiceLiveSummarySource<B: crate::SessionAgentBuilder>(
+    pub Arc<crate::PersistentSessionService<B>>,
+);
+
+#[async_trait::async_trait]
+impl<B: crate::SessionAgentBuilder + 'static> LiveSummarySource
+    for ConcurrentServiceLiveSummarySource<B>
+{
+    async fn read(
+        &self,
+        id: &SessionId,
+    ) -> Result<(Session, SessionLlmIdentity), LiveContextSummaryError> {
+        Ok(self.0.export_live_context_summary_snapshot(id).await?)
+    }
+}
 
 #[async_trait::async_trait]
 impl<B: crate::SessionAgentBuilder + 'static> LiveSummarySource for ServiceLiveSummarySource<B> {
@@ -583,6 +804,41 @@ mod tests {
             .validate_provider_source()
             .await
             .expect("canonical appends preserve the accepted source prefix");
+    }
+
+    #[tokio::test]
+    async fn concurrent_capture_defers_production_and_retains_one_exact_prefix() {
+        let (session, config) = source("The historical code is Violet.");
+        let producer = producer("The historical code was Violet.");
+        let policy =
+            LiveContextSummaryPolicy::new(producer.clone(), 4096, 100, Duration::from_secs(1))
+                .unwrap();
+        assert_eq!(
+            policy.bootstrap_mode(),
+            LiveContextBootstrapMode::BeforeOpen
+        );
+        let policy = policy.with_bootstrap_mode(LiveContextBootstrapMode::Concurrent);
+        assert_eq!(
+            policy.bootstrap_mode(),
+            LiveContextBootstrapMode::Concurrent
+        );
+        let mut current = session.clone();
+        current.push(Message::User(meerkat_core::types::UserMessage::text(
+            "The new code is Amber.",
+        )));
+        let capture = policy
+            .capture(
+                session,
+                &config,
+                Arc::new(Source(current, config.llm_identity.clone())),
+            )
+            .unwrap();
+        assert_eq!(capture.canonical_message_cursor(), 2);
+        assert_eq!(producer.calls.load(Ordering::SeqCst), 0);
+        let summary = capture.generate().await.unwrap();
+        assert_eq!(producer.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(summary.canonical_message_cursor(), 2);
+        summary.validate_provider_source().await.unwrap();
     }
 
     #[tokio::test]

@@ -323,6 +323,8 @@ pub enum LiveContextCommittedRowDisposition {
     MirrorParentText,
     #[serde(rename = "AlreadyPresentInLiveChannel")]
     AlreadyPresentInLiveChannel,
+    #[serde(rename = "AssistantObservation")]
+    AssistantObservation,
     #[serde(rename = "ExcludedFromLiveContext")]
     ExcludedFromLiveContext,
 }
@@ -331,6 +333,7 @@ impl LiveContextCommittedRowDisposition {
         match self {
             Self::MirrorParentText => "MirrorParentText",
             Self::AlreadyPresentInLiveChannel => "AlreadyPresentInLiveChannel",
+            Self::AssistantObservation => "AssistantObservation",
             Self::ExcludedFromLiveContext => "ExcludedFromLiveContext",
         }
     }
@@ -341,6 +344,7 @@ impl std::convert::TryFrom<&str> for LiveContextCommittedRowDisposition {
         match value {
             "MirrorParentText" => Ok(Self::MirrorParentText),
             "AlreadyPresentInLiveChannel" => Ok(Self::AlreadyPresentInLiveChannel),
+            "AssistantObservation" => Ok(Self::AssistantObservation),
             "ExcludedFromLiveContext" => Ok(Self::ExcludedFromLiveContext),
             other => Err(format!(
                 "invalid LiveContextCommittedRowDisposition value `{other}`"
@@ -379,6 +383,8 @@ pub enum LiveContextCommittedRowKind {
     UserText,
     #[serde(rename = "AssistantText")]
     AssistantText,
+    #[serde(rename = "AssistantTranscript")]
+    AssistantTranscript,
     #[serde(rename = "NonText")]
     NonText,
 }
@@ -387,6 +393,7 @@ impl LiveContextCommittedRowKind {
         match self {
             Self::UserText => "UserText",
             Self::AssistantText => "AssistantText",
+            Self::AssistantTranscript => "AssistantTranscript",
             Self::NonText => "NonText",
         }
     }
@@ -397,6 +404,7 @@ impl std::convert::TryFrom<&str> for LiveContextCommittedRowKind {
         match value {
             "UserText" => Ok(Self::UserText),
             "AssistantText" => Ok(Self::AssistantText),
+            "AssistantTranscript" => Ok(Self::AssistantTranscript),
             "NonText" => Ok(Self::NonText),
             other => Err(format!(
                 "invalid LiveContextCommittedRowKind value `{other}`"

@@ -116,6 +116,56 @@ may select another available ordinary text model with
 S98's Bazel shard remains
 `//:e2e_smoke_turbo_s_s98`; both backends use the same Rust catalog and test.
 
+Scenario 99 is a separate opt-in paid acceptance scenario; S97/S98 retain their
+existing selectors and behavior:
+
+```bash
+RUST_LANE_ID=async-acceptance ./scripts/repo-cargo e2e-smoke \
+  -E 'test(e2e_smoke_s99_gpt_live_public_concurrent_context)'
+```
+
+The generated Bazel shard is `//:e2e_smoke_turbo_s_s99`; it carries the same
+public Live test binary and routes through the canonical Rust catalog.
+
+S99 composes `LiveContextSummaryPolicy` with `Concurrent` bootstrap and an
+externally gated, content-only summarizer held for at least 20 seconds. The
+gate carries permission only: after release, a separate factory-built LLM
+client summarizes the immutable source snapshot using its exact model/provider
+and auth binding. No canned summary is used in paid acceptance. The caller
+bounds this real call to 90 seconds and 1024 output tokens, disables caller
+and provider-native tools, and requires measured input/output token usage.
+S99 requires an exact-receipt **Active** owner, connected WebRTC, fresh provider
+output transcript honestly lacking an unpredictable historical phrase, and
+at least 100 ms of fresh decoded non-silent native voice **before releasing**
+the summary. Analyser-only activity, RTP, silence, or transcript alone cannot
+qualify S99. Checked-in synthetic WAVs are the only speech input; a zero-gain
+oscillator keeps the media track and RTP alive between speech fixtures.
+S99 selects `ProviderManagedUnmeasured` bookkeeping, with no output queue,
+polling, publication receipt pump, or manual playback completion. Its required
+binder publisher is a fail-closed guard against unexpected actionable playback
+publication; the owner must settle internally without calling it. Provider
+transcripts and decoded-audio assertions are evidence, never settlement
+signals. S98 retains its separate caller-confirmed playback path.
+
+While preparation remains **Generating**, an ordinary text update and a newer
+spoken correction are admitted, and an existing-member delegation must complete
+with the same successful `pwd` evidence as S98. After receipt-validated
+**ProviderAcknowledged**, fresh marked spoken queries must recall the historical
+phrase while retaining both newer facts over the old summary. Historical
+thinking-context delivery requests no speech, but releasing its barrier can
+legitimately release queued speakable work results. S99 neither suppresses
+those results nor asserts full-duplex silence. Exact thinking-append/ACK
+correlation and absence of fabricated user turns belong to deterministic
+provider/owner tests with attribution. Further
+close/reopen cycles attempt to release an obsolete job (or observe its
+cancellation) while a replacement job remains gated: the replacement must
+still report preparation and honestly lack the history until its own job is
+released. All waits are bounded (20-minute inner
+scenario, 25-minute catalog command). Missing auth is a failure, not a skip.
+Compilation and deterministic catalog/audio-evidence tests are not evidence
+that this paid scenario has passed; native-provider qualification requires
+explicit execution of the selector above.
+
 The dense Mob topology stress has a dedicated GitHub-hosted Linux workflow,
 `.github/workflows/mob-dense-topology.yml`. The active top-level CI calls it
 and requires its result alongside BuildBuddy, while the full Cargo workflow

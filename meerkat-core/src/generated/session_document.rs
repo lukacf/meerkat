@@ -138,6 +138,7 @@ pub enum LiveAssistantPlaybackTerminalDisposition {
 pub enum LiveContextCommittedRowKind {
     UserText,
     AssistantText,
+    AssistantTranscript,
     #[default]
     NonText,
 }
@@ -154,6 +155,7 @@ pub enum LiveContextCommittedTextProvenance {
 pub enum LiveContextCommittedRowDisposition {
     MirrorParentText,
     AlreadyPresentInLiveChannel,
+    AssistantObservation,
     #[default]
     ExcludedFromLiveContext,
 }
@@ -4727,14 +4729,14 @@ impl SessionDocumentMachineAuthority {
                                 canonical_row_sequence: canonical_row_sequence,
                                 row_kind: row_kind,
                                 provenance: provenance,
-                                disposition: if (provenance
-                                    == LiveContextCommittedTextProvenance::ParentSessionServiceTurn)
-                                    && ((row_kind == LiveContextCommittedRowKind::UserText)
-                                        || (row_kind == LiveContextCommittedRowKind::AssistantText))
+                                disposition: if (row_kind
+                                    == LiveContextCommittedRowKind::AssistantTranscript)
+                                    && (provenance
+                                        != LiveContextCommittedTextProvenance::ExecutorTrace)
                                 {
-                                    LiveContextCommittedRowDisposition::MirrorParentText
+                                    LiveContextCommittedRowDisposition::AssistantObservation
                                 } else {
-                                    if provenance == LiveContextCommittedTextProvenance::LiveRealtimeTranscript { LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel } else { LiveContextCommittedRowDisposition::ExcludedFromLiveContext }
+                                    if (provenance == LiveContextCommittedTextProvenance::ParentSessionServiceTurn) && ((row_kind == LiveContextCommittedRowKind::UserText) || (row_kind == LiveContextCommittedRowKind::AssistantText)) { LiveContextCommittedRowDisposition::MirrorParentText } else { if provenance == LiveContextCommittedTextProvenance::LiveRealtimeTranscript { LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel } else { LiveContextCommittedRowDisposition::ExcludedFromLiveContext } }
                                 },
                                 content_digest: content_digest.clone(),
                                 store_commit_authority: store_commit_authority.clone(),

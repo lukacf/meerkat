@@ -1084,6 +1084,8 @@ pub mod dsl;
 pub(crate) mod dsl_authority;
 mod dsl_effects;
 mod durability_health;
+#[cfg(feature = "live")]
+mod live_context_preparation;
 mod llm_reconfigure;
 mod runtime_control;
 mod session_management;
@@ -7285,6 +7287,7 @@ pub struct LiveChannelCustodyProjection {
     channel_id: meerkat_core::LiveChannelId,
     mode: meerkat_core::LiveExecutionMode,
     state: LiveChannelCustodyState,
+    preparation: crate::live_execution::LiveContextPreparationStatus,
 }
 
 #[cfg(feature = "live")]
@@ -7323,6 +7326,18 @@ impl LiveChannelCustodyProjection {
     #[must_use]
     pub const fn state(&self) -> &LiveChannelCustodyState {
         &self.state
+    }
+
+    #[must_use]
+    pub const fn preparation(&self) -> crate::live_execution::LiveContextPreparationStatus {
+        self.preparation
+    }
+
+    #[must_use]
+    pub const fn context_preparation(
+        &self,
+    ) -> &crate::live_execution::LiveContextPreparationStatus {
+        &self.preparation
     }
 }
 
@@ -7716,6 +7731,13 @@ pub struct MeerkatMachineShared {
     #[cfg(feature = "live")]
     live_context_queued_rows:
         StdMutex<HashMap<(SessionId, u64), crate::live_execution::LiveContextQueuedRow>>,
+    #[cfg(feature = "live")]
+    live_context_preparation_leases: StdMutex<
+        HashMap<
+            (SessionId, meerkat_core::LiveChannelId),
+            crate::live_execution::LiveContextPreparationLease,
+        >,
+    >,
     /// Serialize local row projection and generated claim selection only;
     /// never hold this mechanical gate while awaiting provider delivery.
     #[cfg(feature = "live")]
@@ -9142,6 +9164,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
+                live_context_preparation_leases: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
                 live_context_drain_tasks: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_projection_tasks: StdMutex::new(HashMap::new()),
@@ -9228,6 +9252,8 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
+                live_context_preparation_leases: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
                 live_context_drain_tasks: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_projection_tasks: StdMutex::new(HashMap::new()),
@@ -9313,6 +9339,8 @@ impl MeerkatMachine {
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_projection_gates: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_context_preparation_leases: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_context_drain_tasks: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]

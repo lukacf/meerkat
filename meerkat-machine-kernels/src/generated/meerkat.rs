@@ -3859,21 +3859,299 @@ impl std::fmt::Display for LiveContextAppendObservation {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveContextDeliveryReadiness {
+    #[default]
+    #[serde(rename = "Ready")]
+    Ready,
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Revoked")]
+    Revoked,
+}
+impl LiveContextDeliveryReadiness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::Pending => "Pending",
+            Self::Failed => "Failed",
+            Self::Revoked => "Revoked",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveContextDeliveryReadiness {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Ready" => Ok(Self::Ready),
+            "Pending" => Ok(Self::Pending),
+            "Failed" => Ok(Self::Failed),
+            "Revoked" => Ok(Self::Revoked),
+            other => Err(format!(
+                "invalid LiveContextDeliveryReadiness value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveContextDeliveryReadiness {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveContextDeliveryReadiness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveContextPayloadAvailability {
+    #[default]
+    #[serde(rename = "NoPayload")]
+    NoPayload,
+    #[serde(rename = "Materializable")]
+    Materializable,
+}
+impl LiveContextPayloadAvailability {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoPayload => "NoPayload",
+            Self::Materializable => "Materializable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveContextPayloadAvailability {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NoPayload" => Ok(Self::NoPayload),
+            "Materializable" => Ok(Self::Materializable),
+            other => Err(format!(
+                "invalid LiveContextPayloadAvailability value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveContextPayloadAvailability {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveContextPayloadAvailability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveContextPreparationFailure {
+    #[default]
+    #[serde(rename = "Capture")]
+    Capture,
+    #[serde(rename = "Generation")]
+    Generation,
+    #[serde(rename = "TimedOut")]
+    TimedOut,
+    #[serde(rename = "InputTooLarge")]
+    InputTooLarge,
+    #[serde(rename = "OutputTooLarge")]
+    OutputTooLarge,
+    #[serde(rename = "Empty")]
+    Empty,
+    #[serde(rename = "StaleSnapshot")]
+    StaleSnapshot,
+    #[serde(rename = "Unsupported")]
+    Unsupported,
+    #[serde(rename = "SourceRead")]
+    SourceRead,
+    #[serde(rename = "ProducerPanicked")]
+    ProducerPanicked,
+    #[serde(rename = "DeliveryRejected")]
+    DeliveryRejected,
+    #[serde(rename = "DeliveryAmbiguous")]
+    DeliveryAmbiguous,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+}
+impl LiveContextPreparationFailure {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Capture => "Capture",
+            Self::Generation => "Generation",
+            Self::TimedOut => "TimedOut",
+            Self::InputTooLarge => "InputTooLarge",
+            Self::OutputTooLarge => "OutputTooLarge",
+            Self::Empty => "Empty",
+            Self::StaleSnapshot => "StaleSnapshot",
+            Self::Unsupported => "Unsupported",
+            Self::SourceRead => "SourceRead",
+            Self::ProducerPanicked => "ProducerPanicked",
+            Self::DeliveryRejected => "DeliveryRejected",
+            Self::DeliveryAmbiguous => "DeliveryAmbiguous",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveContextPreparationFailure {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Capture" => Ok(Self::Capture),
+            "Generation" => Ok(Self::Generation),
+            "TimedOut" => Ok(Self::TimedOut),
+            "InputTooLarge" => Ok(Self::InputTooLarge),
+            "OutputTooLarge" => Ok(Self::OutputTooLarge),
+            "Empty" => Ok(Self::Empty),
+            "StaleSnapshot" => Ok(Self::StaleSnapshot),
+            "Unsupported" => Ok(Self::Unsupported),
+            "SourceRead" => Ok(Self::SourceRead),
+            "ProducerPanicked" => Ok(Self::ProducerPanicked),
+            "DeliveryRejected" => Ok(Self::DeliveryRejected),
+            "DeliveryAmbiguous" => Ok(Self::DeliveryAmbiguous),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => Err(format!(
+                "invalid LiveContextPreparationFailure value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveContextPreparationFailure {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveContextPreparationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveContextPreparationPhase {
+    #[default]
+    #[serde(rename = "Capturing")]
+    Capturing,
+    #[serde(rename = "Generating")]
+    Generating,
+    #[serde(rename = "Delivering")]
+    Delivering,
+    #[serde(rename = "ProviderAcknowledged")]
+    ProviderAcknowledged,
+    #[serde(rename = "Failed")]
+    Failed,
+}
+impl LiveContextPreparationPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Capturing => "Capturing",
+            Self::Generating => "Generating",
+            Self::Delivering => "Delivering",
+            Self::ProviderAcknowledged => "ProviderAcknowledged",
+            Self::Failed => "Failed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveContextPreparationPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Capturing" => Ok(Self::Capturing),
+            "Generating" => Ok(Self::Generating),
+            "Delivering" => Ok(Self::Delivering),
+            "ProviderAcknowledged" => Ok(Self::ProviderAcknowledged),
+            "Failed" => Ok(Self::Failed),
+            other => Err(format!(
+                "invalid LiveContextPreparationPhase value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveContextPreparationPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveContextPreparationPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveContextRowDisposition {
     #[default]
     #[serde(rename = "MirrorParentText")]
     MirrorParentText,
     #[serde(rename = "AlreadyPresentInLiveChannel")]
     AlreadyPresentInLiveChannel,
+    #[serde(rename = "AssistantObservation")]
+    AssistantObservation,
     #[serde(rename = "ExcludedFromLiveContext")]
     ExcludedFromLiveContext,
+    #[serde(rename = "ReassertCausalTail")]
+    ReassertCausalTail,
 }
 impl LiveContextRowDisposition {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::MirrorParentText => "MirrorParentText",
             Self::AlreadyPresentInLiveChannel => "AlreadyPresentInLiveChannel",
+            Self::AssistantObservation => "AssistantObservation",
             Self::ExcludedFromLiveContext => "ExcludedFromLiveContext",
+            Self::ReassertCausalTail => "ReassertCausalTail",
         }
     }
 }
@@ -3883,7 +4161,9 @@ impl std::convert::TryFrom<&str> for LiveContextRowDisposition {
         match value {
             "MirrorParentText" => Ok(Self::MirrorParentText),
             "AlreadyPresentInLiveChannel" => Ok(Self::AlreadyPresentInLiveChannel),
+            "AssistantObservation" => Ok(Self::AssistantObservation),
             "ExcludedFromLiveContext" => Ok(Self::ExcludedFromLiveContext),
+            "ReassertCausalTail" => Ok(Self::ReassertCausalTail),
             other => Err(format!("invalid LiveContextRowDisposition value `{other}`")),
         }
     }
@@ -12977,6 +13257,14 @@ pub struct State {
     pub live_bridge_submission_state_by_operation:
         std::collections::BTreeMap<OperationId, LiveBridgeSubmissionState>,
     pub live_context_cursor_by_channel: std::collections::BTreeMap<String, u64>,
+    pub live_context_preparation_phase_by_channel:
+        std::collections::BTreeMap<String, LiveContextPreparationPhase>,
+    pub live_context_preparation_failure_by_channel:
+        std::collections::BTreeMap<String, LiveContextPreparationFailure>,
+    pub live_context_preparation_lease_by_channel: std::collections::BTreeMap<String, String>,
+    pub live_context_reserved_cursor_by_channel: std::collections::BTreeMap<String, u64>,
+    pub live_context_bootstrap_append_by_channel: std::collections::BTreeMap<String, String>,
+    pub live_context_bootstrap_digest_by_channel: std::collections::BTreeMap<String, String>,
     pub live_context_queued_session_by_append: std::collections::BTreeMap<String, String>,
     pub live_context_queued_cursor_by_append: std::collections::BTreeMap<String, u64>,
     pub live_context_queued_digest_by_append: std::collections::BTreeMap<String, String>,
@@ -14865,6 +15153,56 @@ pub mod inputs {
         pub operation_id: OperationId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginLiveContextPreparation {
+        pub session_id: String,
+        pub channel_id: String,
+        pub lease_id: String,
+        pub reserved_cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ObserveLiveContextDeliveryReadiness {
+        pub session_id: String,
+        pub channel_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct GenerateLiveContextPreparation {
+        pub session_id: String,
+        pub channel_id: String,
+        pub lease_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeLiveContextBootstrapAppend {
+        pub session_id: String,
+        pub channel_id: String,
+        pub lease_id: String,
+        pub append_id: String,
+        pub content_digest: String,
+        pub reserved_cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveContextBootstrapAppend {
+        pub session_id: String,
+        pub channel_id: String,
+        pub lease_id: String,
+        pub append_id: String,
+        pub content_digest: String,
+        pub reserved_cursor: u64,
+        pub observation: LiveContextAppendObservation,
+        pub retained_sessions: std::collections::BTreeMap<String, String>,
+        pub retained_cursors: std::collections::BTreeMap<String, u64>,
+        pub retained_digests: std::collections::BTreeMap<String, String>,
+        pub retained_commits: std::collections::BTreeMap<String, String>,
+        pub retained_dispositions: std::collections::BTreeMap<String, LiveContextRowDisposition>,
+        pub retained_append_by_cursor: std::collections::BTreeMap<u64, String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FailLiveContextPreparation {
+        pub session_id: String,
+        pub channel_id: String,
+        pub lease_id: String,
+        pub reason: LiveContextPreparationFailure,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeLiveContextAppend {
         pub channel_id: String,
         pub runtime_id: AgentRuntimeId,
@@ -14885,6 +15223,7 @@ pub mod inputs {
         pub content_digest: String,
         pub commit_authority_token: String,
         pub disposition: LiveContextRowDisposition,
+        pub payload_availability: LiveContextPayloadAvailability,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdvanceLiveContextCanonicalCoverage {
@@ -15751,6 +16090,12 @@ pub enum Input {
     RecordLiveBridgeSubmissionLocalWrite(inputs::RecordLiveBridgeSubmissionLocalWrite),
     ResolveLiveBridgeSubmission(inputs::ResolveLiveBridgeSubmission),
     RecoverLiveBridgeSubmission(inputs::RecoverLiveBridgeSubmission),
+    BeginLiveContextPreparation(inputs::BeginLiveContextPreparation),
+    ObserveLiveContextDeliveryReadiness(inputs::ObserveLiveContextDeliveryReadiness),
+    GenerateLiveContextPreparation(inputs::GenerateLiveContextPreparation),
+    AuthorizeLiveContextBootstrapAppend(inputs::AuthorizeLiveContextBootstrapAppend),
+    ResolveLiveContextBootstrapAppend(inputs::ResolveLiveContextBootstrapAppend),
+    FailLiveContextPreparation(inputs::FailLiveContextPreparation),
     AuthorizeLiveContextAppend(inputs::AuthorizeLiveContextAppend),
     EnqueueLiveContextRow(inputs::EnqueueLiveContextRow),
     AdvanceLiveContextCanonicalCoverage(inputs::AdvanceLiveContextCanonicalCoverage),
@@ -16239,6 +16584,18 @@ impl Input {
             }
             Self::ResolveLiveBridgeSubmission(_) => InputKind::ResolveLiveBridgeSubmission,
             Self::RecoverLiveBridgeSubmission(_) => InputKind::RecoverLiveBridgeSubmission,
+            Self::BeginLiveContextPreparation(_) => InputKind::BeginLiveContextPreparation,
+            Self::ObserveLiveContextDeliveryReadiness(_) => {
+                InputKind::ObserveLiveContextDeliveryReadiness
+            }
+            Self::GenerateLiveContextPreparation(_) => InputKind::GenerateLiveContextPreparation,
+            Self::AuthorizeLiveContextBootstrapAppend(_) => {
+                InputKind::AuthorizeLiveContextBootstrapAppend
+            }
+            Self::ResolveLiveContextBootstrapAppend(_) => {
+                InputKind::ResolveLiveContextBootstrapAppend
+            }
+            Self::FailLiveContextPreparation(_) => InputKind::FailLiveContextPreparation,
             Self::AuthorizeLiveContextAppend(_) => InputKind::AuthorizeLiveContextAppend,
             Self::EnqueueLiveContextRow(_) => InputKind::EnqueueLiveContextRow,
             Self::AdvanceLiveContextCanonicalCoverage(_) => {
@@ -16652,6 +17009,12 @@ pub enum InputKind {
     RecordLiveBridgeSubmissionLocalWrite,
     ResolveLiveBridgeSubmission,
     RecoverLiveBridgeSubmission,
+    BeginLiveContextPreparation,
+    ObserveLiveContextDeliveryReadiness,
+    GenerateLiveContextPreparation,
+    AuthorizeLiveContextBootstrapAppend,
+    ResolveLiveContextBootstrapAppend,
+    FailLiveContextPreparation,
     AuthorizeLiveContextAppend,
     EnqueueLiveContextRow,
     AdvanceLiveContextCanonicalCoverage,
@@ -17890,6 +18253,28 @@ pub mod effects {
         pub retry_allowed: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveContextPreparationChanged {
+        pub session_id: String,
+        pub channel_id: String,
+        pub lease_id: String,
+        pub phase: LiveContextPreparationPhase,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveContextDeliveryReadinessObserved {
+        pub session_id: String,
+        pub channel_id: String,
+        pub readiness: LiveContextDeliveryReadiness,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveContextBootstrapAppendAuthorized {
+        pub session_id: String,
+        pub channel_id: String,
+        pub lease_id: String,
+        pub append_id: String,
+        pub content_digest: String,
+        pub reserved_cursor: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveContextAppendAuthorized {
         pub channel_id: String,
         pub append_id: String,
@@ -18455,6 +18840,9 @@ pub enum Effect {
     LiveBridgeSubmissionLocalWriteRecorded(effects::LiveBridgeSubmissionLocalWriteRecorded),
     LiveBridgeSubmissionResolved(effects::LiveBridgeSubmissionResolved),
     LiveBridgeSubmissionRecoveredAmbiguous(effects::LiveBridgeSubmissionRecoveredAmbiguous),
+    LiveContextPreparationChanged(effects::LiveContextPreparationChanged),
+    LiveContextDeliveryReadinessObserved(effects::LiveContextDeliveryReadinessObserved),
+    LiveContextBootstrapAppendAuthorized(effects::LiveContextBootstrapAppendAuthorized),
     LiveContextAppendAuthorized(effects::LiveContextAppendAuthorized),
     LiveContextAppendDeferred(effects::LiveContextAppendDeferred),
     LiveContextAppendAlreadyCovered(effects::LiveContextAppendAlreadyCovered),
@@ -18693,6 +19081,9 @@ pub enum EffectKind {
     LiveBridgeSubmissionLocalWriteRecorded,
     LiveBridgeSubmissionResolved,
     LiveBridgeSubmissionRecoveredAmbiguous,
+    LiveContextPreparationChanged,
+    LiveContextDeliveryReadinessObserved,
+    LiveContextBootstrapAppendAuthorized,
     LiveContextAppendAuthorized,
     LiveContextAppendDeferred,
     LiveContextAppendAlreadyCovered,
@@ -20699,6 +21090,28 @@ pub enum TransitionId {
     RecoverLiveBridgeSubmissionExactReplayRunning,
     RecoverLiveBridgeSubmissionExactReplayRetired,
     RecoverLiveBridgeSubmissionExactReplayStopped,
+    ObserveLiveContextDeliveryReadinessIdle,
+    ObserveLiveContextDeliveryReadinessAttached,
+    ObserveLiveContextDeliveryReadinessRunning,
+    ObserveLiveContextDeliveryReadinessRetired,
+    ObserveLiveContextDeliveryReadinessStopped,
+    BeginLiveContextPreparationIdle,
+    BeginLiveContextPreparationAttached,
+    BeginLiveContextPreparationRunning,
+    GenerateLiveContextPreparationIdle,
+    GenerateLiveContextPreparationAttached,
+    GenerateLiveContextPreparationRunning,
+    AuthorizeLiveContextBootstrapAppendIdle,
+    AuthorizeLiveContextBootstrapAppendAttached,
+    AuthorizeLiveContextBootstrapAppendRunning,
+    ResolveLiveContextBootstrapAppendIdle,
+    ResolveLiveContextBootstrapAppendAttached,
+    ResolveLiveContextBootstrapAppendRunning,
+    FailLiveContextPreparationIdle,
+    FailLiveContextPreparationAttached,
+    FailLiveContextPreparationRunning,
+    FailLiveContextPreparationRetired,
+    FailLiveContextPreparationStopped,
     EnqueueLiveContextRowIdle,
     EnqueueLiveContextRowAttached,
     EnqueueLiveContextRowRunning,
@@ -21889,6 +22302,12 @@ pub fn initial_state() -> State {
         live_bridge_submission_digest_by_operation: Default::default(),
         live_bridge_submission_state_by_operation: Default::default(),
         live_context_cursor_by_channel: Default::default(),
+        live_context_preparation_phase_by_channel: Default::default(),
+        live_context_preparation_failure_by_channel: Default::default(),
+        live_context_preparation_lease_by_channel: Default::default(),
+        live_context_reserved_cursor_by_channel: Default::default(),
+        live_context_bootstrap_append_by_channel: Default::default(),
+        live_context_bootstrap_digest_by_channel: Default::default(),
         live_context_queued_session_by_append: Default::default(),
         live_context_queued_cursor_by_append: Default::default(),
         live_context_queued_digest_by_append: Default::default(),

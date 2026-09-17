@@ -121,6 +121,31 @@ pub trait LiveContextMirrorHost: Send + Sync {
         String,
     >;
 
+    /// Join the exact provider-control handoff before the source owner
+    /// revalidates a prepared summary. This is resource readiness, not ACK.
+    async fn wait_bootstrap_control_ready(
+        &self,
+        _lease: &crate::live_execution::LiveContextPreparationLease,
+    ) -> Result<(), String> {
+        Err("live context host cannot confirm bootstrap control readiness".into())
+    }
+
+    /// Quiet historical bootstrap. The authority binds the exact captured
+    /// prefix, summary digest, channel, and cancellation fence.
+    async fn append_bootstrap_context(
+        &self,
+        authority: crate::live_execution::LiveContextBootstrapAppendAuthority,
+        _context: String,
+    ) -> Result<
+        (
+            crate::live_execution::LiveContextBootstrapAppendAuthority,
+            meerkat_core::LiveAppendDeliveryOutcome,
+        ),
+        String,
+    > {
+        Ok((authority, meerkat_core::LiveAppendDeliveryOutcome::Rejected))
+    }
+
     async fn recover_ambiguous_append(
         &self,
         authority: LiveContextAmbiguityRecoveryAuthority,
@@ -145,8 +170,9 @@ pub trait LiveContextMirrorHost: Send + Sync {
 /// One exact store-committed canonical row classified by SessionDocument.
 ///
 /// Construction is crate-private so a surface cannot manufacture commit or
-/// provenance evidence. The provider payload is retained only for the one
-/// generated disposition that authorizes mirroring.
+/// provenance evidence. Retained payload availability is a sealed observation;
+/// generated runtime authority decides ordinary delivery, causal reassertion,
+/// or coverage without a provider send.
 #[derive(Debug, Clone)]
 pub struct CommittedLiveContextRow {
     session_id: SessionId,
@@ -155,6 +181,7 @@ pub struct CommittedLiveContextRow {
     store_commit_authority: String,
     disposition: LiveContextCommittedRowDisposition,
     provider_context: Option<String>,
+    causal_context: Option<String>,
 }
 
 impl CommittedLiveContextRow {
@@ -166,7 +193,16 @@ impl CommittedLiveContextRow {
         provenance: LiveContextCommittedTextProvenance,
         store_commit_authority: &str,
     ) -> Result<Self, String> {
-        let (row_kind, provider_context) = context_projection(message)?;
+        let (ordinary_row_kind, provider_context) = context_projection(message)?;
+        let causal_context = causal_context_projection(message)?;
+        let row_kind = if ordinary_row_kind == LiveContextCommittedRowKind::NonText
+            && causal_context.is_some()
+            && provenance != LiveContextCommittedTextProvenance::LiveRealtimeTranscript
+        {
+            LiveContextCommittedRowKind::AssistantTranscript
+        } else {
+            ordinary_row_kind
+        };
         let content_digest = format!("{:x}", Sha256::digest(serialized_row));
         let mut authority = SessionDocumentMachineAuthority::new();
         let effects = authority
@@ -205,8 +241,17 @@ impl CommittedLiveContextRow {
         let provider_context = matches!(
             disposition,
             LiveContextCommittedRowDisposition::MirrorParentText
+                | LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel
+                | LiveContextCommittedRowDisposition::AssistantObservation
         )
         .then_some(provider_context)
+        .flatten();
+        let causal_context = matches!(
+            disposition,
+            LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel
+                | LiveContextCommittedRowDisposition::AssistantObservation
+        )
+        .then_some(causal_context)
         .flatten();
         Ok(Self {
             session_id: session_id.clone(),
@@ -215,6 +260,7 @@ impl CommittedLiveContextRow {
             store_commit_authority: store_commit_authority.to_string(),
             disposition,
             provider_context,
+            causal_context,
         })
     }
 
@@ -245,7 +291,28 @@ impl CommittedLiveContextRow {
 
     #[must_use]
     pub fn provider_context(&self) -> Option<&str> {
-        self.provider_context.as_deref()
+        matches!(
+            self.disposition,
+            LiveContextCommittedRowDisposition::MirrorParentText
+        )
+        .then_some(self.provider_context.as_deref())
+        .flatten()
+    }
+
+    pub(crate) fn causal_context(&self) -> Option<&str> {
+        self.causal_context
+            .as_deref()
+            .or(self.provider_context.as_deref())
+    }
+
+    pub(crate) fn payload_availability(
+        &self,
+    ) -> crate::meerkat_machine::dsl::LiveContextPayloadAvailability {
+        if self.causal_context().is_some() {
+            crate::meerkat_machine::dsl::LiveContextPayloadAvailability::Materializable
+        } else {
+            crate::meerkat_machine::dsl::LiveContextPayloadAvailability::NoPayload
+        }
     }
 }
 
@@ -329,6 +396,24 @@ pub(crate) fn classify_committed_boundary_rows_after(
         .collect()
 }
 
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum LiveAssistantContextBlock<'a> {
+    Text {
+        text: &'a str,
+    },
+    Transcript {
+        text: std::borrow::Cow<'a, str>,
+        source: meerkat_core::types::TranscriptSource,
+    },
+}
+
+#[derive(serde::Serialize)]
+struct LiveAssistantContext<'a> {
+    role: &'static str,
+    blocks: Vec<LiveAssistantContextBlock<'a>>,
+}
+
 fn context_projection(
     message: &Message,
 ) -> Result<(LiveContextCommittedRowKind, Option<String>), String> {
@@ -372,6 +457,41 @@ fn context_projection(
         | Message::ToolResults { .. }
         | Message::User(_) => Ok((LiveContextCommittedRowKind::NonText, None)),
     }
+}
+
+fn causal_context_projection(message: &Message) -> Result<Option<String>, String> {
+    let Message::BlockAssistant(assistant) = message else {
+        return Ok(None);
+    };
+    if !assistant.blocks.iter().any(|block| {
+        matches!(
+            block, AssistantBlock::Transcript { text, .. } if !text.trim().is_empty()
+        )
+    }) {
+        return Ok(None);
+    }
+    let blocks = assistant
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            AssistantBlock::Text { text, .. } if !text.trim().is_empty() => {
+                Some(LiveAssistantContextBlock::Text { text })
+            }
+            AssistantBlock::Transcript { text, source, .. } if !text.trim().is_empty() => {
+                Some(LiveAssistantContextBlock::Transcript {
+                    text: source.text_for_model(text),
+                    source: *source,
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    serde_json::to_string(&LiveAssistantContext {
+        role: "assistant",
+        blocks,
+    })
+    .map(Some)
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -425,6 +545,100 @@ mod tests {
     }
 
     #[test]
+    fn causal_assistant_snapshot_retains_typed_unmeasured_provenance_without_strict_echo() {
+        let message =
+            Message::BlockAssistant(meerkat_core::types::BlockAssistantMessage::snapshot(vec![
+                AssistantBlock::Transcript {
+                    text: "earlier unmeasured assistant observation".into(),
+                    source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                    meta: None,
+                },
+            ]));
+        assert_eq!(
+            context_projection(&message).expect("ordinary projection"),
+            (LiveContextCommittedRowKind::NonText, None)
+        );
+        let row = classify(
+            &message,
+            LiveContextCommittedTextProvenance::LiveRealtimeTranscript,
+        );
+        assert_eq!(
+            row.disposition(),
+            LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel
+        );
+        assert!(
+            row.provider_context().is_none(),
+            "strict delivery still does not echo live speech"
+        );
+        let causal = row
+            .causal_context()
+            .expect("causal payload retained for generated reassertion");
+        assert!(causal.contains("earlier unmeasured assistant observation"));
+        assert!(causal.contains("spoken_unmeasured"));
+        assert!(causal.contains("Not proof of"));
+        let ordinary = classify(
+            &message,
+            LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
+        );
+        assert_eq!(
+            ordinary.disposition(),
+            LiveContextCommittedRowDisposition::AssistantObservation
+        );
+        assert!(ordinary.provider_context().is_none());
+    }
+
+    #[test]
+    fn mixed_assistant_rows_keep_ordinary_text_and_separate_observational_context() {
+        let message =
+            Message::BlockAssistant(meerkat_core::types::BlockAssistantMessage::snapshot(vec![
+                AssistantBlock::Text {
+                    text: "written text".into(),
+                    meta: None,
+                },
+                AssistantBlock::Transcript {
+                    text: "unmeasured audio".into(),
+                    source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                    meta: None,
+                },
+            ]));
+        let legacy = r#"{"role":"assistant","text":"written text"}"#;
+        assert_eq!(
+            context_projection(&message).expect("ordinary projection"),
+            (
+                LiveContextCommittedRowKind::AssistantText,
+                Some(legacy.into())
+            )
+        );
+        let ordinary = classify(
+            &message,
+            LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
+        );
+        assert_eq!(ordinary.provider_context(), Some(legacy));
+        assert_eq!(
+            ordinary.causal_context(),
+            Some(legacy),
+            "foreign/ordinary rows expose no extra speech payload"
+        );
+        let live = classify(
+            &message,
+            LiveContextCommittedTextProvenance::LiveRealtimeTranscript,
+        );
+        assert_eq!(
+            live.disposition(),
+            LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel
+        );
+        assert!(
+            live.provider_context().is_none(),
+            "strict live no-echo is unchanged"
+        );
+        let causal = live.causal_context().expect("observational causal payload");
+        assert!(causal.contains("written text"));
+        assert!(causal.contains("unmeasured audio"));
+        assert!(causal.contains("spoken_unmeasured"));
+        assert!(causal.contains("Not proof of"));
+    }
+
+    #[test]
     fn executor_trace_is_excluded_even_when_text_shaped() {
         let row = classify(
             &Message::User(UserMessage::text("executor progress")),
@@ -435,6 +649,23 @@ mod tests {
             LiveContextCommittedRowDisposition::ExcludedFromLiveContext
         );
         assert_eq!(row.provider_context(), None);
+    }
+
+    #[test]
+    fn non_text_live_rows_never_create_unrealizable_causal_appends() {
+        let row = classify(
+            &Message::User(UserMessage::text("   ")),
+            LiveContextCommittedTextProvenance::LiveRealtimeTranscript,
+        );
+        assert_eq!(
+            row.disposition(),
+            LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel
+        );
+        assert!(row.causal_context().is_none());
+        assert_eq!(
+            row.payload_availability(),
+            crate::meerkat_machine::dsl::LiveContextPayloadAvailability::NoPayload
+        );
     }
 
     #[test]

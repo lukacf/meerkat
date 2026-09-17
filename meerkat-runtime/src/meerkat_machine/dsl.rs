@@ -2811,14 +2811,21 @@ pub enum LiveContextAppendObservation {
     InterruptedByClose,
 }
 
-/// Bridging copy of SessionDocument's generated committed-row disposition.
+/// Source dispositions plus the runtime-owned causal reassertion disposition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveContextRowDisposition {
     #[default]
     MirrorParentText,
     AlreadyPresentInLiveChannel,
+    AssistantObservation,
     ExcludedFromLiveContext,
+    ReassertCausalTail,
 }
+
+pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
+    LiveContextDeliveryReadiness, LiveContextPayloadAvailability, LiveContextPreparationFailure,
+    LiveContextPreparationPhase,
+};
 
 /// Bridging copy of the catalog-owned delegation result disposition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

@@ -467,6 +467,14 @@ pub struct AudioEvidence {
 }
 
 impl AudioEvidence {
+    /// S99 requires decoded native remote speech, not analyser-only evidence.
+    pub fn has_decoded_speech_since(self, baseline: Self) -> bool {
+        self.bytes_received > baseline.bytes_received
+            && self.packets_received > baseline.packets_received
+            && self.decoded_non_silent_frames > baseline.decoded_non_silent_frames
+            && self.decoded_non_silent_seconds - baseline.decoded_non_silent_seconds >= 0.1
+    }
+
     /// Require new remote RTP plus measured non-silent media, never protocol
     /// events or counters accumulated before this exchange.
     pub fn has_spoken_since(self, baseline: Self) -> bool {
@@ -533,6 +541,42 @@ mod audio_evidence_tests {
     #[test]
     fn missing_browser_audio_measurement_is_an_error_not_a_zero_default() {
         assert!(serde_json::from_value::<AudioEvidence>(serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn concurrent_bootstrap_requires_fresh_decoded_speech_not_analyser_or_transcript() {
+        let analyser_only = AudioEvidence {
+            bytes_received: 10_000,
+            packets_received: 100,
+            non_silent_frames: 100,
+            total_audio_energy: Some(0.5),
+            ..AudioEvidence::default()
+        };
+        assert!(analyser_only.has_spoken_since(AudioEvidence::default()));
+        assert!(!analyser_only.has_decoded_speech_since(AudioEvidence::default()));
+        let decoded = AudioEvidence {
+            decoded_non_silent_frames: 4_800,
+            decoded_non_silent_seconds: 0.1,
+            ..analyser_only
+        };
+        assert!(decoded.has_decoded_speech_since(AudioEvidence::default()));
+        assert!(!decoded.has_decoded_speech_since(decoded));
+        assert!(
+            !AudioEvidence {
+                bytes_received: decoded.bytes_received + 1,
+                packets_received: decoded.packets_received + 1,
+                ..decoded
+            }
+            .has_decoded_speech_since(decoded)
+        );
+        assert!(
+            !AudioEvidence {
+                bytes_received: 0,
+                packets_received: 0,
+                ..decoded
+            }
+            .has_decoded_speech_since(AudioEvidence::default())
+        );
     }
 }
 

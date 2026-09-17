@@ -4137,11 +4137,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         role: &str,
     ) -> Result<Option<Session>, SessionError> {
+        self.load_committed_runtime_session_with_authority(id, role)
+            .await
+            .map(|loaded| loaded.map(|(session, _authority)| session))
+    }
+
+    async fn load_committed_runtime_session_with_authority(
+        &self,
+        id: &SessionId,
+        role: &str,
+    ) -> Result<Option<(Session, RuntimeSessionAuthority)>, SessionError> {
         match self.runtime_store.session_persistence_profile() {
             RuntimeSessionPersistenceProfile::WholeBlobV1 => {
                 load_committed_whole_blob_session(self.runtime_store.as_ref(), id, role)
                     .await
-                    .map(|loaded| loaded.map(|(session, _snapshot)| session))
+                    .map(|loaded| {
+                        loaded.map(|(session, snapshot)| {
+                            (
+                                session,
+                                RuntimeSessionAuthority::WholeBlob(snapshot.authority().clone()),
+                            )
+                        })
+                    })
             }
             RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
                 let authority = self
@@ -4156,15 +4173,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 let Some(authority) = authority else {
                     return Ok(None);
                 };
-                let authority = authority.head_canonical().ok_or_else(|| {
+                let head_authority = authority.head_canonical().ok_or_else(|| {
                     SessionError::Agent(AgentError::InternalError(format!(
                         "{role} loaded non-HeadCanonical authority for session {id}"
                     )))
                 })?;
-                if authority.session_id() != id {
+                if head_authority.session_id() != id {
                     return Err(SessionError::Agent(AgentError::InternalError(format!(
                         "{role} HeadCanonical authority identifies session {}, not {id}",
-                        authority.session_id()
+                        head_authority.session_id()
                     ))));
                 }
                 let incremental = self.incremental.as_ref().ok_or_else(|| {
@@ -4173,9 +4190,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )))
                 })?;
                 incremental
-                    .materialize_head(authority.boundary_head())
+                    .materialize_head(head_authority.boundary_head())
                     .await
-                    .map(|materialized| Some(materialized.session().as_ref().clone()))
+                    .map(|materialized| Some((materialized.session().as_ref().clone(), authority)))
                     .map_err(|error| SessionError::Store(Box::new(error)))
             }
             profile => Err(SessionError::Agent(AgentError::InternalError(format!(
@@ -5510,6 +5527,59 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.export_realtime_session_authority_snapshot(id).await
     }
 
+    /// Capture the full committed context and its durable LLM identity for a
+    /// concurrent live-context summary.
+    ///
+    /// The source is exclusively the RuntimeStore-issued committed boundary:
+    /// an exact WholeBlob payload, or the exact HeadCanonical head materialized
+    /// by the incremental store. The identity comes from that same document.
+    /// Actor-local changes and provisional tails ahead of the boundary are not
+    /// committed context and are never substituted for it. If the committed
+    /// HeadCanonical head is no longer materializable, its typed conflict is
+    /// returned rather than waiting for a turn or serving a different head.
+    ///
+    /// This read takes no session mutation/recovery/turn-finalization guard,
+    /// sends no actor command, performs no synchronization, and leaves media
+    /// references unhydrated. It does not reserve the captured boundary:
+    /// callers must validate the source prefix, rewrite generation and identity
+    /// against current authority before using an asynchronously produced summary.
+    pub async fn export_live_context_summary_snapshot(
+        &self,
+        id: &SessionId,
+    ) -> Result<(Session, meerkat_core::SessionLlmIdentity), SessionError> {
+        let (session, _authority) = self.load_live_context_committed_source(id).await?;
+        let identity = session
+            .try_session_metadata()
+            .map_err(|error| {
+                durable_session_restore_error(
+                    id,
+                    "live context summary metadata failed typed restore",
+                    error,
+                )
+            })?
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "committed live context summary source for session {id} has no durable LLM identity"
+                )))
+            })?
+            .llm_identity();
+        Ok((session, identity))
+    }
+
+    async fn load_live_context_committed_source(
+        &self,
+        id: &SessionId,
+    ) -> Result<(Session, RuntimeSessionAuthority), SessionError> {
+        let (session, authority) = self
+            .load_committed_runtime_session_with_authority(id, "live context source")
+            .await?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        if self.session_archived_by_authority(id, &session).await? {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        Ok((session, authority))
+    }
+
     /// Export one exact current canonical boundary for live-context catch-up.
     ///
     /// This is used only after a provider has acknowledged seed cursor K and
@@ -5529,20 +5599,24 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         SessionError,
     > {
         let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
-        let session = self
-            .load_committed_runtime_session_for_body(id, "live context answer-ready catch-up")
-            .await?
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let authority = self
-            .runtime_store
-            .load_session_boundary_authority(&Self::runtime_id_for_session(id))
+        self.export_live_context_committed_boundary_nonblocking(id)
             .await
-            .map_err(|error| {
-                SessionError::Agent(AgentError::InternalError(format!(
-                    "failed to load live context catch-up authority for session {id}: {error}"
-                )))
-            })?
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+    }
+
+    /// Capture an exact committed body/token pair without waiting for session
+    /// mutation gates or actor synchronization.
+    ///
+    /// This has the committed-only source and unhydrated-media contract of
+    /// [`Self::export_live_context_summary_snapshot`]. The token belongs to the
+    /// authority that supplied the body, never to a later authority read.
+    /// A concurrent append or rewrite may supersede the pair after capture;
+    /// the receiving runtime owner must validate it before delivery.
+    #[cfg(feature = "live")]
+    pub async fn export_live_context_committed_boundary_nonblocking(
+        &self,
+        id: &SessionId,
+    ) -> Result<(BoundSessionCommit, String), SessionError> {
+        let (session, authority) = self.load_live_context_committed_source(id).await?;
         let _ = PreparedRuntimeBoundaryIdentity::from_runtime_authority(&authority, id)?;
         let authority_token = match authority {
             RuntimeSessionAuthority::WholeBlob(authority) => authority.blob_sha256().to_string(),
@@ -15658,6 +15732,7 @@ mod tests {
         fail_machine_lifecycle_commits: AtomicBool,
         session_snapshot_overrides: Mutex<HashMap<LogicalRuntimeId, Vec<u8>>>,
         replace_snapshot_interlopers: Mutex<HashMap<LogicalRuntimeId, Vec<u8>>>,
+        snapshot_read_interlopers: Mutex<HashMap<LogicalRuntimeId, SerializedSessionSnapshot>>,
         input_state_load_errors: Mutex<HashSet<LogicalRuntimeId>>,
         boundary_commits: Mutex<Vec<meerkat_core::lifecycle::RunBoundaryReceipt>>,
         pause_rewrite_commit: AtomicBool,
@@ -15690,6 +15765,7 @@ mod tests {
                 fail_machine_lifecycle_commits: AtomicBool::new(false),
                 session_snapshot_overrides: Mutex::new(HashMap::new()),
                 replace_snapshot_interlopers: Mutex::new(HashMap::new()),
+                snapshot_read_interlopers: Mutex::new(HashMap::new()),
                 input_state_load_errors: Mutex::new(HashSet::new()),
                 boundary_commits: Mutex::new(Vec::new()),
                 pause_rewrite_commit: AtomicBool::new(false),
@@ -15897,9 +15973,21 @@ mod tests {
             runtime_id: &LogicalRuntimeId,
         ) -> Result<Option<CommittedWholeBlobSnapshot>, meerkat_runtime::store::RuntimeStoreError>
         {
-            self.inner
+            let snapshot = self
+                .inner
                 .load_committed_whole_blob_snapshot(runtime_id)
+                .await?;
+            let interloper = self
+                .snapshot_read_interlopers
+                .lock()
                 .await
+                .remove(runtime_id);
+            if let Some(interloper) = interloper {
+                self.inner
+                    .commit_session_snapshot(runtime_id, interloper)
+                    .await?;
+            }
+            Ok(snapshot)
         }
 
         async fn commit_prepared_whole_blob_snapshot_cas(
@@ -17955,6 +18043,7 @@ mod tests {
         entered_runs: Arc<AtomicUsize>,
         entered_notify: Arc<tokio::sync::Notify>,
         release_notify: Arc<tokio::sync::Semaphore>,
+        pending_context: Option<String>,
     }
 
     impl BlockingRunBuilder {
@@ -17963,6 +18052,7 @@ mod tests {
                 entered_runs: Arc::new(AtomicUsize::new(0)),
                 entered_notify: Arc::new(tokio::sync::Notify::new()),
                 release_notify: Arc::new(tokio::sync::Semaphore::new(0)),
+                pending_context: None,
             }
         }
 
@@ -17990,6 +18080,7 @@ mod tests {
         entered_runs: Arc<AtomicUsize>,
         entered_notify: Arc<tokio::sync::Notify>,
         release_notify: Arc<tokio::sync::Semaphore>,
+        pending_context: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -18021,6 +18112,7 @@ mod tests {
                 entered_runs: Arc::clone(&self.entered_runs),
                 entered_notify: Arc::clone(&self.entered_notify),
                 release_notify: Arc::clone(&self.release_notify),
+                pending_context: self.pending_context.clone(),
             })
         }
     }
@@ -18032,6 +18124,9 @@ mod tests {
             prompt: meerkat_core::types::ContentInput,
             event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
         ) -> Result<RunResult, meerkat_core::error::AgentError> {
+            if let Some(context) = self.pending_context.take() {
+                self.inner.append_system_messages(vec![context])?;
+            }
             self.entered_runs.fetch_add(1, Ordering::AcqRel);
             self.entered_notify.notify_waiters();
             self.release_notify
@@ -22718,6 +22813,442 @@ mod tests {
             listed.is_empty(),
             "archived sessions should remain hidden from list even when stored durably"
         );
+    }
+
+    #[tokio::test]
+    async fn live_context_summary_snapshot_does_not_wait_for_active_turn_mutation_gates() {
+        let mut builder = BlockingRunBuilder::new();
+        builder.pending_context = Some("actor-only pending context".to_string());
+        let service = Arc::new(PersistentSessionService::new(
+            builder.clone(),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        ));
+        let mut seed = recoverable_store_row();
+        seed.push(Message::System(meerkat_core::types::SystemMessage::new(
+            "committed instructions",
+        )));
+        seed.push(user_message("committed context"));
+        let seed = service.save_normalized_session(seed).await.unwrap();
+        let id = seed.id().clone();
+        service.create_session(resume_request(seed)).await.unwrap();
+        let (committed, committed_authority) = service
+            .load_committed_runtime_session_with_authority(&id, "test source")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed_authority.session_id(), &id);
+
+        let admission = service.reserve_runtime_turn_admission(&id).await.unwrap();
+        let turn_service = Arc::clone(&service);
+        let turn_id = id.clone();
+        let active_turn = tokio::spawn(async move {
+            let _boundary = turn_service
+                .acquire_runtime_turn_finalization_guard(&turn_id)
+                .await;
+            turn_service
+                .apply_runtime_turn_with_reserved_admission(
+                    &turn_id,
+                    RunId::new(),
+                    runtime_content_turn_request("held turn"),
+                    RunApplyBoundary::RunStart,
+                    vec![InputId::new()],
+                    admission,
+                )
+                .await
+        });
+        builder.wait_for_entered_runs(1).await;
+        // The running actor has appended context beyond its committed base.
+        // Capturing its export would wait and include uncommitted content.
+        let recovery_gate = service.recovery_gate_for_session(&id).await;
+        assert!(recovery_gate.try_lock().is_err());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(25),
+                service.export_realtime_refresh_session_snapshot(&id),
+            )
+            .await
+            .is_err(),
+            "the old refresh read must encounter the held mutation gate"
+        );
+        let (captured, identity) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.export_live_context_summary_snapshot(&id),
+        )
+        .await
+        .expect("summary capture must not wait for the active turn")
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&captured).unwrap(),
+            serde_json::to_value(&committed).unwrap()
+        );
+        assert_eq!(
+            identity,
+            committed.session_metadata().unwrap().llm_identity()
+        );
+        #[cfg(feature = "live")]
+        {
+            let (boundary, token) = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                service.export_live_context_committed_boundary_nonblocking(&id),
+            )
+            .await
+            .expect("mirror capture must not wait for the active turn")
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(boundary.session().unwrap()).unwrap(),
+                serde_json::to_value(&committed).unwrap()
+            );
+            assert_eq!(
+                token,
+                committed_authority.whole_blob().unwrap().blob_sha256()
+            );
+        }
+        assert!(!active_turn.is_finished());
+        builder.release_notify.add_permits(1);
+        let output = active_turn.await.unwrap().unwrap();
+        assert!(
+            output
+                .session()
+                .unwrap()
+                .messages()
+                .iter()
+                .any(|message| matches!(message, Message::System(system) if system.content == "actor-only pending context")),
+            "the read must not synchronize away actor-local pending context"
+        );
+    }
+
+    fn live_context_summary_source() -> Session {
+        let mut session = recoverable_store_row();
+        let mut metadata = session.session_metadata().unwrap();
+        metadata.model = "gpt-5.5".to_string();
+        metadata.provider = meerkat_core::Provider::OpenAI;
+        metadata.self_hosted_server_id = Some("summary-source-server".to_string());
+        metadata.provider_params = Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                max_output_tokens: Some(2048),
+                ..Default::default()
+            },
+        );
+        metadata.auth_binding = Some(meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("summary-realm").unwrap(),
+            binding: meerkat_core::connection::BindingId::parse("summary-binding").unwrap(),
+            profile: Some(meerkat_core::connection::ProfileId::parse("summary-profile").unwrap()),
+            origin: meerkat_core::connection::BindingOrigin::Configured,
+        });
+        session.set_session_metadata(metadata).unwrap();
+        session.push(Message::System(meerkat_core::types::SystemMessage::new(
+            "first instructions",
+        )));
+        session.push(user_message("older committed context"));
+        session.push(Message::System(meerkat_core::types::SystemMessage::new(
+            "later instructions",
+        )));
+        session.push(Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: meerkat_core::blob::content_blob_id("image/png", "not-stored"),
+                },
+            },
+        ])));
+        session
+    }
+
+    #[tokio::test]
+    async fn live_context_summary_snapshot_pairs_exact_whole_blob_identity_without_hydration() {
+        let store = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            store.clone(),
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        let committed = service
+            .save_normalized_session(live_context_summary_source())
+            .await
+            .unwrap();
+        let id = committed.id().clone();
+        let mut projection = committed.clone();
+        let mut metadata = projection.session_metadata().unwrap();
+        metadata.model = "different-projection-model".to_string();
+        projection.set_session_metadata(metadata).unwrap();
+        store.save(&projection).await.unwrap();
+
+        let checkpointer = StoreCheckpointer {
+            runtime_store: runtime_store.clone(),
+            incremental: service.incremental.clone(),
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(
+                runtime_store
+                    .load_whole_blob_store_authority(&LogicalRuntimeId::for_session(&id))
+                    .await
+                    .unwrap(),
+            ),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+        };
+        let mut provisional = committed.clone();
+        provisional.push(user_message("provisional context is not committed"));
+        meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut provisional,
+            &RunId::new(),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("store-issued provisional receipt");
+
+        let (captured, identity) = service
+            .export_live_context_summary_snapshot(&id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&captured).unwrap(),
+            serde_json::to_value(&committed).unwrap()
+        );
+        assert_eq!(
+            identity,
+            committed.session_metadata().unwrap().llm_identity()
+        );
+        assert_ne!(
+            identity,
+            projection.session_metadata().unwrap().llm_identity()
+        );
+        assert!(
+            runtime_store
+                .load_whole_blob_provisional_tail(&LogicalRuntimeId::for_session(&id))
+                .await
+                .unwrap()
+                .is_some(),
+            "a summary read must not recover or discard provisional work"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "live")]
+    async fn live_context_summary_snapshot_and_boundary_keep_pairing_when_store_advances() {
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        let committed = service
+            .save_normalized_session(live_context_summary_source())
+            .await
+            .unwrap();
+        let id = committed.id().clone();
+        let runtime_id = LogicalRuntimeId::for_session(&id);
+        let initial_authority = runtime_store
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut successor = committed.clone();
+        successor.push(user_message("committed after the sampled snapshot"));
+        let mut metadata = successor.session_metadata().unwrap();
+        metadata.model = "successor-identity".to_string();
+        successor.set_session_metadata(metadata).unwrap();
+        runtime_store.snapshot_read_interlopers.lock().await.insert(
+            runtime_id.clone(),
+            SerializedSessionSnapshot {
+                session_snapshot: serde_json::to_vec(&successor).unwrap().into(),
+            },
+        );
+        let (boundary, token) = service
+            .export_live_context_committed_boundary_nonblocking(&id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(boundary.session().unwrap()).unwrap(),
+            serde_json::to_value(&committed).unwrap()
+        );
+        assert_eq!(token, initial_authority.blob_sha256());
+        let successor_authority = runtime_store
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(token, successor_authority.blob_sha256());
+
+        let mut next = successor.clone();
+        let mut metadata = next.session_metadata().unwrap();
+        metadata.model = "next-identity".to_string();
+        next.set_session_metadata(metadata).unwrap();
+        runtime_store.snapshot_read_interlopers.lock().await.insert(
+            runtime_id,
+            SerializedSessionSnapshot {
+                session_snapshot: serde_json::to_vec(&next).unwrap().into(),
+            },
+        );
+        let (captured, identity) = service
+            .export_live_context_summary_snapshot(&id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&captured).unwrap(),
+            serde_json::to_value(&successor).unwrap()
+        );
+        assert_eq!(
+            identity,
+            successor.session_metadata().unwrap().llm_identity()
+        );
+        assert_ne!(identity, next.session_metadata().unwrap().llm_identity());
+    }
+
+    #[tokio::test]
+    async fn live_context_summary_snapshot_head_canonical_is_exact_or_conflicts() {
+        let directory = tempfile::Builder::new()
+            .prefix(".summary-snapshot-")
+            .tempdir_in(".")
+            .unwrap();
+        let database_path = directory.path().join("runtime.sqlite3");
+        let runtime_store = Arc::new(
+            meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database_path).unwrap(),
+        );
+        let store = Arc::new(meerkat_store::SqliteSessionStore::open(&database_path).unwrap());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            store,
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        let committed = service
+            .persist_detached_head_canonical_session(
+                live_context_summary_source(),
+                "summary source fixture",
+            )
+            .await
+            .unwrap();
+        let id = committed.id().clone();
+        let (captured, identity) = service
+            .export_live_context_summary_snapshot(&id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&captured).unwrap(),
+            serde_json::to_value(&committed).unwrap()
+        );
+        assert_eq!(
+            identity,
+            committed.session_metadata().unwrap().llm_identity()
+        );
+        #[cfg(feature = "live")]
+        {
+            let (boundary, token) = service
+                .export_live_context_committed_boundary_nonblocking(&id)
+                .await
+                .unwrap();
+            let authority = runtime_store
+                .load_session_boundary_authority(&LogicalRuntimeId::for_session(&id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(boundary.session().unwrap()).unwrap(),
+                serde_json::to_value(&committed).unwrap()
+            );
+            assert_eq!(
+                token,
+                authority.head_canonical().unwrap().committed_head_token()
+            );
+        }
+
+        let checkpointer = StoreCheckpointer {
+            runtime_store,
+            incremental: service.incremental.clone(),
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(None),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+        };
+        let mut provisional = committed;
+        provisional.push(user_message("physical provisional successor"));
+        meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut provisional,
+            &RunId::new(),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("physical provisional head receipt");
+        let _boundary = service.acquire_runtime_turn_finalization_guard(&id).await;
+        let recovery_gate = service.recovery_gate_for_session(&id).await;
+        let _recovery = recovery_gate.lock().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.export_live_context_summary_snapshot(&id),
+        )
+        .await
+        .expect("an unmaterializable head must fail without waiting on a writer");
+        assert!(PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(&result));
+        #[cfg(feature = "live")]
+        {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                service.export_live_context_committed_boundary_nonblocking(&id),
+            )
+            .await
+            .expect("mirror must surface an exact-head conflict without waiting on a writer");
+            assert!(
+                PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(&result)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn live_context_summary_snapshot_refuses_absence_missing_identity_and_archive() {
+        let store = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            store.clone(),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let projection = recoverable_store_row();
+        store.save(&projection).await.unwrap();
+        assert!(matches!(
+            service
+                .export_live_context_summary_snapshot(projection.id())
+                .await,
+            Err(SessionError::NotFound { .. })
+        ));
+        let unidentified = service
+            .save_normalized_session(Session::new())
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .export_live_context_summary_snapshot(unidentified.id())
+                .await,
+            Err(SessionError::Agent(AgentError::InternalError(_)))
+        ));
+        let mut archived = recoverable_store_row();
+        archived
+            .set_lifecycle_terminal(SessionLifecycleTerminal::Archived)
+            .unwrap();
+        let archived = service.save_normalized_session(archived).await.unwrap();
+        assert!(matches!(
+            service
+                .export_live_context_summary_snapshot(archived.id())
+                .await,
+            Err(SessionError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]

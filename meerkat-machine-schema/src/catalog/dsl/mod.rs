@@ -727,7 +727,12 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "LiveContextCommittedRowKind",
-                &["UserText", "AssistantText", "NonText"],
+                &[
+                    "UserText",
+                    "AssistantText",
+                    "AssistantTranscript",
+                    "NonText",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "LiveContextCommittedTextProvenance",
@@ -742,6 +747,7 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 &[
                     "MirrorParentText",
                     "AlreadyPresentInLiveChannel",
+                    "AssistantObservation",
                     "ExcludedFromLiveContext",
                 ],
             ),
@@ -1165,8 +1171,46 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &[
                     "MirrorParentText",
                     "AlreadyPresentInLiveChannel",
+                    "AssistantObservation",
                     "ExcludedFromLiveContext",
+                    "ReassertCausalTail",
                 ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveContextPayloadAvailability",
+                &["NoPayload", "Materializable"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveContextPreparationPhase",
+                &[
+                    "Capturing",
+                    "Generating",
+                    "Delivering",
+                    "ProviderAcknowledged",
+                    "Failed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveContextPreparationFailure",
+                &[
+                    "Capture",
+                    "Generation",
+                    "TimedOut",
+                    "InputTooLarge",
+                    "OutputTooLarge",
+                    "Empty",
+                    "StaleSnapshot",
+                    "Unsupported",
+                    "SourceRead",
+                    "ProducerPanicked",
+                    "DeliveryRejected",
+                    "DeliveryAmbiguous",
+                    "Cancelled",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveContextDeliveryReadiness",
+                &["Ready", "Pending", "Failed", "Revoked"],
             ),
             NamedTypeBinding::string_enum(
                 "LiveDelegationResultDisposition",
@@ -2992,6 +3036,12 @@ runtime_internal_inputs!(
         RecordLiveBridgeSubmissionLocalWrite,
         ResolveLiveBridgeSubmission,
         RecoverLiveBridgeSubmission,
+        BeginLiveContextPreparation,
+        GenerateLiveContextPreparation,
+        AuthorizeLiveContextBootstrapAppend,
+        ResolveLiveContextBootstrapAppend,
+        FailLiveContextPreparation,
+        ObserveLiveContextDeliveryReadiness,
         AuthorizeLiveContextAppend,
         EnqueueLiveContextRow,
         AdvanceLiveContextCanonicalCoverage,

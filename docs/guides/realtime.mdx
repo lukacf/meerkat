@@ -672,6 +672,55 @@ as explicitly factual, unprivileged startup `session.input`, never
 `ExperimentalGptLiveWebrtcTransport::bound_context_summary(channel, session)`
 exposes read-only, channel-scoped summary provenance until unbinding.
 
+#### Concurrent historical context
+
+`BeforeOpen` remains the default. A dedicated public Live host can instead
+start native media without waiting for summary generation:
+
+```rust
+use meerkat::session_runtime::live_summary::LiveContextBootstrapMode;
+
+let member_host = member_host.with_context_summary_policy(
+    policy.with_bootstrap_mode(LiveContextBootstrapMode::Concurrent),
+);
+```
+
+Configured binding and existing-member authorization still happen first.
+The shared owner captures one exact committed source and its text identity
+without acquiring the active background turn's mutation guard or hydrating
+media. The original agent keeps its identity, model, tools, and full context.
+The callback runs concurrently; append-only growth does not restart it.
+
+The native session opens with no historical seed and no delivered canonical
+prefix. Generated authority reserves the captured prefix separately, then
+advances delivered coverage only after the exact quiet-context append is
+acknowledged. Historical facts enter the provider's thinking lane, not
+speakable commentary or trusted session instructions. Mirrorable post-snapshot
+canonical text and peer rows follow that summary in order; newer live corrections are
+reasserted as factual context rather than fabricated user turns.
+Existing origin classification is unchanged: a generic inbox notice is not
+promoted into conversational human input by this policy.
+
+Read `context_preparation()` on the existing receipt-validated
+`ExperimentalLiveChannelCustodyStatus`. Its `NotRequested`, `Preparing(stage)`,
+`ProviderAcknowledged`, and `Failed(reason)` values are independent of the
+channel's media `Pending`/`Active` phase. A host may display "Listening, loading
+context" only after actual media activation. `ProviderAcknowledged` proves an
+exact provider receipt, not model consumption, spoken output, or playback.
+Summary failure remains visible while media can remain active; it never
+silently changes to ready or falls back to raw history.
+
+The provider owner bounds the total append and fragments it within the public
+500-token limit. A complete acknowledgement requires every exact fragment
+receipt. A native rejection can follow partial delivery and is therefore
+ambiguous, not permission to replay the append blindly; actual channel-close
+interruption remains a separate outcome.
+
+Concurrent preparation is channel-owned. Exact close, identity change, or
+replacement cancels and fences that channel's job. A late old result cannot
+populate a new channel. The same opt-in policy applies to replacement opens;
+their independent pending and activation receipts remain mandatory.
+
 For an availability indicator, call
 `ExperimentalLiveOpenAuthorityProvider::probe_execution_readiness(session,
 execution_identity)`. Unlike catalog capability atoms, this checks the exact
@@ -913,7 +962,7 @@ bootstraps are mechanical publication custody: closing a never-activated
 replacement removes its entry, and delayed old close feedback cannot remove a
 newer entry.
 
-Cancellation invalidates generated recovery authority; it does not forcibly
+For the default `BeforeOpen` policy, cancellation invalidates generated recovery authority; it does not forcibly
 drop an arbitrary host summary or credential future. Until that bounded
 preparation finishes or times out, its existing projection-memory reservation
 may temporarily backpressure another open. Hosts should surface that refusal

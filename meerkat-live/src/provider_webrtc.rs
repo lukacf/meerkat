@@ -682,13 +682,19 @@ impl LiveSidebandReleaseAuthority {
 
 #[derive(PartialEq, Eq)]
 enum LiveSidebandCommandKind {
-    AppendSessionContext {
+    AppendThinking {
         binding: ProviderWebrtcBinding,
         attempt: LiveSidebandAppendAttempt,
         cursor: u64,
         text: String,
     },
-    ReleaseDelegationContext {
+    AppendSession {
+        binding: ProviderWebrtcBinding,
+        attempt: LiveSidebandAppendAttempt,
+        cursor: u64,
+        text: String,
+    },
+    ReleaseDelegation {
         binding: ProviderWebrtcBinding,
         attempt: LiveSidebandAppendAttempt,
         delegation: LiveSidebandDelegationRef,
@@ -710,6 +716,12 @@ pub struct LiveSidebandCommand {
 /// authorized command can produce it for provider lowering.
 #[doc(hidden)]
 pub enum LiveSidebandProviderCommand {
+    AppendThinkingContext {
+        binding: ProviderWebrtcBinding,
+        attempt: LiveSidebandAppendAttempt,
+        cursor: u64,
+        text: String,
+    },
     AppendSessionContext {
         binding: ProviderWebrtcBinding,
         attempt: LiveSidebandAppendAttempt,
@@ -728,10 +740,9 @@ pub enum LiveSidebandProviderCommand {
 impl fmt::Debug for LiveSidebandCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match &self.kind {
-            LiveSidebandCommandKind::AppendSessionContext { .. } => "append_session_context",
-            LiveSidebandCommandKind::ReleaseDelegationContext { .. } => {
-                "release_delegation_context"
-            }
+            LiveSidebandCommandKind::AppendThinking { .. } => "append_thinking_context",
+            LiveSidebandCommandKind::AppendSession { .. } => "append_session_context",
+            LiveSidebandCommandKind::ReleaseDelegation { .. } => "release_delegation_context",
         };
         formatter
             .debug_struct("LiveSidebandCommand")
@@ -742,6 +753,23 @@ impl fmt::Debug for LiveSidebandCommand {
 }
 
 impl LiveSidebandCommand {
+    /// Quiet factual context, never speakable commentary or trusted instructions.
+    pub fn append_thinking_context(
+        authority: LiveSidebandAppendAuthority,
+        text: impl Into<String>,
+    ) -> Result<Self, LiveSidebandCommandError> {
+        let text = require_sideband_text(text)?;
+        authority.consume_once()?;
+        Ok(Self {
+            kind: LiveSidebandCommandKind::AppendThinking {
+                binding: authority.binding,
+                attempt: authority.attempt,
+                cursor: authority.cursor,
+                text,
+            },
+        })
+    }
+
     pub fn append_session_context(
         authority: LiveSidebandAppendAuthority,
         text: impl Into<String>,
@@ -749,7 +777,7 @@ impl LiveSidebandCommand {
         let text = require_sideband_text(text)?;
         authority.consume_once()?;
         Ok(Self {
-            kind: LiveSidebandCommandKind::AppendSessionContext {
+            kind: LiveSidebandCommandKind::AppendSession {
                 binding: authority.binding,
                 attempt: authority.attempt,
                 cursor: authority.cursor,
@@ -773,7 +801,7 @@ impl LiveSidebandCommand {
             consumed: _,
         } = authority;
         Ok(Self {
-            kind: LiveSidebandCommandKind::ReleaseDelegationContext {
+            kind: LiveSidebandCommandKind::ReleaseDelegation {
                 binding,
                 attempt,
                 delegation,
@@ -786,16 +814,18 @@ impl LiveSidebandCommand {
     #[must_use]
     pub fn binding(&self) -> &ProviderWebrtcBinding {
         match &self.kind {
-            LiveSidebandCommandKind::AppendSessionContext { binding, .. }
-            | LiveSidebandCommandKind::ReleaseDelegationContext { binding, .. } => binding,
+            LiveSidebandCommandKind::AppendThinking { binding, .. }
+            | LiveSidebandCommandKind::AppendSession { binding, .. }
+            | LiveSidebandCommandKind::ReleaseDelegation { binding, .. } => binding,
         }
     }
 
     #[must_use]
     pub fn attempt(&self) -> LiveSidebandAppendAttempt {
         match &self.kind {
-            LiveSidebandCommandKind::AppendSessionContext { attempt, .. }
-            | LiveSidebandCommandKind::ReleaseDelegationContext { attempt, .. } => attempt.clone(),
+            LiveSidebandCommandKind::AppendThinking { attempt, .. }
+            | LiveSidebandCommandKind::AppendSession { attempt, .. }
+            | LiveSidebandCommandKind::ReleaseDelegation { attempt, .. } => attempt.clone(),
         }
     }
 
@@ -806,7 +836,18 @@ impl LiveSidebandCommand {
     #[must_use]
     pub fn __into_provider_command(self) -> LiveSidebandProviderCommand {
         match self.kind {
-            LiveSidebandCommandKind::AppendSessionContext {
+            LiveSidebandCommandKind::AppendThinking {
+                binding,
+                attempt,
+                cursor,
+                text,
+            } => LiveSidebandProviderCommand::AppendThinkingContext {
+                binding,
+                attempt,
+                cursor,
+                text,
+            },
+            LiveSidebandCommandKind::AppendSession {
                 binding,
                 attempt,
                 cursor,
@@ -817,7 +858,7 @@ impl LiveSidebandCommand {
                 cursor,
                 text,
             },
-            LiveSidebandCommandKind::ReleaseDelegationContext {
+            LiveSidebandCommandKind::ReleaseDelegation {
                 binding,
                 attempt,
                 delegation,
@@ -1259,6 +1300,32 @@ mod tests {
         assert_ne!(turn_a.adapter_key(), turn_b.adapter_key());
         assert!(!format!("{turn_a:?}").contains("private-provider-turn-a"));
         assert!(!format!("{turn_a:?}").contains(channel_a.as_str()));
+    }
+
+    #[test]
+    fn thinking_context_is_quiet_typed_and_consumes_exact_append_authority_once() {
+        let expected = binding();
+        let authority = LiveSidebandAppendAuthority {
+            binding: expected.clone(),
+            attempt: LiveSidebandAppendAttempt("historical-prefix".to_string()),
+            cursor: 29,
+            consumed: Arc::new(AtomicBool::new(false)),
+        };
+        let duplicate = authority.clone();
+        let command =
+            LiveSidebandCommand::append_thinking_context(authority, "private historical fact")
+                .expect("one quiet context delivery");
+        assert_eq!(command.binding(), &expected);
+        assert!(!format!("{command:?}").contains("private historical fact"));
+        assert!(matches!(
+            command.__into_provider_command(),
+            LiveSidebandProviderCommand::AppendThinkingContext { cursor: 29, text, .. }
+                if text == "private historical fact"
+        ));
+        assert_eq!(
+            LiveSidebandCommand::append_session_context(duplicate, "cannot switch the lane"),
+            Err(LiveSidebandCommandError::AuthorityAlreadyConsumed),
+        );
     }
 
     #[test]

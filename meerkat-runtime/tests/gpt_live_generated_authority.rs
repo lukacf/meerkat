@@ -142,6 +142,27 @@ fn bind_experimental(authority: &mut mm::MeerkatMachineAuthority, canonical_seed
     .expect("provider answer and acknowledged seed bind experimental execution atomically");
 }
 
+fn register_recovery_playback_owner(
+    authority: &mut mm::MeerkatMachineAuthority,
+    channel_id: &str,
+    pending_receipt: &str,
+) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::RegisterLivePlaybackOwner {
+            session_id: SESSION.into(),
+            channel_id: channel_id.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            owner_id: format!("owner:{channel_id}"),
+            readiness_id: format!("ready:{channel_id}"),
+            pending_receipt: pending_receipt.into(),
+        },
+    )
+    .expect("replacement has an exact ready playback owner");
+}
+
 fn bind_and_admit(authority: &mut mm::MeerkatMachineAuthority) {
     bind_only(authority);
     admit_provider_turn_delegation(authority);
@@ -615,9 +636,572 @@ fn enqueue_mirror_row(
             content_digest: format!("digest-{append_id}"),
             commit_authority_token: format!("commit-{append_id}"),
             disposition: mm::LiveContextRowDisposition::MirrorParentText,
+            payload_availability: mm::LiveContextPayloadAvailability::Materializable,
         },
     )
     .expect("canonical committed row enters generated outbox");
+}
+
+fn stage_bootstrap(authority: &mut mm::MeerkatMachineAuthority, reserved_cursor: u64) {
+    stage_experimental(authority, 0);
+    apply(
+        authority,
+        mm::MeerkatMachineInput::BeginLiveContextPreparation {
+            session_id: SESSION.into(),
+            channel_id: CHANNEL.into(),
+            lease_id: "bootstrap-job".into(),
+            reserved_cursor,
+        },
+    )
+    .expect("reserve exact source without claiming delivery");
+}
+
+fn activate_bootstrap(authority: &mut mm::MeerkatMachineAuthority) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::RecordLiveWebrtcAnswerAcceptedAndBindExecution {
+            session_id: SESSION.into(),
+            channel_id: CHANNEL.into(),
+            answer_observation_sequence: 1,
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            canonical_seed_cursor: 0,
+            activation_receipt: "activation-receipt".into(),
+        },
+    )
+    .expect("audio activates while summary is still preparing");
+}
+
+fn authorize_bootstrap(authority: &mut mm::MeerkatMachineAuthority, reserved_cursor: u64) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::GenerateLiveContextPreparation {
+            session_id: SESSION.into(),
+            channel_id: CHANNEL.into(),
+            lease_id: "bootstrap-job".into(),
+        },
+    )
+    .expect("one captured source starts generation");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AuthorizeLiveContextBootstrapAppend {
+            session_id: SESSION.into(),
+            channel_id: CHANNEL.into(),
+            lease_id: "bootstrap-job".into(),
+            append_id: "bootstrap-append".into(),
+            content_digest: "exact-summary-digest".into(),
+            reserved_cursor,
+        },
+    )
+    .expect("quiet summary receives its exact independent append authority");
+}
+
+fn resolve_bootstrap(
+    authority: &mut mm::MeerkatMachineAuthority,
+    reserved_cursor: u64,
+    observation: mm::LiveContextAppendObservation,
+) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    let input = bootstrap_resolution_input(
+        authority,
+        CHANNEL,
+        "bootstrap-job",
+        "bootstrap-append",
+        "exact-summary-digest",
+        reserved_cursor,
+        observation,
+    );
+    apply(authority, input)
+}
+
+fn bootstrap_resolution_input(
+    authority: &mm::MeerkatMachineAuthority,
+    channel: &str,
+    lease: &str,
+    append: &str,
+    digest: &str,
+    reserved_cursor: u64,
+    observation: mm::LiveContextAppendObservation,
+) -> mm::MeerkatMachineInput {
+    let state = authority.state();
+    let mut retained_cursors = state.live_context_queued_cursor_by_append.clone();
+    if observation == mm::LiveContextAppendObservation::Delivered {
+        retained_cursors.retain(|id, cursor| {
+            state
+                .live_context_queued_session_by_append
+                .get(id)
+                .map(String::as_str)
+                != Some(SESSION)
+                || *cursor > reserved_cursor
+        });
+    }
+    let mut retained_sessions = state.live_context_queued_session_by_append.clone();
+    retained_sessions.retain(|id, _| retained_cursors.contains_key(id));
+    let mut retained_digests = state.live_context_queued_digest_by_append.clone();
+    retained_digests.retain(|id, _| retained_cursors.contains_key(id));
+    let mut retained_commits = state.live_context_queued_commit_token_by_append.clone();
+    retained_commits.retain(|id, _| retained_cursors.contains_key(id));
+    let mut retained_dispositions = state.live_context_queued_disposition_by_append.clone();
+    retained_dispositions.retain(|id, _| retained_cursors.contains_key(id));
+    let mut retained_append_by_cursor = state.live_context_queued_append_by_cursor.clone();
+    retained_append_by_cursor.retain(|_, id| retained_cursors.contains_key(id));
+    mm::MeerkatMachineInput::ResolveLiveContextBootstrapAppend {
+        session_id: SESSION.into(),
+        channel_id: channel.into(),
+        lease_id: lease.into(),
+        append_id: append.into(),
+        content_digest: digest.into(),
+        reserved_cursor,
+        observation,
+        retained_sessions,
+        retained_cursors,
+        retained_digests,
+        retained_commits,
+        retained_dispositions,
+        retained_append_by_cursor,
+    }
+}
+
+#[test]
+fn bootstrap_reserved_prefix_is_not_delivered_and_media_activates_independently() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 5);
+    assert_eq!(
+        authority.state().live_context_reserved_cursor_by_channel[CHANNEL],
+        5
+    );
+    assert!(
+        !authority
+            .state()
+            .live_context_cursor_by_channel
+            .contains_key(CHANNEL)
+    );
+    activate_bootstrap(&mut authority);
+    assert_eq!(
+        authority.state().live_execution_phase_by_channel[CHANNEL],
+        mm::LiveExecutionChannelPhase::Active
+    );
+    assert_eq!(authority.state().live_context_cursor_by_channel[CHANNEL], 0);
+    enqueue_mirror_row(&mut authority, "tail-6", 6);
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::BeginLiveContextPreparation {
+                session_id: SESSION.into(),
+                channel_id: CHANNEL.into(),
+                lease_id: "restart".into(),
+                reserved_cursor: 6,
+            }
+        )
+        .is_err(),
+        "source append never restarts capture"
+    );
+    authorize_bootstrap(&mut authority, 5);
+    assert_eq!(authority.state().live_context_cursor_by_channel[CHANNEL], 0);
+    assert!(
+        resolve_bootstrap(
+            &mut authority,
+            6,
+            mm::LiveContextAppendObservation::Delivered
+        )
+        .is_err()
+    );
+    resolve_bootstrap(
+        &mut authority,
+        5,
+        mm::LiveContextAppendObservation::Delivered,
+    )
+    .expect("exact ACK");
+    assert_eq!(authority.state().live_context_cursor_by_channel[CHANNEL], 5);
+    assert_eq!(
+        authority.state().live_context_preparation_phase_by_channel[CHANNEL],
+        mm::LiveContextPreparationPhase::ProviderAcknowledged
+    );
+    assert!(
+        resolve_bootstrap(
+            &mut authority,
+            5,
+            mm::LiveContextAppendObservation::Delivered
+        )
+        .is_err(),
+        "one-shot ACK"
+    );
+}
+
+#[test]
+fn bootstrap_causal_live_tail_is_reasserted_and_results_wait_for_ordered_tail() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 3);
+    activate_bootstrap(&mut authority);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::EnqueueLiveContextRow {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: "spoken-correction".into(),
+            canonical_cursor: 4,
+            content_digest: "corrected-fact".into(),
+            commit_authority_token: "exact-row-4".into(),
+            disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+            payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+        },
+    )
+    .expect("live correction is one committed row");
+    enqueue_mirror_row(&mut authority, "typed-tail", 5);
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["spoken-correction"],
+        mm::LiveContextRowDisposition::ReassertCausalTail
+    );
+    authorize_bootstrap(&mut authority, 3);
+    resolve_bootstrap(
+        &mut authority,
+        3,
+        mm::LiveContextAppendObservation::Delivered,
+    )
+    .expect("exact ACK");
+    let observed = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ObserveLiveContextDeliveryReadiness {
+            session_id: SESSION.into(),
+            channel_id: CHANNEL.into(),
+        },
+    )
+    .expect("result barrier");
+    assert!(observed.into_effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveContextDeliveryReadinessObserved {
+            readiness: mm::LiveContextDeliveryReadiness::Pending,
+            ..
+        }
+    )));
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AdvanceLiveContextCanonicalCoverage {
+                channel_id: CHANNEL.into(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                append_id: "spoken-correction".into(),
+                previous_cursor: 3,
+                next_cursor: 4,
+                disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+            }
+        )
+        .is_err(),
+        "already-present source does not silently skip causal reassertion"
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveContextAppend {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: "spoken-correction".into(),
+            previous_cursor: 3,
+            next_cursor: 4,
+        },
+    )
+    .expect("first post-summary append is the spoken correction");
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AuthorizeLiveContextAppend {
+                channel_id: CHANNEL.into(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                append_id: "typed-tail".into(),
+                previous_cursor: 4,
+                next_cursor: 5,
+            }
+        )
+        .is_err(),
+        "typed tail cannot overtake correction ACK"
+    );
+}
+
+#[test]
+fn bootstrap_ambiguous_failure_is_terminal_without_cursor_or_retry_lie() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 9);
+    activate_bootstrap(&mut authority);
+    authorize_bootstrap(&mut authority, 9);
+    resolve_bootstrap(
+        &mut authority,
+        9,
+        mm::LiveContextAppendObservation::Ambiguous,
+    )
+    .expect("ambiguity observed");
+    assert_eq!(authority.state().live_context_cursor_by_channel[CHANNEL], 0);
+    assert_eq!(
+        authority
+            .state()
+            .live_context_preparation_failure_by_channel[CHANNEL],
+        mm::LiveContextPreparationFailure::DeliveryAmbiguous
+    );
+    assert_eq!(
+        authority.state().live_execution_phase_by_channel[CHANNEL],
+        mm::LiveExecutionChannelPhase::Active
+    );
+    assert!(
+        resolve_bootstrap(
+            &mut authority,
+            9,
+            mm::LiveContextAppendObservation::Delivered
+        )
+        .is_err()
+    );
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::GenerateLiveContextPreparation {
+                session_id: SESSION.into(),
+                channel_id: CHANNEL.into(),
+                lease_id: "bootstrap-job".into(),
+            }
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn bootstrap_preserves_each_typed_failure_without_changing_media_or_cursor() {
+    for reason in [
+        mm::LiveContextPreparationFailure::Capture,
+        mm::LiveContextPreparationFailure::Generation,
+        mm::LiveContextPreparationFailure::TimedOut,
+        mm::LiveContextPreparationFailure::InputTooLarge,
+        mm::LiveContextPreparationFailure::OutputTooLarge,
+        mm::LiveContextPreparationFailure::Empty,
+        mm::LiveContextPreparationFailure::StaleSnapshot,
+        mm::LiveContextPreparationFailure::Unsupported,
+        mm::LiveContextPreparationFailure::SourceRead,
+        mm::LiveContextPreparationFailure::ProducerPanicked,
+        mm::LiveContextPreparationFailure::DeliveryRejected,
+        mm::LiveContextPreparationFailure::DeliveryAmbiguous,
+        mm::LiveContextPreparationFailure::Cancelled,
+    ] {
+        let mut authority = opened_authority();
+        stage_bootstrap(&mut authority, 7);
+        activate_bootstrap(&mut authority);
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::FailLiveContextPreparation {
+                session_id: SESSION.into(),
+                channel_id: CHANNEL.into(),
+                lease_id: "bootstrap-job".into(),
+                reason,
+            },
+        )
+        .expect("record exact typed source/producer/delivery failure");
+        assert_eq!(
+            authority
+                .state()
+                .live_context_preparation_failure_by_channel[CHANNEL],
+            reason
+        );
+        assert_eq!(
+            authority.state().live_context_preparation_phase_by_channel[CHANNEL],
+            mm::LiveContextPreparationPhase::Failed
+        );
+        assert_eq!(
+            authority.state().live_execution_phase_by_channel[CHANNEL],
+            mm::LiveExecutionChannelPhase::Active
+        );
+        assert_eq!(authority.state().live_context_cursor_by_channel[CHANNEL], 0);
+        assert_eq!(
+            authority.state().live_context_reserved_cursor_by_channel[CHANNEL],
+            7
+        );
+        assert!(
+            apply(
+                &mut authority,
+                mm::MeerkatMachineInput::GenerateLiveContextPreparation {
+                    session_id: SESSION.into(),
+                    channel_id: CHANNEL.into(),
+                    lease_id: "bootstrap-job".into(),
+                }
+            )
+            .is_err(),
+            "a failed producer is not restarted implicitly"
+        );
+    }
+}
+
+#[test]
+fn assistant_observation_is_quiet_only_for_concurrent_bootstrap() {
+    for concurrent in [false, true] {
+        let mut authority = opened_authority();
+        if concurrent {
+            stage_bootstrap(&mut authority, 0);
+            activate_bootstrap(&mut authority);
+        } else {
+            bind_experimental(&mut authority, 0);
+        }
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::EnqueueLiveContextRow {
+                channel_id: CHANNEL.into(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                append_id: "assistant-observation".into(),
+                canonical_cursor: 1,
+                content_digest: "typed-unmeasured-observation".into(),
+                commit_authority_token: "exact-commit".into(),
+                disposition: mm::LiveContextRowDisposition::AssistantObservation,
+                payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+            },
+        )
+        .expect("admit source-owned assistant observation");
+        assert_eq!(
+            authority.state().live_context_queued_disposition_by_append["assistant-observation"],
+            if concurrent {
+                mm::LiveContextRowDisposition::ReassertCausalTail
+            } else {
+                mm::LiveContextRowDisposition::ExcludedFromLiveContext
+            }
+        );
+        if !concurrent {
+            apply(
+                &mut authority,
+                mm::MeerkatMachineInput::AdvanceLiveContextCanonicalCoverage {
+                    channel_id: CHANNEL.into(),
+                    runtime_id: runtime_id(),
+                    fence_token: fence(),
+                    generation: generation(),
+                    append_id: "assistant-observation".into(),
+                    previous_cursor: 0,
+                    next_cursor: 1,
+                    disposition: mm::LiveContextRowDisposition::ExcludedFromLiveContext,
+                },
+            )
+            .expect("strict mode covers the observation without provider echo");
+        }
+    }
+}
+
+#[test]
+fn non_materializable_live_row_keeps_no_send_coverage_after_summary_ack() {
+    for concurrent in [false, true] {
+        let mut authority = opened_authority();
+        if concurrent {
+            stage_bootstrap(&mut authority, 0);
+            activate_bootstrap(&mut authority);
+        } else {
+            bind_experimental(&mut authority, 0);
+        }
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::EnqueueLiveContextRow {
+                channel_id: CHANNEL.into(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                append_id: "native-non-text".into(),
+                canonical_cursor: 1,
+                content_digest: "non-text-digest".into(),
+                commit_authority_token: "exact-non-text".into(),
+                disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+                payload_availability: mm::LiveContextPayloadAvailability::NoPayload,
+            },
+        )
+        .expect("admit exact no-payload native row");
+        assert_eq!(
+            authority.state().live_context_queued_disposition_by_append["native-non-text"],
+            mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel
+        );
+        let advance = || mm::MeerkatMachineInput::AdvanceLiveContextCanonicalCoverage {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: "native-non-text".into(),
+            previous_cursor: 0,
+            next_cursor: 1,
+            disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        };
+        if concurrent {
+            assert!(
+                apply(&mut authority, advance()).is_err(),
+                "no row bypasses unacknowledged bootstrap"
+            );
+            authorize_bootstrap(&mut authority, 0);
+            resolve_bootstrap(
+                &mut authority,
+                0,
+                mm::LiveContextAppendObservation::Delivered,
+            )
+            .expect("summary ACK");
+        }
+        apply(&mut authority, advance()).expect("no-payload row advances without provider send");
+        assert_eq!(authority.state().live_context_cursor_by_channel[CHANNEL], 1);
+        assert!(
+            !authority
+                .state()
+                .live_context_pending_append_by_channel
+                .contains_key(CHANNEL)
+        );
+        assert!(
+            !authority
+                .state()
+                .live_context_delivered_append_ids
+                .contains("native-non-text")
+        );
+    }
+}
+
+#[test]
+fn bootstrap_close_cancels_exact_job_and_late_summary_cannot_mutate_replacement() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 2);
+    activate_bootstrap(&mut authority);
+    authorize_bootstrap(&mut authority, 2);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AbandonLiveOpenAdmission {
+            session_id: SESSION.into(),
+            channel_id: CHANNEL.into(),
+        },
+    )
+    .expect("close old channel");
+    assert_eq!(
+        authority
+            .state()
+            .live_context_preparation_failure_by_channel[CHANNEL],
+        mm::LiveContextPreparationFailure::Cancelled
+    );
+    let before = authority.state().clone();
+    assert!(
+        resolve_bootstrap(
+            &mut authority,
+            2,
+            mm::LiveContextAppendObservation::Delivered
+        )
+        .is_err()
+    );
+    assert_eq!(
+        authority.state().live_context_cursor_by_channel,
+        before.live_context_cursor_by_channel
+    );
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AuthorizeLiveContextBootstrapAppend {
+                session_id: SESSION.into(),
+                channel_id: "replacement".into(),
+                lease_id: "bootstrap-job".into(),
+                append_id: "late-old-summary".into(),
+                content_digest: "exact-summary-digest".into(),
+                reserved_cursor: 2,
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -2311,10 +2895,60 @@ fn stale_fence_and_ambiguous_context_retry_are_rejected() {
 
 #[test]
 fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
+    assert_ambiguity_recovery_answer_and_seed_binding(false, false);
+}
+
+#[test]
+fn concurrent_context_recovery_reserves_pin_without_claiming_provider_delivery() {
+    assert_ambiguity_recovery_answer_and_seed_binding(true, false);
+}
+
+#[test]
+fn causal_recovery_retires_covered_outbox_only_on_exact_summary_ack() {
+    assert_ambiguity_recovery_answer_and_seed_binding(true, true);
+}
+
+fn assert_ambiguity_recovery_answer_and_seed_binding(concurrent: bool, covered_tail: bool) {
     const REPLACEMENT: &str = "channel-live-recovery-atomic";
+    let source_cursor = if covered_tail { 3 } else { 1 };
+    let delivered_seed = if concurrent { 0 } else { source_cursor };
     let mut authority = opened_authority();
-    bind_experimental(&mut authority, 0);
-    enqueue_mirror_row(&mut authority, "context-recovery-atomic", 1);
+    if covered_tail {
+        stage_bootstrap(&mut authority, 0);
+        activate_bootstrap(&mut authority);
+        authorize_bootstrap(&mut authority, 0);
+        resolve_bootstrap(
+            &mut authority,
+            0,
+            mm::LiveContextAppendObservation::Delivered,
+        )
+        .expect("initial summary ACK");
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::EnqueueLiveContextRow {
+                channel_id: CHANNEL.into(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                append_id: "context-recovery-atomic".into(),
+                canonical_cursor: 1,
+                content_digest: "causal-correction".into(),
+                commit_authority_token: "causal-commit".into(),
+                disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+                payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+            },
+        )
+        .expect("queue causal correction");
+        assert_eq!(
+            authority.state().live_context_queued_disposition_by_append["context-recovery-atomic"],
+            mm::LiveContextRowDisposition::ReassertCausalTail
+        );
+        enqueue_mirror_row(&mut authority, "covered-two", 2);
+        enqueue_mirror_row(&mut authority, "covered-three", 3);
+    } else {
+        bind_experimental(&mut authority, 0);
+        enqueue_mirror_row(&mut authority, "context-recovery-atomic", 1);
+    }
     apply(
         &mut authority,
         mm::MeerkatMachineInput::AuthorizeLiveContextAppend {
@@ -2339,7 +2973,7 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
             previous_cursor: 0,
             next_cursor: 1,
             replacement_channel_id: REPLACEMENT.to_string(),
-            canonical_seed_cursor: 1,
+            canonical_seed_cursor: source_cursor,
             observation: mm::LiveContextAppendObservation::Ambiguous,
         },
     )
@@ -2381,7 +3015,7 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
             runtime_id: runtime_id(),
             fence_token: fence(),
             generation: generation(),
-            canonical_seed_cursor: 1,
+            canonical_seed_cursor: delivered_seed,
             pending_receipt: "context-recovery-pending".to_string(),
         },
     )
@@ -2420,6 +3054,48 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
     )
     .expect("context replacement playback readiness");
 
+    if concurrent {
+        for reserved_cursor in [source_cursor + 1, source_cursor] {
+            let result = apply(
+                &mut authority,
+                mm::MeerkatMachineInput::BeginLiveContextPreparation {
+                    session_id: SESSION.into(),
+                    channel_id: REPLACEMENT.into(),
+                    lease_id: "recovery-summary".into(),
+                    reserved_cursor,
+                },
+            );
+            if reserved_cursor == source_cursor {
+                result.expect("reserve pinned source");
+            } else {
+                assert!(result.is_err(), "capture must match exact recovery pin");
+            }
+        }
+        if covered_tail {
+            assert_eq!(
+                authority.state().live_context_queued_append_by_cursor.len(),
+                2,
+                "reservation does not retire undelivered obligations"
+            );
+            apply(
+                &mut authority,
+                mm::MeerkatMachineInput::EnqueueLiveContextRow {
+                    channel_id: REPLACEMENT.into(),
+                    runtime_id: runtime_id(),
+                    fence_token: fence(),
+                    generation: generation(),
+                    append_id: "new-tail-four".into(),
+                    canonical_cursor: 4,
+                    content_digest: "new-tail".into(),
+                    commit_authority_token: "new-tail-commit".into(),
+                    disposition: mm::LiveContextRowDisposition::MirrorParentText,
+                    payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+                },
+            )
+            .expect("new tail arrives after capture");
+        }
+    }
+
     let transition = apply(
         &mut authority,
         mm::MeerkatMachineInput::BindLiveContextRecoveryChannel {
@@ -2432,7 +3108,7 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
             fence_token: fence(),
             generation: generation(),
             append_id: "context-recovery-atomic".to_string(),
-            canonical_seed_cursor: 1,
+            canonical_seed_cursor: delivered_seed,
         },
     )
     .expect("provider answer truth and acknowledged recovery seed bind atomically");
@@ -2444,16 +3120,16 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
             status: mm::LiveWebrtcAnswerPublicStatus::Answered,
             answered: true,
             answer_observation_sequence: 9,
-            canonical_seed_cursor: 1,
+            canonical_seed_cursor,
             ..
-        } if replacement_channel_id == REPLACEMENT
+        } if replacement_channel_id == REPLACEMENT && *canonical_seed_cursor == delivered_seed
     )));
     assert_eq!(
         authority
             .state()
             .live_context_cursor_by_channel
             .get(REPLACEMENT),
-        Some(&1)
+        Some(&delivered_seed)
     );
     assert_eq!(
         authority
@@ -2470,6 +3146,58 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
             .map(String::as_str),
         Some("context-recovery-pending")
     );
+    if concurrent {
+        if covered_tail {
+            assert_eq!(
+                authority.state().live_context_queued_append_by_cursor.len(),
+                3,
+                "binding provider zero does not retire the old prefix"
+            );
+        }
+        acknowledge_recovery_bootstrap(&mut authority, REPLACEMENT, source_cursor);
+        if covered_tail {
+            for retired in ["covered-two", "covered-three"] {
+                assert!(
+                    !authority
+                        .state()
+                        .live_context_queued_session_by_append
+                        .contains_key(retired)
+                );
+                assert!(
+                    !authority
+                        .state()
+                        .live_context_queued_cursor_by_append
+                        .contains_key(retired)
+                );
+                assert!(
+                    !authority
+                        .state()
+                        .live_context_queued_digest_by_append
+                        .contains_key(retired)
+                );
+                assert!(
+                    !authority
+                        .state()
+                        .live_context_queued_commit_token_by_append
+                        .contains_key(retired)
+                );
+                assert!(
+                    !authority
+                        .state()
+                        .live_context_queued_disposition_by_append
+                        .contains_key(retired)
+                );
+            }
+            assert_eq!(
+                authority.state().live_context_queued_append_by_cursor.len(),
+                1
+            );
+            assert_eq!(
+                authority.state().live_context_queued_append_by_cursor[&4],
+                "new-tail-four"
+            );
+        }
+    }
     assert_eq!(
         authority
             .state()
@@ -2488,6 +3216,278 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
         },
     )
     .expect("original pending receipt still revokes an activated context replacement");
+}
+
+fn acknowledge_recovery_bootstrap(
+    authority: &mut mm::MeerkatMachineAuthority,
+    channel: &str,
+    reserved_cursor: u64,
+) {
+    assert!(
+        authority
+            .state()
+            .live_activation_receipt_by_channel
+            .contains_key(channel)
+    );
+    assert!(
+        authority
+            .state()
+            .live_experimental_pending_receipt_by_channel
+            .contains_key(channel)
+    );
+    assert_eq!(authority.state().live_context_cursor_by_channel[channel], 0);
+    assert_eq!(
+        authority.state().live_context_reserved_cursor_by_channel[channel],
+        reserved_cursor
+    );
+    apply(
+        authority,
+        mm::MeerkatMachineInput::GenerateLiveContextPreparation {
+            session_id: SESSION.into(),
+            channel_id: channel.into(),
+            lease_id: "recovery-summary".into(),
+        },
+    )
+    .expect("generate exact recovery source");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AuthorizeLiveContextBootstrapAppend {
+            session_id: SESSION.into(),
+            channel_id: channel.into(),
+            lease_id: "recovery-summary".into(),
+            append_id: "recovery-summary-append".into(),
+            content_digest: "exact-summary".into(),
+            reserved_cursor,
+        },
+    )
+    .expect("authorize reserved-prefix append after empty media binds");
+    assert_eq!(authority.state().live_context_cursor_by_channel[channel], 0);
+    if authority
+        .state()
+        .live_context_queued_append_by_cursor
+        .keys()
+        .any(|cursor| *cursor <= reserved_cursor)
+        && authority
+            .state()
+            .live_context_queued_append_by_cursor
+            .keys()
+            .any(|cursor| *cursor > reserved_cursor)
+    {
+        let mut keeps_covered = bootstrap_resolution_input(
+            authority,
+            channel,
+            "recovery-summary",
+            "recovery-summary-append",
+            "exact-summary",
+            reserved_cursor,
+            mm::LiveContextAppendObservation::Rejected,
+        );
+        if let mm::MeerkatMachineInput::ResolveLiveContextBootstrapAppend { observation, .. } =
+            &mut keeps_covered
+        {
+            *observation = mm::LiveContextAppendObservation::Delivered;
+        }
+        assert!(
+            apply(authority, keeps_covered).is_err(),
+            "ACK cannot leave covered obligations behind"
+        );
+        let mut deletes_new_tail = bootstrap_resolution_input(
+            authority,
+            channel,
+            "recovery-summary",
+            "recovery-summary-append",
+            "exact-summary",
+            reserved_cursor,
+            mm::LiveContextAppendObservation::Delivered,
+        );
+        if let mm::MeerkatMachineInput::ResolveLiveContextBootstrapAppend {
+            retained_sessions,
+            retained_cursors,
+            retained_digests,
+            retained_commits,
+            retained_dispositions,
+            retained_append_by_cursor,
+            ..
+        } = &mut deletes_new_tail
+        {
+            retained_sessions.clear();
+            retained_cursors.clear();
+            retained_digests.clear();
+            retained_commits.clear();
+            retained_dispositions.clear();
+            retained_append_by_cursor.clear();
+        }
+        assert!(
+            apply(authority, deletes_new_tail).is_err(),
+            "ACK cannot retire new tail beyond its reserved source"
+        );
+        assert_eq!(authority.state().live_context_cursor_by_channel[channel], 0);
+    }
+    let input = bootstrap_resolution_input(
+        authority,
+        channel,
+        "recovery-summary",
+        "recovery-summary-append",
+        "exact-summary",
+        reserved_cursor,
+        mm::LiveContextAppendObservation::Delivered,
+    );
+    apply(authority, input).expect("only exact summary ACK covers the prefix");
+    assert_eq!(
+        authority.state().live_context_cursor_by_channel[channel],
+        reserved_cursor
+    );
+}
+
+#[test]
+fn concurrent_result_recovery_validates_nonzero_pin_but_binds_empty_provider_context() {
+    const REPLACEMENT: &str = "result-recovery-concurrent";
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 3);
+    admit_provider_turn_delegation(&mut authority);
+    prepare_confirmed_completed_worker(&mut authority);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultRelease {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.into(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.into(),
+        },
+    )
+    .expect("release completed result");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultDelivery {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.into(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.into(),
+            result_digest: "result-digest".into(),
+            disposition: mm::LiveDelegationResultDisposition::OpenTurn,
+        },
+    )
+    .expect("authorize result send");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationResultDelivery {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            operation_id: operation_id(),
+            result_digest: "result-digest".into(),
+            replacement_channel_id: REPLACEMENT.into(),
+            canonical_seed_cursor: 3,
+            observation: mm::LiveDelegationResultDeliveryObservation::Ambiguous,
+        },
+    )
+    .expect("pin result recovery source");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AbandonLiveOpenAdmission {
+            session_id: SESSION.into(),
+            channel_id: CHANNEL.into(),
+        },
+    )
+    .expect("close old result channel");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveOpenAdmission {
+            session_id: SESSION.into(),
+            channel_id: REPLACEMENT.into(),
+            llm_identity: identity(),
+        },
+    )
+    .expect("open recovery replacement");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveExecutionModeAdmission {
+            session_id: SESSION.into(),
+            channel_id: REPLACEMENT.into(),
+            profile_id: "test-function-bridge".into(),
+            requested_mode: mm::LiveExecutionMode::FunctionBridge,
+            function_bridge_available: true,
+            client_context_available: false,
+        },
+    )
+    .expect("resolve replacement mode");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::StageExperimentalLiveExecution {
+            session_id: SESSION.into(),
+            channel_id: REPLACEMENT.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            canonical_seed_cursor: 0,
+            pending_receipt: "result-recovery-pending".into(),
+        },
+    )
+    .expect("stage empty media");
+    for reserved_cursor in [4, 3] {
+        let result = apply(
+            &mut authority,
+            mm::MeerkatMachineInput::BeginLiveContextPreparation {
+                session_id: SESSION.into(),
+                channel_id: REPLACEMENT.into(),
+                lease_id: "recovery-summary".into(),
+                reserved_cursor,
+            },
+        );
+        if reserved_cursor == 3 {
+            result.expect("reserve exact result recovery source");
+        } else {
+            assert!(result.is_err(), "wrong source cannot satisfy recovery");
+        }
+    }
+    let bind =
+        |canonical_seed_cursor| mm::MeerkatMachineInput::BindLiveDelegationResultRecoveryChannel {
+            session_id: SESSION.into(),
+            closing_channel_id: CHANNEL.into(),
+            replacement_channel_id: REPLACEMENT.into(),
+            answer_observation_sequence: 1,
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            operation_id: operation_id(),
+            result_digest: "result-digest".into(),
+            canonical_seed_cursor,
+            activation_receipt: "result-recovery-active".into(),
+        };
+    assert!(
+        apply(&mut authority, bind(0)).is_err(),
+        "even an exact empty provider seed requires registered playback ownership"
+    );
+    register_recovery_playback_owner(&mut authority, REPLACEMENT, "result-recovery-pending");
+    assert!(
+        apply(&mut authority, bind(3)).is_err(),
+        "reserved source is not delivered seed"
+    );
+    apply(&mut authority, bind(0)).expect("bind exactly acknowledged empty context");
+    assert_eq!(
+        authority
+            .state()
+            .live_activation_receipt_by_channel
+            .get(REPLACEMENT)
+            .map(String::as_str),
+        Some("result-recovery-active")
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_experimental_pending_receipt_by_channel
+            .get(REPLACEMENT)
+            .map(String::as_str),
+        Some("result-recovery-pending")
+    );
+    acknowledge_recovery_bootstrap(&mut authority, REPLACEMENT, 3);
 }
 
 #[test]

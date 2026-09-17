@@ -41,6 +41,17 @@ async function prepare() {
     delegation: audioDataUrl('delegate-working-directory.wav'),
     remember: audioDataUrl('remember-code-word.wav'),
     recall: audioDataUrl('recall-code-word.wav'),
+    // Synthetic speech (macOS say, Samantha, 155 wpm; PCM16 mono 24 kHz).
+    // history: "What was my historical vault phrase from the earlier text
+    // conversation? If that history is not available yet, say I don't know
+    // yet. Don't guess and don't ask a delegate."
+    history: audioDataUrl('historical-vault-query.wav'),
+    // correction: "Correction: the current code word is Cobalt, replacing
+    // every older code word. Please acknowledge Cobalt briefly. Do not delegate."
+    correction: audioDataUrl('correct-code-word.wav'),
+    // current: "What are the current code word and my current favorite flower,
+    // according to the newest updates? Say both briefly, without delegating."
+    current: audioDataUrl('current-context-query.wav'),
   };
   const offerSdp = await page.evaluate(async ({ fixtures, protocol }) => {
     const audioContext = new AudioContext({ sampleRate: 24_000 });
@@ -140,6 +151,9 @@ async function prepare() {
       events: [],
       eventTransport: { rawMessages: 0, parseFailures: 0 },
       fixtureBuffers,
+      // Keep an active zero-PCM source between WAVs. Ending the last source
+      // can stall outbound RTP and prevent the provider's context ACK.
+      continuousInput: { oscillator, gain, track: destination.stream.getAudioTracks()[0] },
       bargeIn: { armedFixture: null, failures: 0, starts: [] },
       peer,
       remoteAudio,
@@ -264,7 +278,12 @@ async function snapshot() {
       total_samples_received: null,
       total_samples_duration: null,
     };
+    const outboundAudio = { bytes_sent: 0, packets_sent: 0 };
     for (const report of (await state.peer.getStats()).values()) {
+      if (report.type === 'outbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio')) {
+        outboundAudio.bytes_sent += Number(report.bytesSent || 0);
+        outboundAudio.packets_sent += Number(report.packetsSent || 0);
+      }
       if (report.type !== 'inbound-rtp' || (report.kind !== 'audio' && report.mediaType !== 'audio')) {
         continue;
       }
@@ -294,6 +313,13 @@ async function snapshot() {
         ...inboundAudio,
       },
       event_transport: state.eventTransport,
+      connection: {
+        state: state.peer.connectionState,
+        data_channel: state.channel.readyState,
+        audio_context: state.audioContext.state,
+        input_track: state.continuousInput.track.readyState,
+        ...outboundAudio,
+      },
       events: state.events,
       barge_in: state.bargeIn,
     };

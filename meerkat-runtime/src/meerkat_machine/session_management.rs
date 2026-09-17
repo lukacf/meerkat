@@ -9801,6 +9801,8 @@ impl MeerkatMachine {
         )? {
             return Ok(());
         }
+        #[cfg(feature = "live")]
+        self.release_finalized_live_context_preparation_jobs(session_id);
         let removed_entry = sessions.remove(session_id);
         if let Some(entry) = removed_entry.as_ref() {
             entry.post_commit_hooks.shutdown();

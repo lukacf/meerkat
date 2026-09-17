@@ -105,6 +105,107 @@ them.
 - Behavior-only: hosts must invoke the shared exact pending/activation-receipt
   close even for `Closed` or `Revoked` channels to cancel outstanding recovery;
   transport-only close does not represent that user intent.
+- **Live transcript vocabulary (`meerkat-core`, `meerkat-live`,
+  `meerkat-contracts`):** `RealtimeTranscriptEvent` gains
+  `AssistantUnmeasuredSnapshotCommitted`, `WithContextObservation`, and
+  `ContextObservationBound`; `LiveAdapterObservation` gains
+  `WithContextObservation`; `RealtimeTranscriptSidecarRecord` gains
+  `ChannelEventV2` and `ObservationEventV3`; `RealtimeTranscriptLaneKind` gains
+  `SpokenUnmeasured`; `LiveAssistantPlaybackEvidence` gains
+  `ProviderManagedUnmeasured`; `LiveContextCommittedRowKind` gains
+  `AssistantTranscript`; `LiveContextCommittedRowDisposition` gains
+  `AssistantObservation`. `TranscriptMessageIdentity` gains `realtime_origin`
+  and `LiveTranscriptIdentity` gains `channel_id` and `context_observation_id`.
+  `SessionDocumentMachineAuthority::observe_live_assistant_playback_snapshot`
+  takes `observation_only` and
+  `SessionDocumentMachineAuthority::resolve_realtime_assistant_playback_snapshot`
+  takes `requested_lane`; `SessionDocumentInput::ObserveLiveAssistantPlaybackSnapshot`
+  and `SessionDocumentInput::ResolveRealtimeAssistantPlaybackSnapshot` carry the
+  same fields, `SessionDocumentEffect::LiveAssistantPlaybackTerminalResolved`
+  gains `continues_provider_group` and `observed_snapshot_digest`, and
+  `SessionDocumentEffect` and `SessionDocumentEffectVariant` gain
+  `RealtimeAssistantSnapshotMaterializationAuthorized`. The implicit
+  discriminants of the later variants of `RealtimeTranscriptEvent::*`,
+  `LiveAdapterObservation::*`, `RealtimeTranscriptSidecarRecord::*`,
+  `SessionDocumentEffect::*`, `SessionDocumentEffectVariant::*`,
+  `LiveContextCommittedRowKind::*`, `LiveContextCommittedRowDisposition::*`,
+  and `WireTranscriptSource::*` move; match by name.
+- **Facade, broker, and mob surfaces:** `ExperimentalLiveChannelOpenError`
+  and `RealtimeSessionOpenProjectionError` gain `Summary`;
+  `ExperimentalLiveContextRecoveryError` gains `Preparation` and `Summary`;
+  `ExperimentalLiveChannelCloseError` gains `TerminalProjection`;
+  `LiveSeedProjectionStatus` gains `ContextPending` and `Summarized` (its
+  `LiveSeedProjectionStatus::*` discriminants move);
+  `RealtimeSessionOpenProjection` is no longer `UnwindSafe` or
+  `RefUnwindSafe`. `GptLiveBrokerObservation` gains
+  `ThinkingContextAppendAcknowledged`, `ThinkingContextAppendRejected`, and
+  `ThinkingContextAppendInterruptedByClose` (`GptLiveBrokerObservation::*`
+  discriminants move). `MobError` gains `WorkInputCompletionUnavailable` and
+  `WorkInputIdempotencyConflict`;
+  `MobSessionService::commit_live_delegation_final_transcript` takes the
+  transcript identity and `MobSessionService` no longer provides a default for
+  the human-input admission method. `MobMachineInput::SubmitWork`,
+  `MobMachineEffect::RequestRuntimeIngress`, and
+  `MobMachineEffect::RequestPeerRuntimeIngress` gain `content_attribution`.
+- **Generated MeerkatMachine authority (`meerkat-machine-schema`,
+  `meerkat-runtime`, `meerkat-machine-kernels`):** `MeerkatMachineState` and
+  the kernel `State` gain `live_assistant_origin_by_turn`,
+  `live_cancelled_recovery_channels`, `live_context_ack_cut_by_channel`,
+  `live_context_bootstrap_append_by_channel`,
+  `live_context_bootstrap_digest_by_channel`,
+  `live_context_observation_channel_by_id`,
+  `live_context_observation_counter_by_channel`,
+  `live_context_observation_fence_by_id`,
+  `live_context_observation_generation_by_id`,
+  `live_context_observation_lease_by_id`,
+  `live_context_observation_ordinal_by_id`,
+  `live_context_observation_runtime_by_id`,
+  `live_context_preparation_failure_by_channel`,
+  `live_context_preparation_fence_by_channel`,
+  `live_context_preparation_generation_by_channel`,
+  `live_context_preparation_lease_by_channel`,
+  `live_context_preparation_phase_by_channel`,
+  `live_context_preparation_runtime_by_channel`,
+  `live_context_reserved_cursor_by_channel`, and
+  `live_delegation_existing_member_operations`. `MeerkatMachineInput`,
+  `MeerkatMachineInputVariant`, and the kernel `Input` and `InputKind` gain
+  `BeginLiveContextPreparation`, `GenerateLiveContextPreparation`,
+  `FailLiveContextPreparation`, `AuthorizeLiveContextBootstrapAppend`,
+  `RecordLiveContextObservation`, `RecordLiveContextBootstrapAckCut`,
+  `ResolveLiveContextBootstrapAppend`, and
+  `ObserveLiveContextDeliveryReadiness`. `MeerkatMachineEffect`,
+  `MeerkatMachineEffectVariant`, and the kernel `Effect` and `EffectKind` gain
+  `LiveContextPreparationChanged`, `LiveContextBootstrapAppendAuthorized`,
+  `LiveContextObservationRecorded`, `LiveContextBootstrapAckCutRecorded`,
+  `LiveContextAppendDeferred`, `LiveContextAppendAlreadyCovered`, and
+  `LiveContextDeliveryReadinessObserved` (the kernel `Effect` and
+  `EffectKind` also gain `RealtimeAssistantSnapshotMaterializationAuthorized`).
+  `LiveContextRowDisposition` gains `AssistantObservation` and
+  `ReassertCausalTail`. Input and effect payloads gain fields:
+  `EnqueueLiveContextRow` gains `observation_id` and `payload_availability`;
+  `ResolveLiveContextAppend` and `ResolveLiveDelegationResultDelivery` gain
+  `canonical_seed_cursor`; `AuthorizeLiveDelegationWorkerStart` and
+  `LiveDelegationWorkerStartAuthorized` gain `worker_ownership`;
+  `BindLiveContextRecoveryChannel`, `BindLiveDelegationResultRecoveryChannel`,
+  `LiveContextRecoveryChannelBound`, and
+  `LiveDelegationResultRecoveryChannelBound` gain `activation_receipt`;
+  `DeferInputBehindBacklog` gains `cancelled_run_id`;
+  `ObserveLiveAssistantTurnStarted` gains `candidate_interaction_id`;
+  `LiveAssistantTurnStarted` gains `origin`; `LiveChannelCloseCustodyRevoked`
+  gains `context_recovery_channel_id` and `result_recovery_channel_id`;
+  `ObserveLiveAssistantPlaybackSnapshot` gains `observation_only`;
+  `ResolveRealtimeAssistantPlaybackSnapshot` gains `requested_lane`;
+  `SubmitWork`, `RequestRuntimeIngress`, and `RequestPeerRuntimeIngress` gain
+  `content_attribution`. `TransitionId` gains the per-phase transitions
+  `AuthorizeLiveContextAppendDeferredByCloseIdle` / `AuthorizeLiveContextAppendDeferredByCloseAttached` / `AuthorizeLiveContextAppendDeferredByCloseRunning` / `AuthorizeLiveContextAppendDeferredByRecoveryIdle` / `AuthorizeLiveContextAppendDeferredByRecoveryAttached` / `AuthorizeLiveContextAppendDeferredByRecoveryRunning` / `AuthorizeLiveContextAppendDeferredByTurnIdle` / `AuthorizeLiveContextAppendDeferredByTurnAttached` / `AuthorizeLiveContextAppendDeferredByTurnRunning` / `AuthorizeLiveContextAppendDeliveredReplayIdle` / `AuthorizeLiveContextAppendDeliveredReplayAttached` / `AuthorizeLiveContextAppendDeliveredReplayRunning` / `AuthorizeLiveContextAppendPendingReplayIdle` / `AuthorizeLiveContextAppendPendingReplayAttached` / `AuthorizeLiveContextAppendPendingReplayRunning` / `AuthorizeLiveContextBootstrapAppendIdle` / `AuthorizeLiveContextBootstrapAppendAttached` / `AuthorizeLiveContextBootstrapAppendRunning` / `BeginLiveContextPreparationIdle` / `BeginLiveContextPreparationAttached` / `BeginLiveContextPreparationRunning` / `GenerateLiveContextPreparationIdle` / `GenerateLiveContextPreparationAttached` / `GenerateLiveContextPreparationRunning` / `RecordLiveContextBootstrapAckCutIdle` / `RecordLiveContextBootstrapAckCutAttached` / `RecordLiveContextBootstrapAckCutRunning` / `RecordLiveContextObservationIdle` / `RecordLiveContextObservationAttached` / `RecordLiveContextObservationRunning` / `ResolveLiveContextBootstrapAppendIdle` / `ResolveLiveContextBootstrapAppendAttached` / `ResolveLiveContextBootstrapAppendRunning`, and `FailLiveContextPreparationIdle` / `FailLiveContextPreparationAttached` / `FailLiveContextPreparationRunning` / `FailLiveContextPreparationRetired` / `FailLiveContextPreparationStopped` / `ObserveLiveContextDeliveryReadinessIdle` / `ObserveLiveContextDeliveryReadinessAttached` / `ObserveLiveContextDeliveryReadinessRunning` / `ObserveLiveContextDeliveryReadinessRetired` / `ObserveLiveContextDeliveryReadinessStopped` / `DeferInputBehindBacklogAlreadyArchivedIdle` / `DeferInputBehindBacklogAlreadyArchivedAttached` / `DeferInputBehindBacklogAlreadyArchivedRunning` / `DeferInputBehindBacklogAlreadyArchivedRetired` / `DeferInputBehindBacklogAlreadyArchivedStopped`. Because generated enums are emitted in schema order,
+  the implicit discriminants and `PartialOrd` positions of every later variant
+  of `MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`,
+  `MeerkatMachineEffect::*`, `MeerkatMachineEffectVariant::*`,
+  `LiveContextRowDisposition::*`, `InputKind::*`, `EffectKind::*`, and
+  `TransitionId::*` move. Discriminants of generated machine enums are never a
+  stable contract; match by name. Session documents written by 0.8.39 load
+  unchanged; transcript sidecars written by 0.8.40 use schema V3 and are not
+  readable by 0.8.39.
 
 ## [0.8.39] - 2026-09-16
 

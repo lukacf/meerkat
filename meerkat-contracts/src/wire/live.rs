@@ -1790,6 +1790,8 @@ impl TryFrom<RealtimeTranscriptEvent> for WireRealtimeTranscriptEvent {
                 Err(WireConversionError::InternalRealtimeUserContent)
             }
             RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted { .. }
+            | RealtimeTranscriptEvent::WithContextObservation { .. }
+            | RealtimeTranscriptEvent::ContextObservationBound { .. }
             | RealtimeTranscriptEvent::AssistantPlaybackTerminalObserved { .. }
             | RealtimeTranscriptEvent::AssistantPlaybackSnapshotCommitted { .. }
             | RealtimeTranscriptEvent::AssistantUnmeasuredSnapshotCommitted { .. }

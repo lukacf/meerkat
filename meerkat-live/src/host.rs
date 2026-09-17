@@ -545,6 +545,7 @@ impl std::fmt::Display for LiveToolDispatchTimeout {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LiveTranscriptIdentity<'a> {
     pub channel_id: Option<&'a LiveChannelId>,
+    pub context_observation_id: Option<&'a meerkat_core::LiveContextObservationId>,
     pub provider_item_id: Option<&'a str>,
     pub previous_item_id: Option<&'a str>,
     pub content_index: Option<u32>,
@@ -553,6 +554,15 @@ pub struct LiveTranscriptIdentity<'a> {
 }
 
 impl<'a> LiveTranscriptIdentity<'a> {
+    #[must_use]
+    pub fn with_context_observation(
+        mut self,
+        observation_id: Option<&'a meerkat_core::LiveContextObservationId>,
+    ) -> Self {
+        self.context_observation_id = observation_id;
+        self
+    }
+
     #[must_use]
     pub fn with_channel(mut self, channel_id: &'a LiveChannelId) -> Self {
         self.channel_id = Some(channel_id);
@@ -568,6 +578,7 @@ impl<'a> LiveTranscriptIdentity<'a> {
     ) -> Self {
         Self {
             channel_id: None,
+            context_observation_id: None,
             provider_item_id,
             previous_item_id,
             content_index,
@@ -586,6 +597,7 @@ impl<'a> LiveTranscriptIdentity<'a> {
     ) -> Self {
         Self {
             channel_id: None,
+            context_observation_id: None,
             provider_item_id,
             previous_item_id,
             content_index,
@@ -604,6 +616,7 @@ impl<'a> LiveTranscriptIdentity<'a> {
     ) -> Self {
         Self {
             channel_id: None,
+            context_observation_id: None,
             provider_item_id: Some(provider_item_id),
             previous_item_id,
             content_index,
@@ -772,6 +785,35 @@ pub trait LiveProjectionSink: Send + Sync {
         provider_item_id: &str,
         content_index: u32,
     ) -> Result<LiveAssistantOutputAddress, LiveProjectionError>;
+
+    /// Forward opaque source provenance in the same admission as the target.
+    /// Legacy sinks remain usable for unsequenced observations only.
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_assistant_playback_target_with_context_observation(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        provider_turn_ref: &str,
+        response_id: &str,
+        provider_item_id: &str,
+        content_index: u32,
+        observation_id: Option<&meerkat_core::LiveContextObservationId>,
+    ) -> Result<LiveAssistantOutputAddress, LiveProjectionError> {
+        if observation_id.is_some() {
+            return Err(LiveProjectionError::Rejected(
+                "assistant source-observation forwarding is unavailable".into(),
+            ));
+        }
+        self.admit_assistant_playback_target(
+            session_id,
+            channel_id,
+            provider_turn_ref,
+            response_id,
+            provider_item_id,
+            content_index,
+        )
+        .await
+    }
 
     /// Resolve a playback-complete terminal through session authority.
     async fn complete_assistant_playback(
@@ -2461,6 +2503,24 @@ impl LiveAdapterHost {
         channel_id: &LiveChannelId,
         observation: &LiveAdapterObservation,
     ) -> Result<ObservationOutcome, LiveAdapterHostError> {
+        let (observation, context_observation_id) = match observation {
+            LiveAdapterObservation::WithContextObservation {
+                observation_id,
+                observation,
+            } => {
+                if matches!(
+                    observation.as_ref(),
+                    LiveAdapterObservation::WithContextObservation { .. }
+                ) {
+                    return Err(LiveProjectionError::Rejected(
+                        "nested source-observation provenance is invalid".into(),
+                    )
+                    .into());
+                }
+                (observation.as_ref(), Some(observation_id))
+            }
+            observation => (observation, None),
+        };
         #[cfg(feature = "test-support")]
         let injected_failure = self
             .inner
@@ -2497,13 +2557,14 @@ impl LiveAdapterHost {
                 },
             ) => self
                 .projection_sink
-                .admit_assistant_playback_target(
+                .admit_assistant_playback_target_with_context_observation(
                     &session_id,
                     channel_id,
                     provider_turn_ref,
                     response_id,
                     provider_item_id,
                     *content_index,
+                    context_observation_id,
                 )
                 .await
                 .map(ObservationOutcome::AssistantOutputAvailable)
@@ -2528,7 +2589,8 @@ impl LiveAdapterHost {
                     previous_item_id.as_deref(),
                     *content_index,
                 )
-                .with_channel(channel_id);
+                .with_channel(channel_id)
+                .with_context_observation(context_observation_id);
                 self.projection_sink
                     .append_user_transcript(&session_id, text, identity)
                     .await?;
@@ -2553,7 +2615,8 @@ impl LiveAdapterHost {
                     *content_index,
                     response_id.as_deref(),
                     delta_id.as_deref(),
-                );
+                )
+                .with_context_observation(context_observation_id);
                 // T6: display text routes to the text lane; flushed as
                 // AssistantBlock::Text.
                 self.projection_sink
@@ -2580,7 +2643,8 @@ impl LiveAdapterHost {
                     *content_index,
                     response_id.as_deref(),
                     delta_id.as_deref(),
-                );
+                )
+                .with_context_observation(context_observation_id);
                 // T6: spoken transcript routes to the transcript lane;
                 // flushed as AssistantBlock::Transcript { source: Spoken }.
                 self.projection_sink
@@ -2607,7 +2671,8 @@ impl LiveAdapterHost {
                     previous_item_id.as_deref(),
                     *content_index,
                     response_id.as_deref(),
-                );
+                )
+                .with_context_observation(context_observation_id);
                 // R6: forward the response_id so the sink keys its
                 // per-turn buffer on (SessionId, response_id). T6:
                 // spoken-transcript final routes to the transcript lane.
@@ -2764,9 +2829,12 @@ impl LiveAdapterHost {
                 ObservationRouting::AppendRealtimeTranscript,
                 LiveAdapterObservation::RealtimeTranscript { event },
             ) => {
+                let event = event
+                    .clone()
+                    .with_context_observation(context_observation_id.cloned());
                 let outcome = self
                     .projection_sink
-                    .append_realtime_transcript(&session_id, event)
+                    .append_realtime_transcript(&session_id, &event)
                     .await?;
                 match outcome.user_content {
                     Some(RealtimeUserContentApplyOutcome::Committed(identity))
@@ -3670,6 +3738,9 @@ impl LiveAdapterHost {
 
     pub fn classify_observation(observation: &LiveAdapterObservation) -> ObservationRouting {
         match observation {
+            LiveAdapterObservation::WithContextObservation { observation, .. } => {
+                Self::classify_observation(observation)
+            }
             LiveAdapterObservation::Ready => {
                 ObservationRouting::UpdateStatus(LiveAdapterStatus::Ready)
             }

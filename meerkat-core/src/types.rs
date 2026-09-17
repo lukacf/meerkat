@@ -43,11 +43,53 @@ pub struct TranscriptMessageIdentity {
     pub realtime_origin: Option<RealtimeMessageOrigin>,
 }
 
+/// Opaque provenance identifier. Its namespace is data, not admission or
+/// temporal authority; only the runtime's generated registry grants a claim.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveContextObservationId {
+    namespace: String,
+    channel_id: crate::LiveChannelId,
+    nonce: uuid::Uuid,
+}
+
+impl LiveContextObservationId {
+    #[must_use]
+    pub fn new(namespace: impl Into<String>, channel_id: crate::LiveChannelId) -> Self {
+        Self {
+            namespace: namespace.into(),
+            channel_id,
+            nonce: uuid::Uuid::new_v4(),
+        }
+    }
+
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+    #[must_use]
+    pub fn channel_id(&self) -> &crate::LiveChannelId {
+        &self.channel_id
+    }
+}
+
+impl std::fmt::Display for LiveContextObservationId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}:{}:{}",
+            self.namespace, self.channel_id, self.nonce
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RealtimeMessageOrigin {
     session_id: crate::types::SessionId,
     channel_id: crate::LiveChannelId,
     canonical_row_sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_observation_id: Option<LiveContextObservationId>,
 }
 
 impl RealtimeMessageOrigin {
@@ -60,7 +102,18 @@ impl RealtimeMessageOrigin {
             session_id,
             channel_id,
             canonical_row_sequence,
+            context_observation_id: None,
         }
+    }
+
+    pub(crate) fn with_context_observation(mut self, id: LiveContextObservationId) -> Self {
+        self.context_observation_id = Some(id);
+        self
+    }
+
+    #[must_use]
+    pub fn context_observation_id(&self) -> Option<&LiveContextObservationId> {
+        self.context_observation_id.as_ref()
     }
 
     #[must_use]

@@ -60,6 +60,7 @@ use tokio::io::BufReader;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant, sleep, timeout};
 
+use support::evidence::{self, Journal, Record as EvidenceRecord, Stage as EvidenceStage};
 use support::{
     BrowserPeer, BrowserPeerProtocol, ExplicitScenarioBindingAuthority, FixedConfigSource,
     JsonlRpcClient, execution_identity, wait_for_events, wait_for_spoken_output,
@@ -464,6 +465,7 @@ async fn complete_playback(
 /// a turn-driven executor mob member, the session-bound public open
 /// authority, one open channel and one browser peer answering its offer.
 struct PublicLiveHarness {
+    evidence: Option<Journal>,
     rpc: JsonlRpcClient,
     peer: BrowserPeer,
     channel_id: Value,
@@ -516,6 +518,13 @@ impl PublicLiveHarness {
     }
 
     async fn close_exact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(evidence) = &self.evidence {
+            evidence.stage(EvidenceStage::Closing)?;
+            evidence.channel(
+                evidence.current_channel()?,
+                evidence::ChannelAction::CloseRequested,
+            )?;
+        }
         let (shared, exact) = self.shared()?;
         let started = Instant::now();
         let result = timeout(
@@ -537,6 +546,9 @@ impl PublicLiveHarness {
             .validate_experimental_live_channel_custody(&exact.id, &exact.pending_receipt)
             .await?;
         assert_eq!(custody.phase(), &ExperimentalLiveChannelPhaseStatus::Closed);
+        if let Some(evidence) = &self.evidence {
+            evidence.channel(evidence.current_channel()?, evidence::ChannelAction::Closed)?;
+        }
         Ok(())
     }
 
@@ -564,13 +576,32 @@ impl PublicLiveHarness {
     /// session and answer its offer with a fresh peer. The runtime seeds the
     /// canonical dialogue into the new provider session at creation.
     async fn reopen(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut peer = BrowserPeer::start(BrowserPeerProtocol::Public).await?;
+        let channel = if let Some(evidence) = &self.evidence {
+            evidence.stage(EvidenceStage::Reopening)?;
+            Some(evidence.next_channel()?)
+        } else {
+            None
+        };
+        let mut peer = match (&self.evidence, channel) {
+            (Some(evidence), Some(channel)) => {
+                BrowserPeer::start_recorded(BrowserPeerProtocol::Public, evidence.clone(), channel)
+                    .await?
+            }
+            _ => BrowserPeer::start(BrowserPeerProtocol::Public).await?,
+        };
         let (shared, exact) = self.shared.as_mut().ok_or("shared host missing")?;
-        let replacement = timeout(
+        let connect = timeout(
             Duration::from_secs(90),
             shared.connect(&mut peer, &self.session_id),
-        )
-        .await??;
+        );
+        let replacement = match (&self.evidence, channel) {
+            (Some(evidence), Some(channel)) => evidence.wire(channel).scope(connect).await??,
+            _ => connect.await??,
+        };
+        if let (Some(evidence), Some(channel)) = (&self.evidence, channel) {
+            evidence.require_attached(channel)?;
+            evidence.channel(channel, evidence::ChannelAction::Connected)?;
+        }
         assert_ne!(replacement.id, exact.id);
         assert!(
             shared
@@ -602,6 +633,9 @@ async fn open_public_live_with_summary(
     bootstrap: Option<ConcurrentContextBootstrap>,
 ) -> Result<PublicLiveHarness, Box<dyn std::error::Error>> {
     let concurrent = bootstrap.is_some();
+    let evidence = bootstrap
+        .as_ref()
+        .map(|bootstrap| bootstrap.evidence.clone());
     let temp = tempfile::Builder::new()
         .prefix(temp_prefix)
         .tempdir_in(support::test_tmp_root()?)?;
@@ -822,10 +856,12 @@ async fn open_public_live_with_summary(
                 LiveContextSummaryPolicy::new(
                     Arc::new(GatedContextSummarizer {
                         captures: bootstrap.captures,
+                        evidence: Some(bootstrap.evidence.clone()),
                         producer: Arc::new(FactoryContextSummarizer {
                             factory: factory.clone(),
                             config,
                             auth_lease: runtime.generated_auth_lease_handle(),
+                            evidence: bootstrap.evidence,
                         }),
                     }),
                     2 * 1024 * 1024,
@@ -881,13 +917,28 @@ async fn open_public_live_with_summary(
     rpc.call("initialize", json!({}), 60).await?;
 
     if let Some(shared) = shared {
-        let mut peer = BrowserPeer::start(BrowserPeerProtocol::Public).await?;
-        let exact = timeout(
+        let channel = evidence.as_ref().map(Journal::next_channel).transpose()?;
+        let mut peer = match (&evidence, channel) {
+            (Some(evidence), Some(channel)) => {
+                BrowserPeer::start_recorded(BrowserPeerProtocol::Public, evidence.clone(), channel)
+                    .await?
+            }
+            _ => BrowserPeer::start(BrowserPeerProtocol::Public).await?,
+        };
+        let connect = timeout(
             Duration::from_secs(90),
             shared.connect(&mut peer, &session_id),
-        )
-        .await??;
+        );
+        let exact = match (&evidence, channel) {
+            (Some(evidence), Some(channel)) => evidence.wire(channel).scope(connect).await??,
+            _ => connect.await??,
+        };
+        if let (Some(evidence), Some(channel)) = (&evidence, channel) {
+            evidence.require_attached(channel)?;
+            evidence.channel(channel, evidence::ChannelAction::Connected)?;
+        }
         return Ok(PublicLiveHarness {
+            evidence,
             rpc,
             peer,
             channel_id: json!(exact.id),
@@ -948,6 +999,7 @@ async fn open_public_live_with_summary(
         .await?;
 
     Ok(PublicLiveHarness {
+        evidence: None,
         rpc,
         peer,
         channel_id,
@@ -1244,6 +1296,7 @@ const S99_SUMMARY_MAX_TOKENS: u32 = 1024;
 struct ConcurrentContextBootstrap {
     seed_prompt: String,
     captures: mpsc::Sender<GatedSummaryCapture>,
+    evidence: Journal,
 }
 
 /// The gate releases permission, never content. Paid S99 always composes the
@@ -1251,6 +1304,7 @@ struct ConcurrentContextBootstrap {
 struct GatedContextSummarizer {
     captures: mpsc::Sender<GatedSummaryCapture>,
     producer: Arc<dyn LiveContextSummarizer>,
+    evidence: Option<Journal>,
 }
 
 /// A separate LLM client, not an Agent: no tools, source service, transcript
@@ -1259,6 +1313,11 @@ struct FactoryContextSummarizer {
     factory: meerkat::AgentFactory,
     config: Config,
     auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
+    evidence: Journal,
+}
+
+tokio::task_local! {
+    static SUMMARY_JOB: u32;
 }
 
 #[async_trait::async_trait]
@@ -1368,6 +1427,18 @@ impl FactoryContextSummarizer {
             result.usage().output_tokens,
             text.len(),
         );
+        let job = SUMMARY_JOB.try_with(|job| *job).map_err(|_| {
+            LiveContextSummaryError::Producer("summary evidence has no job ordinal".into())
+        })?;
+        self.evidence
+            .record(EvidenceRecord::Summary {
+                job,
+                text: text.clone(),
+                expected_fact_present: s99_recalls_phrase(&text, self.evidence.expected_phrase()),
+                input_tokens: result.usage().input_tokens,
+                output_tokens: result.usage().output_tokens,
+            })
+            .map_err(|fault| LiveContextSummaryError::Producer(fault.to_string()))?;
         Ok(text)
     }
 }
@@ -1379,6 +1450,32 @@ struct GatedSummaryCapture {
     captured_at: Instant,
     release: oneshot::Sender<()>,
     returned: oneshot::Receiver<()>,
+    evidence: Option<Journal>,
+    job: u32,
+}
+
+struct SummaryJobGuard {
+    evidence: Option<Journal>,
+    job: u32,
+    returned: bool,
+}
+
+impl Drop for SummaryJobGuard {
+    fn drop(&mut self) {
+        if let Some(evidence) = &self.evidence {
+            let action = if self.returned {
+                evidence::JobAction::Returned
+            } else {
+                evidence::JobAction::Cancelled
+            };
+            if let Err(fault) = evidence.record(EvidenceRecord::Job {
+                job: self.job,
+                action,
+            }) {
+                eprintln!("{fault}; journal={}", evidence.path().display());
+            }
+        }
+    }
 }
 
 struct AbortScenarioServer(tokio::task::AbortHandle);
@@ -1396,6 +1493,18 @@ impl LiveContextSummarizer for GatedContextSummarizer {
         snapshot: LiveContextSummarySnapshot<'_>,
     ) -> Result<String, LiveContextSummaryError> {
         let captured_at = Instant::now();
+        let job = self
+            .evidence
+            .as_ref()
+            .map(|evidence| evidence.capture_source(&snapshot))
+            .transpose()
+            .map_err(|fault| LiveContextSummaryError::Producer(fault.to_string()))?
+            .unwrap_or(0);
+        let mut job_guard = SummaryJobGuard {
+            evidence: self.evidence.clone(),
+            job,
+            returned: false,
+        };
         let (release, permission) = oneshot::channel();
         let (returned, receipt) = oneshot::channel();
         self.captures
@@ -1406,13 +1515,18 @@ impl LiveContextSummarizer for GatedContextSummarizer {
                 captured_at,
                 release,
                 returned: receipt,
+                evidence: self.evidence.clone(),
+                job,
             })
             .await
             .map_err(|_| LiveContextSummaryError::Producer("acceptance probe closed".into()))?;
         let ((), permission) = tokio::join!(sleep(S99_MIN_SUMMARY_DELAY), permission);
         permission
             .map_err(|_| LiveContextSummaryError::Producer("acceptance gate closed".into()))?;
-        let content = self.producer.summarize(snapshot).await?;
+        let content = SUMMARY_JOB
+            .scope(job, self.producer.summarize(snapshot))
+            .await?;
+        job_guard.returned = true;
         let _ = returned.send(());
         Ok(content)
     }
@@ -1420,12 +1534,36 @@ impl LiveContextSummarizer for GatedContextSummarizer {
 
 impl GatedSummaryCapture {
     async fn release(self) -> Result<bool, Box<dyn std::error::Error>> {
+        if let Some(evidence) = &self.evidence {
+            evidence.record(EvidenceRecord::Job {
+                job: self.job,
+                action: evidence::JobAction::ReleaseRequested,
+            })?;
+        }
         if self.release.is_closed() {
+            if let Some(evidence) = &self.evidence {
+                evidence.record(EvidenceRecord::Job {
+                    job: self.job,
+                    action: evidence::JobAction::ReleaseRejected,
+                })?;
+            }
             return Ok(false);
         }
         sleep(S99_MIN_SUMMARY_DELAY.saturating_sub(self.captured_at.elapsed())).await;
         if self.release.send(()).is_err() {
+            if let Some(evidence) = &self.evidence {
+                evidence.record(EvidenceRecord::Job {
+                    job: self.job,
+                    action: evidence::JobAction::ReleaseRejected,
+                })?;
+            }
             return Ok(false);
+        }
+        if let Some(evidence) = &self.evidence {
+            evidence.record(EvidenceRecord::Job {
+                job: self.job,
+                action: evidence::JobAction::PermissionReleased,
+            })?;
         }
         timeout(
             S99_SUMMARY_LLM_TIMEOUT + Duration::from_secs(5),
@@ -1460,7 +1598,20 @@ async fn s99_context_status(
         ),
         "context preparation must not gate or revoke the active playback owner"
     );
-    Ok(*custody.context_preparation())
+    let status = *custody.context_preparation();
+    use meerkat::surface::{LiveContextPreparationStage as S, LiveContextPreparationStatus as P};
+    s99_evidence(live)?.record(EvidenceRecord::Preparation {
+        channel: s99_evidence(live)?.current_channel()?,
+        status: match status {
+            P::NotRequested => evidence::Preparation::NotRequested,
+            P::Preparing(S::Capturing) => evidence::Preparation::Capturing,
+            P::Preparing(S::Generating) => evidence::Preparation::Generating,
+            P::Preparing(S::Delivering) => evidence::Preparation::Delivering,
+            P::ProviderAcknowledged => evidence::Preparation::ProviderAcknowledged,
+            P::Failed(_) => evidence::Preparation::Failed,
+        },
+    })?;
+    Ok(status)
 }
 
 async fn s99_assert_pending(
@@ -1492,7 +1643,10 @@ async fn s99_wait_for_context_ack(
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         match s99_context_status(live).await? {
-            LiveContextPreparationStatus::ProviderAcknowledged => return Ok(()),
+            LiveContextPreparationStatus::ProviderAcknowledged => {
+                s99_evidence(live)?.stage(EvidenceStage::ProviderAcknowledged)?;
+                return Ok(());
+            }
             LiveContextPreparationStatus::Preparing(_) => {}
             status => {
                 return Err(
@@ -1512,6 +1666,7 @@ async fn s99_release_summary(
     capture: GatedSummaryCapture,
 ) -> Result<(), Box<dyn std::error::Error>> {
     s99_assert_unmeasured(live)?;
+    s99_evidence(live)?.stage(EvidenceStage::ReleasingSummary)?;
     assert!(
         capture.release().await?,
         "active summary callback was cancelled"
@@ -1524,6 +1679,7 @@ async fn s99_release_summary(
 }
 
 fn s99_assert_unmeasured(live: &PublicLiveHarness) -> Result<(), Box<dyn std::error::Error>> {
+    s99_evidence(live)?.flush_wire()?;
     let fault = live
         .unmeasured_publication_fault
         .as_ref()
@@ -1532,6 +1688,12 @@ fn s99_assert_unmeasured(live: &PublicLiveHarness) -> Result<(), Box<dyn std::er
         return Err("unmeasured mode attempted an actionable playback-output publication".into());
     }
     Ok(())
+}
+
+fn s99_evidence(live: &PublicLiveHarness) -> Result<&Journal, Box<dyn std::error::Error>> {
+    live.evidence
+        .as_ref()
+        .ok_or_else(|| "S99 requires durable evidence custody".into())
 }
 
 /// A fresh synthetic microphone-track request, matching native provider
@@ -1545,10 +1707,15 @@ async fn s99_native_exchange(
     s99_assert_unmeasured(live)?;
     let start = live.peer.events().await?.len();
     let baseline = live.peer.audio_evidence().await?;
+    let exchange = s99_evidence(live)?.exchange(start, baseline)?;
     live.peer
         .call(json!({"type":"play","name":fixture}))
         .await?;
     let deadline = Instant::now() + Duration::from_secs(90);
+    s99_evidence(live)?.record(EvidenceRecord::ResponseWindow {
+        exchange,
+        timeout_ms: 90_000,
+    })?;
     loop {
         let events = live.peer.events().await?;
         let user_start = events[start..]
@@ -1565,6 +1732,11 @@ async fn s99_native_exchange(
         let audio = live.peer.audio_evidence().await?;
         if matches_text(&text.to_lowercase()) && audio.has_decoded_speech_since(baseline) {
             s99_assert_unmeasured(live)?;
+            s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
+                exchange,
+                matched: true,
+                audio,
+            })?;
             println!("GPT_LIVE_PUBLIC_CONCURRENT_AUDIO fixture={fixture} evidence={audio:?}");
             return Ok(output_transcript_text(
                 &live.peer.events().await?,
@@ -1572,6 +1744,11 @@ async fn s99_native_exchange(
             ));
         }
         if Instant::now() >= deadline {
+            s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
+                exchange,
+                matched: false,
+                audio,
+            })?;
             return Err(format!(
                 "S99 native exchange lacked fresh matching transcript/decoded speech; fixture={fixture} audio={audio:?}; {}",
                 live.peer.event_summary(&events[start..])
@@ -1614,14 +1791,6 @@ fn s99_recalls_phrase(text: &str, phrase: &str) -> bool {
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_99_gpt_live_public_concurrent_context()
 -> Result<(), Box<dyn std::error::Error>> {
-    timeout(Duration::from_secs(1200), run_s99_concurrent_context())
-        .await
-        .map_err(|_| "S99 overall deadline expired; concurrent-context acceptance not qualified")?
-}
-
-async fn run_s99_concurrent_context() -> Result<(), Box<dyn std::error::Error>> {
-    require_api_key()?;
-    let (captures, mut captured) = mpsc::channel(4);
     // The spoken query never contains the answer. Vary the phrase between
     // runs so provider guesses and fixture memorization cannot pass recall.
     let nonce = meerkat_core::SessionId::new();
@@ -1634,12 +1803,34 @@ async fn run_s99_concurrent_context() -> Result<(), Box<dyn std::error::Error>> 
         .map(|byte| words[usize::from(*byte) % words.len()])
         .collect::<Vec<_>>()
         .join(" ");
+    let evidence = Journal::create(phrase)?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = timeout(
+        Duration::from_secs(1200),
+        run_s99_concurrent_context(evidence.clone()),
+    )
+    .await;
+    evidence.finish(match &result {
+        Ok(Ok(())) => evidence::Outcome::Passed,
+        Ok(Err(_)) => evidence::Outcome::Failed,
+        Err(_) => evidence::Outcome::TimedOut,
+    })?;
+    result
+        .map_err(|_| "S99 overall deadline expired; concurrent-context acceptance not qualified")?
+}
+
+async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
+    require_api_key()?;
+    evidence.stage(EvidenceStage::Opening)?;
+    let phrase = evidence.expected_phrase().to_owned();
+    let (captures, mut captured) = mpsc::channel(4);
     let mut live = open_public_live_with_summary(
         "gpt-live-public-concurrent-e2e-",
         "scenario-99-operator",
         LiveDelegationExecutionPolicy::ExistingMember,
         Some(ConcurrentContextBootstrap {
             captures,
+            evidence: evidence.clone(),
             seed_prompt: format!(
                 "Remember this historical vault phrase from our text conversation: {phrase}. \
              The current code word is Tangerine. My current favorite flower is Daffodil. \
@@ -1650,6 +1841,11 @@ async fn run_s99_concurrent_context() -> Result<(), Box<dyn std::error::Error>> 
     )
     .await?;
     let _server_guard = AbortScenarioServer(live.server_task.clone());
+    // Declared after the owner: cancellation/panic flushes this guard before
+    // the browser, runtime, or scenario TempDir can be dropped.
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = async {
+    evidence.stage(EvidenceStage::Connected)?;
     let first_capture = next_summary_capture(&mut captured).await?;
     assert_eq!(first_capture.session_id, live.session_id);
     assert!(first_capture.cursor > 0);
@@ -1662,6 +1858,7 @@ async fn run_s99_concurrent_context() -> Result<(), Box<dyn std::error::Error>> 
     live.assert_existing_text_identity().await?;
     s99_assert_pending(&mut live, &first_capture).await?;
 
+    evidence.stage(EvidenceStage::InitialUnknown)?;
     let unknown = s99_native_exchange(&mut live, "history", s99_honest_unknown).await?;
     assert!(s99_honest_unknown(&unknown.to_lowercase()));
     assert!(!s99_recalls_phrase(&unknown, &phrase));
@@ -1669,6 +1866,7 @@ async fn run_s99_concurrent_context() -> Result<(), Box<dyn std::error::Error>> 
 
     // Commit newer ordinary context through the existing source session while
     // its immutable opening snapshot is still blocked in the summarizer.
+    evidence.stage(EvidenceStage::TypedCorrection)?;
     live.rpc.call("turn/start", json!({
         "session_id":live.session_id,
         "prompt":"A newer ordinary text update changes the current code word from Tangerine to Violet and my current favorite flower from Daffodil to Marigold. Acknowledge Violet and Marigold briefly. Do not repeat other historical facts and do not use tools."
@@ -1691,11 +1889,13 @@ async fn run_s99_concurrent_context() -> Result<(), Box<dyn std::error::Error>> 
         "new source appends must not change the callback's opening snapshot"
     );
     s99_assert_pending(&mut live, &first_capture).await?;
+    evidence.stage(EvidenceStage::SpokenCorrection)?;
     s99_native_exchange(&mut live, "correction", |text| text.contains("cobalt")).await?;
     s99_assert_pending(&mut live, &first_capture).await?;
 
     // Spoken delegation must complete a real tool-backed turn while summary
     // preparation is pending, without changing the existing member identity.
+    evidence.stage(EvidenceStage::DelegatedWork)?;
     s99_existing_member_work(&mut live, &first_capture).await?;
     s99_assert_pending(&mut live, &first_capture).await?;
     let before_release = live.peer.snapshot().await?;
@@ -1711,11 +1911,13 @@ async fn run_s99_concurrent_context() -> Result<(), Box<dyn std::error::Error>> 
     let elapsed = first_capture.captured_at.elapsed();
     assert!(elapsed >= S99_MIN_SUMMARY_DELAY);
     s99_release_summary(&mut live, first_capture).await?;
+    evidence.stage(EvidenceStage::HistoricalRecall)?;
     let recalled = s99_native_exchange(&mut live, "history", |text| {
         s99_recalls_phrase(text, &phrase)
     })
     .await?;
     assert!(s99_recalls_phrase(&recalled, &phrase));
+    evidence.stage(EvidenceStage::CurrentFactsRecall)?;
     let current = s99_native_exchange(&mut live, "current", |text| {
         text.contains("cobalt") && text.contains("marigold")
     })
@@ -1749,24 +1951,39 @@ async fn run_s99_concurrent_context() -> Result<(), Box<dyn std::error::Error>> 
     live.reopen().await?;
     let replacement = next_summary_capture(&mut captured).await?;
     s99_assert_pending(&mut live, &replacement).await?;
+    evidence.stage(EvidenceStage::ObsoleteJobRelease)?;
     let obsolete_returned = obsolete.release().await?;
+    evidence.stage(EvidenceStage::ReplacementUnknown)?;
     let late_unknown = s99_native_exchange(&mut live, "history", s99_honest_unknown).await?;
     assert!(!s99_recalls_phrase(&late_unknown, &phrase));
     s99_assert_pending(&mut live, &replacement).await?;
     s99_release_summary(&mut live, replacement).await?;
+    evidence.stage(EvidenceStage::ReplacementRecall)?;
     s99_native_exchange(&mut live, "history", |text| {
         s99_recalls_phrase(text, &phrase)
     })
     .await?;
     live.close_exact().await?;
     live.assert_existing_text_identity().await?;
-    live.peer.close().await;
-    live.server_task.abort();
     println!(
         "GPT_LIVE_PUBLIC_CONCURRENT_CONTEXT_OK gated_ms={} obsolete_callback_returned={obsolete_returned}",
         elapsed.as_millis()
     );
-    Ok(())
+    Ok::<(), Box<dyn std::error::Error>>(())
+    }.await;
+    let browser_flush = live.peer.stop_evidence().await;
+    let outcome = if result.is_ok() && browser_flush.is_ok() {
+        evidence.stage(EvidenceStage::Finished)?;
+        evidence::Outcome::Passed
+    } else {
+        evidence::Outcome::Failed
+    };
+    let retained = evidence.finish(outcome);
+    live.peer.close().await;
+    live.server_task.abort();
+    retained?;
+    browser_flush?;
+    result
 }
 
 async fn s99_existing_member_work(
@@ -2386,6 +2603,7 @@ mod config_tests {
             std::sync::Arc::new(super::GatedContextSummarizer {
                 captures,
                 producer: std::sync::Arc::new(DeterministicSummary),
+                evidence: None,
             }),
             1024,
             1024,
@@ -2417,6 +2635,8 @@ mod config_tests {
             captured_at: tokio::time::Instant::now(),
             release,
             returned: receipt,
+            evidence: None,
+            job: 0,
         };
         assert!(!capture.release().await.unwrap());
     }

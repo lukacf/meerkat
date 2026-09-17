@@ -1,0 +1,25 @@
+FROZEN_SOURCE=73a0b869afb872d16b39d9de2ef5bd74e1c4f8a1
+ONE_AUTHORIZED_S99_ATTEMPT
+    Finished `test` profile [unoptimized] target(s) in 0.34s
+     Running tests/gpt_live_public_e2e.rs (/Users/luka/Library/Caches/rust-workspaces/meerkat-7f595016ca/targets/v4/1.94.1-aarch64-apple-darwin-e408947bfd/async-acceptance/debug/deps/gpt_live_public_e2e-f002c92e1115bb50)
+
+running 1 test
+GPT_LIVE_PUBLIC_CONCURRENT_AUDIO fixture=history evidence=AudioEvidence { decoded_non_silent_frames: 5760, decoded_non_silent_seconds: 0.11999999999999998, non_silent_frames: 2, total_audio_energy: Some(0.0003239139148019315), total_samples_received: Some(486240), total_samples_duration: Some(11.219999999999803), bytes_received: 38242, packets_received: 502 }
+GPT_LIVE_PUBLIC_CONCURRENT_AUDIO fixture=correction evidence=AudioEvidence { decoded_non_silent_frames: 43680, decoded_non_silent_seconds: 0.9100000000000006, non_silent_frames: 19, total_audio_energy: Some(0.032513080765257434), total_samples_received: Some(995040), total_samples_duration: Some(21.82000000000061), bytes_received: 79928, packets_received: 1013 }
+GPT_LIVE_PUBLIC_TOOL_CALL name=shell pwd_command=true
+GPT_LIVE_PUBLIC_TOOL_CHECK linked_pwd=true exit_code=Some(0) timed_out=false absolute_stdout=true expected_directory=true
+GPT_LIVE_PUBLIC_REAL_SUMMARY elapsed_ms=3178 input_tokens=4738 output_tokens=217 bytes=580
+test e2e_scenario_99_gpt_live_public_concurrent_context has been running for over 60 seconds
+Error: "S99 native exchange lacked fresh matching transcript/decoded speech; fixture=history audio=AudioEvidence { decoded_non_silent_frames: 943680, decoded_non_silent_seconds: 19.660000000000274, non_silent_frames: 448, total_audio_energy: Some(0.6114352593753628), total_samples_received: Some(6531840), total_samples_duration: Some(137.17000000002022), bytes_received: 584879, packets_received: 6664 }; observed 162 events across 5 safe classes with normalized_json_bytes=22691: {\"session.commentary.appended\": 3, \"session.input_transcript.delta\": 31, \"session.output_transcript.delta\": 52, \"session.thinking.appended\": 69, \"session.usage.updated\": 7}"
+test e2e_scenario_99_gpt_live_public_concurrent_context ... FAILED
+
+failures:
+
+failures:
+    e2e_scenario_99_gpt_live_public_concurrent_context
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 143.36s
+
+error: test failed, to rerun pass `-p meerkat-integration-tests --test gpt_live_public_e2e`
+
+S99_EXIT_CODE=101

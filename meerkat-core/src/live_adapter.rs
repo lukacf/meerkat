@@ -232,6 +232,13 @@ pub enum LiveAdapterCommand {
 #[serde(tag = "observation", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LiveAdapterObservation {
+    /// Opaque source provenance attached by an admitted intake owner.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    WithContextObservation {
+        observation_id: crate::LiveContextObservationId,
+        #[serde(rename = "payload")]
+        observation: Box<LiveAdapterObservation>,
+    },
     Ready,
     UserTranscriptFinal {
         #[serde(default, skip_serializing_if = "Option::is_none")]

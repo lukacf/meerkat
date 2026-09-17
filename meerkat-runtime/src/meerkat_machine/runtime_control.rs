@@ -191,6 +191,7 @@ mod live_context_mirror_tests {
 
     #[derive(Default)]
     struct RecordingMirrorHost {
+        runtime: Option<crate::MeerkatMachine>,
         appends: std::sync::Mutex<Vec<(String, String)>>,
         append_kinds: std::sync::Mutex<Vec<crate::live_execution::LiveContextAppendKind>>,
         bootstrap_barrier: Option<Arc<MirrorAppendBarrier>>,
@@ -255,6 +256,18 @@ mod live_context_mirror_tests {
                     .await
                     .map_err(|error| error.to_string())?
                     .forget();
+            }
+            if self
+                .bootstrap_outcome
+                .unwrap_or(meerkat_core::LiveAppendDeliveryOutcome::Acknowledged)
+                == meerkat_core::LiveAppendDeliveryOutcome::Acknowledged
+            {
+                self.runtime
+                    .as_ref()
+                    .ok_or("mock bootstrap ACK has no recorder")?
+                    .record_live_context_bootstrap_ack_cut(&authority)
+                    .await
+                    .map_err(|error| error.to_string())?;
             }
             Ok((
                 authority,
@@ -468,6 +481,7 @@ mod live_context_mirror_tests {
             release: tokio::sync::Semaphore::new(0),
         });
         let host = Arc::new(RecordingMirrorHost {
+            runtime: Some(machine.clone()),
             bootstrap_barrier: Some(barrier.clone()),
             ..Default::default()
         });
@@ -509,24 +523,43 @@ mod live_context_mirror_tests {
         ));
         let mut spoken =
             meerkat_core::UserMessage::text("spoken correction while history is pending");
+        let spoken_observation = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pre-ACK spoken admission")
+            .observation_id()
+            .clone();
         spoken.identity.realtime_origin = Some(
             serde_json::from_value(serde_json::json!({
                 "session_id": session_id,
                 "channel_id": channel_id,
-                "canonical_row_sequence": 3
+                "canonical_row_sequence": 3,
+                "context_observation_id": spoken_observation
             }))
             .expect("stored exact live origin"),
         );
         session.push(meerkat_core::Message::User(spoken));
-        session.push(meerkat_core::Message::BlockAssistant(
-            meerkat_core::types::BlockAssistantMessage::snapshot(vec![
-                meerkat_core::AssistantBlock::Transcript {
-                    text: "unmeasured assistant snapshot".into(),
-                    source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
-                    meta: None,
-                },
-            ]),
-        ));
+        let assistant_observation = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pre-ACK assistant admission")
+            .observation_id()
+            .clone();
+        let mut assistant_snapshot = meerkat_core::types::BlockAssistantMessage::snapshot(vec![
+            meerkat_core::AssistantBlock::Transcript {
+                text: "unmeasured assistant snapshot".into(),
+                source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                meta: None,
+            },
+        ]);
+        assistant_snapshot.identity.realtime_origin = Some(
+            serde_json::from_value(serde_json::json!({
+                "session_id": session_id, "channel_id": channel_id, "canonical_row_sequence": 4,
+                "context_observation_id": assistant_observation
+            }))
+            .expect("assistant source origin"),
+        );
+        session.push(meerkat_core::Message::BlockAssistant(assistant_snapshot));
         let mut non_text = meerkat_core::UserMessage::text("   ");
         non_text.identity.realtime_origin = Some(
             serde_json::from_value(serde_json::json!({
@@ -548,11 +581,18 @@ mod live_context_mirror_tests {
                 meta: None,
             },
         ]);
+        let mixed_observation = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pre-ACK mixed admission")
+            .observation_id()
+            .clone();
         mixed.identity.realtime_origin = Some(
             serde_json::from_value(serde_json::json!({
                 "session_id": session_id,
                 "channel_id": channel_id,
-                "canonical_row_sequence": 6
+                "canonical_row_sequence": 6,
+                "context_observation_id": mixed_observation
             }))
             .expect("exact mixed native origin"),
         );
@@ -650,6 +690,11 @@ mod live_context_mirror_tests {
             .begin_live_context_preparation(&session_id, &channel_id, 8)
             .await
             .expect("reserve");
+        let old_source = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pending source admission");
+        assert_eq!(old_source.ordinal(), 1);
         machine
             .mark_live_context_preparation_generating(&lease)
             .await
@@ -712,7 +757,25 @@ mod live_context_mirror_tests {
             .stage_experimental_live_execution_with_preparation(&session_id, &replacement, 10)
             .await
             .expect("new exact reservation");
+        assert!(
+            machine
+                .record_live_context_observation(&new_lease, old_source.observation_id().clone())
+                .await
+                .is_err(),
+            "an old scoped identifier cannot become a new-channel admission"
+        );
+        let new_source = machine
+            .record_live_context_observation(&new_lease, new_lease.new_observation_id())
+            .await
+            .expect("new pending scope");
+        assert_eq!(new_source.ordinal(), 1);
         bind_experimental_live_machine(&machine, &session_id, &replacement, 0).await;
+        assert!(
+            machine
+                .record_live_context_bootstrap_ack_cut(&append)
+                .await
+                .is_err()
+        );
         assert!(
             machine
                 .resolve_live_context_bootstrap_append(
@@ -762,6 +825,16 @@ mod live_context_mirror_tests {
             .authorize_live_context_bootstrap_append(&old_lease, "initial summary")
             .await
             .expect("initial summary authority");
+        let causal_observation = machine
+            .record_live_context_observation(&old_lease, old_lease.new_observation_id())
+            .await
+            .expect("pre-ACK causal source")
+            .observation_id()
+            .clone();
+        machine
+            .record_live_context_bootstrap_ack_cut(&bootstrap)
+            .await
+            .expect("initial native ACK cut");
         machine
             .resolve_live_context_bootstrap_append(
                 &bootstrap,
@@ -777,7 +850,8 @@ mod live_context_mirror_tests {
         let mut causal = meerkat_core::UserMessage::text("failed causal correction");
         causal.identity.realtime_origin = Some(
             serde_json::from_value(serde_json::json!({
-                "session_id": session_id, "channel_id": old_channel, "canonical_row_sequence": 1
+                "session_id": session_id, "channel_id": old_channel, "canonical_row_sequence": 1,
+                "context_observation_id": causal_observation
             }))
             .expect("causal origin"),
         );
@@ -939,6 +1013,7 @@ mod live_context_mirror_tests {
             release: tokio::sync::Semaphore::new(0),
         });
         let host = Arc::new(RecordingMirrorHost {
+            runtime: Some(machine.clone()),
             bootstrap_barrier: Some(barrier.clone()),
             ..Default::default()
         });
@@ -1058,6 +1133,199 @@ mod live_context_mirror_tests {
         assert!(
             machine
                 .wait_live_context_ready_for_results(&session_id, &channel_id)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn observation_cut_survives_deferred_materialization_and_late_resolution() {
+        let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        let lease = machine
+            .begin_live_context_preparation(&session_id, &channel_id, 0)
+            .await
+            .expect("lease");
+        bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        machine
+            .mark_live_context_preparation_generating(&lease)
+            .await
+            .expect("generate");
+        let pre = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pre source");
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        let held = session.append_realtime_transcript_event(
+            meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "delayed-live".into(),
+                previous_item_id: Some("prerequisite".into()),
+                content_index: 0,
+                text: "pre-cut live correction".into(),
+            }
+            .with_context_observation(Some(pre.observation_id().clone())),
+        );
+        assert!(held.materialized_messages.is_empty());
+        let pre_assistant = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pre assistant source");
+        let interaction_id = meerkat_core::InteractionId::new();
+        for event in [
+            meerkat_core::RealtimeTranscriptEvent::ContextObservationBound {
+                channel_id: channel_id.clone(),
+                item_id: "deferred-assistant".into(),
+                observation_id: pre_assistant.observation_id().clone(),
+            },
+            meerkat_core::RealtimeTranscriptEvent::ItemObserved {
+                item_id: "deferred-assistant".into(),
+                previous_item_id: Some("delayed-live".into()),
+                role: meerkat_core::RealtimeTranscriptRole::Assistant,
+                response_id: Some("observed-response".into()),
+            },
+            meerkat_core::RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted {
+                channel_id: channel_id.to_string(),
+                interaction_id,
+                response_id: "observed-response".into(),
+                item_id: "deferred-assistant".into(),
+                content_index: 0,
+            },
+            meerkat_core::RealtimeTranscriptEvent::AssistantUnmeasuredSnapshotCommitted {
+                channel_id: channel_id.to_string(),
+                interaction_id,
+                response_id: "observed-response".into(),
+                item_id: "deferred-assistant".into(),
+                content_index: 0,
+                text: "pre-cut unmeasured speech".into(),
+                evidence: meerkat_core::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(
+                    "pre-cut unmeasured speech".into(),
+                ),
+            },
+        ] {
+            assert!(
+                session
+                    .append_realtime_transcript_event(event)
+                    .materialized_messages
+                    .is_empty()
+            );
+        }
+        let summary = machine
+            .authorize_live_context_bootstrap_append(&lease, "exact historical summary")
+            .await
+            .expect("summary");
+        machine
+            .record_live_context_bootstrap_ack_cut(&summary)
+            .await
+            .expect("ACK intake cut");
+        let post = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("source after ACK before resolve");
+        let replay = machine
+            .record_live_context_observation(&lease, pre.observation_id().clone())
+            .await
+            .expect("source replay");
+        assert_eq!(replay.ordinal(), pre.ordinal());
+        assert!(post.ordinal() > pre_assistant.ordinal());
+        machine
+            .record_live_context_bootstrap_ack_cut(&summary)
+            .await
+            .expect("ACK replay keeps cut");
+        machine
+            .resolve_live_context_bootstrap_append(
+                &summary,
+                meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+            )
+            .await
+            .expect("late resolution");
+        session.append_realtime_transcript_event(
+            meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "prerequisite".into(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "ordinary prerequisite".into(),
+            },
+        );
+        session.append_realtime_transcript_event(
+            meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "fresh-live".into(),
+                previous_item_id: Some("delayed-live".into()),
+                content_index: 0,
+                text: "fresh already heard output".into(),
+            }
+            .with_context_observation(Some(post.observation_id().clone())),
+        );
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("commit");
+        machine
+            .enqueue_committed_live_transcript_boundary(&session_id, &committed, "after-cut-commit")
+            .await
+            .expect("delayed notification");
+        {
+            let rows = machine
+                .shared
+                .live_context_queued_rows
+                .lock()
+                .expect("rows");
+            assert!(rows[&(session_id.clone(), 2)].is_causal_reassertion());
+            assert!(rows[&(session_id.clone(), 3)].is_causal_reassertion());
+            assert!(!rows[&(session_id.clone(), 4)].is_causal_reassertion());
+            assert!(rows[&(session_id.clone(), 4)].provider_context().is_none());
+        }
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+            .await
+            .expect("ordered drain");
+        {
+            let appends = host.appends.lock().expect("appends");
+            assert_eq!(appends.len(), 3);
+            assert!(appends[0].1.contains("ordinary prerequisite"));
+            assert!(appends[1].1.contains("pre-cut live correction"));
+            assert!(appends[2].1.contains("pre-cut unmeasured speech"));
+            assert!(appends[2].1.contains("spoken_unmeasured"));
+            assert!(
+                !appends
+                    .iter()
+                    .any(|(_, text)| text.contains("fresh already heard output"))
+            );
+        }
+        let other_session = SessionId::new();
+        assert!(
+            machine
+                .record_live_context_observation(
+                    &lease,
+                    meerkat_core::LiveContextObservationId::new(
+                        other_session.to_string(),
+                        channel_id.clone()
+                    )
+                )
+                .await
+                .is_err(),
+            "foreign namespace is not an admitted source"
+        );
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AbandonLiveOpenAdmission {
+                    session_id: session_id.to_string(),
+                    channel_id: channel_id.to_string(),
+                },
+                "test:close-observation-scope",
+            )
+            .await
+            .expect("close");
+        assert!(
+            machine
+                .record_live_context_observation(&lease, pre.observation_id().clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            machine
+                .record_live_context_bootstrap_ack_cut(&summary)
                 .await
                 .is_err()
         );
@@ -3476,6 +3744,10 @@ mod live_context_mirror_tests {
                 .authorize_live_context_bootstrap_append(&lease, "empty source summary")
                 .await
                 .expect("authorize");
+            machine
+                .record_live_context_bootstrap_ack_cut(&append)
+                .await
+                .expect("ACK cut");
             machine
                 .resolve_live_context_bootstrap_append(
                     &append,
@@ -9773,6 +10045,7 @@ impl MeerkatMachine {
                     commit_authority_token: row.store_commit_authority().to_string(),
                     disposition,
                     payload_availability: row.payload_availability(),
+                    observation_id: row.observation_id().map(ToString::to_string),
                 },
                 "EnqueueLiveContextRow",
             )

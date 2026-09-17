@@ -128,11 +128,42 @@ impl MeerkatMachine {
         let _guard = self
             .lock_current_durability_ready_session_mutation_gate(session_id)
             .await?;
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        let channel = channel_id.as_str();
+        let runtime_id = state
+            .live_experimental_staged_runtime_by_channel
+            .get(channel)
+            .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                reason: "preparation has no staged runtime".into(),
+            })?;
+        let fence = state
+            .live_experimental_staged_fence_by_channel
+            .get(channel)
+            .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                reason: "preparation has no staged fence".into(),
+            })?;
+        let generation = state
+            .live_experimental_staged_generation_by_channel
+            .get(channel)
+            .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+                reason: "preparation has no staged generation".into(),
+            })?;
         let lease = LiveContextPreparationLease {
             session_id: session_id.clone(),
             channel_id: channel_id.clone(),
             lease_id: uuid::Uuid::new_v4().to_string(),
             reserved_cursor,
+            binding: crate::live_execution::LiveDelegationRuntimeBinding::new(
+                session_id.clone(),
+                channel_id.clone(),
+                crate::identifiers::LogicalRuntimeId::new(runtime_id.0.clone()),
+                fence.0,
+                generation.0,
+            ),
             cancellation: Default::default(),
         };
         let (_, effects) = self
@@ -143,6 +174,9 @@ impl MeerkatMachine {
                     channel_id: channel_id.to_string(),
                     lease_id: lease.lease_id.clone(),
                     reserved_cursor,
+                    runtime_id: runtime_id.clone(),
+                    fence_token: *fence,
+                    generation: *generation,
                 },
                 "BeginLiveContextPreparation",
             )
@@ -167,6 +201,99 @@ impl MeerkatMachine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert((session_id.clone(), channel_id.clone()), lease.clone());
         Ok(lease)
+    }
+
+    /// Linearize source admission with ACK-cut recording in generated
+    /// authority. No persistence, actor, provider, or projection I/O occurs.
+    pub async fn record_live_context_observation(
+        &self,
+        lease: &LiveContextPreparationLease,
+        observation_id: meerkat_core::LiveContextObservationId,
+    ) -> Result<crate::live_execution::LiveContextObservationReceipt, RuntimeDriverError> {
+        let binding = &lease.binding;
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                lease.session_id(),
+                dsl::MeerkatMachineInput::RecordLiveContextObservation {
+                    session_id: lease.session_id.to_string(),
+                    channel_id: lease.channel_id.to_string(),
+                    lease_id: lease.lease_id.clone(),
+                    runtime_id: dsl::AgentRuntimeId::from_domain(binding.runtime_id()),
+                    fence_token: dsl::FenceToken(binding.fence_token()),
+                    generation: dsl::Generation(binding.generation()),
+                    observation_id: observation_id.to_string(),
+                    observation_namespace: observation_id.namespace().to_string(),
+                    observation_channel_id: observation_id.channel_id().to_string(),
+                },
+                "RecordLiveContextObservation",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        for effect in effects.as_slice() {
+            if let dsl::MeerkatMachineEffect::LiveContextObservationRecorded {
+                session_id,
+                channel_id,
+                lease_id,
+                observation_id: recorded,
+                ordinal,
+                runtime_id,
+                fence_token,
+                generation,
+            } = effect
+                && session_id == &lease.session_id.to_string()
+                && channel_id == lease.channel_id.as_str()
+                && lease_id == &lease.lease_id
+                && recorded == &observation_id.to_string()
+                && runtime_id.0 == binding.runtime_id().0
+                && fence_token.0 == binding.fence_token()
+                && generation.0 == binding.generation()
+            {
+                return Ok(crate::live_execution::LiveContextObservationReceipt {
+                    observation_id,
+                    ordinal: *ordinal,
+                });
+            }
+        }
+        Err(RuntimeDriverError::Internal(
+            "source admission emitted no exact receipt".into(),
+        ))
+    }
+
+    /// Record the exact native ACK in the same intake order as source
+    /// admissions, before waking any provider-send waiter.
+    pub async fn record_live_context_bootstrap_ack_cut(
+        &self,
+        authority: &LiveContextBootstrapAppendAuthority,
+    ) -> Result<(), RuntimeDriverError> {
+        let lease = &authority.lease;
+        let binding = &lease.binding;
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                lease.session_id(),
+                dsl::MeerkatMachineInput::RecordLiveContextBootstrapAckCut {
+                    session_id: lease.session_id.to_string(),
+                    channel_id: lease.channel_id.to_string(),
+                    lease_id: lease.lease_id.clone(),
+                    runtime_id: dsl::AgentRuntimeId::from_domain(binding.runtime_id()),
+                    fence_token: dsl::FenceToken(binding.fence_token()),
+                    generation: dsl::Generation(binding.generation()),
+                    append_id: authority.append_id.clone(),
+                    content_digest: authority.content_digest.clone(),
+                    reserved_cursor: lease.reserved_cursor,
+                },
+                "RecordLiveContextBootstrapAckCut",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        if effects.as_slice().iter().any(|effect| matches!(effect,
+            dsl::MeerkatMachineEffect::LiveContextBootstrapAckCutRecorded {
+                session_id, channel_id, lease_id, append_id, ..
+            } if session_id == &lease.session_id.to_string() && channel_id == lease.channel_id.as_str()
+                && lease_id == &lease.lease_id && append_id == &authority.append_id
+        )) { return Ok(()); }
+        Err(RuntimeDriverError::Internal(
+            "bootstrap ACK emitted no exact cut receipt".into(),
+        ))
     }
 
     pub async fn mark_live_context_preparation_generating(

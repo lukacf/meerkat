@@ -4402,11 +4402,14 @@ impl Session {
             .map(|(index, row)| {
                 let mut message = row.message;
                 if let Some(channel_id) = row.source_channel {
-                    let origin = crate::types::RealtimeMessageOrigin::new(
+                    let mut origin = crate::types::RealtimeMessageOrigin::new(
                         self.id.clone(),
                         channel_id,
                         start + index as u64 + 1,
                     );
+                    if let Some(observation_id) = row.context_observation_id {
+                        origin = origin.with_context_observation(observation_id);
+                    }
                     match &mut message {
                         Message::User(user) => user.identity.realtime_origin = Some(origin),
                         Message::BlockAssistant(assistant) => {
@@ -4516,6 +4519,25 @@ impl Session {
         item_id: &str,
         content_index: u32,
     ) -> Result<crate::LiveAssistantPlaybackTarget, crate::error::AgentError> {
+        self.admit_live_assistant_playback_target_with_context_observation(
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            None,
+        )
+    }
+
+    pub fn admit_live_assistant_playback_target_with_context_observation(
+        &mut self,
+        channel_id: &crate::LiveChannelId,
+        interaction_id: crate::InteractionId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+        observation_id: Option<crate::LiveContextObservationId>,
+    ) -> Result<crate::LiveAssistantPlaybackTarget, crate::error::AgentError> {
         if let Some(existing) = realtime_transcript_revision::live_assistant_playback_target(
             self.realtime_transcript.state(),
             channel_id.as_str(),
@@ -4523,6 +4545,15 @@ impl Session {
             content_index,
         ) {
             if existing.response_id() == response_id {
+                if observation_id
+                    .as_ref()
+                    .is_some_and(|id| existing.context_observation_id() != Some(id))
+                {
+                    return Err(crate::error::AgentError::ConfigError(
+                        "live assistant playback source observation conflicts with admitted target"
+                            .into(),
+                    ));
+                }
                 return Ok(existing);
             }
 
@@ -4537,7 +4568,8 @@ impl Session {
                 response_id: response_id.to_string(),
                 item_id: item_id.to_string(),
                 content_index,
-            },
+            }
+            .with_context_observation(observation_id),
         );
         realtime_transcript_revision::live_assistant_playback_target(
             self.realtime_transcript.state(),

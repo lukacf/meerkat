@@ -349,8 +349,8 @@ pub use realtime_transcript::{
 };
 pub use realtime_transcript_sidecar::{
     REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V1, REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V2,
-    RealtimeTranscriptSidecarError, RealtimeTranscriptSidecarRecord,
-    RealtimeTranscriptSnapshotReasonV1,
+    REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V3, RealtimeTranscriptSidecarError,
+    RealtimeTranscriptSidecarRecord, RealtimeTranscriptSnapshotReasonV1,
 };
 pub use retry::{
     DEFAULT_STREAM_INACTIVITY_TIMEOUT, LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan,
@@ -525,9 +525,9 @@ pub use types::{
     ContentInput, CumulativeUsage, ExtractionError, HandlingMode, ImageData,
     InstructionActivationId, InstructionActivationIdentity, InstructionContentDigest,
     InstructionKey, InstructionNamespace, InstructionRevisionId, InstructionRevisionRef,
-    InvalidInstructionContentDigest, InvalidInstructionIdentifier, MemoryIndexExclusion,
-    MemoryIndexableContent, Message, OutputSchema, ProviderMeta, RunInput, RunResult,
-    SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, ServerToolKind, SessionId, StopReason,
+    InvalidInstructionContentDigest, InvalidInstructionIdentifier, LiveContextObservationId,
+    MemoryIndexExclusion, MemoryIndexableContent, Message, OutputSchema, ProviderMeta, RunInput,
+    RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, ServerToolKind, SessionId, StopReason,
     SystemMessage, SystemMessageIdentity, SystemNoticeBlock, SystemNoticeDirection,
     SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer, SystemPromptKey, SystemPromptVersion,
     SystemPromptVersionIdentity, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity,

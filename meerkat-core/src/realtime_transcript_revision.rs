@@ -347,9 +347,15 @@ pub struct SessionRealtimeTranscriptState {
     /// commit and durable object are not yet known to be jointly committed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_user_content_blob: Option<PendingRealtimeUserContentBlob>,
+    /// Opaque data attached at intake; no ordering or bootstrap policy lives here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    context_observations: BTreeMap<String, crate::LiveContextObservationId>,
 }
 
 impl SessionRealtimeTranscriptState {
+    pub(crate) fn has_context_observations(&self) -> bool {
+        !self.context_observations.is_empty()
+    }
     pub(crate) fn has_channel_origins(&self) -> bool {
         self.items
             .values()
@@ -569,6 +575,7 @@ pub struct RealtimeTranscriptApplyCommit {
 pub struct RealtimeMaterializedRow {
     pub message: Message,
     pub source_channel: Option<crate::LiveChannelId>,
+    pub context_observation_id: Option<crate::LiveContextObservationId>,
 }
 
 /// Authorize a durable snapshot through the canonical SessionDocument
@@ -601,7 +608,12 @@ pub fn restore_realtime_transcript_state(
         causal.no_self_predecessor_references,
         causal.acyclic,
         causal.all_materialized_items_have_materialized_ancestry,
-        realtime_transcript_state_identity_fields_valid(&state),
+        realtime_transcript_state_identity_fields_valid(&state)
+            && state.context_observations.iter().all(|(item, id)| {
+                !item.is_empty()
+                    && !id.namespace().is_empty()
+                    && !id.channel_id().as_str().is_empty()
+            }),
         realtime_user_content_identity_keys_match(&state),
         realtime_user_content_identity_fields_valid(&state),
         realtime_user_content_identity_item_ids_unique(&state),
@@ -719,12 +731,98 @@ pub fn apply_realtime_transcript_event(
     apply_realtime_transcript_event_from_channel(state, event, None)
 }
 
+fn bind_context_observation(
+    state: &mut SessionRealtimeTranscriptState,
+    item_id: String,
+    observation_id: crate::LiveContextObservationId,
+) -> Result<(), RealtimeTranscriptShellError> {
+    if item_id.is_empty() || observation_id.namespace().is_empty() {
+        return Err(RealtimeTranscriptShellError {
+            op: "context_observation_identity_empty",
+        });
+    }
+    if let Some(existing) = state.context_observations.get(&item_id) {
+        if existing != &observation_id {
+            return Err(RealtimeTranscriptShellError {
+                op: "context_observation_identity_conflict",
+            });
+        }
+        return Ok(());
+    }
+    if state
+        .items
+        .get(&item_id)
+        .is_some_and(|item| item.materialized)
+    {
+        return Err(RealtimeTranscriptShellError {
+            op: "context_observation_cannot_relabel_materialized_item",
+        });
+    }
+    state.context_observations.insert(item_id, observation_id);
+    Ok(())
+}
+
 pub fn apply_realtime_transcript_event_from_channel(
     state: &mut SessionRealtimeTranscriptState,
     event: RealtimeTranscriptEvent,
     source_channel: Option<crate::LiveChannelId>,
 ) -> Result<RealtimeTranscriptApplyCommit, RealtimeTranscriptShellError> {
     let commit = match event {
+        RealtimeTranscriptEvent::WithContextObservation {
+            observation_id,
+            event,
+        } => {
+            if matches!(
+                event.as_ref(),
+                RealtimeTranscriptEvent::WithContextObservation { .. }
+            ) {
+                return Err(RealtimeTranscriptShellError {
+                    op: "conflicting_context_observation_envelope",
+                });
+            }
+            let item_id = event
+                .source_item_id()
+                .ok_or(RealtimeTranscriptShellError {
+                    op: "context_observation_requires_item",
+                })?
+                .to_string();
+            if source_channel
+                .as_ref()
+                .is_some_and(|channel| channel != observation_id.channel_id())
+            {
+                return Err(RealtimeTranscriptShellError {
+                    op: "context_observation_channel_mismatch",
+                });
+            }
+            let prior = state.context_observations.get(&item_id).cloned();
+            bind_context_observation(state, item_id.clone(), observation_id.clone())?;
+            let result = apply_realtime_transcript_event_from_channel(
+                state,
+                *event,
+                Some(observation_id.channel_id().clone()),
+            );
+            if result.is_err() && prior.is_none() {
+                state.context_observations.remove(&item_id);
+            }
+            result?
+        }
+        RealtimeTranscriptEvent::ContextObservationBound {
+            channel_id,
+            item_id,
+            observation_id,
+        } => {
+            if channel_id != *observation_id.channel_id()
+                || source_channel
+                    .as_ref()
+                    .is_some_and(|channel| channel != &channel_id)
+            {
+                return Err(RealtimeTranscriptShellError {
+                    op: "context_observation_channel_mismatch",
+                });
+            }
+            bind_context_observation(state, item_id, observation_id)?;
+            RealtimeTranscriptApplyCommit::default()
+        }
         RealtimeTranscriptEvent::ItemObserved {
             item_id,
             previous_item_id,
@@ -748,6 +846,7 @@ pub fn apply_realtime_transcript_event_from_channel(
                 response_id,
             )?
         }
+
         RealtimeTranscriptEvent::ItemSkipped {
             item_id,
             previous_item_id,
@@ -1014,9 +1113,10 @@ fn apply_assistant_playback_target_admitted(
         channel_id,
         interaction_id,
         response_id,
-        item_id,
+        item_id.clone(),
         content_index,
-    );
+    )
+    .with_context_observation(state.context_observations.get(&item_id).cloned());
     match state.assistant_playback_target.as_ref() {
         None => state.assistant_playback_target = Some(candidate),
         Some(existing) if existing == &candidate => {}
@@ -1510,7 +1610,7 @@ pub fn preflight_realtime_user_content_event(
         previous_item_id,
         content_index,
         content,
-    } = event
+    } = event.payload()
     else {
         return Ok(None);
     };
@@ -2116,6 +2216,7 @@ fn materialize_realtime_transcript_ready_items(
     let mut pending_response_id: Option<String> = None;
     let mut pending_stop_reason: Option<StopReason> = None;
     let mut pending_usage: Option<crate::types::TurnUsage> = None;
+    let mut pending_observation: Option<crate::LiveContextObservationId> = None;
 
     loop {
         let order = realtime_transcript_order(state);
@@ -2189,6 +2290,7 @@ fn materialize_realtime_transcript_ready_items(
                         &mut pending_blocks,
                         pending_stop_reason,
                         &mut pending_usage,
+                        &mut pending_observation,
                     );
                     pending_response_id = None;
                     if let Some(item) = state.items.get_mut(&item_id) {
@@ -2199,9 +2301,16 @@ fn materialize_realtime_transcript_ready_items(
                     messages.push(RealtimeMaterializedRow {
                         message: Message::User(UserMessage::with_blocks(content)),
                         source_channel: state
-                            .items
+                            .context_observations
                             .get(&item_id)
-                            .and_then(|item| item.source_channel.clone()),
+                            .map(|source| source.channel_id().clone())
+                            .or_else(|| {
+                                state
+                                    .items
+                                    .get(&item_id)
+                                    .and_then(|item| item.source_channel.clone())
+                            }),
+                        context_observation_id: state.context_observations.get(&item_id).cloned(),
                     });
                     materialized
                         .push(RealtimeTranscriptMaterializedMessage::User { item_id, text });
@@ -2215,9 +2324,11 @@ fn materialize_realtime_transcript_ready_items(
                     lane,
                     consume_usage,
                 } => {
-                    if pending_response_id
+                    let observation = state.context_observations.get(&item_id).cloned();
+                    if (pending_response_id
                         .as_ref()
                         .is_some_and(|existing| existing != &response_id)
+                        || pending_observation != observation)
                         && !pending_blocks.is_empty()
                     {
                         flush_pending_assistant_blocks(
@@ -2226,6 +2337,7 @@ fn materialize_realtime_transcript_ready_items(
                             &mut pending_blocks,
                             pending_stop_reason,
                             &mut pending_usage,
+                            &mut pending_observation,
                         );
                         pending_response_id = None;
                     }
@@ -2258,6 +2370,7 @@ fn materialize_realtime_transcript_ready_items(
                         pending_stop_reason = stop_reason;
                         pending_usage = usage.clone();
                     }
+                    pending_observation = observation;
                     pending_blocks.push(block);
                     materialized.push(RealtimeTranscriptMaterializedMessage::Assistant {
                         item_id,
@@ -2278,6 +2391,7 @@ fn materialize_realtime_transcript_ready_items(
         &mut pending_blocks,
         pending_stop_reason,
         &mut pending_usage,
+        &mut pending_observation,
     );
 
     Ok(RealtimeTranscriptApplyCommit {
@@ -2312,6 +2426,7 @@ fn flush_pending_assistant_blocks(
     pending_blocks: &mut Vec<AssistantBlock>,
     pending_stop_reason: Option<StopReason>,
     pending_usage: &mut Option<crate::types::TurnUsage>,
+    pending_observation: &mut Option<crate::LiveContextObservationId>,
 ) {
     if pending_blocks.is_empty() {
         *pending_usage = None;
@@ -2324,7 +2439,10 @@ fn flush_pending_assistant_blocks(
     };
     messages.push(RealtimeMaterializedRow {
         message: Message::BlockAssistant(message),
-        source_channel: None,
+        source_channel: pending_observation
+            .as_ref()
+            .map(|source| source.channel_id().clone()),
+        context_observation_id: pending_observation.take(),
     });
     if let Some(turn_usage) = pending_usage.take() {
         let mut cumulative = crate::types::CumulativeUsage::from_usage(committed_usage.clone());

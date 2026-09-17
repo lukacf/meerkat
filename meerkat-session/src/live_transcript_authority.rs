@@ -240,10 +240,49 @@ pub(crate) fn admit_live_assistant_playback_target(
     item_id: String,
     content_index: u32,
 ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, meerkat_core::error::AgentError> {
+    admit_live_assistant_playback_target_with_context_observation(
+        agent,
+        session_id,
+        channel_id,
+        interaction_id,
+        response_id,
+        item_id,
+        content_index,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn admit_live_assistant_playback_target_with_context_observation(
+    agent: &mut dyn SessionAgent,
+    session_id: &SessionId,
+    channel_id: LiveChannelId,
+    interaction_id: InteractionId,
+    response_id: String,
+    item_id: String,
+    content_index: u32,
+    observation_id: Option<meerkat_core::LiveContextObservationId>,
+) -> Result<meerkat_core::LiveAssistantPlaybackTarget, meerkat_core::error::AgentError> {
+    if observation_id
+        .as_ref()
+        .is_some_and(|id| id.channel_id() != &channel_id)
+    {
+        return Err(meerkat_core::error::AgentError::ConfigError(
+            "assistant observation channel mismatch".into(),
+        ));
+    }
     if let Some(existing) =
         agent.live_assistant_playback_target(&channel_id, &item_id, content_index)
     {
         if existing.interaction_id() == interaction_id && existing.response_id() == response_id {
+            if observation_id
+                .as_ref()
+                .is_some_and(|id| existing.context_observation_id() != Some(id))
+            {
+                return Err(meerkat_core::error::AgentError::ConfigError(
+                    "assistant observation conflicts with admitted target".into(),
+                ));
+            }
             return Ok(existing);
         }
         return Err(meerkat_core::error::AgentError::ConfigError(
@@ -333,12 +372,13 @@ pub(crate) fn admit_live_assistant_playback_target(
             "SessionDocument emitted no exact playback target admission".to_string(),
         ));
     }
-    agent.admit_live_assistant_playback_target(
+    agent.admit_live_assistant_playback_target_with_context_observation(
         &channel_id,
         interaction_id,
         &response_id,
         &item_id,
         content_index,
+        observation_id,
     )
 }
 
@@ -352,7 +392,8 @@ pub(crate) fn commit_final_live_user_transcript(
     let Some(final_event) = final_event else {
         return prepared.finish(None, None);
     };
-    let RealtimeTranscriptEvent::UserTranscriptFinal { item_id, text, .. } = &final_event else {
+    let RealtimeTranscriptEvent::UserTranscriptFinal { item_id, text, .. } = final_event.payload()
+    else {
         return Err(meerkat_core::error::AgentError::ConfigError(
             "live final-user commit requires UserTranscriptFinal".to_string(),
         ));

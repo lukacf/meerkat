@@ -13262,6 +13262,19 @@ pub struct State {
     pub live_context_preparation_failure_by_channel:
         std::collections::BTreeMap<String, LiveContextPreparationFailure>,
     pub live_context_preparation_lease_by_channel: std::collections::BTreeMap<String, String>,
+    pub live_context_preparation_runtime_by_channel:
+        std::collections::BTreeMap<String, AgentRuntimeId>,
+    pub live_context_preparation_fence_by_channel: std::collections::BTreeMap<String, FenceToken>,
+    pub live_context_preparation_generation_by_channel:
+        std::collections::BTreeMap<String, Generation>,
+    pub live_context_observation_counter_by_channel: std::collections::BTreeMap<String, u64>,
+    pub live_context_ack_cut_by_channel: std::collections::BTreeMap<String, u64>,
+    pub live_context_observation_channel_by_id: std::collections::BTreeMap<String, String>,
+    pub live_context_observation_lease_by_id: std::collections::BTreeMap<String, String>,
+    pub live_context_observation_runtime_by_id: std::collections::BTreeMap<String, AgentRuntimeId>,
+    pub live_context_observation_fence_by_id: std::collections::BTreeMap<String, FenceToken>,
+    pub live_context_observation_generation_by_id: std::collections::BTreeMap<String, Generation>,
+    pub live_context_observation_ordinal_by_id: std::collections::BTreeMap<String, u64>,
     pub live_context_reserved_cursor_by_channel: std::collections::BTreeMap<String, u64>,
     pub live_context_bootstrap_append_by_channel: std::collections::BTreeMap<String, String>,
     pub live_context_bootstrap_digest_by_channel: std::collections::BTreeMap<String, String>,
@@ -15158,6 +15171,33 @@ pub mod inputs {
         pub channel_id: String,
         pub lease_id: String,
         pub reserved_cursor: u64,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveContextObservation {
+        pub session_id: String,
+        pub channel_id: String,
+        pub lease_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub observation_id: String,
+        pub observation_namespace: String,
+        pub observation_channel_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordLiveContextBootstrapAckCut {
+        pub session_id: String,
+        pub channel_id: String,
+        pub lease_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub append_id: String,
+        pub content_digest: String,
+        pub reserved_cursor: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ObserveLiveContextDeliveryReadiness {
@@ -15224,6 +15264,7 @@ pub mod inputs {
         pub commit_authority_token: String,
         pub disposition: LiveContextRowDisposition,
         pub payload_availability: LiveContextPayloadAvailability,
+        pub observation_id: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdvanceLiveContextCanonicalCoverage {
@@ -16091,6 +16132,8 @@ pub enum Input {
     ResolveLiveBridgeSubmission(inputs::ResolveLiveBridgeSubmission),
     RecoverLiveBridgeSubmission(inputs::RecoverLiveBridgeSubmission),
     BeginLiveContextPreparation(inputs::BeginLiveContextPreparation),
+    RecordLiveContextObservation(inputs::RecordLiveContextObservation),
+    RecordLiveContextBootstrapAckCut(inputs::RecordLiveContextBootstrapAckCut),
     ObserveLiveContextDeliveryReadiness(inputs::ObserveLiveContextDeliveryReadiness),
     GenerateLiveContextPreparation(inputs::GenerateLiveContextPreparation),
     AuthorizeLiveContextBootstrapAppend(inputs::AuthorizeLiveContextBootstrapAppend),
@@ -16585,6 +16628,10 @@ impl Input {
             Self::ResolveLiveBridgeSubmission(_) => InputKind::ResolveLiveBridgeSubmission,
             Self::RecoverLiveBridgeSubmission(_) => InputKind::RecoverLiveBridgeSubmission,
             Self::BeginLiveContextPreparation(_) => InputKind::BeginLiveContextPreparation,
+            Self::RecordLiveContextObservation(_) => InputKind::RecordLiveContextObservation,
+            Self::RecordLiveContextBootstrapAckCut(_) => {
+                InputKind::RecordLiveContextBootstrapAckCut
+            }
             Self::ObserveLiveContextDeliveryReadiness(_) => {
                 InputKind::ObserveLiveContextDeliveryReadiness
             }
@@ -17010,6 +17057,8 @@ pub enum InputKind {
     ResolveLiveBridgeSubmission,
     RecoverLiveBridgeSubmission,
     BeginLiveContextPreparation,
+    RecordLiveContextObservation,
+    RecordLiveContextBootstrapAckCut,
     ObserveLiveContextDeliveryReadiness,
     GenerateLiveContextPreparation,
     AuthorizeLiveContextBootstrapAppend,
@@ -18260,6 +18309,25 @@ pub mod effects {
         pub phase: LiveContextPreparationPhase,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveContextObservationRecorded {
+        pub session_id: String,
+        pub channel_id: String,
+        pub lease_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub observation_id: String,
+        pub ordinal: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveContextBootstrapAckCutRecorded {
+        pub session_id: String,
+        pub channel_id: String,
+        pub lease_id: String,
+        pub append_id: String,
+        pub cut: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveContextDeliveryReadinessObserved {
         pub session_id: String,
         pub channel_id: String,
@@ -18841,6 +18909,8 @@ pub enum Effect {
     LiveBridgeSubmissionResolved(effects::LiveBridgeSubmissionResolved),
     LiveBridgeSubmissionRecoveredAmbiguous(effects::LiveBridgeSubmissionRecoveredAmbiguous),
     LiveContextPreparationChanged(effects::LiveContextPreparationChanged),
+    LiveContextObservationRecorded(effects::LiveContextObservationRecorded),
+    LiveContextBootstrapAckCutRecorded(effects::LiveContextBootstrapAckCutRecorded),
     LiveContextDeliveryReadinessObserved(effects::LiveContextDeliveryReadinessObserved),
     LiveContextBootstrapAppendAuthorized(effects::LiveContextBootstrapAppendAuthorized),
     LiveContextAppendAuthorized(effects::LiveContextAppendAuthorized),
@@ -19082,6 +19152,8 @@ pub enum EffectKind {
     LiveBridgeSubmissionResolved,
     LiveBridgeSubmissionRecoveredAmbiguous,
     LiveContextPreparationChanged,
+    LiveContextObservationRecorded,
+    LiveContextBootstrapAckCutRecorded,
     LiveContextDeliveryReadinessObserved,
     LiveContextBootstrapAppendAuthorized,
     LiveContextAppendAuthorized,
@@ -21098,6 +21170,12 @@ pub enum TransitionId {
     BeginLiveContextPreparationIdle,
     BeginLiveContextPreparationAttached,
     BeginLiveContextPreparationRunning,
+    RecordLiveContextObservationIdle,
+    RecordLiveContextObservationAttached,
+    RecordLiveContextObservationRunning,
+    RecordLiveContextBootstrapAckCutIdle,
+    RecordLiveContextBootstrapAckCutAttached,
+    RecordLiveContextBootstrapAckCutRunning,
     GenerateLiveContextPreparationIdle,
     GenerateLiveContextPreparationAttached,
     GenerateLiveContextPreparationRunning,
@@ -22305,6 +22383,17 @@ pub fn initial_state() -> State {
         live_context_preparation_phase_by_channel: Default::default(),
         live_context_preparation_failure_by_channel: Default::default(),
         live_context_preparation_lease_by_channel: Default::default(),
+        live_context_preparation_runtime_by_channel: Default::default(),
+        live_context_preparation_fence_by_channel: Default::default(),
+        live_context_preparation_generation_by_channel: Default::default(),
+        live_context_observation_counter_by_channel: Default::default(),
+        live_context_ack_cut_by_channel: Default::default(),
+        live_context_observation_channel_by_id: Default::default(),
+        live_context_observation_lease_by_id: Default::default(),
+        live_context_observation_runtime_by_id: Default::default(),
+        live_context_observation_fence_by_id: Default::default(),
+        live_context_observation_generation_by_id: Default::default(),
+        live_context_observation_ordinal_by_id: Default::default(),
         live_context_reserved_cursor_by_channel: Default::default(),
         live_context_bootstrap_append_by_channel: Default::default(),
         live_context_bootstrap_digest_by_channel: Default::default(),

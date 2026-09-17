@@ -6096,16 +6096,40 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         item_id: String,
         content_index: u32,
     ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, SessionError> {
+        self.admit_live_assistant_playback_target_with_context_observation(
+            id,
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn admit_live_assistant_playback_target_with_context_observation(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        observation_id: Option<meerkat_core::LiveContextObservationId>,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, SessionError> {
         let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
         let target = self
             .inner
-            .admit_live_assistant_playback_target(
+            .admit_live_assistant_playback_target_with_context_observation(
                 id,
                 channel_id,
                 interaction_id,
                 response_id,
                 item_id,
                 content_index,
+                observation_id,
             )
             .await?;
         if let Err(error) = self.persist_full_session(id).await {
@@ -6157,6 +6181,47 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Some(channel_id),
         )
         .await
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn append_realtime_transcript_event_from_channel_with_observation_and_machine(
+        &self,
+        machine: &MeerkatMachine,
+        id: &SessionId,
+        event: meerkat_core::RealtimeTranscriptEvent,
+        channel_id: meerkat_core::LiveChannelId,
+        observation_id: Option<meerkat_core::LiveContextObservationId>,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
+        self.append_realtime_transcript_event_from_channel_with_machine(
+            machine,
+            id,
+            event.with_context_observation(observation_id),
+            channel_id,
+        )
+        .await
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn bind_realtime_context_observation_with_machine(
+        &self,
+        machine: &MeerkatMachine,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        item_id: String,
+        observation_id: meerkat_core::LiveContextObservationId,
+    ) -> Result<(), SessionError> {
+        self.append_realtime_transcript_event_from_channel_with_machine(
+            machine,
+            id,
+            meerkat_core::RealtimeTranscriptEvent::ContextObservationBound {
+                channel_id: channel_id.clone(),
+                item_id,
+                observation_id,
+            },
+            channel_id,
+        )
+        .await
+        .map(|_| ())
     }
 
     #[cfg(feature = "live")]
@@ -6299,6 +6364,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         };
 
         use meerkat_core::generated::session_document::RealtimeUserContentBlobStageDisposition;
+        if let Some(observation_id) = event.context_observation_id() {
+            current.append_realtime_transcript_event(
+                meerkat_core::RealtimeTranscriptEvent::ContextObservationBound {
+                    channel_id: observation_id.channel_id().clone(),
+                    item_id: prepared.pending.item_id.clone(),
+                    observation_id: observation_id.clone(),
+                },
+            );
+        }
         let stage = current
             .stage_pending_realtime_user_content_blob(prepared.pending.clone())
             .map_err(|error| {
@@ -6622,7 +6696,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             previous_item_id,
             content_index,
             content,
-        } = event
+        } = event.payload()
         else {
             return Ok(None);
         };
@@ -25384,6 +25458,78 @@ mod tests {
                     Message::User(user) if user.text_content() == "durable realtime seed"
                 )),
             "live session semantics must match the durable snapshot after realtime-open recovery"
+        );
+    }
+
+    #[cfg(feature = "live")]
+    #[tokio::test]
+    async fn opaque_observation_survives_persistent_whole_event_forwarding() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            CapabilityBuilder,
+            4,
+            store,
+            runtime_store,
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create");
+        let channel = meerkat_core::LiveChannelId::new("opaque-source");
+        let observation =
+            meerkat_core::LiveContextObservationId::new("opaque-namespace", channel.clone());
+        let machine = MeerkatMachine::ephemeral();
+        let pending = service
+            .append_realtime_transcript_event_from_channel_with_observation_and_machine(
+                &machine,
+                &created.session_id,
+                meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: "later".into(),
+                    previous_item_id: Some("before".into()),
+                    content_index: 0,
+                    text: "held source".into(),
+                },
+                channel.clone(),
+                Some(observation.clone()),
+            )
+            .await
+            .expect("persist held observation");
+        assert!(pending.materialized_messages.is_empty());
+        service
+            .append_realtime_transcript_event_from_channel_with_machine(
+                &machine,
+                &created.session_id,
+                meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: "before".into(),
+                    previous_item_id: None,
+                    content_index: 0,
+                    text: "prerequisite".into(),
+                },
+                channel.clone(),
+            )
+            .await
+            .expect("release");
+        let session = service
+            .export_live_session(&created.session_id)
+            .await
+            .expect("export");
+        let user = session
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::User(user) if user.text_content() == "held source" => Some(user),
+                _ => None,
+            })
+            .expect("held user");
+        assert_eq!(
+            user.identity
+                .realtime_origin
+                .as_ref()
+                .expect("origin")
+                .context_observation_id(),
+            Some(&observation)
         );
     }
 

@@ -280,6 +280,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_context_preparation_phase_by_channel`: `Map<String, LiveContextPreparationPhase>`
 - `live_context_preparation_failure_by_channel`: `Map<String, LiveContextPreparationFailure>`
 - `live_context_preparation_lease_by_channel`: `Map<String, String>`
+- `live_context_preparation_runtime_by_channel`: `Map<String, AgentRuntimeId>`
+- `live_context_preparation_fence_by_channel`: `Map<String, FenceToken>`
+- `live_context_preparation_generation_by_channel`: `Map<String, Generation>`
+- `live_context_observation_counter_by_channel`: `Map<String, u64>`
+- `live_context_ack_cut_by_channel`: `Map<String, u64>`
+- `live_context_observation_channel_by_id`: `Map<String, String>`
+- `live_context_observation_lease_by_id`: `Map<String, String>`
+- `live_context_observation_runtime_by_id`: `Map<String, AgentRuntimeId>`
+- `live_context_observation_fence_by_id`: `Map<String, FenceToken>`
+- `live_context_observation_generation_by_id`: `Map<String, Generation>`
+- `live_context_observation_ordinal_by_id`: `Map<String, u64>`
 - `live_context_reserved_cursor_by_channel`: `Map<String, u64>`
 - `live_context_bootstrap_append_by_channel`: `Map<String, String>`
 - `live_context_bootstrap_digest_by_channel`: `Map<String, String>`
@@ -707,14 +718,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordLiveBridgeSubmissionLocalWrite`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, provider_call_ref: String, output_digest: String)
 - `ResolveLiveBridgeSubmission`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, provider_call_ref: String, output_digest: String, observation: LiveBridgeSubmissionObservation)
 - `RecoverLiveBridgeSubmission`(operation_id: OperationId)
-- `BeginLiveContextPreparation`(session_id: String, channel_id: String, lease_id: String, reserved_cursor: u64)
+- `BeginLiveContextPreparation`(session_id: String, channel_id: String, lease_id: String, reserved_cursor: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `RecordLiveContextObservation`(session_id: String, channel_id: String, lease_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, observation_id: String, observation_namespace: String, observation_channel_id: String)
+- `RecordLiveContextBootstrapAckCut`(session_id: String, channel_id: String, lease_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, content_digest: String, reserved_cursor: u64)
 - `ObserveLiveContextDeliveryReadiness`(session_id: String, channel_id: String)
 - `GenerateLiveContextPreparation`(session_id: String, channel_id: String, lease_id: String)
 - `AuthorizeLiveContextBootstrapAppend`(session_id: String, channel_id: String, lease_id: String, append_id: String, content_digest: String, reserved_cursor: u64)
 - `ResolveLiveContextBootstrapAppend`(session_id: String, channel_id: String, lease_id: String, append_id: String, content_digest: String, reserved_cursor: u64, observation: LiveContextAppendObservation, retained_sessions: Map<String, String>, retained_cursors: Map<String, u64>, retained_digests: Map<String, String>, retained_commits: Map<String, String>, retained_dispositions: Map<String, LiveContextRowDisposition>, retained_append_by_cursor: Map<u64, String>)
 - `FailLiveContextPreparation`(session_id: String, channel_id: String, lease_id: String, reason: LiveContextPreparationFailure)
 - `AuthorizeLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64)
-- `EnqueueLiveContextRow`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_cursor: u64, content_digest: String, commit_authority_token: String, disposition: LiveContextRowDisposition, payload_availability: LiveContextPayloadAvailability)
+- `EnqueueLiveContextRow`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_cursor: u64, content_digest: String, commit_authority_token: String, disposition: LiveContextRowDisposition, payload_availability: LiveContextPayloadAvailability, observation_id: Option<String>)
 - `AdvanceLiveContextCanonicalCoverage`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
 - `ResolveLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, replacement_channel_id: String, canonical_seed_cursor: u64, observation: LiveContextAppendObservation)
 - `BindLiveContextRecoveryChannel`(activation_receipt: String, session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_seed_cursor: u64)
@@ -1003,6 +1016,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveBridgeSubmissionResolved`(channel_id: String, operation_id: OperationId, provider_call_ref: String, output_digest: String, state: LiveBridgeSubmissionState, retry_allowed: Bool)
 - `LiveBridgeSubmissionRecoveredAmbiguous`(channel_id: String, operation_id: OperationId, provider_call_ref: String, output_digest: String, state: LiveBridgeSubmissionState, retry_allowed: Bool)
 - `LiveContextPreparationChanged`(session_id: String, channel_id: String, lease_id: String, phase: LiveContextPreparationPhase)
+- `LiveContextObservationRecorded`(session_id: String, channel_id: String, lease_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, observation_id: String, ordinal: u64)
+- `LiveContextBootstrapAckCutRecorded`(session_id: String, channel_id: String, lease_id: String, append_id: String, cut: u64)
 - `LiveContextDeliveryReadinessObserved`(session_id: String, channel_id: String, readiness: LiveContextDeliveryReadiness)
 - `LiveContextBootstrapAppendAuthorized`(session_id: String, channel_id: String, lease_id: String, append_id: String, content_digest: String, reserved_cursor: u64)
 - `LiveContextAppendAuthorized`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64)
@@ -1332,6 +1347,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_consequential_authority_requires_confirmed_transcript`
 - `live_pending_context_append_is_exact_and_channel_scoped`
 - `live_context_bootstrap_reservation_is_not_delivery`
+- `live_context_observation_order_is_exact_and_scoped`
 - `live_context_outbox_is_exact_and_session_scoped`
 - `live_context_recovery_is_exact_and_channel_scoped`
 - `runtime_epoch_requires_registered_session`
@@ -16821,29 +16837,86 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginLiveContextPreparationIdle`
 - From: `Idle`
-- On: `BeginLiveContextPreparation`(session_id, channel_id, lease_id, reserved_cursor)
+- On: `BeginLiveContextPreparation`(session_id, channel_id, lease_id, reserved_cursor, runtime_id, fence_token, generation)
 - Guards:
   - `exact_staged_empty_channel`
+  - `preparation_incarnation_matches`
   - `reserved_source_matches_recovery_pin`
 - Emits: `LiveContextPreparationChanged`
 - To: `Idle`
 
 ### `BeginLiveContextPreparationAttached`
 - From: `Attached`
-- On: `BeginLiveContextPreparation`(session_id, channel_id, lease_id, reserved_cursor)
+- On: `BeginLiveContextPreparation`(session_id, channel_id, lease_id, reserved_cursor, runtime_id, fence_token, generation)
 - Guards:
   - `exact_staged_empty_channel`
+  - `preparation_incarnation_matches`
   - `reserved_source_matches_recovery_pin`
 - Emits: `LiveContextPreparationChanged`
 - To: `Attached`
 
 ### `BeginLiveContextPreparationRunning`
 - From: `Running`
-- On: `BeginLiveContextPreparation`(session_id, channel_id, lease_id, reserved_cursor)
+- On: `BeginLiveContextPreparation`(session_id, channel_id, lease_id, reserved_cursor, runtime_id, fence_token, generation)
 - Guards:
   - `exact_staged_empty_channel`
+  - `preparation_incarnation_matches`
   - `reserved_source_matches_recovery_pin`
 - Emits: `LiveContextPreparationChanged`
+- To: `Running`
+
+### `RecordLiveContextObservationIdle`
+- From: `Idle`
+- On: `RecordLiveContextObservation`(session_id, channel_id, lease_id, runtime_id, fence_token, generation, observation_id, observation_namespace, observation_channel_id)
+- Guards:
+  - `exact_observation_scope`
+  - `fresh_or_exact_observation_replay`
+  - `observation_counter_available`
+- Emits: `LiveContextObservationRecorded`
+- To: `Idle`
+
+### `RecordLiveContextObservationAttached`
+- From: `Attached`
+- On: `RecordLiveContextObservation`(session_id, channel_id, lease_id, runtime_id, fence_token, generation, observation_id, observation_namespace, observation_channel_id)
+- Guards:
+  - `exact_observation_scope`
+  - `fresh_or_exact_observation_replay`
+  - `observation_counter_available`
+- Emits: `LiveContextObservationRecorded`
+- To: `Attached`
+
+### `RecordLiveContextObservationRunning`
+- From: `Running`
+- On: `RecordLiveContextObservation`(session_id, channel_id, lease_id, runtime_id, fence_token, generation, observation_id, observation_namespace, observation_channel_id)
+- Guards:
+  - `exact_observation_scope`
+  - `fresh_or_exact_observation_replay`
+  - `observation_counter_available`
+- Emits: `LiveContextObservationRecorded`
+- To: `Running`
+
+### `RecordLiveContextBootstrapAckCutIdle`
+- From: `Idle`
+- On: `RecordLiveContextBootstrapAckCut`(session_id, channel_id, lease_id, runtime_id, fence_token, generation, append_id, content_digest, reserved_cursor)
+- Guards:
+  - `exact_authorized_bootstrap_ack`
+- Emits: `LiveContextBootstrapAckCutRecorded`
+- To: `Idle`
+
+### `RecordLiveContextBootstrapAckCutAttached`
+- From: `Attached`
+- On: `RecordLiveContextBootstrapAckCut`(session_id, channel_id, lease_id, runtime_id, fence_token, generation, append_id, content_digest, reserved_cursor)
+- Guards:
+  - `exact_authorized_bootstrap_ack`
+- Emits: `LiveContextBootstrapAckCutRecorded`
+- To: `Attached`
+
+### `RecordLiveContextBootstrapAckCutRunning`
+- From: `Running`
+- On: `RecordLiveContextBootstrapAckCut`(session_id, channel_id, lease_id, runtime_id, fence_token, generation, append_id, content_digest, reserved_cursor)
+- Guards:
+  - `exact_authorized_bootstrap_ack`
+- Emits: `LiveContextBootstrapAckCutRecorded`
 - To: `Running`
 
 ### `GenerateLiveContextPreparationIdle`
@@ -16899,6 +16972,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveLiveContextBootstrapAppend`(session_id, channel_id, lease_id, append_id, content_digest, reserved_cursor, observation, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
 - Guards:
   - `exact_preparation_receipt`
+  - `acknowledged_resolution_has_observation_cut`
   - `retained_outbox_is_exact_acknowledged_complement`
 - Emits: `LiveContextPreparationChanged`
 - To: `Idle`
@@ -16908,6 +16982,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveLiveContextBootstrapAppend`(session_id, channel_id, lease_id, append_id, content_digest, reserved_cursor, observation, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
 - Guards:
   - `exact_preparation_receipt`
+  - `acknowledged_resolution_has_observation_cut`
   - `retained_outbox_is_exact_acknowledged_complement`
 - Emits: `LiveContextPreparationChanged`
 - To: `Attached`
@@ -16917,6 +16992,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveLiveContextBootstrapAppend`(session_id, channel_id, lease_id, append_id, content_digest, reserved_cursor, observation, retained_sessions, retained_cursors, retained_digests, retained_commits, retained_dispositions, retained_append_by_cursor)
 - Guards:
   - `exact_preparation_receipt`
+  - `acknowledged_resolution_has_observation_cut`
   - `retained_outbox_is_exact_acknowledged_complement`
 - Emits: `LiveContextPreparationChanged`
 - To: `Running`
@@ -16963,7 +17039,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `EnqueueLiveContextRowIdle`
 - From: `Idle`
-- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition, payload_availability)
+- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition, payload_availability, observation_id)
 - Guards:
   - `append_present`
   - `commit_evidence_present`
@@ -16973,6 +17049,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `canonical_cursor_is_after_reserved_prefix`
   - `source_disposition_is_not_runtime_minted`
   - `ordinary_mirror_has_materializable_payload`
+  - `source_observation_claim_matches_exact_custody`
   - `canonical_cursor_is_unique`
   - `append_identity_is_fresh`
 - Emits: `LiveContextRowQueued`
@@ -16980,7 +17057,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `EnqueueLiveContextRowAttached`
 - From: `Attached`
-- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition, payload_availability)
+- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition, payload_availability, observation_id)
 - Guards:
   - `append_present`
   - `commit_evidence_present`
@@ -16990,6 +17067,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `canonical_cursor_is_after_reserved_prefix`
   - `source_disposition_is_not_runtime_minted`
   - `ordinary_mirror_has_materializable_payload`
+  - `source_observation_claim_matches_exact_custody`
   - `canonical_cursor_is_unique`
   - `append_identity_is_fresh`
 - Emits: `LiveContextRowQueued`
@@ -16997,7 +17075,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `EnqueueLiveContextRowRunning`
 - From: `Running`
-- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition, payload_availability)
+- On: `EnqueueLiveContextRow`(channel_id, runtime_id, fence_token, generation, append_id, canonical_cursor, content_digest, commit_authority_token, disposition, payload_availability, observation_id)
 - Guards:
   - `append_present`
   - `commit_evidence_present`
@@ -17007,6 +17085,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `canonical_cursor_is_after_reserved_prefix`
   - `source_disposition_is_not_runtime_minted`
   - `ordinary_mirror_has_materializable_payload`
+  - `source_observation_claim_matches_exact_custody`
   - `canonical_cursor_is_unique`
   - `append_identity_is_fresh`
 - Emits: `LiveContextRowQueued`

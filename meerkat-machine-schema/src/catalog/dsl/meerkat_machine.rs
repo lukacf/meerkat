@@ -3822,6 +3822,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_context_preparation_phase_by_channel: Map<String, Enum<LiveContextPreparationPhase>>,
             live_context_preparation_failure_by_channel: Map<String, Enum<LiveContextPreparationFailure>>,
             live_context_preparation_lease_by_channel: Map<String, String>,
+            live_context_preparation_runtime_by_channel: Map<String, AgentRuntimeId>,
+            live_context_preparation_fence_by_channel: Map<String, FenceToken>,
+            live_context_preparation_generation_by_channel: Map<String, Generation>,
+            live_context_observation_counter_by_channel: Map<String, u64>,
+            live_context_ack_cut_by_channel: Map<String, u64>,
+            live_context_observation_channel_by_id: Map<String, String>,
+            live_context_observation_lease_by_id: Map<String, String>,
+            live_context_observation_runtime_by_id: Map<String, AgentRuntimeId>,
+            live_context_observation_fence_by_id: Map<String, FenceToken>,
+            live_context_observation_generation_by_id: Map<String, Generation>,
+            live_context_observation_ordinal_by_id: Map<String, u64>,
             live_context_reserved_cursor_by_channel: Map<String, u64>,
             live_context_bootstrap_append_by_channel: Map<String, String>,
             live_context_bootstrap_digest_by_channel: Map<String, String>,
@@ -4393,6 +4404,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_context_preparation_phase_by_channel = EmptyMap,
             live_context_preparation_failure_by_channel = EmptyMap,
             live_context_preparation_lease_by_channel = EmptyMap,
+            live_context_preparation_runtime_by_channel = EmptyMap,
+            live_context_preparation_fence_by_channel = EmptyMap,
+            live_context_preparation_generation_by_channel = EmptyMap,
+            live_context_observation_counter_by_channel = EmptyMap,
+            live_context_ack_cut_by_channel = EmptyMap,
+            live_context_observation_channel_by_id = EmptyMap,
+            live_context_observation_lease_by_id = EmptyMap,
+            live_context_observation_runtime_by_id = EmptyMap,
+            live_context_observation_fence_by_id = EmptyMap,
+            live_context_observation_generation_by_id = EmptyMap,
+            live_context_observation_ordinal_by_id = EmptyMap,
             live_context_reserved_cursor_by_channel = EmptyMap,
             live_context_bootstrap_append_by_channel = EmptyMap,
             live_context_bootstrap_digest_by_channel = EmptyMap,
@@ -5839,6 +5861,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             RecoverLiveBridgeSubmission { operation_id: OperationId },
             BeginLiveContextPreparation {
                 session_id: String, channel_id: String, lease_id: String, reserved_cursor: u64,
+                runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation,
+            },
+            RecordLiveContextObservation {
+                session_id: String, channel_id: String, lease_id: String,
+                runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation,
+                observation_id: String, observation_namespace: String, observation_channel_id: String,
+            },
+            RecordLiveContextBootstrapAckCut {
+                session_id: String, channel_id: String, lease_id: String,
+                runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation,
+                append_id: String, content_digest: String, reserved_cursor: u64,
             },
             ObserveLiveContextDeliveryReadiness {
                 session_id: String, channel_id: String,
@@ -5885,6 +5918,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 commit_authority_token: String,
                 disposition: Enum<LiveContextRowDisposition>,
                 payload_availability: Enum<LiveContextPayloadAvailability>,
+                observation_id: Option<String>,
             },
             AdvanceLiveContextCanonicalCoverage {
                 channel_id: String,
@@ -7227,6 +7261,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id: String, channel_id: String, lease_id: String,
                 phase: Enum<LiveContextPreparationPhase>,
             },
+            LiveContextObservationRecorded {
+                session_id: String, channel_id: String, lease_id: String,
+                runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation,
+                observation_id: String, ordinal: u64,
+            },
+            LiveContextBootstrapAckCutRecorded {
+                session_id: String, channel_id: String, lease_id: String,
+                append_id: String, cut: u64,
+            },
             LiveContextDeliveryReadinessObserved {
                 session_id: String, channel_id: String,
                 readiness: Enum<LiveContextDeliveryReadiness>,
@@ -7764,6 +7807,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveBridgeSubmissionResolved => local seam OwnerRealizationOnly,
         disposition LiveBridgeSubmissionRecoveredAmbiguous => external seam OwnerRealizationOnly,
         disposition LiveContextPreparationChanged => local seam OwnerRealizationOnly,
+        disposition LiveContextObservationRecorded => local seam OwnerRealizationOnly,
+        disposition LiveContextBootstrapAckCutRecorded => local seam OwnerRealizationOnly,
         disposition LiveContextDeliveryReadinessObserved => local seam OwnerRealizationOnly,
         disposition LiveContextBootstrapAppendAuthorized => external seam OwnerRealizationOnly,
         disposition LiveContextAppendAuthorized => external seam OwnerRealizationOnly,
@@ -8722,6 +8767,42 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_context_cursor_by_channel.get_copied(channel_id) == Some(0))
                 && (self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::Failed)
                     || self.live_context_preparation_failure_by_channel.contains_key(channel_id)))
+        }
+
+        invariant live_context_observation_order_is_exact_and_scoped {
+            self.live_context_preparation_lease_by_channel.keys() == self.live_context_preparation_runtime_by_channel.keys()
+            && self.live_context_preparation_lease_by_channel.keys() == self.live_context_preparation_fence_by_channel.keys()
+            && self.live_context_preparation_lease_by_channel.keys() == self.live_context_preparation_generation_by_channel.keys()
+            && self.live_context_preparation_lease_by_channel.keys() == self.live_context_observation_counter_by_channel.keys()
+            && self.live_context_observation_ordinal_by_id.keys() == self.live_context_observation_channel_by_id.keys()
+            && self.live_context_observation_ordinal_by_id.keys() == self.live_context_observation_lease_by_id.keys()
+            && self.live_context_observation_ordinal_by_id.keys() == self.live_context_observation_runtime_by_id.keys()
+            && self.live_context_observation_ordinal_by_id.keys() == self.live_context_observation_fence_by_id.keys()
+            && self.live_context_observation_ordinal_by_id.keys() == self.live_context_observation_generation_by_id.keys()
+            && for_all(source in self.live_context_observation_ordinal_by_id.keys(),
+                self.live_context_observation_ordinal_by_id.get_copied(source).get("value") > 0
+                && self.live_context_observation_ordinal_by_id.get_copied(source).get("value")
+                    <= self.live_context_observation_counter_by_channel.get_copied(
+                        self.live_context_observation_channel_by_id.get_cloned(source).get("value")).get("value")
+                && self.live_context_observation_lease_by_id.get_cloned(source)
+                    == self.live_context_preparation_lease_by_channel.get_cloned(
+                        self.live_context_observation_channel_by_id.get_cloned(source).get("value"))
+                && self.live_context_observation_runtime_by_id.get_cloned(source)
+                    == self.live_context_preparation_runtime_by_channel.get_cloned(
+                        self.live_context_observation_channel_by_id.get_cloned(source).get("value"))
+                && self.live_context_observation_fence_by_id.get_copied(source)
+                    == self.live_context_preparation_fence_by_channel.get_copied(
+                        self.live_context_observation_channel_by_id.get_cloned(source).get("value"))
+                && self.live_context_observation_generation_by_id.get_copied(source)
+                    == self.live_context_preparation_generation_by_channel.get_copied(
+                        self.live_context_observation_channel_by_id.get_cloned(source).get("value")))
+            && for_all(channel in self.live_context_ack_cut_by_channel.keys(),
+                self.live_context_bootstrap_append_by_channel.contains_key(channel)
+                && self.live_context_ack_cut_by_channel.get_copied(channel).get("value")
+                    <= self.live_context_observation_counter_by_channel.get_copied(channel).get("value"))
+            && for_all(channel in self.live_context_preparation_phase_by_channel.keys(),
+                self.live_context_preparation_phase_by_channel.get_copied(channel) != Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                || self.live_context_ack_cut_by_channel.contains_key(channel))
         }
 
         invariant live_context_outbox_is_exact_and_session_scoped {
@@ -26913,7 +26994,9 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         transition BeginLiveContextPreparation {
             per_phase [Idle, Attached, Running]
-            on input BeginLiveContextPreparation { session_id, channel_id, lease_id, reserved_cursor }
+            on input BeginLiveContextPreparation {
+                session_id, channel_id, lease_id, reserved_cursor, runtime_id, fence_token, generation
+            }
             guard "exact_staged_empty_channel" {
                 lease_id != ""
                 && self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
@@ -26922,6 +27005,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && !self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                 && !self.live_revoked_execution_channels.contains(channel_id)
                 && !self.live_context_preparation_lease_by_channel.contains_key(channel_id)
+            }
+            guard "preparation_incarnation_matches" {
+                self.active_runtime_id == Some(runtime_id)
+                && self.active_fence_token == Some(fence_token)
+                && self.active_runtime_generation == Some(generation)
+                && self.live_experimental_staged_runtime_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_experimental_staged_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_experimental_staged_generation_by_channel.get_copied(channel_id) == Some(generation)
             }
             guard "reserved_source_matches_recovery_pin" {
                 (!self.live_context_recovery_source_by_replacement.contains_key(channel_id)
@@ -26935,6 +27026,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.live_context_preparation_lease_by_channel.insert(channel_id, lease_id);
+                self.live_context_preparation_runtime_by_channel.insert(channel_id, runtime_id);
+                self.live_context_preparation_fence_by_channel.insert(channel_id, fence_token);
+                self.live_context_preparation_generation_by_channel.insert(channel_id, generation);
+                self.live_context_observation_counter_by_channel.insert(channel_id, 0);
                 self.live_context_reserved_cursor_by_channel.insert(channel_id, reserved_cursor);
                 self.live_context_preparation_phase_by_channel.insert(channel_id, LiveContextPreparationPhase::Capturing);
             }
@@ -26942,6 +27037,98 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit LiveContextPreparationChanged {
                 session_id: session_id, channel_id: channel_id, lease_id: lease_id,
                 phase: LiveContextPreparationPhase::Capturing
+            }
+        }
+
+        transition RecordLiveContextObservation {
+            per_phase [Idle, Attached, Running]
+            on input RecordLiveContextObservation {
+                session_id, channel_id, lease_id, runtime_id, fence_token, generation,
+                observation_id, observation_namespace, observation_channel_id
+            }
+            guard "exact_observation_scope" {
+                observation_id != "" && observation_namespace == lease_id && observation_channel_id == channel_id
+                && self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+                && self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+                && self.live_context_preparation_lease_by_channel.get_cloned(channel_id) == Some(lease_id)
+                && self.live_context_preparation_runtime_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_context_preparation_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_context_preparation_generation_by_channel.get_copied(channel_id) == Some(generation)
+                && self.active_runtime_id == Some(runtime_id)
+                && self.active_fence_token == Some(fence_token)
+                && self.active_runtime_generation == Some(generation)
+                && !self.live_revoked_execution_channels.contains(channel_id)
+            }
+            guard "fresh_or_exact_observation_replay" {
+                !self.live_context_observation_ordinal_by_id.contains_key(observation_id)
+                || (self.live_context_observation_channel_by_id.get_cloned(observation_id) == Some(channel_id)
+                    && self.live_context_observation_lease_by_id.get_cloned(observation_id) == Some(lease_id)
+                    && self.live_context_observation_runtime_by_id.get_cloned(observation_id) == Some(runtime_id)
+                    && self.live_context_observation_fence_by_id.get_copied(observation_id) == Some(fence_token)
+                    && self.live_context_observation_generation_by_id.get_copied(observation_id) == Some(generation))
+            }
+            guard "observation_counter_available" {
+                self.live_context_observation_ordinal_by_id.contains_key(observation_id)
+                || self.live_context_observation_counter_by_channel.get_copied(channel_id).get("value") < 18446744073709551615
+            }
+            update {
+                if !self.live_context_observation_ordinal_by_id.contains_key(observation_id) {
+                    self.live_context_observation_counter_by_channel.increment(channel_id, 1);
+                    self.live_context_observation_channel_by_id.insert(observation_id, channel_id);
+                    self.live_context_observation_lease_by_id.insert(observation_id, lease_id);
+                    self.live_context_observation_runtime_by_id.insert(observation_id, runtime_id);
+                    self.live_context_observation_fence_by_id.insert(observation_id, fence_token);
+                    self.live_context_observation_generation_by_id.insert(observation_id, generation);
+                    self.live_context_observation_ordinal_by_id.insert(observation_id,
+                        self.live_context_observation_counter_by_channel.get_copied(channel_id).get("value"));
+                }
+            }
+            to Idle
+            emit LiveContextObservationRecorded {
+                session_id: session_id, channel_id: channel_id, lease_id: lease_id,
+                runtime_id: runtime_id, fence_token: fence_token, generation: generation,
+                observation_id: observation_id,
+                ordinal: self.live_context_observation_ordinal_by_id.get_copied(observation_id).get("value")
+            }
+        }
+
+        transition RecordLiveContextBootstrapAckCut {
+            per_phase [Idle, Attached, Running]
+            on input RecordLiveContextBootstrapAckCut {
+                session_id, channel_id, lease_id, runtime_id, fence_token, generation,
+                append_id, content_digest, reserved_cursor
+            }
+            guard "exact_authorized_bootstrap_ack" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+                && self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+                && self.live_context_preparation_lease_by_channel.get_cloned(channel_id) == Some(lease_id)
+                && self.live_context_preparation_runtime_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_context_preparation_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_context_preparation_generation_by_channel.get_copied(channel_id) == Some(generation)
+                && self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                && self.active_runtime_id == Some(runtime_id)
+                && self.active_fence_token == Some(fence_token)
+                && self.active_runtime_generation == Some(generation)
+                && self.live_context_reserved_cursor_by_channel.get_copied(channel_id) == Some(reserved_cursor)
+                && self.live_context_bootstrap_append_by_channel.get_cloned(channel_id) == Some(append_id)
+                && self.live_context_bootstrap_digest_by_channel.get_cloned(channel_id) == Some(content_digest)
+                && !self.live_revoked_execution_channels.contains(channel_id)
+                && (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::Delivering)
+                    || (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                        && self.live_context_ack_cut_by_channel.contains_key(channel_id)))
+            }
+            update {
+                if !self.live_context_ack_cut_by_channel.contains_key(channel_id) {
+                    self.live_context_ack_cut_by_channel.insert(channel_id,
+                        self.live_context_observation_counter_by_channel.get_copied(channel_id).get("value"));
+                }
+            }
+            to Idle
+            emit LiveContextBootstrapAckCutRecorded {
+                session_id: session_id, channel_id: channel_id, lease_id: lease_id,
+                append_id: append_id, cut: self.live_context_ack_cut_by_channel.get_copied(channel_id).get("value")
             }
         }
 
@@ -27011,6 +27198,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_bootstrap_digest_by_channel.get_cloned(channel_id) == Some(content_digest)
                 && self.live_context_cursor_by_channel.get_copied(channel_id) == Some(0)
                 && !self.live_revoked_execution_channels.contains(channel_id)
+            }
+            guard "acknowledged_resolution_has_observation_cut" {
+                observation != LiveContextAppendObservation::Delivered
+                || self.live_context_ack_cut_by_channel.contains_key(channel_id)
             }
             guard "retained_outbox_is_exact_acknowledged_complement" {
                 for_all(queued in self.live_context_queued_cursor_by_append.keys(),
@@ -27092,7 +27283,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input EnqueueLiveContextRow {
                 channel_id, runtime_id, fence_token, generation, append_id,
                 canonical_cursor, content_digest, commit_authority_token,
-                disposition, payload_availability
+                disposition, payload_availability, observation_id
             }
             guard "append_present" { append_id != "" }
             guard "commit_evidence_present" {
@@ -27137,6 +27328,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 disposition != LiveContextRowDisposition::MirrorParentText
                 || payload_availability == LiveContextPayloadAvailability::Materializable
             }
+            guard "source_observation_claim_matches_exact_custody" {
+                observation_id == None
+                || (self.live_context_observation_channel_by_id.get_cloned(observation_id.get("value")) == Some(channel_id)
+                    && self.live_context_observation_lease_by_id.get_cloned(observation_id.get("value"))
+                        == self.live_context_preparation_lease_by_channel.get_cloned(channel_id)
+                    && self.live_context_observation_runtime_by_id.get_cloned(observation_id.get("value")) == Some(runtime_id)
+                    && self.live_context_observation_fence_by_id.get_copied(observation_id.get("value")) == Some(fence_token)
+                    && self.live_context_observation_generation_by_id.get_copied(observation_id.get("value")) == Some(generation))
+            }
             guard "canonical_cursor_is_unique" {
                 !self.live_context_queued_append_by_cursor.contains_key(canonical_cursor)
             }
@@ -27159,6 +27359,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                             || disposition == LiveContextRowDisposition::AssistantObservation)
                         && payload_availability == LiveContextPayloadAvailability::Materializable
                         && self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                        && self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::Failed)
+                        && observation_id != None
+                        && (!self.live_context_ack_cut_by_channel.contains_key(channel_id)
+                            || self.live_context_observation_ordinal_by_id.get_copied(observation_id.get("value")).get("value")
+                                <= self.live_context_ack_cut_by_channel.get_copied(channel_id).get("value"))
                     { LiveContextRowDisposition::ReassertCausalTail }
                     else { if disposition == LiveContextRowDisposition::AssistantObservation {
                         LiveContextRowDisposition::ExcludedFromLiveContext

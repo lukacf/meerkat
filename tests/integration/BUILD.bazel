@@ -891,6 +891,7 @@ rust_test(
     srcs = [
         "tests/gpt_live_client_e2e.rs",
         "tests/support/gpt_live_e2e.rs",
+        "tests/support/gpt_live_evidence.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
@@ -971,6 +972,7 @@ rust_test(
     srcs = [
         "tests/gpt_live_public_e2e.rs",
         "tests/support/gpt_live_e2e.rs",
+        "tests/support/gpt_live_evidence.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {

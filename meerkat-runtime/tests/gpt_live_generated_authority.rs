@@ -637,6 +637,7 @@ fn enqueue_mirror_row(
             commit_authority_token: format!("commit-{append_id}"),
             disposition: mm::LiveContextRowDisposition::MirrorParentText,
             payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+            observation_id: None,
         },
     )
     .expect("canonical committed row enters generated outbox");
@@ -651,6 +652,9 @@ fn stage_bootstrap(authority: &mut mm::MeerkatMachineAuthority, reserved_cursor:
             channel_id: CHANNEL.into(),
             lease_id: "bootstrap-job".into(),
             reserved_cursor,
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
         },
     )
     .expect("reserve exact source without claiming delivery");
@@ -702,6 +706,16 @@ fn resolve_bootstrap(
     reserved_cursor: u64,
     observation: mm::LiveContextAppendObservation,
 ) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    if observation == mm::LiveContextAppendObservation::Delivered {
+        record_bootstrap_cut(
+            authority,
+            CHANNEL,
+            "bootstrap-job",
+            "bootstrap-append",
+            "exact-summary-digest",
+            reserved_cursor,
+        )?;
+    }
     let input = bootstrap_resolution_input(
         authority,
         CHANNEL,
@@ -712,6 +726,54 @@ fn resolve_bootstrap(
         observation,
     );
     apply(authority, input)
+}
+
+fn record_source(
+    authority: &mut mm::MeerkatMachineAuthority,
+    channel: &str,
+    lease: &str,
+    id: &str,
+) -> String {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::RecordLiveContextObservation {
+            session_id: SESSION.into(),
+            channel_id: channel.into(),
+            lease_id: lease.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            observation_id: id.into(),
+            observation_namespace: lease.into(),
+            observation_channel_id: channel.into(),
+        },
+    )
+    .expect("record source admission before projection");
+    id.into()
+}
+
+fn record_bootstrap_cut(
+    authority: &mut mm::MeerkatMachineAuthority,
+    channel: &str,
+    lease: &str,
+    append: &str,
+    digest: &str,
+    reserved_cursor: u64,
+) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::RecordLiveContextBootstrapAckCut {
+            session_id: SESSION.into(),
+            channel_id: channel.into(),
+            lease_id: lease.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: append.into(),
+            content_digest: digest.into(),
+            reserved_cursor,
+        },
+    )
 }
 
 fn bootstrap_resolution_input(
@@ -791,6 +853,9 @@ fn bootstrap_reserved_prefix_is_not_delivered_and_media_activates_independently(
                 channel_id: CHANNEL.into(),
                 lease_id: "restart".into(),
                 reserved_cursor: 6,
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
             }
         )
         .is_err(),
@@ -829,10 +894,331 @@ fn bootstrap_reserved_prefix_is_not_delivered_and_media_activates_independently(
 }
 
 #[test]
+fn bootstrap_ack_does_not_reassert_fresh_already_heard_live_output() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 3);
+    activate_bootstrap(&mut authority);
+    authorize_bootstrap(&mut authority, 3);
+    resolve_bootstrap(
+        &mut authority,
+        3,
+        mm::LiveContextAppendObservation::Delivered,
+    )
+    .expect("historical summary acknowledged");
+
+    let queued = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::EnqueueLiveContextRow {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: "fresh-post-bootstrap-speech".into(),
+            canonical_cursor: 4,
+            content_digest: "new-native-output".into(),
+            commit_authority_token: "post-bootstrap-commit".into(),
+            disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+            payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+            observation_id: None,
+        },
+    )
+    .expect("fresh native speech remains canonical after bootstrap");
+    assert!(
+        queued.effects().iter().any(|effect| matches!(
+            effect,
+            mm::MeerkatMachineEffect::LiveContextRowQueued {
+                disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+                ..
+            }
+        )),
+        "fresh post-bootstrap speech must not become a new provider context append"
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AdvanceLiveContextCanonicalCoverage {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: "fresh-post-bootstrap-speech".into(),
+            previous_cursor: 3,
+            next_cursor: 4,
+            disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        },
+    )
+    .expect("already-heard fresh speech advances coverage without provider I/O");
+}
+
+fn enqueue_observed_row(
+    authority: &mut mm::MeerkatMachineAuthority,
+    append: &str,
+    cursor: u64,
+    disposition: mm::LiveContextRowDisposition,
+    observation_id: Option<&str>,
+) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::EnqueueLiveContextRow {
+            channel_id: CHANNEL.into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            append_id: append.into(),
+            canonical_cursor: cursor,
+            content_digest: format!("digest-{append}"),
+            commit_authority_token: format!("commit-{append}"),
+            disposition,
+            payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+            observation_id: observation_id.map(str::to_string),
+        },
+    )
+    .expect("enqueue observed canonical row");
+}
+
+#[test]
+fn bootstrap_ack_cut_linearizes_before_resolution_and_preserves_delayed_sources() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 3);
+    activate_bootstrap(&mut authority);
+    record_source(&mut authority, CHANNEL, "bootstrap-job", "pre-user");
+    record_source(&mut authority, CHANNEL, "bootstrap-job", "pre-assistant");
+    authorize_bootstrap(&mut authority, 3);
+    record_bootstrap_cut(
+        &mut authority,
+        CHANNEL,
+        "bootstrap-job",
+        "bootstrap-append",
+        "exact-summary-digest",
+        3,
+    )
+    .expect("native ACK cut");
+    record_source(&mut authority, CHANNEL, "bootstrap-job", "post-user");
+    record_source(&mut authority, CHANNEL, "bootstrap-job", "pre-user");
+    record_bootstrap_cut(
+        &mut authority,
+        CHANNEL,
+        "bootstrap-job",
+        "bootstrap-append",
+        "exact-summary-digest",
+        3,
+    )
+    .expect("exact ACK replay");
+    assert_eq!(
+        authority.state().live_context_ack_cut_by_channel[CHANNEL],
+        2
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_context_observation_counter_by_channel[CHANNEL],
+        3
+    );
+    assert_eq!(
+        authority.state().live_context_observation_ordinal_by_id["pre-user"],
+        1
+    );
+    assert_eq!(
+        authority.state().live_context_preparation_phase_by_channel[CHANNEL],
+        mm::LiveContextPreparationPhase::Delivering
+    );
+    enqueue_observed_row(
+        &mut authority,
+        "post-before-resolution",
+        4,
+        mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        Some("post-user"),
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["post-before-resolution"],
+        mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel
+    );
+    resolve_bootstrap(
+        &mut authority,
+        3,
+        mm::LiveContextAppendObservation::Delivered,
+    )
+    .expect("later resolution uses frozen cut");
+    enqueue_observed_row(
+        &mut authority,
+        "delayed-user",
+        5,
+        mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+        Some("pre-user"),
+    );
+    enqueue_observed_row(
+        &mut authority,
+        "delayed-assistant",
+        6,
+        mm::LiveContextRowDisposition::AssistantObservation,
+        Some("pre-assistant"),
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["delayed-user"],
+        mm::LiveContextRowDisposition::ReassertCausalTail
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["delayed-assistant"],
+        mm::LiveContextRowDisposition::ReassertCausalTail
+    );
+    assert_eq!(
+        authority.state().live_context_ack_cut_by_channel[CHANNEL],
+        2
+    );
+}
+
+#[test]
+fn fresh_post_ack_output_never_creates_a_self_sustaining_append_chain() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 3);
+    activate_bootstrap(&mut authority);
+    authorize_bootstrap(&mut authority, 3);
+    resolve_bootstrap(
+        &mut authority,
+        3,
+        mm::LiveContextAppendObservation::Delivered,
+    )
+    .expect("ACK with empty observation cut");
+    for cursor in 4..24 {
+        let source = format!("fresh-source-{cursor}");
+        let append = format!("fresh-row-{cursor}");
+        record_source(&mut authority, CHANNEL, "bootstrap-job", &source);
+        let source_disposition = if cursor % 2 == 0 {
+            mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel
+        } else {
+            mm::LiveContextRowDisposition::AssistantObservation
+        };
+        enqueue_observed_row(
+            &mut authority,
+            &append,
+            cursor,
+            source_disposition,
+            Some(&source),
+        );
+        let disposition = if cursor % 2 == 0 {
+            mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel
+        } else {
+            mm::LiveContextRowDisposition::ExcludedFromLiveContext
+        };
+        assert_eq!(
+            authority.state().live_context_queued_disposition_by_append[&append],
+            disposition
+        );
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AdvanceLiveContextCanonicalCoverage {
+                channel_id: CHANNEL.into(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                append_id: append,
+                previous_cursor: cursor - 1,
+                next_cursor: cursor,
+                disposition,
+            },
+        )
+        .expect("fresh own output covers without provider work");
+        assert!(
+            authority
+                .state()
+                .live_context_pending_append_by_channel
+                .is_empty()
+        );
+        assert!(
+            authority
+                .state()
+                .live_context_queued_append_by_cursor
+                .is_empty()
+        );
+    }
+    assert!(
+        authority
+            .state()
+            .live_context_delivered_append_ids
+            .is_empty()
+    );
+}
+
+#[test]
+fn missing_claim_is_not_pre_ack_or_ordinal_zero_and_cut_is_required() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 3);
+    activate_bootstrap(&mut authority);
+    enqueue_observed_row(
+        &mut authority,
+        "legacy-observation",
+        4,
+        mm::LiveContextRowDisposition::AssistantObservation,
+        None,
+    );
+    assert_eq!(
+        authority.state().live_context_queued_disposition_by_append["legacy-observation"],
+        mm::LiveContextRowDisposition::ExcludedFromLiveContext
+    );
+    authorize_bootstrap(&mut authority, 3);
+    let input = bootstrap_resolution_input(
+        &authority,
+        CHANNEL,
+        "bootstrap-job",
+        "bootstrap-append",
+        "exact-summary-digest",
+        3,
+        mm::LiveContextAppendObservation::Delivered,
+    );
+    assert!(
+        apply(&mut authority, input).is_err(),
+        "late resolution cannot invent an ACK cut"
+    );
+    assert!(
+        !authority
+            .state()
+            .live_context_ack_cut_by_channel
+            .contains_key(CHANNEL)
+    );
+}
+
+#[test]
+fn observation_admission_rejects_wrong_namespace_fence_and_closed_scope() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 0);
+    activate_bootstrap(&mut authority);
+    record_source(&mut authority, CHANNEL, "bootstrap-job", "source");
+    let record =
+        |namespace: &str, fence_token| mm::MeerkatMachineInput::RecordLiveContextObservation {
+            session_id: SESSION.into(),
+            channel_id: CHANNEL.into(),
+            lease_id: "bootstrap-job".into(),
+            runtime_id: runtime_id(),
+            fence_token,
+            generation: generation(),
+            observation_id: "source".into(),
+            observation_namespace: namespace.into(),
+            observation_channel_id: CHANNEL.into(),
+        };
+    assert!(apply(&mut authority, record("another-lease", fence())).is_err());
+    assert!(apply(&mut authority, record("bootstrap-job", mm::FenceToken(42))).is_err());
+    assert_eq!(
+        authority
+            .state()
+            .live_context_observation_counter_by_channel[CHANNEL],
+        1
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AbandonLiveOpenAdmission {
+            session_id: SESSION.into(),
+            channel_id: CHANNEL.into(),
+        },
+    )
+    .expect("close scope");
+    assert!(apply(&mut authority, record("bootstrap-job", fence())).is_err());
+}
+
+#[test]
 fn bootstrap_causal_live_tail_is_reasserted_and_results_wait_for_ordered_tail() {
     let mut authority = opened_authority();
     stage_bootstrap(&mut authority, 3);
     activate_bootstrap(&mut authority);
+    let observation_id = record_source(&mut authority, CHANNEL, "bootstrap-job", "pre-ack-spoken");
     apply(
         &mut authority,
         mm::MeerkatMachineInput::EnqueueLiveContextRow {
@@ -846,6 +1232,7 @@ fn bootstrap_causal_live_tail_is_reasserted_and_results_wait_for_ordered_tail() 
             commit_authority_token: "exact-row-4".into(),
             disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
             payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+            observation_id: Some(observation_id),
         },
     )
     .expect("live correction is one committed row");
@@ -1042,6 +1429,8 @@ fn assistant_observation_is_quiet_only_for_concurrent_bootstrap() {
         } else {
             bind_experimental(&mut authority, 0);
         }
+        let observation_id = concurrent
+            .then(|| record_source(&mut authority, CHANNEL, "bootstrap-job", "assistant-source"));
         apply(
             &mut authority,
             mm::MeerkatMachineInput::EnqueueLiveContextRow {
@@ -1055,6 +1444,7 @@ fn assistant_observation_is_quiet_only_for_concurrent_bootstrap() {
                 commit_authority_token: "exact-commit".into(),
                 disposition: mm::LiveContextRowDisposition::AssistantObservation,
                 payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+                observation_id,
             },
         )
         .expect("admit source-owned assistant observation");
@@ -1108,6 +1498,7 @@ fn non_materializable_live_row_keeps_no_send_coverage_after_summary_ack() {
                 commit_authority_token: "exact-non-text".into(),
                 disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
                 payload_availability: mm::LiveContextPayloadAvailability::NoPayload,
+                observation_id: None,
             },
         )
         .expect("admit exact no-payload native row");
@@ -2916,6 +3307,12 @@ fn assert_ambiguity_recovery_answer_and_seed_binding(concurrent: bool, covered_t
     if covered_tail {
         stage_bootstrap(&mut authority, 0);
         activate_bootstrap(&mut authority);
+        let observation_id = record_source(
+            &mut authority,
+            CHANNEL,
+            "bootstrap-job",
+            "delayed-pre-ack-causal",
+        );
         authorize_bootstrap(&mut authority, 0);
         resolve_bootstrap(
             &mut authority,
@@ -2936,6 +3333,7 @@ fn assert_ambiguity_recovery_answer_and_seed_binding(concurrent: bool, covered_t
                 commit_authority_token: "causal-commit".into(),
                 disposition: mm::LiveContextRowDisposition::AlreadyPresentInLiveChannel,
                 payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+                observation_id: Some(observation_id),
             },
         )
         .expect("queue causal correction");
@@ -3063,6 +3461,9 @@ fn assert_ambiguity_recovery_answer_and_seed_binding(concurrent: bool, covered_t
                     channel_id: REPLACEMENT.into(),
                     lease_id: "recovery-summary".into(),
                     reserved_cursor,
+                    runtime_id: runtime_id(),
+                    fence_token: fence(),
+                    generation: generation(),
                 },
             );
             if reserved_cursor == source_cursor {
@@ -3090,6 +3491,7 @@ fn assert_ambiguity_recovery_answer_and_seed_binding(concurrent: bool, covered_t
                     commit_authority_token: "new-tail-commit".into(),
                     disposition: mm::LiveContextRowDisposition::MirrorParentText,
                     payload_availability: mm::LiveContextPayloadAvailability::Materializable,
+                    observation_id: None,
                 },
             )
             .expect("new tail arrives after capture");
@@ -3261,6 +3663,15 @@ fn acknowledge_recovery_bootstrap(
         },
     )
     .expect("authorize reserved-prefix append after empty media binds");
+    record_bootstrap_cut(
+        authority,
+        channel,
+        "recovery-summary",
+        "recovery-summary-append",
+        "exact-summary",
+        reserved_cursor,
+    )
+    .expect("linearize exact native ACK cut");
     assert_eq!(authority.state().live_context_cursor_by_channel[channel], 0);
     if authority
         .state()
@@ -3439,6 +3850,9 @@ fn concurrent_result_recovery_validates_nonzero_pin_but_binds_empty_provider_con
                 channel_id: REPLACEMENT.into(),
                 lease_id: "recovery-summary".into(),
                 reserved_cursor,
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
             },
         );
         if reserved_cursor == 3 {

@@ -4778,6 +4778,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BeginLiveContextPreparationRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecordLiveContextObservationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveContextObservationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveContextObservationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveContextBootstrapAckCutIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveContextBootstrapAckCutAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveContextBootstrapAckCutRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `GenerateLiveContextPreparationIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7792,6 +7810,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveContextPreparationChanged`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveContextObservationRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextBootstrapAckCutRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveContextDeliveryReadinessObserved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8047,6 +8071,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_context_bootstrap_reservation_is_not_delivery`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_context_observation_order_is_exact_and_scoped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_context_outbox_is_exact_and_session_scoped`

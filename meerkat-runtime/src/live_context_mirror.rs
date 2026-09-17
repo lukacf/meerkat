@@ -182,6 +182,7 @@ pub struct CommittedLiveContextRow {
     disposition: LiveContextCommittedRowDisposition,
     provider_context: Option<String>,
     causal_context: Option<String>,
+    observation_id: Option<meerkat_core::LiveContextObservationId>,
 }
 
 impl CommittedLiveContextRow {
@@ -194,6 +195,20 @@ impl CommittedLiveContextRow {
         store_commit_authority: &str,
     ) -> Result<Self, String> {
         let (ordinary_row_kind, provider_context) = context_projection(message)?;
+        let observation_id = if provenance
+            == LiveContextCommittedTextProvenance::LiveRealtimeTranscript
+        {
+            let origin = match message {
+                Message::User(user) => user.identity.realtime_origin.as_ref(),
+                Message::BlockAssistant(assistant) => assistant.identity.realtime_origin.as_ref(),
+                _ => None,
+            };
+            origin
+                .and_then(|origin| origin.context_observation_id())
+                .cloned()
+        } else {
+            None
+        };
         let causal_context = causal_context_projection(message)?;
         let row_kind = if ordinary_row_kind == LiveContextCommittedRowKind::NonText
             && causal_context.is_some()
@@ -261,6 +276,7 @@ impl CommittedLiveContextRow {
             disposition,
             provider_context,
             causal_context,
+            observation_id,
         })
     }
 
@@ -313,6 +329,10 @@ impl CommittedLiveContextRow {
         } else {
             crate::meerkat_machine::dsl::LiveContextPayloadAvailability::NoPayload
         }
+    }
+
+    pub(crate) fn observation_id(&self) -> Option<&meerkat_core::LiveContextObservationId> {
+        self.observation_id.as_ref()
     }
 }
 

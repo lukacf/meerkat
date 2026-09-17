@@ -216,6 +216,43 @@ impl LiveContextSummaryCapture {
 pub struct LiveContextSummaryJob {
     task: tokio::task::JoinHandle<()>,
     provenance: Arc<std::sync::Mutex<Option<LiveContextSummaryProvenance>>>,
+    observation_recorder: Arc<LiveContextObservationRecorder>,
+}
+
+pub(crate) struct LiveContextObservationRecorder {
+    runtime: std::sync::Weak<meerkat_runtime::MeerkatMachine>,
+    lease: meerkat_runtime::live_execution::LiveContextPreparationLease,
+}
+
+impl LiveContextObservationRecorder {
+    pub(crate) async fn admit(
+        &self,
+    ) -> Result<meerkat_core::LiveContextObservationId, meerkat_runtime::RuntimeDriverError> {
+        let runtime = self.runtime.upgrade().ok_or_else(|| {
+            meerkat_runtime::RuntimeDriverError::Internal(
+                "live observation owner was released".into(),
+            )
+        })?;
+        let observation_id = self.lease.new_observation_id();
+        let receipt = runtime
+            .record_live_context_observation(&self.lease, observation_id)
+            .await?;
+        Ok(receipt.observation_id().clone())
+    }
+
+    pub(crate) async fn record_ack_cut(
+        &self,
+        authority: &meerkat_runtime::live_execution::LiveContextBootstrapAppendAuthority,
+    ) -> Result<(), meerkat_runtime::RuntimeDriverError> {
+        let runtime = self.runtime.upgrade().ok_or_else(|| {
+            meerkat_runtime::RuntimeDriverError::Internal(
+                "live observation owner was released".into(),
+            )
+        })?;
+        runtime
+            .record_live_context_bootstrap_ack_cut(authority)
+            .await
+    }
 }
 
 impl Drop for LiveContextSummaryJob {
@@ -235,6 +272,10 @@ impl LiveContextSummaryJob {
 
         let provenance = Arc::new(std::sync::Mutex::new(None));
         let produced_provenance = Arc::clone(&provenance);
+        let observation_recorder = Arc::new(LiveContextObservationRecorder {
+            runtime: Arc::downgrade(&runtime),
+            lease: lease.clone(),
+        });
         let task = tokio::spawn(async move {
             let cancellation = lease.cancellation_token();
             let generation = std::panic::AssertUnwindSafe(capture.generate()).catch_unwind();
@@ -297,7 +338,15 @@ impl LiveContextSummaryJob {
                 .await;
             }
         });
-        Self { task, provenance }
+        Self {
+            task,
+            provenance,
+            observation_recorder,
+        }
+    }
+
+    pub(crate) fn observation_recorder(&self) -> Arc<LiveContextObservationRecorder> {
+        Arc::clone(&self.observation_recorder)
     }
 
     pub(crate) fn provenance(&self) -> Option<LiveContextSummaryProvenance> {

@@ -3037,6 +3037,8 @@ runtime_internal_inputs!(
         ResolveLiveBridgeSubmission,
         RecoverLiveBridgeSubmission,
         BeginLiveContextPreparation,
+        RecordLiveContextObservation,
+        RecordLiveContextBootstrapAckCut,
         GenerateLiveContextPreparation,
         AuthorizeLiveContextBootstrapAppend,
         ResolveLiveContextBootstrapAppend,

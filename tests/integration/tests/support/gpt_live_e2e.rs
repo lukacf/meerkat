@@ -9,6 +9,9 @@
 //! public and unused items in one target are expected.
 #![allow(dead_code)]
 
+#[path = "gpt_live_evidence.rs"]
+pub mod evidence;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
@@ -352,17 +355,61 @@ impl BrowserPeerProtocol {
 }
 
 pub struct BrowserPeer {
+    evidence: Option<(evidence::Journal, u32)>,
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout: BrowserOutput,
     next_id: u64,
     pub protocol: BrowserPeerProtocol,
     pub last_raw_messages: u64,
     pub last_parse_failures: u64,
 }
 
+enum BrowserOutput {
+    Direct(BufReader<ChildStdout>),
+    Recorded {
+        responses: tokio::sync::mpsc::Receiver<Value>,
+        task: tokio::task::AbortHandle,
+        closing: Arc<std::sync::atomic::AtomicBool>,
+    },
+}
+
+impl Drop for BrowserOutput {
+    fn drop(&mut self) {
+        if let Self::Recorded { task, .. } = self {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for BrowserPeer {
+    fn drop(&mut self) {
+        if let Some((journal, channel)) = &self.evidence {
+            let _ = journal.channel(*channel, evidence::ChannelAction::BrowserDropping);
+            if let Err(fault) = journal.finish(evidence::Outcome::CancelledOrPanicked) {
+                eprintln!("{fault}; journal={}", journal.path().display());
+            }
+        }
+    }
+}
+
 impl BrowserPeer {
     pub async fn start(protocol: BrowserPeerProtocol) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_inner(protocol, None).await
+    }
+
+    pub async fn start_recorded(
+        protocol: BrowserPeerProtocol,
+        journal: evidence::Journal,
+        channel: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_inner(protocol, Some((journal, channel))).await
+    }
+
+    async fn start_inner(
+        protocol: BrowserPeerProtocol,
+        evidence: Option<(evidence::Journal, u32)>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let browser_root = workspace_root().join("tests/live_smoke/browser");
         let script = browser_root.join("harness/gpt-live-peer-e2e.mjs");
         let node = [
@@ -381,6 +428,7 @@ impl BrowserPeer {
             .arg(script)
             .arg("--protocol")
             .arg(protocol.harness_flag())
+            .args(evidence.as_ref().map(|_| "--capture-evidence"))
             .env_remove("MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON")
             .env_remove("OPENAI_API_KEY")
             .env_remove("OPENAI_API_KEY_OLD")
@@ -391,8 +439,53 @@ impl BrowserPeer {
             .stderr(Stdio::inherit())
             .spawn()?;
         let stdin = child.stdin.take().ok_or("missing peer stdin")?;
-        let stdout = BufReader::new(child.stdout.take().ok_or("missing peer stdout")?);
+        let mut stdout = BufReader::new(child.stdout.take().ok_or("missing peer stdout")?);
+        let stdout = if let Some((journal, channel)) = &evidence {
+            let journal = journal.clone();
+            let channel = *channel;
+            let (responses, receiver) = tokio::sync::mpsc::channel(4);
+            let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let reader_closing = closing.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let mut line = String::new();
+                    match stdout.read_line(&mut line).await {
+                        Ok(0) | Err(_) => {
+                            if !reader_closing.load(std::sync::atomic::Ordering::Acquire) {
+                                let _ = journal.fail(evidence::Fault::BrowserReaderClosed);
+                            }
+                            break;
+                        }
+                        Ok(_) => {}
+                    }
+                    let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                        let _ = journal.fail(evidence::Fault::InvalidBrowserEvidence);
+                        continue;
+                    };
+                    if let Some(record) = message.get("evidence") {
+                        match serde_json::from_value(record.clone()) {
+                            Ok(record) => {
+                                let _ = journal.native(channel, record);
+                            }
+                            Err(_) => {
+                                let _ = journal.fail(evidence::Fault::InvalidBrowserEvidence);
+                            }
+                        }
+                    } else if responses.send(message).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            BrowserOutput::Recorded {
+                responses: receiver,
+                task: task.abort_handle(),
+                closing,
+            }
+        } else {
+            BrowserOutput::Direct(stdout)
+        };
         Ok(Self {
+            evidence,
             child,
             stdin,
             stdout,
@@ -411,9 +504,18 @@ impl BrowserPeer {
         self.stdin.write_all(command.to_string().as_bytes()).await?;
         self.stdin.write_all(b"\n").await?;
         self.stdin.flush().await?;
-        let mut line = String::new();
-        timeout(Duration::from_secs(120), self.stdout.read_line(&mut line)).await??;
-        let response: Value = serde_json::from_str(line.trim())?;
+        let response: Value = match &mut self.stdout {
+            BrowserOutput::Direct(stdout) => {
+                let mut line = String::new();
+                timeout(Duration::from_secs(120), stdout.read_line(&mut line)).await??;
+                serde_json::from_str(line.trim())?
+            }
+            BrowserOutput::Recorded { responses, .. } => {
+                timeout(Duration::from_secs(120), responses.recv())
+                    .await?
+                    .ok_or("browser evidence reader closed")?
+            }
+        };
         if response["id"].as_u64() != Some(id) {
             return Err("browser peer response id mismatch".into());
         }
@@ -449,8 +551,34 @@ impl BrowserPeer {
     }
 
     pub async fn close(mut self) {
+        if self.evidence.is_some() {
+            let _ = self.stop_evidence().await;
+        }
         let _ = self.call(json!({"type":"close"})).await;
         let _ = self.child.kill().await;
+    }
+
+    pub async fn stop_evidence(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some((journal, channel)) = self.evidence.take() {
+            let result = timeout(
+                Duration::from_secs(5),
+                self.call(json!({"type":"stop_evidence"})),
+            )
+            .await;
+            if let BrowserOutput::Recorded { closing, .. } = &self.stdout {
+                closing.store(true, std::sync::atomic::Ordering::Release);
+            }
+            journal.channel(channel, evidence::ChannelAction::BrowserDropping)?;
+            match result {
+                Ok(Ok(_)) => Ok(()),
+                _ => {
+                    journal.fail(evidence::Fault::BrowserReaderClosed)?;
+                    Err("browser evidence flush failed".into())
+                }
+            }
+        } else {
+            Ok(())
+        }
     }
 }
 

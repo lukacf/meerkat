@@ -360,6 +360,10 @@ pub enum PublicGptLivePlaybackPolicy {
     ProviderManagedUnmeasured,
 }
 
+#[cfg(feature = "test-realtime-fixtures")]
+#[doc(hidden)]
+pub use meerkat_openai::public_live::thinking_capture;
+
 /// Which provider path an open authority admits targets through.
 enum GptLiveOpenAdmission {
     #[cfg(feature = "experimental-gpt-live")]
@@ -1621,6 +1625,8 @@ impl ExperimentalGptLiveAppendWaiter {
 enum PendingExperimentalGptLiveDelivery {
     BootstrapAppend {
         authority: LiveContextBootstrapAppendAuthority,
+        observation_recorder:
+            Arc<crate::session_runtime::live_summary::LiveContextObservationRecorder>,
         resolution_tx: oneshot::Sender<(
             LiveContextBootstrapAppendAuthority,
             meerkat_core::LiveAppendDeliveryOutcome,
@@ -2739,6 +2745,11 @@ fn experimental_gpt_live_realtime_capabilities() -> RealtimeCapabilities {
 }
 
 struct ExperimentalGptLiveDeferredAdapter {
+    context_observation_recorder: std::sync::OnceLock<
+        Arc<crate::session_runtime::live_summary::LiveContextObservationRecorder>,
+    >,
+    user_context_observations:
+        std::sync::Mutex<HashMap<String, meerkat_core::LiveContextObservationId>>,
     identity: meerkat_core::SessionLlmIdentity,
     status: std::sync::Mutex<LiveAdapterStatus>,
     // The provider reader must never await the transcript consumer before it
@@ -2758,7 +2769,10 @@ struct ExperimentalGptLiveDeferredAdapter {
 }
 
 enum ExperimentalGptLiveAdapterIngress {
-    Provider(LiveSidebandObservation),
+    Provider {
+        observation: LiveSidebandObservation,
+        context_observation_id: Option<meerkat_core::LiveContextObservationId>,
+    },
     SnapshotCut {
         interaction_id: meerkat_core::InteractionId,
         item_id: String,
@@ -2768,6 +2782,7 @@ enum ExperimentalGptLiveAdapterIngress {
 }
 
 struct PendingExperimentalGptLivePlayback {
+    context_observation_id: Option<meerkat_core::LiveContextObservationId>,
     provider_turn_ref: String,
     response_id: String,
     stop_reason: StopReason,
@@ -2781,10 +2796,25 @@ struct PendingExperimentalGptLivePlayback {
     next_segment: Option<u64>,
 }
 
+fn with_live_context_observation(
+    observation: LiveAdapterObservation,
+    observation_id: Option<meerkat_core::LiveContextObservationId>,
+) -> LiveAdapterObservation {
+    match observation_id {
+        Some(observation_id) => LiveAdapterObservation::WithContextObservation {
+            observation_id,
+            observation: Box::new(observation),
+        },
+        None => observation,
+    }
+}
+
 impl ExperimentalGptLiveDeferredAdapter {
     fn new(identity: meerkat_core::SessionLlmIdentity) -> Self {
         let (observation_tx, observation_rx) = mpsc::unbounded_channel();
         Self {
+            context_observation_recorder: std::sync::OnceLock::new(),
+            user_context_observations: std::sync::Mutex::new(HashMap::new()),
             identity,
             status: std::sync::Mutex::new(LiveAdapterStatus::Opening),
             observation_tx,
@@ -2804,11 +2834,22 @@ impl ExperimentalGptLiveDeferredAdapter {
         &self,
         observation: LiveSidebandObservation,
     ) -> Result<(), ProviderWebrtcBrokerError> {
+        self.push_observation_with_context(observation, None)
+    }
+
+    fn push_observation_with_context(
+        &self,
+        observation: LiveSidebandObservation,
+        context_observation_id: Option<meerkat_core::LiveContextObservationId>,
+    ) -> Result<(), ProviderWebrtcBrokerError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(ProviderWebrtcBrokerError::Rejected);
         }
         self.observation_tx
-            .send(ExperimentalGptLiveAdapterIngress::Provider(observation))
+            .send(ExperimentalGptLiveAdapterIngress::Provider {
+                observation,
+                context_observation_id,
+            })
             .map_err(|_| ProviderWebrtcBrokerError::Unavailable)
     }
 
@@ -2892,15 +2933,18 @@ impl ExperimentalGptLiveDeferredAdapter {
             ),
         };
         pending.cut_captured = true;
-        Ok(LiveAdapterObservation::AssistantPlaybackTerminalObserved {
-            interaction_id,
-            provider_item_id: item_id,
-            content_index,
-            response_id: pending.response_id.clone(),
-            evidence,
-            stop_reason: pending.stop_reason,
-            usage: pending.usage.clone(),
-        })
+        Ok(with_live_context_observation(
+            LiveAdapterObservation::AssistantPlaybackTerminalObserved {
+                interaction_id,
+                provider_item_id: item_id,
+                content_index,
+                response_id: pending.response_id.clone(),
+                evidence,
+                stop_reason: pending.stop_reason,
+                usage: pending.usage.clone(),
+            },
+            pending.context_observation_id.clone(),
+        ))
     }
 
     fn released_segment_turn(&self, item_id: &str) -> Option<String> {
@@ -2937,17 +2981,20 @@ impl ExperimentalGptLiveDeferredAdapter {
             .ok_or("unmeasured segment has no exact observed output")?;
         pending.cut_captured = true;
         pending.terminal_forwarded = true;
-        Ok(LiveAdapterObservation::AssistantPlaybackTerminalObserved {
-            interaction_id: handle.interaction_id(),
-            provider_item_id: item_id,
-            content_index,
-            response_id,
-            evidence: meerkat_core::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(
-                pending.snapshot.clone(),
-            ),
-            stop_reason: pending.stop_reason,
-            usage: pending.usage.clone(),
-        })
+        Ok(with_live_context_observation(
+            LiveAdapterObservation::AssistantPlaybackTerminalObserved {
+                interaction_id: handle.interaction_id(),
+                provider_item_id: item_id,
+                content_index,
+                response_id,
+                evidence: meerkat_core::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(
+                    pending.snapshot.clone(),
+                ),
+                stop_reason: pending.stop_reason,
+                usage: pending.usage.clone(),
+            },
+            pending.context_observation_id.clone(),
+        ))
     }
 
     fn settle_output_segment(&self, item_id: &str, next_segment: u64) -> Result<(), String> {
@@ -2970,6 +3017,7 @@ impl ExperimentalGptLiveDeferredAdapter {
         &self,
         turn: &LiveSidebandTurnRef,
         delta: &str,
+        context_observation_id: Option<meerkat_core::LiveContextObservationId>,
     ) -> Result<Option<LiveAdapterObservation>, String> {
         let mut playback = self
             .playback_by_item
@@ -3011,13 +3059,17 @@ impl ExperimentalGptLiveDeferredAdapter {
         }
         pending.snapshot.push_str(delta);
         if !pending.output_started_forwarded && !pending.snapshot.is_empty() {
+            pending.context_observation_id = context_observation_id;
             pending.output_started_forwarded = true;
-            return Ok(Some(LiveAdapterObservation::AssistantOutputStarted {
-                provider_turn_ref: pending.provider_turn_ref.clone(),
-                response_id: pending.response_id.clone(),
-                provider_item_id: item_id,
-                content_index: 0,
-            }));
+            return Ok(Some(with_live_context_observation(
+                LiveAdapterObservation::AssistantOutputStarted {
+                    provider_turn_ref: pending.provider_turn_ref.clone(),
+                    response_id: pending.response_id.clone(),
+                    provider_item_id: item_id,
+                    content_index: 0,
+                },
+                pending.context_observation_id.clone(),
+            )));
         }
         Ok(None)
     }
@@ -3026,6 +3078,7 @@ impl ExperimentalGptLiveDeferredAdapter {
         &self,
         turn: &LiveSidebandTurnRef,
         transcript: &str,
+        context_observation_id: Option<meerkat_core::LiveContextObservationId>,
     ) -> Result<Option<LiveAdapterObservation>, String> {
         let mut playback = self
             .playback_by_item
@@ -3050,8 +3103,11 @@ impl ExperimentalGptLiveDeferredAdapter {
                 return Ok(None);
             }
             drop(playback);
-            let started = self.lower_snapshot_delta(turn, suffix)?;
-            if let Some(final_observation) = self.lower_snapshot_final(turn, transcript)? {
+            let started =
+                self.lower_snapshot_delta(turn, suffix, context_observation_id.clone())?;
+            if let Some(final_observation) =
+                self.lower_snapshot_final(turn, transcript, context_observation_id)?
+            {
                 self.queue_local_observation(final_observation);
             }
             return Ok(started);
@@ -3064,15 +3120,21 @@ impl ExperimentalGptLiveDeferredAdapter {
             .ok_or("assistant final conflicts with committed playback prefix")?;
         pending.snapshot = suffix.to_string();
         pending.final_forwarded = true;
-        let final_observation = LiveAdapterObservation::AssistantTranscriptFinal {
-            provider_item_id: item_id.clone(),
-            previous_item_id: None,
-            content_index: Some(0),
-            response_id: Some(pending.response_id.clone()),
-            text: suffix.to_string(),
-            stop_reason: pending.stop_reason,
-            usage: Usage::default(),
-        };
+        if !pending.output_started_forwarded {
+            pending.context_observation_id = context_observation_id;
+        }
+        let final_observation = with_live_context_observation(
+            LiveAdapterObservation::AssistantTranscriptFinal {
+                provider_item_id: item_id.clone(),
+                previous_item_id: None,
+                content_index: Some(0),
+                response_id: Some(pending.response_id.clone()),
+                text: suffix.to_string(),
+                stop_reason: pending.stop_reason,
+                usage: Usage::default(),
+            },
+            pending.context_observation_id.clone(),
+        );
         if !pending.output_started_forwarded {
             if suffix.is_empty() {
                 playback.remove(&item_id);
@@ -3080,12 +3142,15 @@ impl ExperimentalGptLiveDeferredAdapter {
             }
             pending.output_started_forwarded = true;
             self.queue_local_observation(final_observation);
-            return Ok(Some(LiveAdapterObservation::AssistantOutputStarted {
-                provider_turn_ref: pending.provider_turn_ref.clone(),
-                response_id: pending.response_id.clone(),
-                provider_item_id: item_id,
-                content_index: 0,
-            }));
+            return Ok(Some(with_live_context_observation(
+                LiveAdapterObservation::AssistantOutputStarted {
+                    provider_turn_ref: pending.provider_turn_ref.clone(),
+                    response_id: pending.response_id.clone(),
+                    provider_item_id: item_id,
+                    content_index: 0,
+                },
+                pending.context_observation_id.clone(),
+            )));
         }
         Ok(Some(final_observation))
     }
@@ -3098,20 +3163,24 @@ impl ExperimentalGptLiveDeferredAdapter {
         content_index: u32,
         evidence: meerkat_core::LiveAssistantPlaybackEvidence,
     ) {
-        self.queue_local_observation(LiveAdapterObservation::AssistantPlaybackTerminalObserved {
-            interaction_id,
-            provider_item_id: item_id,
-            content_index,
-            response_id: playback.response_id.clone(),
-            evidence,
-            stop_reason: playback.stop_reason,
-            usage: playback.usage.clone(),
-        });
+        self.queue_local_observation(with_live_context_observation(
+            LiveAdapterObservation::AssistantPlaybackTerminalObserved {
+                interaction_id,
+                provider_item_id: item_id,
+                content_index,
+                response_id: playback.response_id.clone(),
+                evidence,
+                stop_reason: playback.stop_reason,
+                usage: playback.usage.clone(),
+            },
+            playback.context_observation_id.clone(),
+        ));
     }
 
     fn lower_observation(
         &self,
         observation: LiveSidebandObservation,
+        context_observation_id: Option<meerkat_core::LiveContextObservationId>,
     ) -> Option<LiveAdapterObservation> {
         match observation.into_kind() {
             LiveSidebandObservationKind::TurnFinished {
@@ -3133,7 +3202,7 @@ impl ExperimentalGptLiveDeferredAdapter {
             LiveSidebandObservationKind::TurnSnapshotDelta { turn, delta }
                 if self.snapshot_cuts =>
             {
-                self.lower_snapshot_delta(&turn, &delta)
+                self.lower_snapshot_delta(&turn, &delta, context_observation_id)
                     .unwrap_or_else(|message| {
                         Some(LiveAdapterObservation::Error {
                             code: LiveAdapterErrorCode::ProviderError,
@@ -3146,7 +3215,7 @@ impl ExperimentalGptLiveDeferredAdapter {
                 role: LiveSidebandTurnRole::Assistant,
                 transcript,
             } if self.snapshot_cuts => self
-                .lower_snapshot_final(&turn, &transcript)
+                .lower_snapshot_final(&turn, &transcript, context_observation_id)
                 .unwrap_or_else(|message| {
                     Some(LiveAdapterObservation::Error {
                         code: LiveAdapterErrorCode::ProviderError,
@@ -3161,12 +3230,28 @@ impl ExperimentalGptLiveDeferredAdapter {
             }
             LiveSidebandObservationKind::TurnStarted {
                 turn,
+                role: LiveSidebandTurnRole::User,
+            } => {
+                if let Some(observation_id) = context_observation_id {
+                    let Ok(mut observations) = self.user_context_observations.lock() else {
+                        return Some(LiveAdapterObservation::Error {
+                            code: LiveAdapterErrorCode::InternalError,
+                            message: "user source-observation custody is unavailable".into(),
+                        });
+                    };
+                    observations.insert(turn.adapter_key().to_string(), observation_id);
+                }
+                None
+            }
+            LiveSidebandObservationKind::TurnStarted {
+                turn,
                 role: LiveSidebandTurnRole::Assistant,
             } => {
                 let response_id = Self::local_response_id(&turn);
                 let item_id = Self::local_item_id(&turn);
                 let provider_turn_ref = turn.adapter_key().to_string();
                 let pending = PendingExperimentalGptLivePlayback {
+                    context_observation_id: context_observation_id.clone(),
                     provider_turn_ref: provider_turn_ref.clone(),
                     response_id: response_id.clone(),
                     stop_reason: StopReason::EndTurn,
@@ -3199,27 +3284,44 @@ impl ExperimentalGptLiveDeferredAdapter {
                 if self.snapshot_cuts {
                     return None;
                 }
-                Some(LiveAdapterObservation::AssistantOutputStarted {
-                    provider_turn_ref,
-                    response_id,
-                    provider_item_id: item_id,
-                    content_index: 0,
-                })
+                Some(with_live_context_observation(
+                    LiveAdapterObservation::AssistantOutputStarted {
+                        provider_turn_ref,
+                        response_id,
+                        provider_item_id: item_id,
+                        content_index: 0,
+                    },
+                    context_observation_id,
+                ))
             }
             LiveSidebandObservationKind::TurnFinished {
                 turn,
                 role,
                 transcript,
             } => match role {
-                LiveSidebandTurnRole::User => Some(LiveAdapterObservation::UserTranscriptFinal {
-                    provider_item_id: Some(format!(
-                        "experimental-gpt-live-user-item:{}",
-                        turn.adapter_key()
-                    )),
-                    previous_item_id: None,
-                    content_index: Some(0),
-                    text: transcript,
-                }),
+                LiveSidebandTurnRole::User => {
+                    let Ok(mut observations) = self.user_context_observations.lock() else {
+                        return Some(LiveAdapterObservation::Error {
+                            code: LiveAdapterErrorCode::InternalError,
+                            message: "user source-observation custody is unavailable".into(),
+                        });
+                    };
+                    let source = observations
+                        .remove(turn.adapter_key())
+                        .or(context_observation_id);
+                    Some(with_live_context_observation(
+                        LiveAdapterObservation::UserTranscriptFinal {
+                            provider_item_id: Some(format!(
+                                "experimental-gpt-live-user-item:{}",
+                                turn.adapter_key()
+                            )),
+                            previous_item_id: None,
+                            content_index: Some(0),
+                            text: transcript,
+                        },
+                        source,
+                    ))
+                }
                 LiveSidebandTurnRole::Assistant => {
                     let response_id = Self::local_response_id(&turn);
                     let item_id = Self::local_item_id(&turn);
@@ -3246,15 +3348,18 @@ impl ExperimentalGptLiveDeferredAdapter {
                                 .to_string(),
                         });
                     };
-                    Some(LiveAdapterObservation::AssistantTranscriptFinal {
-                        provider_item_id: item_id,
-                        previous_item_id: None,
-                        content_index: Some(0),
-                        response_id: Some(response_id),
-                        text: transcript,
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                    })
+                    Some(with_live_context_observation(
+                        LiveAdapterObservation::AssistantTranscriptFinal {
+                            provider_item_id: item_id,
+                            previous_item_id: None,
+                            content_index: Some(0),
+                            response_id: Some(response_id),
+                            text: transcript,
+                            stop_reason: StopReason::EndTurn,
+                            usage: Usage::default(),
+                        },
+                        context_observation_id,
+                    ))
                 }
                 LiveSidebandTurnRole::Unknown => None,
             },
@@ -3497,9 +3602,10 @@ impl LiveAdapter for ExperimentalGptLiveDeferredAdapter {
                 return Ok(None);
             };
             let lowered = match observation {
-                ExperimentalGptLiveAdapterIngress::Provider(observation) => {
-                    self.lower_observation(observation)
-                }
+                ExperimentalGptLiveAdapterIngress::Provider {
+                    observation,
+                    context_observation_id,
+                } => self.lower_observation(observation, context_observation_id),
                 ExperimentalGptLiveAdapterIngress::SnapshotCut {
                     interaction_id,
                     item_id,
@@ -3647,6 +3753,14 @@ impl ExperimentalLivePendingOpen for ExperimentalGptLivePreparedOpen {
         {
             return Err(crate::session_runtime::live_summary::LiveContextSummaryError::ConflictingProjection);
         }
+        self.pending
+            .registration
+            .adapter
+            .context_observation_recorder
+            .set(job.observation_recorder())
+            .map_err(|_| {
+                crate::session_runtime::live_summary::LiveContextSummaryError::ConflictingProjection
+            })?;
         self.pending.registration.context_preparation_job = Some(job);
         Ok(())
     }
@@ -4004,6 +4118,20 @@ impl ExperimentalGptLiveWebrtcTransport {
         ExperimentalGptLiveBridgeError,
     > {
         let text = require_context_text(text)?;
+        let observation_recorder = self
+            .registered_by_channel
+            .lock()
+            .await
+            .get(authority.channel_id())
+            .filter(|registration| &registration.session_id == authority.session_id())
+            .and_then(|registration| {
+                registration
+                    .adapter
+                    .context_observation_recorder
+                    .get()
+                    .cloned()
+            })
+            .ok_or(ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
         let binding = self
             .active_binding(authority.session_id())
             .await
@@ -4020,6 +4148,7 @@ impl ExperimentalGptLiveWebrtcTransport {
             attempt.clone(),
             PendingExperimentalGptLiveDelivery::BootstrapAppend {
                 authority,
+                observation_recorder,
                 resolution_tx,
             },
         );
@@ -4250,8 +4379,26 @@ impl ExperimentalGptLiveWebrtcTransport {
             match pending {
                 PendingExperimentalGptLiveDelivery::BootstrapAppend {
                     authority,
+                    observation_recorder,
                     resolution_tx,
                 } => {
+                    let outcome = if outcome
+                        == meerkat_core::LiveAppendDeliveryOutcome::Acknowledged
+                    {
+                        match observation_recorder.record_ack_cut(&authority).await {
+                            Ok(()) => outcome,
+                            Err(error) if authority.cancellation_token().is_cancelled() => {
+                                tracing::debug!(%error, "closed bootstrap rejected late acknowledgement cut");
+                                meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "bootstrap acknowledgement cut failed closed");
+                                meerkat_core::LiveAppendDeliveryOutcome::Ambiguous
+                            }
+                        }
+                    } else {
+                        outcome
+                    };
                     if let Err((authority, _)) = resolution_tx.send((authority, outcome))
                         && !authority.cancellation_token().is_cancelled()
                     {
@@ -4818,6 +4965,28 @@ fn spawn_sideband_actors(
                             | LiveSidebandObservationKind::TurnFinished { .. }
                             | LiveSidebandObservationKind::DelegationRequested { .. }
                     );
+                    let context_observation_id = if matches!(
+                        observation.kind(),
+                        LiveSidebandObservationKind::TurnStarted { .. }
+                            | LiveSidebandObservationKind::TurnFinished { .. }
+                            | LiveSidebandObservationKind::TurnSnapshotDelta { .. }
+                    ) {
+                        if let Some(recorder) =
+                            observation_adapter.context_observation_recorder.get()
+                        {
+                            match recorder.admit().await {
+                                Ok(observation_id) => Some(observation_id),
+                                Err(error) => {
+                                    tracing::error!(%error, "live source-observation admission failed closed");
+                                    break;
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     if lifecycle_observation
                         && let Err(error) = activation
                             .activator
@@ -4832,7 +5001,10 @@ fn spawn_sideband_actors(
                     }
                     if adapter_observation
                         && observation_adapter
-                            .push_observation(observation.clone())
+                            .push_observation_with_context(
+                                observation.clone(),
+                                context_observation_id,
+                            )
                             .is_err()
                     {
                         break;
@@ -5190,6 +5362,7 @@ async fn resolve_pending_deliveries(
                 PendingExperimentalGptLiveDelivery::BootstrapAppend {
                     authority,
                     resolution_tx,
+                    ..
                 } => {
                     let _ = resolution_tx.send((authority, outcome));
                 }

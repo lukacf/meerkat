@@ -142,6 +142,20 @@ pub struct RealtimeUserContentTombstone {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RealtimeTranscriptEvent {
+    /// Metadata only; admission order and bootstrap cuts are runtime-owned.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    WithContextObservation {
+        observation_id: crate::LiveContextObservationId,
+        event: Box<RealtimeTranscriptEvent>,
+    },
+    /// Attach opaque provenance to an assistant target before its later
+    /// terminal/snapshot events arrive. This carries no bootstrap policy.
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    ContextObservationBound {
+        channel_id: crate::LiveChannelId,
+        item_id: String,
+        observation_id: crate::LiveContextObservationId,
+    },
     /// Observe a provider item and its causal predecessor without committing
     /// content yet.
     ItemObserved {
@@ -321,6 +335,67 @@ pub enum RealtimeTranscriptEvent {
     AssistantTurnInterrupted { response_id: String },
 }
 
+impl RealtimeTranscriptEvent {
+    #[must_use]
+    pub fn with_context_observation(
+        self,
+        observation_id: Option<crate::LiveContextObservationId>,
+    ) -> Self {
+        if observation_id
+            .as_ref()
+            .is_some_and(|id| self.context_observation_id() == Some(id))
+        {
+            return self;
+        }
+        match observation_id {
+            Some(observation_id) => Self::WithContextObservation {
+                observation_id,
+                event: Box::new(self),
+            },
+            None => self,
+        }
+    }
+
+    /// Inspect an event without discarding its envelope from the owning value.
+    #[must_use]
+    pub fn payload(&self) -> &Self {
+        match self {
+            Self::WithContextObservation { event, .. } => event.payload(),
+            _ => self,
+        }
+    }
+
+    #[must_use]
+    pub fn context_observation_id(&self) -> Option<&crate::LiveContextObservationId> {
+        match self {
+            Self::WithContextObservation { observation_id, .. }
+            | Self::ContextObservationBound { observation_id, .. } => Some(observation_id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn source_item_id(&self) -> Option<&str> {
+        match self.payload() {
+            Self::ItemObserved { item_id, .. }
+            | Self::ItemSkipped { item_id, .. }
+            | Self::UserTranscriptFinal { item_id, .. }
+            | Self::UserContentFinal { item_id, .. }
+            | Self::AssistantTextDelta { item_id, .. }
+            | Self::AssistantTranscriptDelta { item_id, .. }
+            | Self::AssistantTranscriptTruncated { item_id, .. }
+            | Self::AssistantTranscriptFinalText { item_id, .. }
+            | Self::AssistantPlaybackTargetAdmitted { item_id, .. }
+            | Self::AssistantPlaybackTerminalObserved { item_id, .. }
+            | Self::AssistantPlaybackTargetResolved { item_id, .. }
+            | Self::AssistantPlaybackTerminalSettled { item_id, .. }
+            | Self::AssistantPlaybackSnapshotCommitted { item_id, .. }
+            | Self::AssistantUnmeasuredSnapshotCommitted { item_id, .. }
+            | Self::ContextObservationBound { item_id, .. } => Some(item_id),
+            _ => None,
+        }
+    }
+}
+
 /// Durable session-owned correlation for one foreground assistant playback
 /// target. Fields are read-only outside core so surfaces can resolve but not
 /// manufacture the semantic identity.
@@ -331,6 +406,8 @@ pub struct LiveAssistantPlaybackTarget {
     response_id: String,
     item_id: String,
     content_index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_observation_id: Option<crate::LiveContextObservationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_terminal: Option<LiveAssistantPlaybackPendingTerminal>,
 }
@@ -356,8 +433,22 @@ impl LiveAssistantPlaybackTarget {
             response_id,
             item_id,
             content_index,
+            context_observation_id: None,
             pending_terminal: None,
         }
+    }
+
+    pub(crate) fn with_context_observation(
+        mut self,
+        id: Option<crate::LiveContextObservationId>,
+    ) -> Self {
+        self.context_observation_id = id;
+        self
+    }
+
+    #[must_use]
+    pub fn context_observation_id(&self) -> Option<&crate::LiveContextObservationId> {
+        self.context_observation_id.as_ref()
     }
 
     #[must_use]

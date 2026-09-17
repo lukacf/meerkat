@@ -13,6 +13,7 @@ const fixtureRoot = path.resolve(here, '..', 'fixtures', 'gpt_live_client');
 //   the answer SDP; it never sends `session.start` on the data channel.
 const PROTOCOLS = new Set(['experimental', 'public']);
 const protocol = parseProtocol(process.argv.slice(2));
+const captureEvidence = process.argv.includes('--capture-evidence');
 let browser;
 let page;
 
@@ -35,6 +36,12 @@ async function prepare() {
     args: ['--autoplay-policy=no-user-gesture-required', '--use-fake-ui-for-media-stream'],
   });
   page = await browser.newPage();
+  if (captureEvidence) {
+    await page.exposeFunction('__gptLiveEvidence', (record) => {
+      if (process.stdout.writableLength > 262144) throw new Error('evidence stdout queue bound');
+      process.stdout.write(`${JSON.stringify({ evidence: record })}\n`);
+    });
+  }
   await page.goto('data:text/html,<title>Meerkat GPT Live E2E peer</title>');
   const fixtures = {
     greeting: audioDataUrl('no-delegation-greeting.wav'),
@@ -53,7 +60,7 @@ async function prepare() {
     // according to the newest updates? Say both briefly, without delegating."
     current: audioDataUrl('current-context-query.wav'),
   };
-  const offerSdp = await page.evaluate(async ({ fixtures, protocol }) => {
+  const offerSdp = await page.evaluate(async ({ fixtures, protocol, captureEvidence }) => {
     const audioContext = new AudioContext({ sampleRate: 24_000 });
     const fixtureBuffers = {};
     for (const [name, fixture] of Object.entries(fixtures)) {
@@ -157,7 +164,61 @@ async function prepare() {
       bargeIn: { armedFixture: null, failures: 0, starts: [] },
       peer,
       remoteAudio,
+      evidence: { enabled: captureEvidence, pending: 0, count: 0, failed: false, chain: Promise.resolve(), timer: null },
     };
+    const evidenceState = globalThis.__gptLivePeer;
+    evidenceState.captureAudio = async () => {
+      const audio = {
+        decoded_non_silent_frames: remoteAudio.decodedNonSilentFrames,
+        decoded_non_silent_seconds: remoteAudio.decodedNonSilentSeconds,
+        non_silent_frames: remoteAudio.nonSilentFrames,
+        total_audio_energy: null, total_samples_received: null, total_samples_duration: null,
+        bytes_received: 0, packets_received: 0,
+      };
+      for (const report of (await peer.getStats()).values()) {
+        if (report.type !== 'inbound-rtp' || (report.kind !== 'audio' && report.mediaType !== 'audio')) continue;
+        audio.bytes_received += Number(report.bytesReceived || 0);
+        audio.packets_received += Number(report.packetsReceived || 0);
+        for (const [key, value] of [
+          ['total_audio_energy', report.totalAudioEnergy],
+          ['total_samples_received', report.totalSamplesReceived],
+          ['total_samples_duration', report.totalSamplesDuration],
+        ]) {
+          if (typeof value === 'number' && Number.isFinite(value)) audio[key] = (audio[key] ?? 0) + value;
+        }
+      }
+      return audio;
+    };
+    evidenceState.recordEvidence = (record) => {
+      const evidence = evidenceState.evidence;
+      if (!evidence.enabled || evidence.failed) return;
+      const fault = evidence.pending >= 128 || evidence.count >= 20000
+        ? 'queue_limit'
+        : typeof record.delta === 'string' && new TextEncoder().encode(record.delta).length > 16384
+          ? 'string_limit' : null;
+      if (fault) {
+        evidence.failed = true;
+        evidence.chain = evidence.chain.then(() => globalThis.__gptLiveEvidence({ kind: 'fault', fault }));
+        return;
+      }
+      evidence.pending += 1;
+      evidence.count += 1;
+      // Sample media immediately at this transcript/timer observation. The
+      // ordered evidence chain is never awaited by provider event handling.
+      const audio = evidenceState.captureAudio();
+      evidence.chain = evidence.chain.then(async () => {
+        await globalThis.__gptLiveEvidence({ ...record, audio: await audio });
+        evidence.pending -= 1;
+      }).catch(() => {
+        evidence.failed = true;
+        return globalThis.__gptLiveEvidence({ kind: 'fault', fault: 'capture_failure' });
+      });
+    };
+    if (captureEvidence) {
+      evidenceState.evidence.timer = setInterval(() => {
+        evidenceState.recordEvidence({ kind: 'audio', browser_ms: performance.now() });
+      }, 250);
+    }
     globalThis.__gptLivePeer.startFixture = (fixtureName, waitForEnd) => {
       const state = globalThis.__gptLivePeer;
       const buffer = state.fixtureBuffers[fixtureName];
@@ -185,6 +246,25 @@ async function prepare() {
         return;
       }
       state.events.push(parsed);
+      if (captureEvidence && (parsed?.type === 'session.input_transcript.delta'
+        || parsed?.type === 'session.output_transcript.delta')) {
+        const delta = typeof parsed.delta === 'string' ? parsed.delta
+          : typeof parsed.text === 'string' ? parsed.text : null;
+        if (delta === null && state.evidence.enabled && !state.evidence.failed) {
+          state.evidence.failed = true;
+          state.evidence.chain = state.evidence.chain.then(() =>
+            globalThis.__gptLiveEvidence({ kind: 'fault', fault: 'capture_failure' }));
+        } else if (delta !== null) {
+          state.recordEvidence({
+            kind: 'transcript',
+            direction: parsed.type === 'session.input_transcript.delta' ? 'input' : 'output',
+            delta,
+            event_index: state.events.length - 1,
+            browser_ms: performance.now(),
+            provider_start_ms: typeof parsed.start_ms === 'number' ? parsed.start_ms : null,
+          });
+        }
+      }
       // Assistant-start boundary used to fire an armed barge-in. The private
       // protocol announces assistant turns; the public Live API has no turn
       // identifiers, so the first assistant output delta is the boundary.
@@ -218,7 +298,7 @@ async function prepare() {
       ]);
     }
     return peer.localDescription?.sdp;
-  }, { fixtures, protocol });
+  }, { fixtures, protocol, captureEvidence });
   return { offer_sdp: offerSdp, protocol };
 }
 
@@ -333,6 +413,17 @@ async function close() {
   return { closed: true };
 }
 
+async function stopEvidence() {
+  if (!page || !captureEvidence) return { evidence_stopped: true };
+  await page.evaluate(async () => {
+    const evidence = globalThis.__gptLivePeer.evidence;
+    evidence.enabled = false;
+    clearInterval(evidence.timer);
+    await evidence.chain;
+  });
+  return { evidence_stopped: true };
+}
+
 async function handle(command) {
   switch (command.type) {
     case 'prepare': return prepare();
@@ -340,6 +431,7 @@ async function handle(command) {
     case 'arm_barge_in': return armBargeIn(command.name);
     case 'play': return play(command.name);
     case 'snapshot': return snapshot();
+    case 'stop_evidence': return stopEvidence();
     case 'close': return close();
     default: throw new Error(`unsupported peer command: ${command.type}`);
   }

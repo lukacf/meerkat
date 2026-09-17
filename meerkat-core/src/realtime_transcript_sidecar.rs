@@ -34,6 +34,7 @@ use std::sync::Arc;
 /// Schema of canonical realtime component-event bytes.
 pub const REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V1: u16 = 1;
 pub const REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V2: u16 = 2;
+pub const REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V3: u16 = 3;
 
 /// Exceptional operation that authorizes a full realtime projection reset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -68,6 +69,10 @@ pub enum RealtimeTranscriptSidecarRecord {
     /// Channel-attributed input; older readers reject schema 2 explicitly.
     ChannelEventV2 {
         channel_id: crate::LiveChannelId,
+        event: RealtimeTranscriptEvent,
+    },
+    ObservationEventV3 {
+        channel_id: Option<crate::LiveChannelId>,
         event: RealtimeTranscriptEvent,
     },
     /// Install the bounded image-blob recovery anchor.
@@ -228,6 +233,7 @@ impl SessionRealtimeTranscriptProjection {
                     schema,
                     REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V1
                         | REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V2
+                        | REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V3
                 ) {
                     return Err(RealtimeTranscriptSidecarError::Incoherent(format!(
                         "unsupported realtime event schema {schema}"
@@ -300,14 +306,21 @@ impl SessionRealtimeTranscriptProjection {
         event: RealtimeTranscriptEvent,
         channel_id: Option<crate::LiveChannelId>,
     ) -> Result<(RealtimeTranscriptApplyCommit, bool), RealtimeTranscriptSidecarError> {
-        let record = match &channel_id {
-            Some(channel_id) => RealtimeTranscriptSidecarRecord::ChannelEventV2 {
+        let record = if event.context_observation_id().is_some() {
+            RealtimeTranscriptSidecarRecord::ObservationEventV3 {
                 channel_id: channel_id.clone(),
                 event: event.clone(),
-            },
-            None => RealtimeTranscriptSidecarRecord::EventV1 {
-                event: event.clone(),
-            },
+            }
+        } else {
+            match &channel_id {
+                Some(channel_id) => RealtimeTranscriptSidecarRecord::ChannelEventV2 {
+                    channel_id: channel_id.clone(),
+                    event: event.clone(),
+                },
+                None => RealtimeTranscriptSidecarRecord::EventV1 {
+                    event: event.clone(),
+                },
+            }
         };
         let serialized = serialize_record(&record)?;
         let commit = realtime_transcript_revision::apply_realtime_transcript_event_from_channel(
@@ -406,6 +419,14 @@ fn serialize_record(
 
 fn record_schema(record: &RealtimeTranscriptSidecarRecord) -> u16 {
     match record {
+        RealtimeTranscriptSidecarRecord::ObservationEventV3 { .. } => {
+            REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V3
+        }
+        RealtimeTranscriptSidecarRecord::SnapshotV1 { state, .. }
+            if state.has_context_observations() =>
+        {
+            REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V3
+        }
         RealtimeTranscriptSidecarRecord::ChannelEventV2 { .. } => {
             REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V2
         }
@@ -443,6 +464,11 @@ fn apply_record(
             *state = realtime_transcript_revision::restore_realtime_transcript_state(snapshot)?;
         }
         RealtimeTranscriptSidecarRecord::EventV1 { event } => {
+            if event.context_observation_id().is_some() {
+                return Err(RealtimeTranscriptSidecarError::Incoherent(
+                    "schema V1 cannot carry observation provenance".into(),
+                ));
+            }
             let commit =
                 realtime_transcript_revision::apply_realtime_transcript_event(state, event)?;
             if user_content_event_rejected(&commit) {
@@ -452,6 +478,11 @@ fn apply_record(
             }
         }
         RealtimeTranscriptSidecarRecord::ChannelEventV2 { channel_id, event } => {
+            if event.context_observation_id().is_some() {
+                return Err(RealtimeTranscriptSidecarError::Incoherent(
+                    "schema V2 cannot carry observation provenance".into(),
+                ));
+            }
             let commit =
                 realtime_transcript_revision::apply_realtime_transcript_event_from_channel(
                     state,
@@ -461,6 +492,22 @@ fn apply_record(
             if user_content_event_rejected(&commit) {
                 return Err(RealtimeTranscriptSidecarError::Incoherent(
                     "durable channel realtime event was rejected".to_string(),
+                ));
+            }
+        }
+        RealtimeTranscriptSidecarRecord::ObservationEventV3 { channel_id, event } => {
+            if event.context_observation_id().is_none() {
+                return Err(RealtimeTranscriptSidecarError::Incoherent(
+                    "schema V3 observation event has no provenance identifier".into(),
+                ));
+            }
+            let commit =
+                realtime_transcript_revision::apply_realtime_transcript_event_from_channel(
+                    state, event, channel_id,
+                )?;
+            if user_content_event_rejected(&commit) {
+                return Err(RealtimeTranscriptSidecarError::Incoherent(
+                    "durable observed event was rejected".into(),
                 ));
             }
         }
@@ -507,7 +554,7 @@ fn user_content_event_rejected(commit: &RealtimeTranscriptApplyCommit) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::realtime_transcript::RealtimeTranscriptRole;
@@ -600,6 +647,295 @@ mod tests {
         assert_eq!(released.messages.len(), 2);
         assert!(released.messages[0].source_channel.is_none());
         assert_eq!(released.messages[1].source_channel.as_ref(), Some(&channel));
+        assert!(
+            released
+                .messages
+                .iter()
+                .all(|row| row.context_observation_id.is_none()),
+            "V1/V2 rows carry NoClaim, never an inferred ordinal"
+        );
+    }
+
+    #[test]
+    fn observation_v3_survives_replay_and_deferred_user_materialization() {
+        let session_id = SessionId::new();
+        let channel = crate::LiveChannelId::new("observed-user");
+        let observation = crate::LiveContextObservationId::new("lease-scope", channel.clone());
+        let mut producer = SessionRealtimeTranscriptProjection::empty(&session_id);
+        let (pending, _) = producer
+            .apply_event(
+                RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: "later".into(),
+                    previous_item_id: Some("before".into()),
+                    content_index: 0,
+                    text: "pre-cut correction".into(),
+                }
+                .with_context_observation(Some(observation.clone())),
+            )
+            .expect("record opaque source before deferred materialization");
+        assert!(pending.messages.is_empty());
+        let suffix = producer.prepare_suffix().expect("prepare").expect("suffix");
+        assert_eq!(
+            suffix.events()[0].schema_version(),
+            REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V3
+        );
+        assert!(
+            suffix.events()[0]
+                .decode_payload::<RealtimeTranscriptSidecarRecord>(
+                    REALTIME_TRANSCRIPT_SIDECAR_EVENT_SCHEMA_V2
+                )
+                .is_err()
+        );
+        let verified = verified_sequence(suffix.successor().clone(), suffix.events());
+        let mut restored =
+            SessionRealtimeTranscriptProjection::from_verified_sequence(&session_id, &verified)
+                .expect("V3 replay");
+        let (released, _) = restored
+            .apply_event(RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "before".into(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "legacy prerequisite".into(),
+            })
+            .expect("release after external ACK cut without knowing it in Core");
+        assert!(released.messages[0].context_observation_id.is_none());
+        assert_eq!(
+            released.messages[1].context_observation_id.as_ref(),
+            Some(&observation)
+        );
+        assert_eq!(released.messages[1].source_channel.as_ref(), Some(&channel));
+    }
+
+    #[test]
+    fn observed_assistant_snapshot_retains_source_through_deferred_replay() {
+        let session_id = SessionId::new();
+        let channel = crate::LiveChannelId::new("observed-assistant");
+        let observation = crate::LiveContextObservationId::new("scope", channel.clone());
+        let interaction_id = crate::InteractionId::new();
+        let mut producer = SessionRealtimeTranscriptProjection::empty(&session_id);
+        for event in [
+            RealtimeTranscriptEvent::ContextObservationBound {
+                channel_id: channel.clone(),
+                item_id: "assistant".into(),
+                observation_id: observation.clone(),
+            },
+            RealtimeTranscriptEvent::ItemObserved {
+                item_id: "assistant".into(),
+                previous_item_id: Some("before".into()),
+                role: RealtimeTranscriptRole::Assistant,
+                response_id: Some("response".into()),
+            },
+            RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted {
+                channel_id: channel.to_string(),
+                interaction_id,
+                response_id: "response".into(),
+                item_id: "assistant".into(),
+                content_index: 0,
+            },
+            RealtimeTranscriptEvent::AssistantUnmeasuredSnapshotCommitted {
+                channel_id: channel.to_string(),
+                interaction_id,
+                response_id: "response".into(),
+                item_id: "assistant".into(),
+                content_index: 0,
+                text: "observed speech".into(),
+                evidence: crate::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(
+                    "observed speech".into(),
+                ),
+            },
+        ] {
+            assert!(
+                producer
+                    .apply_event(event)
+                    .expect("stage assistant source")
+                    .0
+                    .messages
+                    .is_empty()
+            );
+        }
+        let suffix = producer.prepare_suffix().expect("prepare").expect("suffix");
+        let verified = verified_sequence(suffix.successor().clone(), suffix.events());
+        let mut restored =
+            SessionRealtimeTranscriptProjection::from_verified_sequence(&session_id, &verified)
+                .expect("replay assistant source");
+        let (released, _) = restored
+            .apply_event(RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "before".into(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "prerequisite".into(),
+            })
+            .expect("release deferred assistant");
+        assert_eq!(released.messages.len(), 2);
+        assert_eq!(
+            released.messages[1].context_observation_id.as_ref(),
+            Some(&observation)
+        );
+        assert!(
+            matches!(&released.messages[1].message, crate::Message::BlockAssistant(message)
+            if message.stop_reason.is_none() && matches!(&message.blocks[0],
+                crate::AssistantBlock::Transcript { source: crate::TranscriptSource::SpokenUnmeasured, .. }))
+        );
+    }
+
+    #[test]
+    fn legacy_sidecar_records_cannot_smuggle_observation_claims() {
+        let channel = crate::LiveChannelId::new("legacy");
+        let event = RealtimeTranscriptEvent::UserTranscriptFinal {
+            item_id: "user".into(),
+            previous_item_id: None,
+            content_index: 0,
+            text: "data".into(),
+        }
+        .with_context_observation(Some(crate::LiveContextObservationId::new(
+            "scope",
+            channel.clone(),
+        )));
+        for record in [
+            RealtimeTranscriptSidecarRecord::EventV1 {
+                event: event.clone(),
+            },
+            RealtimeTranscriptSidecarRecord::ChannelEventV2 {
+                channel_id: channel,
+                event,
+            },
+        ] {
+            assert!(
+                apply_record(&mut SessionRealtimeTranscriptState::default(), 0, record).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn opaque_item_binding_rejects_reassignment_and_legacy_relabeling() {
+        let channel = crate::LiveChannelId::new("binding");
+        let id = crate::LiveContextObservationId::new("scope", channel.clone());
+        let other = crate::LiveContextObservationId::new("scope", channel.clone());
+        let mut projection = SessionRealtimeTranscriptProjection::empty(&SessionId::new());
+        let bind = |item: &str, observation_id| RealtimeTranscriptEvent::ContextObservationBound {
+            channel_id: channel.clone(),
+            item_id: item.into(),
+            observation_id,
+        };
+        projection
+            .apply_event(bind("tracked", id.clone()))
+            .expect("first binding");
+        projection
+            .apply_event(bind("tracked", id.clone()))
+            .expect("same binding replay");
+        assert!(
+            projection
+                .apply_event(bind("tracked", other.clone()))
+                .is_err()
+        );
+        let (commit, _) = projection
+            .apply_event(RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "tracked".into(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "data".into(),
+            })
+            .expect("materialize original source");
+        assert_eq!(
+            commit.messages[0].context_observation_id.as_ref(),
+            Some(&id)
+        );
+        projection
+            .apply_event(RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "legacy".into(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "legacy".into(),
+            })
+            .expect("legacy materialization");
+        assert!(
+            projection.apply_event(bind("legacy", other)).is_err(),
+            "NoClaim cannot be retroactively upgraded"
+        );
+    }
+
+    #[test]
+    fn canonical_origin_roundtrips_opaque_id_and_keeps_legacy_none() {
+        let session_id = SessionId::new();
+        let channel = crate::LiveChannelId::new("origin");
+        let observation = crate::LiveContextObservationId::new("scope", channel.clone());
+        let mut session = crate::Session::with_id(session_id.clone());
+        session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "user".into(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "source".into(),
+            }
+            .with_context_observation(Some(observation.clone())),
+        );
+        let bytes = serde_json::to_vec(&session).expect("serialize");
+        let restored: crate::Session = serde_json::from_slice(&bytes).expect("restore");
+        let crate::Message::User(user) = &restored.messages()[0] else {
+            panic!("user row")
+        };
+        let origin = user.identity.realtime_origin.as_ref().expect("origin");
+        assert!(origin.matches(&session_id, &channel, 1));
+        assert_eq!(origin.context_observation_id(), Some(&observation));
+        let legacy: crate::types::RealtimeMessageOrigin =
+            serde_json::from_value(serde_json::json!({
+                "session_id": session_id, "channel_id": channel, "canonical_row_sequence": 1
+            }))
+            .expect("legacy origin");
+        assert!(legacy.context_observation_id().is_none());
+    }
+
+    #[test]
+    fn distinct_assistant_observations_do_not_coalesce_across_source_items() {
+        let channel = crate::LiveChannelId::new("assistant-items");
+        for tracked in [false, true] {
+            let mut projection = SessionRealtimeTranscriptProjection::empty(&SessionId::new());
+            let first = crate::LiveContextObservationId::new("scope", channel.clone());
+            let second = crate::LiveContextObservationId::new("scope", channel.clone());
+            for (item, text, id) in [
+                ("a", "first", first.clone()),
+                ("b", "second", second.clone()),
+            ] {
+                projection
+                    .apply_event(
+                        RealtimeTranscriptEvent::AssistantTranscriptDelta {
+                            response_id: "same-response".into(),
+                            delta_id: item.into(),
+                            item_id: item.into(),
+                            previous_item_id: None,
+                            content_index: 0,
+                            delta: text.into(),
+                        }
+                        .with_context_observation(tracked.then_some(id)),
+                    )
+                    .expect("delta");
+            }
+            let (commit, _) = projection
+                .apply_event(RealtimeTranscriptEvent::AssistantTurnCompleted {
+                    response_id: "same-response".into(),
+                    stop_reason: crate::StopReason::EndTurn,
+                    usage: crate::TurnUsage::host_declared(
+                        crate::Provider::OpenAI,
+                        "test",
+                        crate::Usage::default(),
+                    ),
+                })
+                .expect("materialize");
+            if tracked {
+                assert_eq!(commit.messages.len(), 2);
+                assert_eq!(
+                    commit.messages[0].context_observation_id.as_ref(),
+                    Some(&first)
+                );
+                assert_eq!(
+                    commit.messages[1].context_observation_id.as_ref(),
+                    Some(&second)
+                );
+            } else {
+                assert_eq!(commit.messages.len(), 1, "legacy grouping is unchanged");
+                assert!(commit.messages[0].context_observation_id.is_none());
+            }
+        }
     }
 
     #[test]

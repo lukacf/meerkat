@@ -5816,6 +5816,29 @@ impl SessionRuntime {
         item_id: String,
         content_index: u32,
     ) -> Result<meerkat_live::LiveAssistantOutputAddress, SessionError> {
+        self.admit_live_assistant_playback_target_with_context_observation(
+            session_id,
+            channel_id,
+            provider_turn_ref,
+            response_id,
+            item_id,
+            content_index,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn admit_live_assistant_playback_target_with_context_observation(
+        &self,
+        session_id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        provider_turn_ref: String,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        observation_id: Option<meerkat_core::LiveContextObservationId>,
+    ) -> Result<meerkat_live::LiveAssistantOutputAddress, SessionError> {
         let handle = self
             .runtime_adapter
             .live_assistant_output_handle_for_turn(session_id, &channel_id, &provider_turn_ref)
@@ -5826,13 +5849,14 @@ impl SessionRuntime {
             })?;
         let target = self
             .service
-            .admit_live_assistant_playback_target(
+            .admit_live_assistant_playback_target_with_context_observation(
                 session_id,
                 channel_id.clone(),
                 handle.interaction_id(),
                 response_id.clone(),
                 item_id.clone(),
                 content_index,
+                observation_id,
             )
             .await?;
         if target.interaction_id() != handle.interaction_id() {

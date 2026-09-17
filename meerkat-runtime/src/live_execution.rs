@@ -3660,6 +3660,7 @@ pub struct LiveContextPreparationLease {
     #[cfg_attr(not(feature = "live"), allow(dead_code))]
     pub(crate) lease_id: String,
     pub(crate) reserved_cursor: u64,
+    pub(crate) binding: LiveDelegationRuntimeBinding,
     pub(crate) cancellation: LiveContextPreparationCancellation,
 }
 
@@ -3673,6 +3674,12 @@ impl std::fmt::Debug for LiveContextPreparationLease {
 }
 
 impl LiveContextPreparationLease {
+    /// Allocate an identifier only. Admission/order requires the generated
+    /// record step; copying or constructing an ID does not grant a claim.
+    #[must_use]
+    pub fn new_observation_id(&self) -> meerkat_core::LiveContextObservationId {
+        meerkat_core::LiveContextObservationId::new(self.lease_id.clone(), self.channel_id.clone())
+    }
     #[must_use]
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
@@ -3688,6 +3695,23 @@ impl LiveContextPreparationLease {
     #[must_use]
     pub fn cancellation_token(&self) -> LiveContextPreparationCancellation {
         self.cancellation.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveContextObservationReceipt {
+    pub(crate) observation_id: meerkat_core::LiveContextObservationId,
+    pub(crate) ordinal: u64,
+}
+
+impl LiveContextObservationReceipt {
+    #[must_use]
+    pub fn observation_id(&self) -> &meerkat_core::LiveContextObservationId {
+        &self.observation_id
+    }
+    #[must_use]
+    pub const fn ordinal(&self) -> u64 {
+        self.ordinal
     }
 }
 
@@ -5081,6 +5105,13 @@ mod tests {
             channel_id: LiveChannelId::new("bootstrap-channel"),
             lease_id: "one-job".into(),
             reserved_cursor: 7,
+            binding: LiveDelegationRuntimeBinding::new(
+                session(1),
+                LiveChannelId::new("bootstrap-channel"),
+                crate::identifiers::LogicalRuntimeId::new("test-runtime"),
+                9,
+                7,
+            ),
             cancellation: Default::default(),
         };
         let digest = format!("{:x}", Sha256::digest(b"exact captured summary"));

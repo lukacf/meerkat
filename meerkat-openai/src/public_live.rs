@@ -36,6 +36,206 @@ use crate::gpt_live_broker::{
 
 pub use crate::runtime::GPT_LIVE_MODEL_FAMILY;
 
+/// Scoped diagnostic capture for offline fixtures and explicitly opted-in live
+/// acceptance tests. No raw frames, credentials, SDP, or provider session IDs.
+#[cfg(feature = "test-realtime-fixtures")]
+#[doc(hidden)]
+pub mod thinking_capture {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub enum EventKind {
+        SessionAttached,
+        ThinkingAppendAttempt {
+            client_event_id: String,
+            text: String,
+        },
+        ThinkingAppended {
+            client_event_id: Option<String>,
+            matched_owned: bool,
+            accepted: bool,
+        },
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    pub struct Event {
+        pub channel_ordinal: u32,
+        pub elapsed_ms: u64,
+        pub event: EventKind,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Fault {
+        Overflow,
+        StringLimit,
+        Contention,
+    }
+
+    struct Inner {
+        started: Instant,
+        events: Mutex<VecDeque<Event>>,
+        fault: AtomicU8,
+    }
+
+    #[derive(Clone)]
+    pub struct Capture {
+        inner: Arc<Inner>,
+        channel_ordinal: u32,
+    }
+
+    tokio::task_local! {
+        static CURRENT: Capture;
+    }
+
+    impl Default for Capture {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Capture {
+        pub const MAX_EVENTS: usize = 512;
+        pub const MAX_TEXT_BYTES: usize = 1024;
+        pub const MAX_ID_BYTES: usize = 256;
+
+        pub fn new() -> Self {
+            Self {
+                inner: Arc::new(Inner {
+                    started: Instant::now(),
+                    events: Mutex::new(VecDeque::new()),
+                    fault: AtomicU8::new(0),
+                }),
+                channel_ordinal: 0,
+            }
+        }
+
+        pub fn for_channel(&self, channel_ordinal: u32) -> Self {
+            Self {
+                inner: self.inner.clone(),
+                channel_ordinal,
+            }
+        }
+
+        pub async fn scope<F: std::future::Future>(&self, future: F) -> F::Output {
+            CURRENT.scope(self.clone(), future).await
+        }
+
+        pub(super) fn current() -> Option<Self> {
+            CURRENT.try_with(Clone::clone).ok()
+        }
+
+        pub fn fault(&self) -> Option<Fault> {
+            match self.inner.fault.load(Ordering::Acquire) {
+                0 => None,
+                1 => Some(Fault::Overflow),
+                2 => Some(Fault::StringLimit),
+                _ => Some(Fault::Contention),
+            }
+        }
+
+        pub fn drain(&self) -> Result<Vec<Event>, Fault> {
+            self.inner
+                .events
+                .lock()
+                .map(|mut events| events.drain(..).collect())
+                .map_err(|_| Fault::Contention)
+        }
+
+        pub(super) fn string_limit(&self) {
+            self.inner.fault.store(2, Ordering::Release);
+        }
+
+        pub(super) fn record(&self, event: EventKind) {
+            if self.fault().is_some() {
+                return;
+            }
+            let valid = match &event {
+                EventKind::SessionAttached => true,
+                EventKind::ThinkingAppendAttempt {
+                    client_event_id,
+                    text,
+                } => {
+                    client_event_id.len() <= Self::MAX_ID_BYTES
+                        && text.len() <= Self::MAX_TEXT_BYTES
+                }
+                EventKind::ThinkingAppended {
+                    client_event_id, ..
+                } => client_event_id
+                    .as_ref()
+                    .is_none_or(|id| id.len() <= Self::MAX_ID_BYTES),
+            };
+            if !valid {
+                self.inner.fault.store(2, Ordering::Release);
+                return;
+            }
+            let Ok(mut events) = self.inner.events.try_lock() else {
+                self.inner.fault.store(3, Ordering::Release);
+                return;
+            };
+            if events.len() == Self::MAX_EVENTS {
+                self.inner.fault.store(1, Ordering::Release);
+                return;
+            }
+            events.push_back(Event {
+                channel_ordinal: self.channel_ordinal,
+                elapsed_ms: u64::try_from(self.inner.started.elapsed().as_millis())
+                    .unwrap_or(u64::MAX),
+                event,
+            });
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn capture_is_opt_in_task_scoped_and_follows_the_selected_session_clone() {
+            let capture = Capture::new().for_channel(7);
+            assert!(Capture::current().is_none());
+            let session_capture = capture
+                .scope(async {
+                    assert!(
+                        tokio::spawn(async { Capture::current().is_none() })
+                            .await
+                            .unwrap()
+                    );
+                    Capture::current().unwrap()
+                })
+                .await;
+            assert!(Capture::current().is_none());
+            session_capture.record(EventKind::SessionAttached);
+            assert_eq!(capture.drain().unwrap()[0].channel_ordinal, 7);
+        }
+
+        #[test]
+        fn bounds_and_contention_latch_without_blocking_or_success_shaped_loss() {
+            let capture = Capture::new();
+            for _ in 0..=Capture::MAX_EVENTS {
+                capture.record(EventKind::SessionAttached);
+            }
+            assert_eq!(capture.fault(), Some(Fault::Overflow));
+            assert_eq!(capture.drain().unwrap().len(), Capture::MAX_EVENTS);
+            let capture = Capture::new();
+            capture.record(EventKind::ThinkingAppendAttempt {
+                client_event_id: "owned".into(),
+                text: "x".repeat(Capture::MAX_TEXT_BYTES + 1),
+            });
+            assert_eq!(capture.fault(), Some(Fault::StringLimit));
+            let capture = Capture::new();
+            let _lock = capture.inner.events.lock().unwrap();
+            capture.record(EventKind::SessionAttached);
+            assert_eq!(capture.fault(), Some(Fault::Contention));
+        }
+    }
+}
+
 /// Provider-owned mechanical configuration for one browser WebRTC bootstrap.
 ///
 /// The public broker always starts the session with a client delegation: the
@@ -236,6 +436,8 @@ impl std::fmt::Debug for PublicLiveOpenConfig {
 pub struct PublicLiveBrokerFactory {
     model: String,
     client: LiveClient,
+    #[cfg(feature = "test-realtime-fixtures")]
+    thinking_capture: Option<thinking_capture::Capture>,
 }
 
 impl std::fmt::Debug for PublicLiveBrokerFactory {
@@ -301,6 +503,8 @@ impl PublicLiveBrokerFactory {
         Ok(Self {
             model: admitted.model,
             client,
+            #[cfg(feature = "test-realtime-fixtures")]
+            thinking_capture: thinking_capture::Capture::current(),
         })
     }
 
@@ -373,12 +577,18 @@ impl PublicLiveBrokerFactory {
             .await
             .map_err(map_live_error)?;
         let (sender, receiver) = sideband.split();
+        #[cfg(feature = "test-realtime-fixtures")]
+        if let Some(capture) = &self.thinking_capture {
+            capture.record(thinking_capture::EventKind::SessionAttached);
+        }
         Ok(PublicLiveBootstrap {
             answer_sdp,
             session: PublicLiveBrokerSession {
                 sender,
                 receiver: Mutex::new(receiver),
                 state: Mutex::new(SessionState::default()),
+                #[cfg(feature = "test-realtime-fixtures")]
+                thinking_capture: self.thinking_capture.clone(),
             },
         })
     }
@@ -443,6 +653,8 @@ pub struct PublicLiveBrokerSession {
     sender: LiveSender,
     receiver: Mutex<LiveReceiver>,
     state: Mutex<SessionState>,
+    #[cfg(feature = "test-realtime-fixtures")]
+    thinking_capture: Option<thinking_capture::Capture>,
 }
 
 impl std::fmt::Debug for PublicLiveBrokerSession {
@@ -605,6 +817,18 @@ impl PublicLiveBrokerSession {
         token: GptLiveAppendToken,
         event: ClientEvent,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        #[cfg(feature = "test-realtime-fixtures")]
+        if let Some(capture) = &self.thinking_capture
+            && let ClientEvent {
+                event_id: Field::Value(client_event_id),
+                command: Command::ThinkingAppend { content, .. },
+            } = &event
+        {
+            capture.record(thinking_capture::EventKind::ThinkingAppendAttempt {
+                client_event_id: client_event_id.clone(),
+                text: content.clone(),
+            });
+        }
         if self.sender.send(event).await.is_err() {
             self.state.lock().await.append_delivery_ambiguous = true;
             return Err(GptLiveBrokerError::AppendDeliveryAmbiguous { token });
@@ -643,7 +867,41 @@ impl PublicLiveBrokerSession {
                 }
                 return Ok(None);
             };
-            self.state.lock().await.apply_frame(frame)?;
+            let mut state = self.state.lock().await;
+            #[cfg(feature = "test-realtime-fixtures")]
+            let thinking_ack = self.thinking_capture.as_ref().and_then(|capture| {
+                if !matches!(&frame.event, ServerEvent::ThinkingAppended { .. }) {
+                    return None;
+                }
+                if frame
+                    .client_event_id
+                    .as_ref()
+                    .is_some_and(|id| id.len() > thinking_capture::Capture::MAX_ID_BYTES)
+                {
+                    capture.string_limit();
+                    return None;
+                }
+                let matched_owned = frame
+                    .client_event_id
+                    .as_deref()
+                    .and_then(|id| state.find_append_receipt(id))
+                    .is_some_and(|(append, _)| {
+                        state.pending_appends[append.0].lane == PendingAppendLane::Thinking
+                    });
+                Some((frame.client_event_id.clone(), matched_owned))
+            });
+            let applied = state.apply_frame(frame);
+            #[cfg(feature = "test-realtime-fixtures")]
+            if let Some(capture) = &self.thinking_capture
+                && let Some((client_event_id, matched_owned)) = thinking_ack
+            {
+                capture.record(thinking_capture::EventKind::ThinkingAppended {
+                    client_event_id,
+                    matched_owned,
+                    accepted: applied.is_ok(),
+                });
+            }
+            applied?;
         }
     }
 
@@ -2678,11 +2936,16 @@ mod tests {
             let server = tokio::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
-            let factory = PublicLiveBrokerFactory::__try_from_target_with_base_url(
-                realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
-                &format!("http://{address}/v1/"),
-            )
-            .unwrap();
+            let thinking_evidence = thinking_capture::Capture::new().for_channel(9);
+            let factory = thinking_evidence
+                .scope(async {
+                    PublicLiveBrokerFactory::__try_from_target_with_base_url(
+                        realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
+                        &format!("http://{address}/v1/"),
+                    )
+                    .unwrap()
+                })
+                .await;
             let (_, session) = factory
                 .open(
                     PublicLiveOpenConfig::new("v=0", "marin")
@@ -2773,6 +3036,47 @@ mod tests {
                 .map(|event| event["event_id"].as_str().unwrap())
                 .collect::<HashSet<_>>();
             assert_eq!(ids.len(), 3);
+            let recorded = thinking_evidence.drain().unwrap();
+            assert!(thinking_evidence.fault().is_none());
+            assert!(recorded.iter().all(|event| event.channel_ordinal == 9));
+            let recorded_fragments = recorded
+                .iter()
+                .filter_map(|event| match &event.event {
+                    thinking_capture::EventKind::ThinkingAppendAttempt {
+                        client_event_id,
+                        text,
+                    } => {
+                        assert!(ids.contains(client_event_id.as_str()));
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(
+                recorded_fragments, text,
+                "recorder must retain exact outgoing fragments"
+            );
+            let acknowledgements = recorded
+                .iter()
+                .filter(|event| {
+                    matches!(&event.event,
+                        thinking_capture::EventKind::ThinkingAppended {
+                            client_event_id: Some(id), matched_owned: true, accepted: true,
+                        } if ids.contains(id.as_str())
+                    )
+                })
+                .count();
+            assert_eq!(acknowledgements, if reject_middle { 2 } else { 3 });
+            let encoded = serde_json::to_string(&recorded).unwrap();
+            for forbidden in [
+                "authorization",
+                "offer_sdp",
+                "instructions",
+                "api_key",
+                "existing reply",
+            ] {
+                assert!(!encoded.contains(forbidden));
+            }
             assert!(session.state.lock().await.pending_appends.is_empty());
             // A failed transport write still retains the whole append token and
             // fences every later lane instead of retrying an uncertain fragment.

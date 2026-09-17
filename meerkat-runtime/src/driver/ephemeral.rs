@@ -2038,11 +2038,13 @@ impl EphemeralRuntimeDriver {
     pub(crate) fn defer_queued_inputs_behind_backlog(
         &mut self,
         input_ids: &[InputId],
+        cancelled_run_id: Option<&RunId>,
     ) -> Result<(), RuntimeDriverError> {
         for input_id in input_ids {
             self.dsl_apply(
                 mm_dsl::MeerkatMachineInput::DeferInputBehindBacklog {
                     input_id: Self::dsl_key(input_id),
+                    cancelled_run_id: cancelled_run_id.map(mm_dsl::RunId::from_domain),
                 },
                 "DeferInputBehindBacklog",
             )?;
@@ -3730,6 +3732,16 @@ impl EphemeralRuntimeDriver {
                 .as_ref()
                 .map(std::string::ToString::to_string),
         )? {
+            let existing = self.stored_input_state(&existing_id).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "generated idempotency authority references missing input {existing_id}"
+                ))
+            })?;
+            crate::input_state::PromptReplayIdentity::verify_replay(
+                &existing.state,
+                &input,
+                resolved.replay_policy(),
+            )?;
             tracing::debug!(
                 work_id = ?input_id,
                 existing_id = ?existing_id,
@@ -3741,24 +3753,18 @@ impl EphemeralRuntimeDriver {
                     existing_id: existing_id.clone(),
                 },
             ));
-            let existing_seed = self
-                .stored_input_state(&existing_id)
-                .ok_or_else(|| {
-                    RuntimeDriverError::Internal(format!(
-                        "generated idempotency authority references missing input {existing_id}"
-                    ))
-                })?
-                .seed;
             return Ok(AcceptOutcome::Deduplicated {
                 input_id,
                 existing_id,
-                existing_seed,
+                existing_seed: existing.seed,
             });
         }
 
         let mut state = InputState::new_accepted(input_id.clone());
         state.durability = Some(input.header().durability);
         state.idempotency_key = input.header().idempotency_key.clone();
+        state.prompt_replay_identity =
+            crate::input_state::PromptReplayIdentity::from_input(&input)?;
         state.directed_run_started_attribution =
             crate::input_state::DirectedRunStartedAttribution::from_input(&input)
                 .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
@@ -3968,18 +3974,20 @@ impl EphemeralRuntimeDriver {
                 .as_ref()
                 .map(std::string::ToString::to_string),
         )? {
-            let existing_seed = self
-                .stored_input_state(&existing_id)
-                .ok_or_else(|| {
-                    RuntimeDriverError::Internal(format!(
-                        "generated idempotency authority references missing input {existing_id}"
-                    ))
-                })?
-                .seed;
+            let existing = self.stored_input_state(&existing_id).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "generated idempotency authority references missing input {existing_id}"
+                ))
+            })?;
+            crate::input_state::PromptReplayIdentity::verify_replay(
+                &existing.state,
+                input,
+                resolved.replay_policy(),
+            )?;
             return Ok(AcceptOutcome::Deduplicated {
                 input_id,
                 existing_id,
-                existing_seed,
+                existing_seed: existing.seed,
             });
         }
 
@@ -4839,7 +4847,7 @@ mod tests {
         driver.accept_input(second).await.unwrap();
 
         driver
-            .defer_queued_inputs_behind_backlog(std::slice::from_ref(&first_id))
+            .defer_queued_inputs_behind_backlog(std::slice::from_ref(&first_id), None)
             .unwrap();
 
         assert_eq!(
@@ -4893,7 +4901,7 @@ mod tests {
         );
 
         driver
-            .defer_queued_inputs_behind_backlog(&[poison_id.clone(), innocent_id.clone()])
+            .defer_queued_inputs_behind_backlog(&[poison_id.clone(), innocent_id.clone()], None)
             .expect(
                 "defer sweep must be total over batch members the machine already resolved \
                  terminally",
@@ -4960,7 +4968,7 @@ mod tests {
         );
 
         driver
-            .defer_queued_inputs_behind_backlog(&[applied_id.clone(), staged_id.clone()])
+            .defer_queued_inputs_behind_backlog(&[applied_id.clone(), staged_id.clone()], None)
             .expect("defer sweep must be total over boundary-applied batch members");
         assert_eq!(
             driver.input_phase(&applied_id),
@@ -4981,7 +4989,7 @@ mod tests {
 
         let untracked = InputId::new();
         driver
-            .defer_queued_inputs_behind_backlog(std::slice::from_ref(&untracked))
+            .defer_queued_inputs_behind_backlog(std::slice::from_ref(&untracked), None)
             .expect_err("an untracked input in the defer sweep is authority corruption");
     }
 

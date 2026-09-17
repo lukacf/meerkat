@@ -2579,7 +2579,19 @@ pub enum RealtimeTranscriptLaneKind {
 }
 
 /// Bridging copy of the catalog-owned live delegation reconciliation state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationReconciliation {
     #[default]
     Provisional,
@@ -2589,7 +2601,19 @@ pub enum LiveDelegationReconciliation {
 }
 
 /// Bridging copy of the catalog-owned live delegation worker lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationWorkerPhase {
     #[default]
     StartAuthorized,
@@ -2601,8 +2625,40 @@ pub enum LiveDelegationWorkerPhase {
     Failed,
 }
 
+/// Bridging copy of the catalog-owned delegation member custody.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveDelegationWorkerOwnership {
+    #[default]
+    OwnedMember,
+    ExistingMember,
+}
+
 /// Bridging copy of the machine-derived live delegation cancellation reason.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationCancellationReason {
     #[default]
     Abandoned,
@@ -2621,7 +2677,19 @@ pub enum LiveDelegationCancellationOutcome {
 }
 
 /// Bridging copy of the shell-observed worker terminal kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationWorkerTerminalKind {
     #[default]
     Completed,
@@ -2635,6 +2703,14 @@ pub enum LiveExecutionChannelPhase {
     Pending,
     Active,
     Revoked,
+}
+
+/// Attribution of observed assistant output, not proof of its causal prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveAssistantTurnOrigin {
+    #[default]
+    ForegroundCorrelated,
+    ProviderInitiated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -2735,14 +2811,21 @@ pub enum LiveContextAppendObservation {
     InterruptedByClose,
 }
 
-/// Bridging copy of SessionDocument's generated committed-row disposition.
+/// Source dispositions plus the runtime-owned causal reassertion disposition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveContextRowDisposition {
     #[default]
     MirrorParentText,
     AlreadyPresentInLiveChannel,
+    AssistantObservation,
     ExcludedFromLiveContext,
+    ReassertCausalTail,
 }
+
+pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
+    LiveContextDeliveryReadiness, LiveContextPayloadAvailability, LiveContextPreparationFailure,
+    LiveContextPreparationPhase,
+};
 
 /// Bridging copy of the catalog-owned delegation result disposition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

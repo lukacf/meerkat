@@ -982,6 +982,7 @@ impl MeerkatMachine {
                 session_id,
                 input,
                 register_completion,
+                replay_policy,
                 member_residency,
                 expected_attachment,
             } => {
@@ -1260,6 +1261,7 @@ impl MeerkatMachine {
                             return Err(error);
                         }
                     };
+                    let resolved = resolved.with_replay_policy(replay_policy);
                     let flags = resolved.coarse_flags();
                     let stages_run_boundary = resolved.stages_run_boundary();
                     self.preview_session_dsl_input(

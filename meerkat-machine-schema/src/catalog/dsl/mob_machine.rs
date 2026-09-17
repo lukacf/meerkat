@@ -1317,7 +1317,7 @@ macro_rules! mob_catalog_machine_dsl {
             ClassifyFlowStepDispatch { run_id: RunId, step_id: StepId, target: AgentIdentity, overlay_present: bool },
             SessionIngressDetachedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId },
             SessionIngressDetachFailedForMobDestroy { mob_id: MobId, agent_runtime_id: AgentRuntimeId, reason: String },
-            SubmitWork { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
+            SubmitWork { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin>, content_attribution: Enum<WorkContentAttribution> },
             ResolveSubmitWorkRejection { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, origin: Enum<WorkOrigin> },
             // Generated composition refusal closure. Each input is bound by
             // `meerkat_mob_seam` to one concrete routed effect kind; the shell
@@ -1741,8 +1741,8 @@ macro_rules! mob_catalog_machine_dsl {
             DefinitionEpochAdvanced { previous_epoch: u64, epoch: u64 },
             RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId },
             SpawnProfileAuthorized { agent_identity: AgentIdentity, profile_name: String, model: String, profile_material_digest: String, tool_config_digest: String, skills_digest: String, provider_params_digest: Option<String>, output_schema_digest: Option<String>, external_addressable: bool, resolved_spec_digest: Option<String> },
-            RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId, work_id: WorkId, origin: Enum<WorkOrigin> },
-            RequestPeerRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, work_id: WorkId, origin: Enum<WorkOrigin> },
+            RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, session_id: SessionId, work_id: WorkId, origin: Enum<WorkOrigin>, content_attribution: Enum<WorkContentAttribution> },
+            RequestPeerRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>, work_id: WorkId, origin: Enum<WorkOrigin>, content_attribution: Enum<WorkContentAttribution> },
             SubmitWorkRejected { agent_runtime_id: AgentRuntimeId, origin: Enum<WorkOrigin>, reason: Enum<SubmitWorkRejectReasonKind>, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken> },
             CancelAllWorkRejected { agent_runtime_id: AgentRuntimeId, reason: Enum<CancelAllWorkRejectReasonKind>, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken> },
             RequestRuntimeRetire { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, session_id: SessionId },
@@ -9786,7 +9786,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition SubmitWorkRunningExternal {
-            on input SubmitWork { agent_identity, agent_runtime_id, fence_token, work_id, origin }
+            on input SubmitWork { agent_identity, agent_runtime_id, fence_token, work_id, origin, content_attribution }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placed_completion_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
@@ -9810,12 +9810,13 @@ macro_rules! mob_catalog_machine_dsl {
                 generation: self.identity_runtime_generations.get_copied(agent_identity),
                 session_id: self.member_session_bindings.get_cloned(agent_identity).get("value"),
                 work_id: work_id,
-                origin: origin
+                origin: origin,
+                content_attribution: content_attribution
             }
         }
 
         transition SubmitWorkRunningExternalPeerOnly {
-            on input SubmitWork { agent_identity, agent_runtime_id, fence_token, work_id, origin }
+            on input SubmitWork { agent_identity, agent_runtime_id, fence_token, work_id, origin, content_attribution }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placed_completion_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
@@ -9835,12 +9836,13 @@ macro_rules! mob_catalog_machine_dsl {
                 fence_token: fence_token,
                 generation: self.identity_runtime_generations.get_copied(agent_identity),
                 work_id: work_id,
-                origin: origin
+                origin: origin,
+                content_attribution: content_attribution
             }
         }
 
         transition SubmitWorkRunningInternal {
-            on input SubmitWork { agent_identity, agent_runtime_id, fence_token, work_id, origin }
+            on input SubmitWork { agent_identity, agent_runtime_id, fence_token, work_id, origin, content_attribution }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placed_completion_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
@@ -9863,12 +9865,13 @@ macro_rules! mob_catalog_machine_dsl {
                 generation: self.identity_runtime_generations.get_copied(agent_identity),
                 session_id: self.member_session_bindings.get_cloned(agent_identity).get("value"),
                 work_id: work_id,
-                origin: origin
+                origin: origin,
+                content_attribution: content_attribution
             }
         }
 
         transition SubmitWorkRunningInternalPeerOnly {
-            on input SubmitWork { agent_identity, agent_runtime_id, fence_token, work_id, origin }
+            on input SubmitWork { agent_identity, agent_runtime_id, fence_token, work_id, origin, content_attribution }
             guard { self.lifecycle_phase == Phase::Running }
             guard "placed_completion_origin_open" { self.placed_completion_lifecycle_quiescing == false }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
@@ -9887,7 +9890,8 @@ macro_rules! mob_catalog_machine_dsl {
                 fence_token: fence_token,
                 generation: self.identity_runtime_generations.get_copied(agent_identity),
                 work_id: work_id,
-                origin: origin
+                origin: origin,
+                content_attribution: content_attribution
             }
         }
 
@@ -21998,6 +22002,19 @@ pub enum WorkOrigin {
     External,
     Internal,
     Ingest,
+}
+
+/// Work authorship carried unchanged from admission into the generated
+/// ingress effect. This is not a wire input or an acknowledgement policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WorkContentAttribution {
+    /// Ordinary work retains the member's configured delivery semantics.
+    #[default]
+    Conversational,
+    /// Private live execution instructions, never a human utterance.
+    InjectedExecutionContext,
+    /// An authenticated host explicitly submitted conversational human input.
+    HostHuman,
 }
 
 /// Typed runtime-mode override carried by generated spawn-policy resolution

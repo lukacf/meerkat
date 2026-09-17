@@ -1,6 +1,38 @@
 use super::*;
 use meerkat_core::time_compat::Instant;
 
+// This is a proposal from generated custody, validated atomically by the
+// recovery transition; provider ACK coverage is not canonical source coverage.
+fn known_live_context_canonical_cursor(
+    state: &crate::meerkat_machine::dsl::MeerkatMachineState,
+    channel: &str,
+) -> Result<u64, RuntimeDriverError> {
+    let acknowledged = state
+        .live_context_cursor_by_channel
+        .get(channel)
+        .copied()
+        .ok_or_else(|| RuntimeDriverError::ValidationFailed {
+            reason: "live context recovery has no acknowledged seed cursor".to_string(),
+        })?;
+    Ok(state
+        .live_context_queued_append_by_cursor
+        .keys()
+        .copied()
+        .chain(
+            state
+                .live_context_pending_channel_by_append
+                .iter()
+                .filter(|(_, owner)| owner.as_str() == channel)
+                .filter_map(|(append, _)| {
+                    state
+                        .live_context_pending_next_cursor_by_append
+                        .get(append)
+                        .copied()
+                }),
+        )
+        .fold(acknowledged, u64::max))
+}
+
 fn live_delegation_worker_binding_matches(
     state: &crate::meerkat_machine::dsl::MeerkatMachineState,
     runtime_id: &crate::identifiers::LogicalRuntimeId,
@@ -64,9 +96,120 @@ fn live_context_execution_binding_is_complete(
 mod live_context_mirror_tests {
     use super::*;
 
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn existing_member_delegation_custody_survives_two_cold_runtime_restarts() {
+        use crate::live_execution::{
+            LiveDelegationRecoveryPhase, LiveDelegationWorkerOwnership,
+            LiveDelegationWorkerTerminalKind,
+        };
+        let store: Arc<dyn crate::RuntimeStore> = Arc::new(crate::InMemoryRuntimeStore::new());
+        let session_id = SessionId::new();
+        let operation_id = {
+            let machine = crate::MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+            let _bindings = machine
+                .prepare_bindings(session_id.clone())
+                .await
+                .expect("bindings");
+            let admission = machine
+                .__test_admit_confirmed_live_delegation(
+                    &session_id,
+                    "existing-console-member",
+                    LiveDelegationWorkerOwnership::ExistingMember,
+                    "confirmed voice work",
+                )
+                .await
+                .expect("admit existing worker");
+            let binding = machine
+                .live_delegation_runtime_binding(
+                    &session_id,
+                    admission.operation().domain_correlation().channel_id(),
+                )
+                .await
+                .expect("binding");
+            machine
+                .resolve_live_delegation_worker_start(
+                    binding.runtime_id(),
+                    binding.fence_token(),
+                    binding.generation(),
+                    &admission,
+                    true,
+                )
+                .await
+                .expect("persist worker running");
+            admission.operation().operation_id().clone()
+        };
+        {
+            let restarted = crate::MeerkatMachine::persistent_without_blobs(Arc::clone(&store));
+            restarted
+                .register_session(session_id.clone())
+                .await
+                .expect("cold restore");
+            let snapshots = restarted
+                .live_delegation_recovery_snapshots(&session_id)
+                .await
+                .expect("read cold restored custody");
+            assert_eq!(snapshots.len(), 1);
+            let snapshot = &snapshots[0];
+            assert_eq!(snapshot.operation_id(), &operation_id);
+            assert_eq!(
+                snapshot.worker_ownership(),
+                LiveDelegationWorkerOwnership::ExistingMember
+            );
+            assert_eq!(snapshot.phase(), LiveDelegationRecoveryPhase::Running);
+            assert!(
+                !restarted
+                    .live_channel_is_active_for_session(&session_id, snapshot.channel_id(),)
+                    .await
+            );
+            restarted
+                .reconcile_revoked_live_delegation_worker_after_restart(
+                    snapshot,
+                    LiveDelegationWorkerTerminalKind::Completed,
+                )
+                .await
+                .expect("settle recovered work without provider capability");
+        }
+        let restarted = crate::MeerkatMachine::persistent_without_blobs(store);
+        restarted
+            .register_session(session_id.clone())
+            .await
+            .expect("second cold restore");
+        let snapshot = restarted
+            .live_delegation_recovery_snapshots(&session_id)
+            .await
+            .expect("settled custody")
+            .remove(0);
+        assert_eq!(
+            snapshot.worker_ownership(),
+            LiveDelegationWorkerOwnership::ExistingMember
+        );
+        assert_eq!(snapshot.phase(), LiveDelegationRecoveryPhase::Retired);
+        assert!(snapshot.late());
+        assert!(!snapshot.result_eligible());
+    }
+
     #[derive(Default)]
     struct RecordingMirrorHost {
+        runtime: Option<crate::MeerkatMachine>,
         appends: std::sync::Mutex<Vec<(String, String)>>,
+        append_kinds: std::sync::Mutex<Vec<crate::live_execution::LiveContextAppendKind>>,
+        bootstrap_barrier: Option<Arc<MirrorAppendBarrier>>,
+        bootstrap_outcome: Option<meerkat_core::LiveAppendDeliveryOutcome>,
+        first_append_barrier: Option<Arc<MirrorAppendBarrier>>,
+        committed: std::sync::Mutex<
+            Option<(
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+                String,
+            )>,
+        >,
+        first_read_barrier: Option<Arc<MirrorAppendBarrier>>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    struct MirrorAppendBarrier {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
     }
 
     #[derive(Default)]
@@ -79,6 +222,88 @@ mod live_context_mirror_tests {
 
     #[async_trait::async_trait]
     impl crate::live_context_mirror::LiveContextMirrorHost for RecordingMirrorHost {
+        async fn wait_bootstrap_control_ready(
+            &self,
+            _lease: &crate::live_execution::LiveContextPreparationLease,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn append_bootstrap_context(
+            &self,
+            authority: crate::live_execution::LiveContextBootstrapAppendAuthority,
+            context: String,
+        ) -> Result<
+            (
+                crate::live_execution::LiveContextBootstrapAppendAuthority,
+                meerkat_core::LiveAppendDeliveryOutcome,
+            ),
+            String,
+        > {
+            self.append_kinds
+                .lock()
+                .expect("append kinds")
+                .push(authority.kind());
+            self.appends
+                .lock()
+                .expect("append records")
+                .push((authority.channel_id().to_string(), context));
+            if let Some(barrier) = &self.bootstrap_barrier {
+                barrier.entered.notify_one();
+                barrier
+                    .release
+                    .acquire()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .forget();
+            }
+            if self
+                .bootstrap_outcome
+                .unwrap_or(meerkat_core::LiveAppendDeliveryOutcome::Acknowledged)
+                == meerkat_core::LiveAppendDeliveryOutcome::Acknowledged
+            {
+                self.runtime
+                    .as_ref()
+                    .ok_or("mock bootstrap ACK has no recorder")?
+                    .record_live_context_bootstrap_ack_cut(&authority)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok((
+                authority,
+                self.bootstrap_outcome
+                    .unwrap_or(meerkat_core::LiveAppendDeliveryOutcome::Acknowledged),
+            ))
+        }
+
+        async fn committed_boundary(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<
+            (
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+                String,
+            ),
+            String,
+        > {
+            if self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+                && let Some(barrier) = &self.first_read_barrier
+            {
+                barrier.entered.notify_one();
+                barrier
+                    .release
+                    .acquire()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .forget();
+            }
+            self.committed
+                .lock()
+                .map_err(|_| "committed fixture lock poisoned".to_string())?
+                .clone()
+                .ok_or_else(|| "fixture has no committed snapshot".to_string())
+        }
+
         async fn append_context(
             &self,
             authority: crate::live_execution::LiveContextAppendAuthority,
@@ -90,10 +315,27 @@ mod live_context_mirror_tests {
             ),
             String,
         > {
-            self.appends
+            self.append_kinds
                 .lock()
-                .map_err(|_| "append record lock poisoned".to_string())?
-                .push((authority.channel_id().to_string(), context));
+                .expect("append kinds")
+                .push(authority.kind());
+            let first = {
+                let mut appends = self
+                    .appends
+                    .lock()
+                    .map_err(|_| "append record lock poisoned".to_string())?;
+                appends.push((authority.channel_id().to_string(), context));
+                appends.len() == 1
+            };
+            if first && let Some(barrier) = &self.first_append_barrier {
+                barrier.entered.notify_one();
+                barrier
+                    .release
+                    .acquire()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .forget();
+            }
             Ok((
                 authority,
                 meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
@@ -219,6 +461,922 @@ mod live_context_mirror_tests {
             .await
             .expect("admit exact live channel");
         (machine, session_id, channel_id)
+    }
+
+    #[tokio::test]
+    async fn bootstrap_slow_ack_allows_media_and_commits_then_drains_exact_tail() {
+        use crate::live_execution::{LiveContextPreparationStage, LiveContextPreparationStatus};
+        let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        let lease = machine
+            .begin_live_context_preparation(&session_id, &channel_id, 1)
+            .await
+            .expect("reserve");
+        machine
+            .mark_live_context_preparation_generating(&lease)
+            .await
+            .expect("generate");
+        let barrier = Arc::new(MirrorAppendBarrier {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let host = Arc::new(RecordingMirrorHost {
+            runtime: Some(machine.clone()),
+            bootstrap_barrier: Some(barrier.clone()),
+            ..Default::default()
+        });
+        let mut delivery = Box::pin({
+            let machine = machine.clone();
+            let lease = lease.clone();
+            async move {
+                machine
+                    .deliver_live_context_preparation(&lease, "frozen historical prefix".into())
+                    .await
+            }
+        });
+        assert!(
+            futures::poll!(&mut delivery).is_pending(),
+            "fast summary waits for media binding before requiring the host"
+        );
+        let delivery = tokio::spawn(delivery);
+        machine.set_live_context_mirror_host(host.clone());
+        bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            barrier.entered.notified(),
+        )
+        .await
+        .expect("append began");
+        assert_eq!(
+            machine
+                .live_context_preparation_status(&session_id, &channel_id)
+                .await
+                .expect("status"),
+            LiveContextPreparationStatus::Preparing(LiveContextPreparationStage::Delivering)
+        );
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("old source"),
+        ));
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("new typed correction"),
+        ));
+        let mut spoken =
+            meerkat_core::UserMessage::text("spoken correction while history is pending");
+        let spoken_observation = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pre-ACK spoken admission")
+            .observation_id()
+            .clone();
+        spoken.identity.realtime_origin = Some(
+            serde_json::from_value(serde_json::json!({
+                "session_id": session_id,
+                "channel_id": channel_id,
+                "canonical_row_sequence": 3,
+                "context_observation_id": spoken_observation
+            }))
+            .expect("stored exact live origin"),
+        );
+        session.push(meerkat_core::Message::User(spoken));
+        let assistant_observation = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pre-ACK assistant admission")
+            .observation_id()
+            .clone();
+        let mut assistant_snapshot = meerkat_core::types::BlockAssistantMessage::snapshot(vec![
+            meerkat_core::AssistantBlock::Transcript {
+                text: "unmeasured assistant snapshot".into(),
+                source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                meta: None,
+            },
+        ]);
+        assistant_snapshot.identity.realtime_origin = Some(
+            serde_json::from_value(serde_json::json!({
+                "session_id": session_id, "channel_id": channel_id, "canonical_row_sequence": 4,
+                "context_observation_id": assistant_observation
+            }))
+            .expect("assistant source origin"),
+        );
+        session.push(meerkat_core::Message::BlockAssistant(assistant_snapshot));
+        let mut non_text = meerkat_core::UserMessage::text("   ");
+        non_text.identity.realtime_origin = Some(
+            serde_json::from_value(serde_json::json!({
+                "session_id": session_id,
+                "channel_id": channel_id,
+                "canonical_row_sequence": 5
+            }))
+            .expect("exact no-payload native origin"),
+        );
+        session.push(meerkat_core::Message::User(non_text));
+        let mut mixed = meerkat_core::types::BlockAssistantMessage::snapshot(vec![
+            meerkat_core::AssistantBlock::Text {
+                text: "written companion".into(),
+                meta: None,
+            },
+            meerkat_core::AssistantBlock::Transcript {
+                text: "unmeasured companion".into(),
+                source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                meta: None,
+            },
+        ]);
+        let mixed_observation = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pre-ACK mixed admission")
+            .observation_id()
+            .clone();
+        mixed.identity.realtime_origin = Some(
+            serde_json::from_value(serde_json::json!({
+                "session_id": session_id,
+                "channel_id": channel_id,
+                "canonical_row_sequence": 6,
+                "context_observation_id": mixed_observation
+            }))
+            .expect("exact mixed native origin"),
+        );
+        session.push(meerkat_core::Message::BlockAssistant(mixed));
+        assert_eq!(
+            session.messages().len(),
+            6,
+            "one canonical turn per source input"
+        );
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("committed session");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            machine.enqueue_committed_parent_session_boundary(
+                &session_id,
+                &committed,
+                "store-tail",
+            ),
+        )
+        .await
+        .expect("summary I/O holds no projection lock")
+        .expect("queue exact tail");
+        {
+            let queued = machine
+                .shared
+                .live_context_queued_rows
+                .lock()
+                .expect("queued rows");
+            let non_text = queued
+                .get(&(session_id.clone(), 5))
+                .expect("no-payload row");
+            assert_eq!(non_text.row().disposition(), meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel);
+            assert!(!non_text.is_causal_reassertion());
+            assert!(non_text.provider_context().is_none());
+        }
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_cursor_by_channel[channel_id.as_str()],
+            0
+        );
+        assert_eq!(host.appends.lock().expect("records").len(), 1);
+        barrier.release.add_permits(1);
+        delivery.await.expect("delivery task").expect("ACK");
+        machine
+            .wait_live_context_ready_for_results(&session_id, &channel_id)
+            .await
+            .expect("summary + tail");
+        {
+            let records = host.appends.lock().expect("records");
+            assert_eq!(records.len(), 5);
+            assert_eq!(records[0].1, "frozen historical prefix");
+            assert!(records[1].1.contains("new typed correction"));
+            assert!(!records[1].1.contains("old source"));
+            assert!(
+                records[2]
+                    .1
+                    .contains("spoken correction while history is pending")
+            );
+            assert!(records[3].1.contains("unmeasured assistant snapshot"));
+            assert!(records[3].1.contains("spoken_unmeasured"));
+            assert!(records[4].1.contains("written companion"));
+            assert!(records[4].1.contains("unmeasured companion"));
+            assert!(records[4].1.contains("spoken_unmeasured"));
+        }
+        assert_eq!(
+            *host.append_kinds.lock().expect("append kinds"),
+            [
+                crate::live_execution::LiveContextAppendKind::HistoryBootstrap,
+                crate::live_execution::LiveContextAppendKind::Ordinary,
+                crate::live_execution::LiveContextAppendKind::CausalReassertion,
+                crate::live_execution::LiveContextAppendKind::CausalReassertion,
+                crate::live_execution::LiveContextAppendKind::CausalReassertion,
+            ]
+        );
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_cursor_by_channel[channel_id.as_str()],
+            6
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_owner_close_cancels_generation_and_fences_late_delivery() {
+        use crate::live_execution::{LiveContextPreparationFailure, LiveContextPreparationStatus};
+        let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        let lease = machine
+            .begin_live_context_preparation(&session_id, &channel_id, 8)
+            .await
+            .expect("reserve");
+        let old_source = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pending source admission");
+        assert_eq!(old_source.ordinal(), 1);
+        machine
+            .mark_live_context_preparation_generating(&lease)
+            .await
+            .expect("generating");
+        bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        let append = machine
+            .authorize_live_context_bootstrap_append(&lease, "old summary")
+            .await
+            .expect("sealed send");
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AbandonLiveOpenAdmission {
+                    session_id: session_id.to_string(),
+                    channel_id: channel_id.to_string(),
+                },
+                "test:close-bootstrap",
+            )
+            .await
+            .expect("close");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            lease.cancellation_token().cancelled(),
+        )
+        .await
+        .expect("job cancellation signalled");
+        assert_eq!(
+            machine
+                .live_context_preparation_status(&session_id, &channel_id)
+                .await
+                .expect("status"),
+            LiveContextPreparationStatus::Failed(LiveContextPreparationFailure::Cancelled)
+        );
+        let replacement = meerkat_core::LiveChannelId::new("replacement-bootstrap");
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: "experimental-realtime-model".into(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        machine
+            .resolve_live_open_admission(&session_id, &replacement, &identity)
+            .await
+            .expect("reopen");
+        machine
+            .resolve_live_execution_mode_admission(
+                &session_id,
+                &replacement,
+                "test-function-bridge",
+                meerkat_core::LiveExecutionMode::FunctionBridge,
+                meerkat_core::LiveExecutionCapabilities {
+                    function_bridge: true,
+                    client_context: false,
+                },
+            )
+            .await
+            .expect("mode");
+        let (_, new_lease) = machine
+            .stage_experimental_live_execution_with_preparation(&session_id, &replacement, 10)
+            .await
+            .expect("new exact reservation");
+        assert!(
+            machine
+                .record_live_context_observation(&new_lease, old_source.observation_id().clone())
+                .await
+                .is_err(),
+            "an old scoped identifier cannot become a new-channel admission"
+        );
+        let new_source = machine
+            .record_live_context_observation(&new_lease, new_lease.new_observation_id())
+            .await
+            .expect("new pending scope");
+        assert_eq!(new_source.ordinal(), 1);
+        bind_experimental_live_machine(&machine, &session_id, &replacement, 0).await;
+        assert!(
+            machine
+                .record_live_context_bootstrap_ack_cut(&append)
+                .await
+                .is_err()
+        );
+        assert!(
+            machine
+                .resolve_live_context_bootstrap_append(
+                    &append,
+                    meerkat_core::LiveAppendDeliveryOutcome::Acknowledged
+                )
+                .await
+                .is_err()
+        );
+        assert!(!new_lease.cancellation_token().is_cancelled());
+        assert_eq!(
+            machine
+                .live_context_preparation_status(&session_id, &replacement)
+                .await
+                .expect("new channel status"),
+            LiveContextPreparationStatus::Preparing(
+                crate::live_execution::LiveContextPreparationStage::Capturing
+            )
+        );
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("replacement state")
+                .live_context_cursor_by_channel[replacement.as_str()],
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_recovery_ack_retires_only_covered_rows_and_unblocks_results() {
+        use crate::live_execution::{
+            LiveContextAppendKind, LiveContextPreparationStage, LiveContextPreparationStatus,
+        };
+        let (machine, session_id, old_channel) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &old_channel, 0).await;
+        let old_lease = machine
+            .begin_live_context_preparation(&session_id, &old_channel, 0)
+            .await
+            .expect("initial reservation");
+        machine
+            .mark_live_context_preparation_generating(&old_lease)
+            .await
+            .expect("initial generator");
+        bind_experimental_live_machine(&machine, &session_id, &old_channel, 0).await;
+        let bootstrap = machine
+            .authorize_live_context_bootstrap_append(&old_lease, "initial summary")
+            .await
+            .expect("initial summary authority");
+        let causal_observation = machine
+            .record_live_context_observation(&old_lease, old_lease.new_observation_id())
+            .await
+            .expect("pre-ACK causal source")
+            .observation_id()
+            .clone();
+        machine
+            .record_live_context_bootstrap_ack_cut(&bootstrap)
+            .await
+            .expect("initial native ACK cut");
+        machine
+            .resolve_live_context_bootstrap_append(
+                &bootstrap,
+                meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+            )
+            .await
+            .expect("initial summary ACK");
+        let old_binding = machine
+            .live_delegation_runtime_binding(&session_id, &old_channel)
+            .await
+            .expect("old binding");
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        let mut causal = meerkat_core::UserMessage::text("failed causal correction");
+        causal.identity.realtime_origin = Some(
+            serde_json::from_value(serde_json::json!({
+                "session_id": session_id, "channel_id": old_channel, "canonical_row_sequence": 1,
+                "context_observation_id": causal_observation
+            }))
+            .expect("causal origin"),
+        );
+        session.push(meerkat_core::Message::User(causal));
+        for text in ["covered old second row", "covered old third row"] {
+            session.push(meerkat_core::Message::User(
+                meerkat_core::UserMessage::text(text),
+            ));
+        }
+        let committed = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(
+            Arc::new(session.clone()),
+        )
+        .expect("old canonical prefix");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &committed, "old-prefix")
+            .await
+            .expect("queue old prefix");
+        let ambiguous_host = Arc::new(AmbiguousMirrorHost::default());
+        machine.set_live_context_mirror_host(ambiguous_host.clone());
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &old_channel)
+            .await
+            .expect("causal ambiguity");
+        let (replacement, failed_append) = {
+            let appends = ambiguous_host.appends.lock().expect("appends");
+            assert_eq!(appends.len(), 1);
+            assert_eq!(appends[0].kind(), LiveContextAppendKind::CausalReassertion);
+            let recoveries = ambiguous_host.recoveries.lock().expect("recoveries");
+            assert_eq!(recoveries[0].2, 3);
+            (
+                meerkat_core::LiveChannelId::new(&recoveries[0].1),
+                appends[0].append_id().to_string(),
+            )
+        };
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AbandonLiveOpenAdmission {
+                    session_id: session_id.to_string(),
+                    channel_id: old_channel.to_string(),
+                },
+                "test:close-ambiguous-source",
+            )
+            .await
+            .expect("close old channel");
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: "experimental-realtime-model".into(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        machine
+            .resolve_live_open_admission(&session_id, &replacement, &identity)
+            .await
+            .expect("replacement open");
+        machine
+            .resolve_live_execution_mode_admission(
+                &session_id,
+                &replacement,
+                "test-function-bridge",
+                meerkat_core::LiveExecutionMode::FunctionBridge,
+                meerkat_core::LiveExecutionCapabilities {
+                    function_bridge: true,
+                    client_context: false,
+                },
+            )
+            .await
+            .expect("replacement mode");
+        let (stage, lease) = machine
+            .stage_experimental_live_execution_with_preparation(&session_id, &replacement, 3)
+            .await
+            .expect("reserve full captured prefix");
+        assert_eq!(
+            machine
+                .shared
+                .live_context_queued_rows
+                .lock()
+                .expect("payload custody")
+                .len(),
+            2,
+            "reservation retains old payload custody"
+        );
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_queued_append_by_cursor
+                .len(),
+            2
+        );
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("new tail beyond capture"),
+        ));
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("new tail");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &committed, "new-tail")
+            .await
+            .expect("queue beyond capture");
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterLivePlaybackOwner {
+                    session_id: session_id.to_string(),
+                    channel_id: replacement.to_string(),
+                    runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                        old_binding.runtime_id(),
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken(old_binding.fence_token()),
+                    generation: crate::meerkat_machine::dsl::Generation(old_binding.generation()),
+                    owner_id: "replacement-owner".into(),
+                    readiness_id: "replacement-ready".into(),
+                    pending_receipt: stage.pending_receipt().into(),
+                },
+                "test:replacement-playback",
+            )
+            .await
+            .expect("playback readiness");
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::BindLiveContextRecoveryChannel {
+                    session_id: session_id.to_string(),
+                    closing_channel_id: old_channel.to_string(),
+                    replacement_channel_id: replacement.to_string(),
+                    answer_observation_sequence: 1,
+                    runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                        old_binding.runtime_id(),
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken(old_binding.fence_token()),
+                    generation: crate::meerkat_machine::dsl::Generation(old_binding.generation()),
+                    append_id: failed_append,
+                    canonical_seed_cursor: 0,
+                    activation_receipt: "replacement-activation".into(),
+                },
+                "test:replacement-bind-zero",
+            )
+            .await
+            .expect("empty media activation");
+        assert_eq!(
+            machine
+                .shared
+                .live_context_queued_rows
+                .lock()
+                .expect("payload custody")
+                .len(),
+            3,
+            "bind zero retains both covered prefix and newer tail"
+        );
+        machine
+            .mark_live_context_preparation_generating(&lease)
+            .await
+            .expect("replacement generator");
+        let barrier = Arc::new(MirrorAppendBarrier {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let host = Arc::new(RecordingMirrorHost {
+            runtime: Some(machine.clone()),
+            bootstrap_barrier: Some(barrier.clone()),
+            ..Default::default()
+        });
+        machine.set_live_context_mirror_host(host.clone());
+        let delivery = tokio::spawn({
+            let machine = machine.clone();
+            async move {
+                machine
+                    .deliver_live_context_preparation(&lease, "summary covers old prefix".into())
+                    .await
+            }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            barrier.entered.notified(),
+        )
+        .await
+        .expect("replacement summary append starts");
+        assert_eq!(
+            machine
+                .live_context_preparation_status(&session_id, &replacement)
+                .await
+                .expect("status"),
+            LiveContextPreparationStatus::Preparing(LiveContextPreparationStage::Delivering)
+        );
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_cursor_by_channel[replacement.as_str()],
+            0
+        );
+        assert_eq!(
+            machine
+                .shared
+                .live_context_queued_rows
+                .lock()
+                .expect("payload custody")
+                .len(),
+            3
+        );
+        barrier.release.add_permits(1);
+        delivery.await.expect("delivery task").expect("summary ACK");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            machine.wait_live_context_ready_for_results(&session_id, &replacement),
+        )
+        .await
+        .expect("result readiness does not stall on old covered rows")
+        .expect("ready");
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("final state");
+        assert_eq!(
+            state.live_context_cursor_by_channel[replacement.as_str()],
+            4
+        );
+        assert!(state.live_context_queued_append_by_cursor.is_empty());
+        assert!(state.live_context_queued_session_by_append.is_empty());
+        assert!(state.live_context_queued_cursor_by_append.is_empty());
+        assert!(state.live_context_queued_digest_by_append.is_empty());
+        assert!(state.live_context_queued_commit_token_by_append.is_empty());
+        assert!(state.live_context_queued_disposition_by_append.is_empty());
+        assert!(
+            machine
+                .shared
+                .live_context_queued_rows
+                .lock()
+                .expect("payload custody")
+                .is_empty()
+        );
+        let appends = host.appends.lock().expect("replacement appends");
+        assert_eq!(appends.len(), 2);
+        assert_eq!(appends[0].1, "summary covers old prefix");
+        assert!(appends[1].1.contains("new tail beyond capture"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_owner_ambiguous_ack_is_failed_without_delivered_cursor() {
+        use crate::live_execution::{LiveContextPreparationFailure, LiveContextPreparationStatus};
+        let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        let lease = machine
+            .begin_live_context_preparation(&session_id, &channel_id, 4)
+            .await
+            .expect("reserve");
+        machine
+            .mark_live_context_preparation_generating(&lease)
+            .await
+            .expect("generate");
+        bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        machine.set_live_context_mirror_host(Arc::new(RecordingMirrorHost {
+            bootstrap_outcome: Some(meerkat_core::LiveAppendDeliveryOutcome::Ambiguous),
+            ..Default::default()
+        }));
+        machine
+            .deliver_live_context_preparation(&lease, "captured summary".into())
+            .await
+            .expect("typed failed outcome recorded");
+        assert_eq!(
+            machine
+                .live_context_preparation_status(&session_id, &channel_id)
+                .await
+                .expect("status"),
+            LiveContextPreparationStatus::Failed(LiveContextPreparationFailure::DeliveryAmbiguous)
+        );
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_cursor_by_channel[channel_id.as_str()],
+            0
+        );
+        assert!(
+            machine
+                .wait_live_context_ready_for_results(&session_id, &channel_id)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn observation_cut_survives_deferred_materialization_and_late_resolution() {
+        let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        let lease = machine
+            .begin_live_context_preparation(&session_id, &channel_id, 0)
+            .await
+            .expect("lease");
+        bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        machine
+            .mark_live_context_preparation_generating(&lease)
+            .await
+            .expect("generate");
+        let pre = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pre source");
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        let held = session.append_realtime_transcript_event(
+            meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "delayed-live".into(),
+                previous_item_id: Some("prerequisite".into()),
+                content_index: 0,
+                text: "pre-cut live correction".into(),
+            }
+            .with_context_observation(Some(pre.observation_id().clone())),
+        );
+        assert!(held.materialized_messages.is_empty());
+        let pre_assistant = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("pre assistant source");
+        let interaction_id = meerkat_core::InteractionId::new();
+        for event in [
+            meerkat_core::RealtimeTranscriptEvent::ContextObservationBound {
+                channel_id: channel_id.clone(),
+                item_id: "deferred-assistant".into(),
+                observation_id: pre_assistant.observation_id().clone(),
+            },
+            meerkat_core::RealtimeTranscriptEvent::ItemObserved {
+                item_id: "deferred-assistant".into(),
+                previous_item_id: Some("delayed-live".into()),
+                role: meerkat_core::RealtimeTranscriptRole::Assistant,
+                response_id: Some("observed-response".into()),
+            },
+            meerkat_core::RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted {
+                channel_id: channel_id.to_string(),
+                interaction_id,
+                response_id: "observed-response".into(),
+                item_id: "deferred-assistant".into(),
+                content_index: 0,
+            },
+            meerkat_core::RealtimeTranscriptEvent::AssistantUnmeasuredSnapshotCommitted {
+                channel_id: channel_id.to_string(),
+                interaction_id,
+                response_id: "observed-response".into(),
+                item_id: "deferred-assistant".into(),
+                content_index: 0,
+                text: "pre-cut unmeasured speech".into(),
+                evidence: meerkat_core::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(
+                    "pre-cut unmeasured speech".into(),
+                ),
+            },
+        ] {
+            assert!(
+                session
+                    .append_realtime_transcript_event(event)
+                    .materialized_messages
+                    .is_empty()
+            );
+        }
+        let summary = machine
+            .authorize_live_context_bootstrap_append(&lease, "exact historical summary")
+            .await
+            .expect("summary");
+        machine
+            .record_live_context_bootstrap_ack_cut(&summary)
+            .await
+            .expect("ACK intake cut");
+        let post = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("source after ACK before resolve");
+        let replay = machine
+            .record_live_context_observation(&lease, pre.observation_id().clone())
+            .await
+            .expect("source replay");
+        assert_eq!(replay.ordinal(), pre.ordinal());
+        assert!(post.ordinal() > pre_assistant.ordinal());
+        machine
+            .record_live_context_bootstrap_ack_cut(&summary)
+            .await
+            .expect("ACK replay keeps cut");
+        machine
+            .resolve_live_context_bootstrap_append(
+                &summary,
+                meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+            )
+            .await
+            .expect("late resolution");
+        session.append_realtime_transcript_event(
+            meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "prerequisite".into(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "ordinary prerequisite".into(),
+            },
+        );
+        session.append_realtime_transcript_event(
+            meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "fresh-live".into(),
+                previous_item_id: Some("delayed-live".into()),
+                content_index: 0,
+                text: "fresh already heard output".into(),
+            }
+            .with_context_observation(Some(post.observation_id().clone())),
+        );
+        // Fresh assistant output after the cut: the provider produced it after
+        // acknowledging the summary, so it is excluded from live context and
+        // must never be reasserted (the 73a0b869 self-echo).
+        let post_assistant = machine
+            .record_live_context_observation(&lease, lease.new_observation_id())
+            .await
+            .expect("post assistant source");
+        // The deferred pre-cut target is still the channel's single active
+        // playback target here, so the fresh output is modelled as a
+        // provider-final assistant item (R5-7) rather than a second target.
+        for event in [
+            meerkat_core::RealtimeTranscriptEvent::ContextObservationBound {
+                channel_id: channel_id.clone(),
+                item_id: "fresh-assistant".into(),
+                observation_id: post_assistant.observation_id().clone(),
+            },
+            meerkat_core::RealtimeTranscriptEvent::ItemObserved {
+                item_id: "fresh-assistant".into(),
+                previous_item_id: Some("fresh-live".into()),
+                role: meerkat_core::RealtimeTranscriptRole::Assistant,
+                response_id: Some("fresh-response".into()),
+            },
+            meerkat_core::RealtimeTranscriptEvent::AssistantTranscriptFinalText {
+                response_id: "fresh-response".into(),
+                item_id: "fresh-assistant".into(),
+                content_index: 0,
+                text: "fresh assistant speech after ack".into(),
+            },
+            meerkat_core::RealtimeTranscriptEvent::AssistantTurnCompleted {
+                response_id: "fresh-response".into(),
+                stop_reason: meerkat_core::StopReason::EndTurn,
+                usage: meerkat_core::types::TurnUsage::host_declared(
+                    meerkat_core::Provider::OpenAI,
+                    "gpt-live-1",
+                    meerkat_core::Usage::default(),
+                ),
+            },
+        ] {
+            session.append_realtime_transcript_event(event);
+        }
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("commit");
+        machine
+            .enqueue_committed_live_transcript_boundary(&session_id, &committed, "after-cut-commit")
+            .await
+            .expect("delayed notification");
+        {
+            let rows = machine
+                .shared
+                .live_context_queued_rows
+                .lock()
+                .expect("rows");
+            assert!(rows[&(session_id.clone(), 2)].is_causal_reassertion());
+            assert!(rows[&(session_id.clone(), 3)].is_causal_reassertion());
+            assert!(!rows[&(session_id.clone(), 4)].is_causal_reassertion());
+            assert!(rows[&(session_id.clone(), 4)].provider_context().is_none());
+            assert!(!rows[&(session_id.clone(), 5)].is_causal_reassertion());
+            assert!(rows[&(session_id.clone(), 5)].provider_context().is_none());
+        }
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+            .await
+            .expect("ordered drain");
+        {
+            let appends = host.appends.lock().expect("appends");
+            assert_eq!(appends.len(), 3);
+            assert!(appends[0].1.contains("ordinary prerequisite"));
+            assert!(appends[1].1.contains("pre-cut live correction"));
+            assert!(appends[2].1.contains("pre-cut unmeasured speech"));
+            assert!(appends[2].1.contains("spoken_unmeasured"));
+            assert!(
+                !appends
+                    .iter()
+                    .any(|(_, text)| text.contains("fresh already heard output"))
+            );
+            assert!(
+                !appends
+                    .iter()
+                    .any(|(_, text)| text.contains("fresh assistant speech after ack")),
+                "fresh post-ack assistant output must never echo back as thinking context"
+            );
+        }
+        let other_session = SessionId::new();
+        assert!(
+            machine
+                .record_live_context_observation(
+                    &lease,
+                    meerkat_core::LiveContextObservationId::new(
+                        other_session.to_string(),
+                        channel_id.clone()
+                    )
+                )
+                .await
+                .is_err(),
+            "foreign namespace is not an admitted source"
+        );
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AbandonLiveOpenAdmission {
+                    session_id: session_id.to_string(),
+                    channel_id: channel_id.to_string(),
+                },
+                "test:close-observation-scope",
+            )
+            .await
+            .expect("close");
+        assert!(
+            machine
+                .record_live_context_observation(&lease, pre.observation_id().clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            machine
+                .record_live_context_bootstrap_ack_cut(&summary)
+                .await
+                .is_err()
+        );
     }
 
     async fn prepared_experimental_live_machine() -> (
@@ -436,6 +1594,7 @@ mod live_context_mirror_tests {
                     operation_id: dsl_operation_id.clone(),
                     provider_turn_correlation: "provider-client-context-restart".to_string(),
                     worker_identity: worker_identity.clone(),
+                    worker_ownership: crate::live_execution::LiveDelegationWorkerOwnership::OwnedMember,
                 },
                 "test:AuthorizeClientContextWorkerStart",
             ),
@@ -546,6 +1705,7 @@ mod live_context_mirror_tests {
             operation_id.clone(),
             interaction_id,
             format!("{worker_identity}-mismatch"),
+            revoked.worker_ownership(),
             revoked.phase(),
             revoked.terminal(),
             revoked.late(),
@@ -2172,6 +3332,7 @@ mod live_context_mirror_tests {
         let handle = LiveAssistantOutputHandle {
             binding: binding.clone(),
             interaction_id: meerkat_core::InteractionId::new(),
+            origin: crate::meerkat_machine::dsl::LiveAssistantTurnOrigin::ForegroundCorrelated,
             assistant_turn_ref: assistant_turn_ref.to_string(),
             playback_segment: 0,
             output_id: output_id.to_string(),
@@ -2476,6 +3637,541 @@ mod live_context_mirror_tests {
     }
 
     #[tokio::test]
+    async fn overlapping_live_and_delayed_parent_commits_do_not_reauthorize_pending_context() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let machine = Arc::new(machine);
+        let barrier = Arc::new(MirrorAppendBarrier {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let host = Arc::new(RecordingMirrorHost {
+            first_append_barrier: Some(Arc::clone(&barrier)),
+            ..Default::default()
+        });
+        machine.set_live_context_mirror_host(host.clone());
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("delayed background peer result"),
+        ));
+        let committed = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(
+            Arc::new(session.clone()),
+        )
+        .expect("seal parent boundary");
+        let sending_machine = Arc::clone(&machine);
+        let sending_session = session_id.clone();
+        let sending = tokio::spawn(async move {
+            sending_machine
+                .enqueue_committed_parent_session_boundary(
+                    &sending_session,
+                    &committed,
+                    "parent-commit-before-delivery",
+                )
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            barrier.entered.notified(),
+        )
+        .await
+        .expect("first append is authorized and awaiting provider acknowledgement");
+        assert!(
+            sending.is_finished(),
+            "canonical commit must not await provider ACK"
+        );
+
+        session.append_realtime_transcript_event_for_channel(
+            meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "voice-overlap".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "voice row already present in provider".to_string(),
+            },
+            channel_id.clone(),
+        );
+        let voice = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(
+            session.clone(),
+        ))
+        .expect("seal concurrent voice boundary");
+        machine
+            .enqueue_committed_live_transcript_boundary(
+                &session_id,
+                &voice,
+                "voice-commit-during-pending-append",
+            )
+            .await
+            .expect("concurrent committed voice projection must defer, not fail its guard");
+
+        let observing_machine = Arc::clone(&machine);
+        let observing_session = session_id.clone();
+        let observer = tokio::spawn(async move {
+            observing_machine
+                .drain_live_context_outbox(&observing_session)
+                .await
+        });
+        tokio::task::yield_now().await;
+        observer.abort();
+        assert!(
+            observer
+                .await
+                .expect_err("cancel drain observer only")
+                .is_cancelled()
+        );
+        barrier.release.add_permits(1);
+        sending
+            .await
+            .expect("sending task")
+            .expect("original append completes");
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect("drain deferred voice coverage");
+        assert_eq!(host.appends.lock().expect("appends").len(), 1);
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_cursor_by_channel
+                .get(channel_id.as_str()),
+            Some(&2)
+        );
+
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text(
+                "later asynchronous background update after initial work",
+            ),
+        ));
+        let later =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("seal later boundary");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &later, "later-peer-commit")
+            .await
+            .expect("later background update remains deliverable");
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect("drain delayed context");
+        assert_eq!(host.appends.lock().expect("appends").len(), 2);
+        assert_eq!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_context_cursor_by_channel
+                .get(channel_id.as_str()),
+            Some(&3)
+        );
+    }
+
+    #[tokio::test]
+    async fn context_append_authorization_defers_at_a_new_provider_turn_without_reminting() {
+        assert_context_append_authorization_defers_without_reminting(false).await;
+    }
+
+    #[tokio::test]
+    async fn bootstrap_readiness_ignores_deferred_replay_and_wakes_on_provider_progress() {
+        assert_context_append_authorization_defers_without_reminting(true).await;
+    }
+
+    async fn assert_context_append_authorization_defers_without_reminting(concurrent: bool) {
+        use crate::live_execution::LiveContextAppendAdmission;
+        let (machine, session_id, channel_id, lease) = if concurrent {
+            let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
+            stage_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+            let lease = machine
+                .begin_live_context_preparation(&session_id, &channel_id, 0)
+                .await
+                .expect("reserve");
+            machine
+                .mark_live_context_preparation_generating(&lease)
+                .await
+                .expect("generate");
+            bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+            let append = machine
+                .authorize_live_context_bootstrap_append(&lease, "empty source summary")
+                .await
+                .expect("authorize");
+            machine
+                .record_live_context_bootstrap_ack_cut(&append)
+                .await
+                .expect("ACK cut");
+            machine
+                .resolve_live_context_bootstrap_append(
+                    &append,
+                    meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+                )
+                .await
+                .expect("acknowledge");
+            (machine, session_id, channel_id, Some(lease))
+        } else {
+            let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+            (machine, session_id, channel_id, None)
+        };
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("typed background update"),
+        ));
+        let committed =
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("seal canonical background update");
+        machine
+            .enqueue_committed_parent_session_boundary(&session_id, &committed, "store-commit")
+            .await
+            .expect("enqueue without provider host");
+        let queued = machine
+            .shared
+            .live_context_queued_rows
+            .lock()
+            .expect("queued")
+            .get(&(session_id.clone(), 1))
+            .expect("exact row")
+            .clone();
+        let binding = queued.binding();
+        let provider_binding = meerkat_live::ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(binding.generation()),
+            meerkat_live::LiveRuntimeBindingFence::new(binding.fence_token()),
+        );
+        let turn = meerkat_live::LiveSidebandTurnRef::__from_provider_observation(
+            &channel_id,
+            "new-user-turn".into(),
+            "private-user-turn".into(),
+        )
+        .expect("turn");
+        machine
+            .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding.clone(),
+                meerkat_live::LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("new provider turn wins after row selection");
+        let mut readiness_changed = lease
+            .as_ref()
+            .map(|lease| Box::pin(lease.cancellation.changed.notified()));
+        assert!(matches!(
+            machine
+                .authorize_queued_live_context_append(&queued)
+                .await
+                .expect("typed deferral"),
+            LiveContextAppendAdmission::Deferred
+        ));
+        if let Some(changed) = readiness_changed.as_mut() {
+            assert!(
+                futures::poll!(changed).is_pending(),
+                "no-op deferral must not self-wake the barrier"
+            );
+        }
+        machine
+            .observe_live_provider_turn_finished(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: "new spoken input".into(),
+                },
+            ))
+            .await
+            .expect("finish exact provider turn");
+        if let Some(changed) = readiness_changed.as_mut() {
+            assert!(
+                futures::poll!(changed).is_ready(),
+                "actual provider progress wakes the barrier"
+            );
+        }
+        let LiveContextAppendAdmission::Authorized(authority) = machine
+            .authorize_queued_live_context_append(&queued)
+            .await
+            .expect("authorized after finish")
+        else {
+            panic!("safe boundary must authorize exact queue head")
+        };
+        assert!(matches!(
+            machine
+                .authorize_queued_live_context_append(&queued)
+                .await
+                .expect("pending replay"),
+            LiveContextAppendAdmission::Deferred
+        ));
+        machine
+            .resolve_live_context_append(
+                binding.runtime_id(),
+                binding.fence_token(),
+                binding.generation(),
+                &authority,
+                meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+            )
+            .await
+            .expect("delivery receipt");
+        assert!(matches!(
+            machine
+                .authorize_queued_live_context_append(&queued)
+                .await
+                .expect("delivered replay"),
+            LiveContextAppendAdmission::AlreadyCovered
+        ));
+        // A different channel cannot use the delivered-append set as authority.
+        let conflict = crate::live_execution::LiveContextQueuedRow::from_generated_effect(
+            &crate::live_execution::LiveDelegationRuntimeBinding::new(
+                session_id.clone(),
+                meerkat_core::LiveChannelId::new("wrong-channel"),
+                binding.runtime_id().clone(),
+                binding.fence_token(),
+                binding.generation(),
+            ),
+            queued.append_id(),
+            queued.row().clone(),
+            &crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveContextRowQueued {
+                session_id: session_id.to_string(),
+                channel_id: "wrong-channel".into(),
+                append_id: queued.append_id().into(),
+                canonical_cursor: 1,
+                disposition:
+                    crate::meerkat_machine::dsl::LiveContextRowDisposition::MirrorParentText,
+            },
+        )
+        .expect("test emitted exact foreign binding")
+        .expect("foreign row");
+        assert!(
+            machine
+                .authorize_queued_live_context_append(&conflict)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_runtime_notification_failure_remains_observable_until_successful_retry() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let host = Arc::new(RecordingMirrorHost::default());
+        machine.set_live_context_mirror_host(host.clone());
+        machine.notify_committed_live_context(&session_id);
+        assert!(
+            machine
+                .drain_live_context_outbox(&session_id)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            machine
+                .quiesce_live_context_outbox_for_channel(&session_id, &channel_id)
+                .await,
+            crate::live_context_mirror::LiveContextDrainCompletion::Failed(_)
+        ));
+        assert!(
+            machine
+                .drain_live_context_outbox(&session_id)
+                .await
+                .is_err(),
+            "close observation must not consume the failed source-read outcome"
+        );
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("retained canonical fact"),
+        ));
+        *host.committed.lock().expect("committed") = Some((
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("canonical body"),
+            "retry-store-authority".to_string(),
+        ));
+        machine.notify_committed_live_context(&session_id);
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect("explicit notification retries exact canonical scan");
+        assert_eq!(host.appends.lock().expect("appends").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn committed_runtime_notification_rebinds_owned_projection_after_close() {
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+        let machine = Arc::new(machine);
+        let barrier = Arc::new(MirrorAppendBarrier {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("before close"),
+        ));
+        let first = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(
+            session.clone(),
+        ))
+        .expect("first committed body");
+        let host = Arc::new(RecordingMirrorHost {
+            committed: std::sync::Mutex::new(Some((first, "first-store-authority".to_string()))),
+            first_read_barrier: Some(Arc::clone(&barrier)),
+            ..Default::default()
+        });
+        machine.set_live_context_mirror_host(host.clone());
+        machine.notify_committed_live_context(&session_id);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            barrier.entered.notified(),
+        )
+        .await
+        .expect("owned read starts");
+        let observing_machine = Arc::clone(&machine);
+        let observing_session = session_id.clone();
+        let observer = tokio::spawn(async move {
+            observing_machine
+                .drain_live_context_outbox(&observing_session)
+                .await
+        });
+        tokio::task::yield_now().await;
+        observer.abort();
+        assert!(
+            observer
+                .await
+                .expect_err("observer cancelled")
+                .is_cancelled()
+        );
+        assert!(matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                machine.quiesce_live_context_outbox_for_channel(&session_id, &channel_id),
+            )
+            .await
+            .expect("close must not join a source read held behind unrelated background work"),
+            crate::live_context_mirror::LiveContextDrainCompletion::Succeeded
+        ));
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+                    session_id: session_id.to_string(),
+                    channel_id: channel_id.to_string(),
+                    close_observation_sequence: 1,
+                },
+                "test:RecordLiveCloseClosed",
+            )
+            .await
+            .expect("generated fixture close");
+        let replacement = meerkat_core::LiveChannelId::new("replacement-after-owned-read");
+        machine
+            .resolve_live_open_admission(
+                &session_id,
+                &replacement,
+                &meerkat_core::SessionLlmIdentity {
+                    model: "context-fixture-model".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+            )
+            .await
+            .expect("fresh channel");
+        stage_experimental_live_machine(&machine, &session_id, &replacement, 1).await;
+        bind_experimental_live_machine(&machine, &session_id, &replacement, 1).await;
+        session.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("after reopen"),
+        ));
+        *host.committed.lock().expect("committed") = Some((
+            meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(Arc::new(session))
+                .expect("later committed body"),
+            "later-store-authority".to_string(),
+        ));
+        barrier.release.add_permits(1);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            machine.drain_live_context_outbox(&session_id),
+        )
+        .await
+        .expect("owned read and delivery complete")
+        .expect("current context delivery");
+        let appends = host.appends.lock().expect("appends");
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].0, replacement.to_string());
+        assert!(appends[0].1.contains("after reopen"));
+        assert!(!appends[0].1.contains("before close"));
+    }
+
+    #[tokio::test]
+    async fn mixed_parent_and_live_suffixes_preserve_origin_in_both_arrival_orders() {
+        for live_first in [false, true] {
+            let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
+            let host = Arc::new(RecordingMirrorHost::default());
+            machine.set_live_context_mirror_host(host.clone());
+            let mut session = meerkat_core::Session::with_id(session_id.clone());
+            session.push(meerkat_core::Message::User(
+                meerkat_core::UserMessage::text("typed parent prompt"),
+            ));
+            session.push(meerkat_core::Message::BlockAssistant(
+                meerkat_core::types::BlockAssistantMessage::new(
+                    vec![meerkat_core::AssistantBlock::Text {
+                        text: "typed parent answer".to_string(),
+                        meta: None,
+                    }],
+                    meerkat_core::StopReason::EndTurn,
+                ),
+            ));
+            session.append_realtime_transcript_event_for_channel(
+                meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: "mixed-voice-row".to_string(),
+                    previous_item_id: None,
+                    content_index: 0,
+                    text: "already spoken user input".to_string(),
+                },
+                channel_id.clone(),
+            );
+            let committed = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(
+                Arc::new(session),
+            )
+            .expect("store-sealed mixed origin snapshot");
+            for live in [live_first, !live_first] {
+                if live {
+                    machine
+                        .enqueue_committed_live_transcript_boundary(
+                            &session_id,
+                            &committed,
+                            "mixed-store-token",
+                        )
+                        .await
+                        .expect("live handoff does not reclassify parent rows");
+                } else {
+                    machine
+                        .enqueue_committed_parent_session_boundary(
+                            &session_id,
+                            &committed,
+                            "mixed-store-token",
+                        )
+                        .await
+                        .expect("deferred parent read does not echo live rows");
+                }
+            }
+            machine
+                .drain_live_context_outbox(&session_id)
+                .await
+                .expect("drain exact mixed suffix");
+            {
+                let appends = host.appends.lock().expect("appends");
+                assert_eq!(appends.len(), 2);
+                assert!(appends[0].1.contains("typed parent prompt"));
+                assert!(appends[1].1.contains("typed parent answer"));
+                assert!(
+                    appends
+                        .iter()
+                        .all(|(_, text)| !text.contains("already spoken user input"))
+                );
+            }
+            assert_eq!(
+                machine
+                    .session_dsl_state(&session_id)
+                    .await
+                    .expect("state")
+                    .live_context_cursor_by_channel
+                    .get(channel_id.as_str()),
+                Some(&3)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn exact_parent_commit_reaches_only_the_active_bound_channel_once() {
         let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
 
@@ -2511,6 +4207,10 @@ mod live_context_mirror_tests {
             duplicate_rows, 0,
             "the exact committed row is not re-enqueued"
         );
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect("observe owned delivery completion");
 
         {
             let appends = host.appends.lock().expect("append record lock");
@@ -2573,6 +4273,10 @@ mod live_context_mirror_tests {
             .await
             .expect("answer-ready catch-up mirrors only the suffix after seed K");
         assert_eq!(rows, 1);
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect("observe catch-up delivery completion");
 
         {
             let appends = host.appends.lock().expect("append record lock");
@@ -2707,7 +4411,7 @@ mod live_context_mirror_tests {
 
     #[tokio::test]
     async fn ambiguity_recovery_io_failure_never_restores_retryable_append() {
-        let (machine, session_id, _) = bound_experimental_live_machine(0).await;
+        let (machine, session_id, channel_id) = bound_experimental_live_machine(0).await;
         let host = Arc::new(AmbiguousMirrorHost::default());
         host.fail_recovery
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2727,7 +4431,11 @@ mod live_context_mirror_tests {
                 "ambiguous-failed-recovery-store-authority",
             )
             .await
-            .expect_err("physical replacement failure remains a separate live error");
+            .expect("canonical enqueue succeeds independently of provider recovery");
+        machine
+            .drain_live_context_outbox(&session_id)
+            .await
+            .expect_err("physical replacement failure remains a separately observed live error");
 
         assert!(
             machine
@@ -2741,7 +4449,20 @@ mod live_context_mirror_tests {
         machine
             .drain_live_context_outbox(&session_id)
             .await
-            .expect("a later drain has no retryable old append");
+            .expect_err("a later observer still sees the retained recovery failure");
+        assert!(
+            matches!(
+                machine
+                    .quiesce_live_context_outbox_for_channel(&session_id, &channel_id)
+                    .await,
+                crate::live_context_mirror::LiveContextDrainCompletion::Failed(_)
+            ),
+            "quiescence is distinct from successful delivery"
+        );
+        machine
+            .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+            .await
+            .expect_err("quiescing never clears a delivery failure");
         assert_eq!(
             host.appends.lock().expect("append record lock").len(),
             1,
@@ -3636,6 +5357,9 @@ impl MeerkatMachine {
             }
         })?;
         let channel = channel_id.as_str();
+        let preparation =
+            crate::live_execution::LiveContextPreparationStatus::from_state(&state, channel)
+                .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
         if state
             .live_experimental_pending_receipt_by_channel
             .get(channel)
@@ -3662,6 +5386,7 @@ impl MeerkatMachine {
                 channel_id: channel_id.clone(),
                 mode,
                 state: LiveChannelCustodyState::Closed,
+                preparation,
             });
         }
         if state.live_channel_session_by_channel.get(channel) != Some(&session_id.to_string()) {
@@ -3679,6 +5404,7 @@ impl MeerkatMachine {
                         channel_id: channel_id.clone(),
                         mode,
                         state: LiveChannelCustodyState::Pending(stage),
+                        preparation,
                     })
             }
             Some(crate::meerkat_machine::dsl::LiveExecutionChannelPhase::Active) => {
@@ -3701,6 +5427,7 @@ impl MeerkatMachine {
                     channel_id: channel_id.clone(),
                     mode,
                     state: LiveChannelCustodyState::Active(activation),
+                    preparation,
                 })
             }
             Some(crate::meerkat_machine::dsl::LiveExecutionChannelPhase::Revoked) => {
@@ -3709,6 +5436,7 @@ impl MeerkatMachine {
                     channel_id: channel_id.clone(),
                     mode,
                     state: LiveChannelCustodyState::Revoked,
+                    preparation,
                 })
             }
             None => Err(RuntimeDriverError::ValidationFailed {
@@ -3733,6 +5461,9 @@ impl MeerkatMachine {
             }
         })?;
         let channel = channel_id.as_str();
+        let preparation =
+            crate::live_execution::LiveContextPreparationStatus::from_state(&state, channel)
+                .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
         if state
             .live_activation_receipt_by_channel
             .get(channel)
@@ -3759,6 +5490,7 @@ impl MeerkatMachine {
                 channel_id: channel_id.clone(),
                 mode,
                 state: LiveChannelCustodyState::Closed,
+                preparation,
             });
         }
         if state.live_channel_session_by_channel.get(channel) != Some(&session_id.to_string()) {
@@ -3780,6 +5512,7 @@ impl MeerkatMachine {
                     channel_id: channel_id.clone(),
                     mode,
                     state: LiveChannelCustodyState::Active(activation),
+                    preparation,
                 })
             }
             Some(crate::meerkat_machine::dsl::LiveExecutionChannelPhase::Revoked) => {
@@ -3788,6 +5521,7 @@ impl MeerkatMachine {
                     channel_id: channel_id.clone(),
                     mode,
                     state: LiveChannelCustodyState::Revoked,
+                    preparation,
                 })
             }
             Some(crate::meerkat_machine::dsl::LiveExecutionChannelPhase::Pending) | None => {
@@ -3811,6 +5545,49 @@ impl MeerkatMachine {
         let _mutation_guard = self
             .lock_current_durability_ready_session_mutation_gate(session_id)
             .await?;
+        self.revoke_live_channel_close_custody_under_guard(session_id, channel_id, receipt)
+            .await
+    }
+
+    /// Reacquire the original machine-owned receipt for a channel-addressed
+    /// host close. Ordinary channels have no experimental custody to revoke.
+    #[cfg(feature = "live")]
+    pub async fn revoke_bound_live_channel_close_custody(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Result<Option<LiveChannelCloseCustodyAuthority>, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        let Some(receipt) = state
+            .live_experimental_pending_receipt_by_channel
+            .get(channel_id.as_str())
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        self.revoke_live_channel_close_custody_under_guard(
+            session_id,
+            channel_id,
+            &LiveChannelCloseReceipt::Pending(receipt),
+        )
+        .await
+        .map(Some)
+    }
+
+    #[cfg(feature = "live")]
+    async fn revoke_live_channel_close_custody_under_guard(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+        receipt: &LiveChannelCloseReceipt,
+    ) -> Result<LiveChannelCloseCustodyAuthority, RuntimeDriverError> {
         let (pending_receipt, activation_receipt) = match receipt {
             LiveChannelCloseReceipt::Pending(value) => (Some(value.clone()), None),
             LiveChannelCloseReceipt::Activation(value) => (None, Some(value.clone())),
@@ -3836,6 +5613,8 @@ impl MeerkatMachine {
                 channel_id: effect_channel,
                 phase: crate::meerkat_machine::dsl::LiveExecutionChannelPhase::Revoked,
                 already_closed,
+                context_recovery_channel_id,
+                result_recovery_channel_id,
             } = effect
                 && effect_session == &session_id.to_string()
                 && effect_channel == channel_id.as_str()
@@ -3844,6 +5623,12 @@ impl MeerkatMachine {
                     session_id: session_id.clone(),
                     channel_id: channel_id.clone(),
                     already_closed: *already_closed,
+                    context_recovery_channel_id: context_recovery_channel_id
+                        .as_ref()
+                        .map(meerkat_core::LiveChannelId::new),
+                    result_recovery_channel_id: result_recovery_channel_id
+                        .as_ref()
+                        .map(meerkat_core::LiveChannelId::new),
                 });
             }
         }
@@ -4400,6 +6185,14 @@ impl MeerkatMachine {
                 operation_id,
                 interaction_id,
                 worker_identity.clone(),
+                if state
+                    .live_delegation_existing_member_operations
+                    .contains(dsl_operation_id)
+                {
+                    crate::live_execution::LiveDelegationWorkerOwnership::ExistingMember
+                } else {
+                    crate::live_execution::LiveDelegationWorkerOwnership::OwnedMember
+                },
                 phase,
                 terminal,
                 state
@@ -4418,8 +6211,9 @@ impl MeerkatMachine {
         Ok(snapshots)
     }
 
-    /// Reconcile one physically retired ClientContext executor after its
-    /// original provider channel has been revoked or replaced.
+    /// Reconcile released ClientContext execution custody after its original
+    /// provider channel has been revoked or replaced. An owned worker is
+    /// physically retired; an existing member retains its settled input.
     ///
     /// The generated transition records the durable terminal as late and
     /// permanently result-ineligible. It cannot mint provider delivery or
@@ -5090,6 +6884,9 @@ impl MeerkatMachine {
         let admission = terminal.admission();
         let binding = admission.binding();
         let domain = admission.operation().domain_correlation();
+        #[cfg(feature = "live")]
+        self.wait_live_context_ready_for_results(admission.session_id(), binding.channel_id())
+            .await?;
         let (_, effects) = self
             .apply_session_dsl_input(
                 admission.session_id(),
@@ -5445,8 +7242,8 @@ impl MeerkatMachine {
     }
 
     /// Freeze one typed provider Assistant TurnStarted observation to the
-    /// foreground InteractionId that was current at that exact boundary.
-    /// Later user turns cannot rewrite the returned opaque output handle.
+    /// generated foreground correlation or a fresh provider-initiated
+    /// interaction. Later user turns cannot rewrite the opaque output handle.
     #[cfg(feature = "live")]
     pub async fn observe_live_assistant_turn_started(
         &self,
@@ -5540,26 +7337,32 @@ impl MeerkatMachine {
                     fence_token: *fence,
                     generation: *generation,
                     assistant_turn_ref: assistant_turn_ref.clone(),
+                    candidate_interaction_id: meerkat_core::InteractionId::new().to_string(),
                 },
                 "ObserveLiveAssistantTurnStarted",
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-        let interaction = effects.as_slice().iter().find_map(|effect| {
+        let attribution = effects.as_slice().iter().find_map(|effect| {
             let crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveAssistantTurnStarted {
                 channel_id: effect_channel,
                 interaction_id,
                 assistant_turn_ref: effect_turn,
+                origin,
             } = effect
             else {
                 return None;
             };
             (effect_channel == &channel && effect_turn == &assistant_turn_ref)
-                .then_some(interaction_id.as_str())
+                .then_some((interaction_id.as_str(), *origin))
         });
-        let interaction_id = interaction
-            .and_then(|value| value.parse::<uuid::Uuid>().ok())
-            .map(meerkat_core::InteractionId)
+        let (interaction_id, origin) = attribution
+            .and_then(|(value, origin)| {
+                value
+                    .parse::<uuid::Uuid>()
+                    .ok()
+                    .map(|id| (meerkat_core::InteractionId(id), origin))
+            })
             .ok_or_else(|| {
                 RuntimeDriverError::Internal(
                     "generated assistant turn start emitted no matching interaction authority"
@@ -5569,6 +7372,7 @@ impl MeerkatMachine {
         let handle = LiveAssistantOutputHandle {
             binding: runtime_binding,
             interaction_id,
+            origin,
             assistant_turn_ref,
             playback_segment: 0,
             output_id: uuid::Uuid::new_v4().to_string(),
@@ -5639,18 +7443,18 @@ impl MeerkatMachine {
             .cloned()
     }
 
-    /// Advance only a session-sealed snapshot cut; provider grouping and the
+    /// Advance only a session-sealed continuation (a snapshot cut or an
+    /// observation-only unmeasured release). Provider grouping and the
     /// original foreground interaction remain unchanged.
     #[cfg(feature = "live")]
     pub async fn advance_live_assistant_playback_segment(
         &self,
         receipt: &meerkat_core::LiveAssistantPlaybackTruncationEvidence,
     ) -> Result<LiveAssistantOutputHandle, RuntimeDriverError> {
-        if receipt.disposition()
-            != meerkat_core::LiveAssistantPlaybackTruncationDisposition::CommittedSnapshot
-        {
+        if !receipt.continues_provider_group() {
             return Err(RuntimeDriverError::ValidationFailed {
-                reason: "playback continuation requires a committed snapshot cut".to_string(),
+                reason: "playback continuation requires a session-sealed segment release"
+                    .to_string(),
             });
         }
         let previous = self
@@ -5703,6 +7507,7 @@ impl MeerkatMachine {
         let next = LiveAssistantOutputHandle {
             binding: previous.binding().clone(),
             interaction_id: previous.interaction_id(),
+            origin: previous.origin(),
             assistant_turn_ref: previous.__assistant_turn_ref().to_string(),
             playback_segment: segment,
             output_id: uuid::Uuid::new_v4().to_string(),
@@ -6134,6 +7939,347 @@ impl MeerkatMachine {
         }
     }
 
+    /// Test fixture: bind a channel without pre-admitting any provider turn.
+    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[doc(hidden)]
+    pub async fn __test_open_live_delegation_channel(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::live_execution::LiveDelegationRuntimeBinding, RuntimeDriverError> {
+        use crate::meerkat_machine::dsl as mm;
+
+        let invalid = |reason| RuntimeDriverError::ValidationFailed { reason };
+        let state = self
+            .session_dsl_state(session_id)
+            .await
+            .map_err(|error| invalid(error.to_string()))?;
+        let runtime_id = state
+            .active_runtime_id
+            .ok_or_else(|| invalid("fixture requires a real member runtime".to_string()))?;
+        let fence_token = state
+            .active_fence_token
+            .ok_or_else(|| invalid("fixture requires a member fence".to_string()))?;
+        let generation = state
+            .active_runtime_generation
+            .ok_or_else(|| invalid("fixture requires a member generation".to_string()))?;
+        let channel_id = if let Some(channel_id) = state
+            .live_active_channel_by_session
+            .get(&session_id.to_string())
+        {
+            meerkat_core::LiveChannelId::new(channel_id.clone())
+        } else {
+            let channel_id = meerkat_core::LiveChannelId::new(uuid::Uuid::new_v4().to_string());
+            self.resolve_live_open_admission(
+                session_id,
+                &channel_id,
+                &meerkat_core::SessionLlmIdentity {
+                    model: "gpt-live-1".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+            )
+            .await?;
+            self.apply_session_dsl_input(
+                session_id,
+                mm::MeerkatMachineInput::BindLiveExecutionChannel {
+                    session_id: session_id.to_string(),
+                    channel_id: channel_id.to_string(),
+                    runtime_id: runtime_id.clone(),
+                    fence_token,
+                    generation,
+                    canonical_seed_cursor: 0,
+                },
+                "test:BindLiveExecutionChannel",
+            )
+            .await
+            .map_err(invalid)?;
+            channel_id
+        };
+        self.live_delegation_runtime_binding(session_id, &channel_id)
+            .await
+    }
+
+    /// Bind the actual generated experimental context path for owner tests.
+    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[doc(hidden)]
+    pub async fn __test_open_live_context_channel(
+        &self,
+        session_id: &SessionId,
+        canonical_seed_cursor: u64,
+    ) -> Result<crate::live_execution::LiveDelegationRuntimeBinding, RuntimeDriverError> {
+        use crate::meerkat_machine::dsl as mm;
+        let channel_id = meerkat_core::LiveChannelId::new(uuid::Uuid::new_v4().to_string());
+        self.resolve_live_open_admission(
+            session_id,
+            &channel_id,
+            &meerkat_core::SessionLlmIdentity {
+                model: "gpt-live-1".to_string(),
+                provider: meerkat_core::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            },
+        )
+        .await?;
+        self.resolve_live_execution_mode_admission(
+            session_id,
+            &channel_id,
+            "test-client-context",
+            meerkat_core::LiveExecutionMode::ClientContext,
+            meerkat_core::LiveExecutionCapabilities {
+                function_bridge: false,
+                client_context: true,
+            },
+        )
+        .await?;
+        let staged = self
+            .stage_experimental_live_execution(session_id, &channel_id, canonical_seed_cursor)
+            .await?;
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        let invalid = || RuntimeDriverError::ValidationFailed {
+            reason: "context fixture requires real runtime binding".to_string(),
+        };
+        let runtime_id = state.active_runtime_id.ok_or_else(invalid)?;
+        let fence_token = state.active_fence_token.ok_or_else(invalid)?;
+        let generation = state.active_runtime_generation.ok_or_else(invalid)?;
+        self.apply_session_dsl_input(
+            session_id,
+            mm::MeerkatMachineInput::RegisterLivePlaybackOwner {
+                session_id: session_id.to_string(),
+                channel_id: channel_id.to_string(),
+                runtime_id: runtime_id.clone(),
+                fence_token,
+                generation,
+                owner_id: "test-context-owner".to_string(),
+                readiness_id: "test-context-ready".to_string(),
+                pending_receipt: staged.pending_receipt().to_string(),
+            },
+            "test:RegisterLivePlaybackOwner",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.apply_session_dsl_input(
+            session_id,
+            mm::MeerkatMachineInput::RecordLiveWebrtcAnswerAcceptedAndBindExecution {
+                session_id: session_id.to_string(),
+                channel_id: channel_id.to_string(),
+                answer_observation_sequence: 1,
+                runtime_id,
+                fence_token,
+                generation,
+                canonical_seed_cursor,
+                activation_receipt: "test-context-activation".to_string(),
+            },
+            "test:RecordLiveWebrtcAnswerAcceptedAndBindExecution",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.live_delegation_runtime_binding(session_id, &channel_id)
+            .await
+    }
+
+    /// Retire a transport-free context fixture through generated close.
+    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[doc(hidden)]
+    pub async fn __test_close_live_context_channel(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+    ) -> Result<(), RuntimeDriverError> {
+        self.apply_session_dsl_input(
+            binding.session_id(),
+            crate::meerkat_machine::dsl::MeerkatMachineInput::RecordLiveCloseClosed {
+                session_id: binding.session_id().to_string(),
+                channel_id: binding.channel_id().to_string(),
+                close_observation_sequence: 1,
+            },
+            "test:RecordLiveCloseClosed",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        Ok(())
+    }
+
+    /// Admit a provisional user delegation without assuming that the separate
+    /// session transcript owner has committed its final input.
+    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[doc(hidden)]
+    pub async fn __test_begin_live_delegation(
+        &self,
+        session_id: &SessionId,
+        task: &str,
+    ) -> Result<
+        (
+            meerkat_core::ExactOperationIdentity<meerkat_core::LiveUserTurnCorrelation>,
+            meerkat_core::ProvisionalLiveHandoff,
+        ),
+        RuntimeDriverError,
+    > {
+        use crate::meerkat_machine::dsl as mm;
+        let invalid = |reason| RuntimeDriverError::ValidationFailed { reason };
+        let binding = self.__test_open_live_delegation_channel(session_id).await?;
+        let channel_id = binding.channel_id();
+        let runtime_id = mm::AgentRuntimeId::from_domain(binding.runtime_id());
+        let fence_token = mm::FenceToken::from_domain(binding.fence_token());
+        let generation = mm::Generation::from_domain(binding.generation());
+        let interaction_id = meerkat_core::InteractionId::new();
+        let provider_turn = uuid::Uuid::new_v4().to_string();
+        let correlation = meerkat_core::LiveUserTurnCorrelation::new(
+            channel_id.clone(),
+            interaction_id,
+            meerkat_core::OpaqueProviderCorrelation::new("test-delegation", provider_turn.clone())
+                .map_err(|error| invalid(error.to_string()))?,
+        )
+        .map_err(|error| invalid(error.to_string()))?;
+        let operation = meerkat_core::ExactOperationIdentity::for_domain(
+            meerkat_core::OperationId::new(),
+            correlation.clone(),
+        );
+        let provisional = meerkat_core::ProvisionalLiveHandoff::new(
+            correlation,
+            task,
+            meerkat_core::LiveHandoffInputProvenance::ProvisionalTranscriptSnapshot,
+        )
+        .map_err(|error| invalid(error.to_string()))?;
+        self.apply_session_dsl_input(
+            session_id,
+            mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+                channel_id: channel_id.to_string(),
+                runtime_id: runtime_id.clone(),
+                fence_token,
+                generation,
+                interaction_id: interaction_id.to_string(),
+                provider_turn_ref: provider_turn.clone(),
+            },
+            "test:ObserveLiveProviderTurnStarted",
+        )
+        .await
+        .map_err(invalid)?;
+        self.admit_live_delegation(&binding, &operation, &provisional)
+            .await?;
+        Ok((operation, provisional))
+    }
+
+    /// Fixture for tests that do not exercise the separate transcript owner.
+    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[doc(hidden)]
+    pub async fn __test_admit_confirmed_live_delegation(
+        &self,
+        session_id: &SessionId,
+        worker_identity: &str,
+        worker_ownership: crate::live_execution::LiveDelegationWorkerOwnership,
+        task: &str,
+    ) -> Result<crate::live_execution::LiveDelegationExecutionAdmission, RuntimeDriverError> {
+        use crate::live_execution::LiveHandoffReconciliationReceipt;
+        use crate::meerkat_machine::dsl as mm;
+        let invalid = |reason| RuntimeDriverError::ValidationFailed { reason };
+        let (operation, provisional) = self.__test_begin_live_delegation(session_id, task).await?;
+        let correlation = operation.domain_correlation();
+        let channel_id = correlation.channel_id();
+        let interaction_id = correlation.interaction_id();
+        let provider_turn = correlation.provider().user_turn_id().to_string();
+        let binding = self
+            .live_delegation_runtime_binding(session_id, channel_id)
+            .await?;
+        let runtime_id = mm::AgentRuntimeId::from_domain(binding.runtime_id());
+        let fence_token = mm::FenceToken::from_domain(binding.fence_token());
+        let generation = mm::Generation::from_domain(binding.generation());
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                mm::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
+                    channel_id: channel_id.to_string(),
+                    runtime_id,
+                    fence_token,
+                    generation,
+                    interaction_id: interaction_id.to_string(),
+                    operation_id: mm::OperationId::from_domain(operation.operation_id()),
+                    provider_turn_correlation: provider_turn,
+                    final_transcript_committed: true,
+                    normalized_digest_matches: true,
+                },
+                "test:ReconcileLiveDelegationTranscript",
+            )
+            .await
+            .map_err(invalid)?;
+        let mut reconciliation = None;
+        for effect in effects.as_slice() {
+            if let Some(receipt) = LiveHandoffReconciliationReceipt::from_generated_effect(
+                session_id,
+                &operation,
+                &provisional,
+                meerkat_core::LiveHandoffReconciliation::Confirmed,
+                effect,
+            )
+            .map_err(|error| invalid(error.to_string()))?
+            {
+                reconciliation = Some(receipt);
+            }
+        }
+        let reconciliation = reconciliation
+            .ok_or_else(|| invalid("fixture reconciliation effect missing".to_string()))?;
+        let admission = self
+            .authorize_live_delegation_worker_start_with_ownership(
+                session_id,
+                binding.runtime_id(),
+                binding.fence_token(),
+                binding.generation(),
+                &operation,
+                &provisional,
+                worker_identity,
+                worker_ownership,
+            )
+            .await?;
+        let consequential = self
+            .authorize_live_consequential_effect(
+                session_id,
+                binding.runtime_id(),
+                binding.fence_token(),
+                binding.generation(),
+                &operation,
+                &reconciliation,
+            )
+            .await?;
+        admission
+            .release_tool_execution(&consequential)
+            .map_err(|error| invalid(error.to_string()))?;
+        Ok(admission)
+    }
+
+    /// End only the fixture's user provider turn; this never settles assistant
+    /// playback or invents an assistant final.
+    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[doc(hidden)]
+    pub async fn __test_finish_live_delegation_provider_turn(
+        &self,
+        admission: &crate::live_execution::LiveDelegationExecutionAdmission,
+    ) -> Result<(), RuntimeDriverError> {
+        use crate::meerkat_machine::dsl as mm;
+        let correlation = admission.operation().domain_correlation();
+        let binding = self
+            .live_delegation_runtime_binding(admission.session_id(), correlation.channel_id())
+            .await?;
+        self.apply_session_dsl_input(
+            admission.session_id(),
+            mm::MeerkatMachineInput::CompleteLiveInteraction {
+                channel_id: correlation.channel_id().to_string(),
+                runtime_id: mm::AgentRuntimeId::from_domain(binding.runtime_id()),
+                fence_token: mm::FenceToken::from_domain(binding.fence_token()),
+                generation: mm::Generation::from_domain(binding.generation()),
+                provider_turn_ref: correlation.provider().user_turn_id().to_string(),
+            },
+            "test:CompleteLiveInteraction",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
     /// Bind and authorize the durable worker for one exact admitted delegation.
     #[allow(clippy::too_many_arguments)]
     pub async fn authorize_live_delegation_worker_start(
@@ -6147,6 +8293,36 @@ impl MeerkatMachine {
         >,
         provisional: &meerkat_core::ProvisionalLiveHandoff,
         worker_identity: &str,
+    ) -> Result<crate::live_execution::LiveDelegationExecutionAdmission, RuntimeDriverError> {
+        self.authorize_live_delegation_worker_start_with_ownership(
+            session_id,
+            runtime_id,
+            fence_token,
+            generation,
+            operation,
+            provisional,
+            worker_identity,
+            crate::live_execution::LiveDelegationWorkerOwnership::OwnedMember,
+        )
+        .await
+    }
+
+    /// Authorize a worker while retaining its member-lifecycle custody in the
+    /// generated durable operation. Existing members are never retired by the
+    /// delegation executor, including after restart under a different policy.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn authorize_live_delegation_worker_start_with_ownership(
+        &self,
+        session_id: &SessionId,
+        runtime_id: &crate::identifiers::LogicalRuntimeId,
+        fence_token: u64,
+        generation: u64,
+        operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+            meerkat_core::LiveUserTurnCorrelation,
+        >,
+        provisional: &meerkat_core::ProvisionalLiveHandoff,
+        worker_identity: &str,
+        worker_ownership: crate::live_execution::LiveDelegationWorkerOwnership,
     ) -> Result<crate::live_execution::LiveDelegationExecutionAdmission, RuntimeDriverError> {
         let correlation = operation.domain_correlation();
         if provisional.correlation() != correlation || worker_identity.is_empty() {
@@ -6169,6 +8345,7 @@ impl MeerkatMachine {
                     operation_id: crate::meerkat_machine::dsl::OperationId::from_domain(operation.operation_id()),
                     provider_turn_correlation: correlation.provider().user_turn_id().to_string(),
                     worker_identity: worker_identity.to_string(),
+                    worker_ownership,
                 },
                 "AuthorizeLiveDelegationWorkerStart",
             )
@@ -6185,6 +8362,12 @@ impl MeerkatMachine {
                 )
                 .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
             {
+                #[cfg(feature = "live")]
+                self.persist_live_bridge_recovery_state(
+                    session_id,
+                    "AuthorizeLiveDelegationWorkerStart",
+                )
+                .await?;
                 return Ok(admission);
             }
         }
@@ -6254,6 +8437,12 @@ impl MeerkatMachine {
                 .contains_key(&operation_id)
         };
         if already_committed {
+            #[cfg(feature = "live")]
+            self.persist_live_bridge_recovery_state(
+                session_id,
+                "ResolveLiveDelegationWorkerStart:replay",
+            )
+            .await?;
             if !started {
                 admission.close_tool_execution_after_generated_terminal();
             }
@@ -6297,6 +8486,9 @@ impl MeerkatMachine {
             if !started {
                 admission.close_tool_execution_after_generated_terminal();
             }
+            #[cfg(feature = "live")]
+            self.persist_live_bridge_recovery_state(session_id, "ResolveLiveDelegationWorkerStart")
+                .await?;
             Ok(())
         } else {
             Err(RuntimeDriverError::Internal(
@@ -6390,6 +8582,12 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(
+            session_id,
+            "AuthorizeLiveDelegationTranscriptTerminalCancellation",
+        )
+        .await?;
         self.live_delegation_cancellation_authority_from_effects(admission, &effects)
     }
 
@@ -6439,6 +8637,12 @@ impl MeerkatMachine {
                 == Some(&crate::meerkat_machine::dsl::LiveDelegationCancellationReason::Abandoned)
         {
             admission.close_tool_execution_after_generated_terminal();
+            #[cfg(feature = "live")]
+            self.persist_live_bridge_recovery_state(
+                session_id,
+                "AbandonLiveInteractionWithDelegationCancellation:replay",
+            )
+            .await?;
             return Ok(
                 crate::live_execution::LiveDelegationCancellationDirective::CancellationAuthorized(
                     crate::live_execution::LiveDelegationCancellationAuthority::from_recovered_generated_state(
@@ -6484,6 +8688,12 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(
+            session_id,
+            "AbandonLiveInteractionWithDelegationCancellation",
+        )
+        .await?;
         for effect in effects.as_slice() {
             if let Some(authority) =
                 crate::live_execution::LiveDelegationCancellationAuthority::from_generated_effect(
@@ -6558,6 +8768,12 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(
+            session_id,
+            "SupersedeLiveInteractionWithDelegationCancellation",
+        )
+        .await?;
         for effect in effects.as_slice() {
             if let Some(authority) = crate::live_execution::LiveDelegationCancellationAuthority::from_generated_supersession_effect(
                 admission.session_id(),
@@ -6819,6 +9035,12 @@ impl MeerkatMachine {
                 });
             }
             admission.close_tool_execution_after_generated_terminal();
+            #[cfg(feature = "live")]
+            self.persist_live_bridge_recovery_state(
+                session_id,
+                "RecordLiveDelegationWorkerTerminal:replay",
+            )
+            .await?;
             return Ok(
                 crate::live_execution::LiveDelegationWorkerTerminalReceipt::from_recovered_generated_state(
                     operation,
@@ -6847,6 +9069,9 @@ impl MeerkatMachine {
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         admission.close_tool_execution_after_generated_terminal();
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(session_id, "RecordLiveDelegationWorkerTerminal")
+            .await?;
         for effect in effects.as_slice() {
             if let Some(receipt) =
                 crate::live_execution::LiveDelegationWorkerTerminalReceipt::from_generated_effect(
@@ -6899,6 +9124,9 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(session_id, "ResolveLiveDelegationCancellation")
+            .await?;
         let matched = effects.as_slice().iter().any(|effect| matches!(
             effect,
             crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveDelegationCancellationResolved {
@@ -6963,6 +9191,12 @@ impl MeerkatMachine {
                 .map(String::as_str)
                 == Some(admission.worker_identity())
         {
+            #[cfg(feature = "live")]
+            self.persist_live_bridge_recovery_state(
+                session_id,
+                "AuthorizeLiveDelegationWorkerRetirement:replay",
+            )
+            .await?;
             return Ok(
                 crate::live_execution::LiveDelegationWorkerRetirementAuthority::from_recovered_generated_state(
                     session_id,
@@ -6987,6 +9221,12 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(
+            session_id,
+            "AuthorizeLiveDelegationWorkerRetirement",
+        )
+        .await?;
         for effect in effects.as_slice() {
             if let Some(authority) =
                 crate::live_execution::LiveDelegationWorkerRetirementAuthority::from_generated_effect(
@@ -7049,6 +9289,12 @@ impl MeerkatMachine {
             .get(&operation_id)
             == Some(&committed_phase)
         {
+            #[cfg(feature = "live")]
+            self.persist_live_bridge_recovery_state(
+                session_id,
+                "ResolveLiveDelegationWorkerRetirement:replay",
+            )
+            .await?;
             return Ok(());
         }
         let (_, effects) = self
@@ -7068,6 +9314,12 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(
+            session_id,
+            "ResolveLiveDelegationWorkerRetirement",
+        )
+        .await?;
         let matched = effects.as_slice().iter().any(|effect| matches!(
             effect,
             crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveDelegationWorkerRetirementResolved {
@@ -7113,6 +9365,7 @@ impl MeerkatMachine {
             committed,
             store_commit_authority,
             meerkat_core::generated::session_document::LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
+            None,
         )
         .await
     }
@@ -7131,8 +9384,28 @@ impl MeerkatMachine {
             committed,
             store_commit_authority,
             meerkat_core::generated::session_document::LiveContextCommittedTextProvenance::LiveRealtimeTranscript,
+            None,
         )
         .await
+    }
+
+    #[cfg(feature = "live")]
+    pub(super) fn live_context_projection_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self
+            .shared
+            .live_context_projection_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(session_id).and_then(std::sync::Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        gates.insert(session_id.clone(), Arc::downgrade(&gate));
+        gate
     }
 
     #[cfg(feature = "live")]
@@ -7141,11 +9414,17 @@ impl MeerkatMachine {
         session_id: &SessionId,
         committed: &meerkat_core::lifecycle::core_executor::BoundSessionCommit,
         store_commit_authority: &str,
-        provenance: meerkat_core::generated::session_document::LiveContextCommittedTextProvenance,
+        _provenance: meerkat_core::generated::session_document::LiveContextCommittedTextProvenance,
+        expected_channel: Option<&meerkat_core::LiveChannelId>,
     ) -> Result<usize, RuntimeDriverError> {
+        let projection_gate = self.live_context_projection_gate(session_id);
+        let projection_guard = projection_gate.lock().await;
         let Some(channel_id) = self.live_active_channel_for_session(session_id).await else {
             return Ok(0);
         };
+        if expected_channel.is_some_and(|expected| expected != &channel_id) {
+            return Ok(0);
+        }
         let state = self.session_dsl_state(session_id).await.map_err(|reason| {
             RuntimeDriverError::ValidationFailed {
                 reason: reason.to_string(),
@@ -7305,13 +9584,29 @@ impl MeerkatMachine {
             })
             .max()
             .unwrap_or(0);
-        let canonical_cursor = authority_cursor.max(queued_cursor);
+        let reserved_cursor = state
+            .live_context_reserved_cursor_by_channel
+            .get(channel)
+            .copied()
+            .unwrap_or(0);
+        let canonical_cursor = authority_cursor.max(reserved_cursor).max(queued_cursor);
+        let existing_member_interactions = state
+            .live_delegation_existing_member_operations
+            .iter()
+            .filter_map(|operation| {
+                state
+                    .live_delegation_interaction_by_operation
+                    .get(operation)
+                    .cloned()
+            })
+            .collect();
         let rows = crate::live_context_mirror::classify_committed_boundary_rows_after(
             session_id,
             committed,
             canonical_cursor,
-            provenance,
+            &channel_id,
             store_commit_authority,
+            &existing_member_interactions,
         )
         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         let row_count = rows.len();
@@ -7324,8 +9619,195 @@ impl MeerkatMachine {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert((session_id.clone(), sequence), queued);
         }
-        self.drain_live_context_outbox(session_id).await?;
+        drop(projection_guard);
+        self.request_live_context_drain(session_id, &channel_id);
         Ok(row_count)
+    }
+
+    #[cfg(feature = "live")]
+    pub fn notify_committed_live_context(&self, session_id: &SessionId) {
+        use std::sync::atomic::Ordering;
+        if self.live_context_mirror_host().is_none() {
+            return;
+        }
+        let mut tasks = self
+            .shared
+            .live_context_projection_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tasks.retain(|session, task| {
+            session == session_id
+                || !matches!(
+                    &*task
+                        .outcome
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    Some(Ok(()))
+                )
+        });
+        if let Some(current) = tasks.get(session_id) {
+            let outcome = current
+                .outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if outcome.is_none() {
+                current.generation.fetch_add(1, Ordering::AcqRel);
+                return;
+            }
+        }
+        let worker = Arc::new(crate::live_context_mirror::LiveContextDrainTask::new());
+        tasks.insert(session_id.clone(), Arc::clone(&worker));
+        let machine = self.clone();
+        let session = session_id.clone();
+        let owned = Arc::clone(&worker);
+        let task = tokio::spawn(async move {
+            use futures::FutureExt as _;
+            loop {
+                let generation = owned.generation.load(Ordering::Acquire);
+                let result =
+                    std::panic::AssertUnwindSafe(machine.project_committed_live_context(&session))
+                        .catch_unwind()
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(RuntimeDriverError::Internal(
+                                "committed live context projection task panicked".to_string(),
+                            ))
+                        });
+                if let Err(error) = &result {
+                    tracing::warn!(%session, %error, "committed live context projection failed with retained observation");
+                }
+                let mut outcome = owned
+                    .outcome
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if generation != owned.generation.load(Ordering::Acquire) {
+                    continue;
+                }
+                *outcome = Some(result.map_err(Arc::new));
+                owned.changed.notify_waiters();
+                break;
+            }
+        });
+        *worker
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
+    }
+
+    #[cfg(feature = "live")]
+    async fn project_committed_live_context(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        loop {
+            let Some(channel) = self.live_active_channel_for_session(session_id).await else {
+                return Ok(());
+            };
+            let Some(host) = self.live_context_mirror_host() else {
+                return Ok(());
+            };
+            let (committed, token) = host
+                .committed_boundary(session_id)
+                .await
+                .map_err(RuntimeDriverError::Internal)?;
+            self.enqueue_committed_session_boundary_with_provenance(
+                session_id, &committed, &token,
+                meerkat_core::generated::session_document::LiveContextCommittedTextProvenance::ParentSessionServiceTurn,
+                Some(&channel),
+            ).await?;
+            if self
+                .live_active_channel_for_session(session_id)
+                .await
+                .as_ref()
+                == Some(&channel)
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    #[cfg(feature = "live")]
+    pub fn wake_live_context_outbox(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+    ) {
+        self.request_live_context_drain(binding.session_id(), binding.channel_id());
+    }
+
+    #[cfg(feature = "live")]
+    pub(super) fn request_live_context_drain(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Arc<crate::live_context_mirror::LiveContextDrainTask> {
+        use std::sync::atomic::Ordering;
+        let mut tasks = self
+            .shared
+            .live_context_drain_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (session_id.clone(), channel_id.clone());
+        tasks.retain(|(session, channel), worker| {
+            session != session_id
+                || channel == channel_id
+                || !matches!(
+                    &*worker
+                        .outcome
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    Some(Ok(()))
+                )
+        });
+        if let Some(current) = tasks.get(&key) {
+            let outcome = current
+                .outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !matches!(&*outcome, Some(Ok(()))) {
+                current.generation.fetch_add(1, Ordering::AcqRel);
+                return Arc::clone(current);
+            }
+        }
+        let worker = Arc::new(crate::live_context_mirror::LiveContextDrainTask::new());
+        tasks.insert(key, Arc::clone(&worker));
+        let machine = self.clone();
+        let session = session_id.clone();
+        let channel = channel_id.clone();
+        let owned = Arc::clone(&worker);
+        let task = tokio::spawn(async move {
+            use futures::FutureExt as _;
+            loop {
+                let generation = owned.generation.load(Ordering::Acquire);
+                let result = std::panic::AssertUnwindSafe(
+                    machine.drain_live_context_outbox_owned(&session, &channel),
+                )
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    Err(RuntimeDriverError::Internal(
+                        "live context drain task panicked".to_string(),
+                    ))
+                });
+                if let Err(error) = &result {
+                    tracing::warn!(%session, %error, "owned live context delivery remains failed with retained custody");
+                }
+                let mut outcome = owned
+                    .outcome
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if result.is_ok() && generation != owned.generation.load(Ordering::Acquire) {
+                    continue;
+                }
+                *outcome = Some(result.map_err(Arc::new));
+                owned.changed.notify_waiters();
+                break;
+            }
+        });
+        *worker
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
+        worker
     }
 
     /// Drain exact-next canonical rows while generated state proves a safe
@@ -7337,10 +9819,89 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
+        let projection = self
+            .shared
+            .live_context_projection_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned();
+        if let Some(projection) = projection {
+            projection.wait().await?;
+        }
+        let Some(channel) = self.live_active_channel_for_session(session_id).await else {
+            return Ok(());
+        };
+        self.drain_live_context_outbox_for_channel(session_id, &channel)
+            .await
+    }
+
+    #[cfg(feature = "live")]
+    pub async fn drain_live_context_outbox_for_channel(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.request_live_context_drain(session_id, channel_id)
+            .wait()
+            .await
+    }
+
+    /// Join exact delivery custody without treating a historical delivery
+    /// failure as an in-flight operation. Failure stays retained for observers.
+    #[cfg(feature = "live")]
+    pub async fn quiesce_live_context_outbox_for_channel(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> crate::live_context_mirror::LiveContextDrainCompletion {
+        let completion = self
+            .request_live_context_drain(session_id, channel_id)
+            .wait_completion()
+            .await;
+        if matches!(
+            completion,
+            crate::live_context_mirror::LiveContextDrainCompletion::Failed(_)
+        ) {
+            return completion;
+        }
+        // Source reads follow an already committed boundary and can wait behind
+        // unrelated text work. Report completed failures without joining that work.
+        let projection = self
+            .shared
+            .live_context_projection_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned();
+        if let Some(projection) = projection
+            && let Some(Err(error)) = &*projection
+                .outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            return crate::live_context_mirror::LiveContextDrainCompletion::Failed(Arc::clone(
+                error,
+            ));
+        }
+        completion
+    }
+
+    #[cfg(feature = "live")]
+    async fn drain_live_context_outbox_owned(
+        &self,
+        session_id: &SessionId,
+        expected_channel: &meerkat_core::LiveChannelId,
+    ) -> Result<(), RuntimeDriverError> {
         loop {
+            let projection_gate = self.live_context_projection_gate(session_id);
+            let projection_guard = projection_gate.lock().await;
             let Some(channel_id) = self.live_active_channel_for_session(session_id).await else {
                 return Ok(());
             };
+            if &channel_id != expected_channel {
+                return Ok(());
+            }
             let state = self.session_dsl_state(session_id).await.map_err(|reason| {
                 RuntimeDriverError::ValidationFailed {
                     reason: reason.to_string(),
@@ -7351,6 +9912,12 @@ impl MeerkatMachine {
                     reason: reason.to_string(),
                 },
             )? {
+                return Ok(());
+            }
+            if state.live_context_preparation_phase_by_channel.contains_key(channel_id.as_str())
+                && state.live_context_preparation_phase_by_channel.get(channel_id.as_str())
+                    != Some(&crate::meerkat_machine::dsl::LiveContextPreparationPhase::ProviderAcknowledged)
+            {
                 return Ok(());
             }
             let binding = self
@@ -7382,7 +9949,7 @@ impl MeerkatMachine {
                 return Ok(());
             };
 
-            let Some(context) = queued.row().provider_context().map(ToString::to_string) else {
+            let Some(context) = queued.provider_context().map(ToString::to_string) else {
                 self.advance_live_context_canonical_coverage(&queued)
                     .await?;
                 self.shared
@@ -7393,20 +9960,29 @@ impl MeerkatMachine {
                 continue;
             };
 
-            if state
-                .live_provider_turn_by_channel
-                .contains_key(channel_id.as_str())
-            {
-                return Ok(());
-            }
             let Some(host) = self.live_context_mirror_host() else {
                 return Ok(());
             };
-            let authority = self.authorize_queued_live_context_append(&queued).await?;
+            let authority = match self.authorize_queued_live_context_append(&queued).await? {
+                crate::live_execution::LiveContextAppendAdmission::Authorized(authority) => {
+                    authority
+                }
+                crate::live_execution::LiveContextAppendAdmission::Deferred => return Ok(()),
+                crate::live_execution::LiveContextAppendAdmission::AlreadyCovered => {
+                    self.shared
+                        .live_context_queued_rows
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&key);
+                    continue;
+                }
+            };
+            drop(projection_guard);
             let (returned_authority, outcome) = host
                 .append_context(authority, context)
                 .await
                 .map_err(RuntimeDriverError::Internal)?;
+            let projection_guard = projection_gate.lock().await;
             let resolution = self
                 .resolve_live_context_append(
                     binding.runtime_id(),
@@ -7456,6 +10032,7 @@ impl MeerkatMachine {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(&key);
+                    drop(projection_guard);
                     host.recover_ambiguous_append(recovery)
                         .await
                         .map_err(RuntimeDriverError::Internal)?;
@@ -7486,6 +10063,9 @@ impl MeerkatMachine {
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel => {
                 crate::meerkat_machine::dsl::LiveContextRowDisposition::AlreadyPresentInLiveChannel
             }
+            meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::AssistantObservation => {
+                crate::meerkat_machine::dsl::LiveContextRowDisposition::AssistantObservation
+            }
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::ExcludedFromLiveContext => {
                 crate::meerkat_machine::dsl::LiveContextRowDisposition::ExcludedFromLiveContext
             }
@@ -7512,6 +10092,8 @@ impl MeerkatMachine {
                     content_digest: row.content_digest().to_string(),
                     commit_authority_token: row.store_commit_authority().to_string(),
                     disposition,
+                    payload_availability: row.payload_availability(),
+                    observation_id: row.observation_id().map(ToString::to_string),
                 },
                 "EnqueueLiveContextRow",
             )
@@ -7555,6 +10137,9 @@ impl MeerkatMachine {
                 crate::meerkat_machine::dsl::LiveContextRowDisposition::AlreadyPresentInLiveChannel
             }
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::ExcludedFromLiveContext => {
+                crate::meerkat_machine::dsl::LiveContextRowDisposition::ExcludedFromLiveContext
+            }
+            meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::AssistantObservation => {
                 crate::meerkat_machine::dsl::LiveContextRowDisposition::ExcludedFromLiveContext
             }
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::MirrorParentText => {
@@ -7610,8 +10195,8 @@ impl MeerkatMachine {
     pub async fn authorize_queued_live_context_append(
         &self,
         queued: &crate::live_execution::LiveContextQueuedRow,
-    ) -> Result<crate::live_execution::LiveContextAppendAuthority, RuntimeDriverError> {
-        if queued.row().provider_context().is_none() {
+    ) -> Result<crate::live_execution::LiveContextAppendAdmission, RuntimeDriverError> {
+        if queued.provider_context().is_none() {
             return Err(RuntimeDriverError::ValidationFailed {
                 reason: "queued live-context row has no provider context payload".to_string(),
             });
@@ -7650,18 +10235,43 @@ impl MeerkatMachine {
             .await
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         for effect in effects.as_slice() {
+            use crate::meerkat_machine::dsl::MeerkatMachineEffect;
+            match effect {
+                MeerkatMachineEffect::LiveContextAppendDeferred {
+                    channel_id,
+                    append_id,
+                    previous_cursor: previous,
+                    next_cursor: next,
+                } if channel_id == binding.channel_id().as_str()
+                    && append_id == queued.append_id()
+                    && *previous == previous_cursor
+                    && *next == next_cursor =>
+                {
+                    return Ok(crate::live_execution::LiveContextAppendAdmission::Deferred);
+                }
+                MeerkatMachineEffect::LiveContextAppendAlreadyCovered {
+                    channel_id,
+                    append_id,
+                    previous_cursor: previous,
+                    next_cursor: next,
+                } if channel_id == binding.channel_id().as_str()
+                    && append_id == queued.append_id()
+                    && *previous == previous_cursor
+                    && *next == next_cursor =>
+                {
+                    return Ok(crate::live_execution::LiveContextAppendAdmission::AlreadyCovered);
+                }
+                _ => {}
+            }
             if let Some(authority) =
-                crate::live_execution::LiveContextAppendAuthority::from_generated_effect(
-                    binding.session_id(),
-                    binding.channel_id(),
-                    queued.append_id(),
-                    previous_cursor,
-                    next_cursor,
-                    effect,
+                crate::live_execution::LiveContextAppendAuthority::from_queued_generated_effect(
+                    queued, effect,
                 )
                 .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
             {
-                return Ok(authority);
+                return Ok(
+                    crate::live_execution::LiveContextAppendAdmission::Authorized(authority),
+                );
             }
         }
         Err(RuntimeDriverError::Internal(
@@ -7700,6 +10310,16 @@ impl MeerkatMachine {
         let replacement_channel_id =
             matches!(outcome, meerkat_core::LiveAppendDeliveryOutcome::Ambiguous)
                 .then(|| meerkat_core::LiveChannelId::new(uuid::Uuid::new_v4().to_string()));
+        let canonical_seed_cursor = if replacement_channel_id.is_some() {
+            let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+                RuntimeDriverError::ValidationFailed {
+                    reason: reason.to_string(),
+                }
+            })?;
+            known_live_context_canonical_cursor(&state, authority.channel_id().as_str())?
+        } else {
+            0
+        };
         let (_, effects) = self
             .apply_session_dsl_input(
                 session_id,
@@ -7717,6 +10337,7 @@ impl MeerkatMachine {
                         .as_ref()
                         .map_or_else(String::new, ToString::to_string),
                     observation,
+                    canonical_seed_cursor,
                 },
                 "ResolveLiveContextAppend",
             )
@@ -7735,6 +10356,7 @@ impl MeerkatMachine {
                 && let Some(recovery) = crate::live_execution::LiveContextAmbiguityRecoveryAuthority::from_generated_effect(
                     authority,
                     replacement_channel_id,
+                    canonical_seed_cursor,
                     effect,
                 )
                 .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
@@ -7752,8 +10374,9 @@ impl MeerkatMachine {
     }
 
     /// Atomically accept the exact replacement WebRTC answer and bind its
-    /// execution only after provider SessionReady and canonical seed
-    /// acknowledgement prove the recovery cursor.
+    /// execution after provider SessionReady acknowledges its actual seed.
+    /// Generated authority separately validates a concurrent reservation
+    /// against the pinned recovery cursor without claiming it was delivered.
     #[cfg(feature = "live")]
     pub async fn accept_live_context_recovery_webrtc_answer_and_bind_execution(
         &self,
@@ -7812,16 +10435,12 @@ impl MeerkatMachine {
                     error.reason_code()
                 ),
             })?;
-        if canonical_seed_cursor != recovery.canonical_seed_cursor() {
-            return Err(RuntimeDriverError::ValidationFailed {
-                reason: "provider recovery seed acknowledgement does not match canonical recovery cursor"
-                    .to_string(),
-            });
-        }
+        let activation_receipt = uuid::Uuid::new_v4().to_string();
         let (_, effects) = self
             .apply_session_dsl_input(
                 recovery.session_id(),
                 crate::meerkat_machine::dsl::MeerkatMachineInput::BindLiveContextRecoveryChannel {
+                    activation_receipt: activation_receipt.clone(),
                     session_id: recovery.session_id().to_string(),
                     closing_channel_id: recovery.closing_channel_id().to_string(),
                     replacement_channel_id: recovery.replacement_channel_id().to_string(),
@@ -7844,6 +10463,7 @@ impl MeerkatMachine {
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         for effect in effects.as_slice() {
             let crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveContextRecoveryChannelBound {
+                activation_receipt: effect_activation,
                 session_id,
                 closing_channel_id,
                 replacement_channel_id,
@@ -7863,6 +10483,7 @@ impl MeerkatMachine {
                 || closing_channel_id != recovery.closing_channel_id().as_str()
                 || replacement_channel_id != recovery.replacement_channel_id().as_str()
                 || append_id != recovery.append_id()
+                || effect_activation != &activation_receipt
                 || *effect_seed_cursor != canonical_seed_cursor
                 || *effect_answer_sequence != answer_observation_sequence
                 || runtime_id.0.as_str() != recovery.runtime_id().0.as_str()
@@ -7894,8 +10515,10 @@ impl MeerkatMachine {
                 .retain(|(queued_session, sequence), _| {
                     queued_session != recovery.session_id() || *sequence > canonical_seed_cursor
                 });
-            return Ok(LiveWebrtcAnswerExecutionBindingAuthority::new(
-                answer, binding,
+            return Ok(LiveWebrtcAnswerExecutionBindingAuthority::new_active(
+                answer,
+                binding,
+                activation_receipt,
             ));
         }
         Err(RuntimeDriverError::Internal(
@@ -7962,18 +10585,13 @@ impl MeerkatMachine {
                     error.reason_code()
                 ),
             })?;
-        if canonical_seed_cursor != recovery.canonical_seed_cursor() {
-            return Err(RuntimeDriverError::ValidationFailed {
-                reason:
-                    "provider result-recovery seed acknowledgement does not match generated cursor"
-                        .to_string(),
-            });
-        }
         let operation = recovery.delivery().operation();
+        let activation_receipt = uuid::Uuid::new_v4().to_string();
         let (_, effects) = self
             .apply_session_dsl_input(
                 recovery.session_id(),
                 crate::meerkat_machine::dsl::MeerkatMachineInput::BindLiveDelegationResultRecoveryChannel {
+                    activation_receipt: activation_receipt.clone(),
                     session_id: recovery.session_id().to_string(),
                     closing_channel_id: recovery.closing_channel_id().to_string(),
                     replacement_channel_id: recovery.replacement_channel_id().to_string(),
@@ -7999,6 +10617,7 @@ impl MeerkatMachine {
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         for effect in effects.as_slice() {
             let crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveDelegationResultRecoveryChannelBound {
+                activation_receipt: effect_activation,
                 session_id,
                 closing_channel_id,
                 replacement_channel_id,
@@ -8023,6 +10642,7 @@ impl MeerkatMachine {
                         operation.operation_id(),
                     )
                 || result_digest != recovery.delivery().result_digest()
+                || effect_activation != &activation_receipt
                 || *effect_seed_cursor != canonical_seed_cursor
                 || *effect_answer_sequence != answer_observation_sequence
                 || runtime_id.0.as_str() != recovery.runtime_id().0.as_str()
@@ -8054,8 +10674,10 @@ impl MeerkatMachine {
                 .retain(|(queued_session, sequence), _| {
                     queued_session != recovery.session_id() || *sequence > canonical_seed_cursor
                 });
-            return Ok(LiveWebrtcAnswerExecutionBindingAuthority::new(
-                answer, binding,
+            return Ok(LiveWebrtcAnswerExecutionBindingAuthority::new_active(
+                answer,
+                binding,
+                activation_receipt,
             ));
         }
         Err(RuntimeDriverError::Internal(
@@ -8191,6 +10813,9 @@ impl MeerkatMachine {
         let session_id = release.session_id();
         let operation = release.operation();
         let correlation = operation.domain_correlation();
+        #[cfg(feature = "live")]
+        self.wait_live_context_ready_for_results(session_id, correlation.channel_id())
+            .await?;
         let channel = correlation.channel_id().to_string();
         let result_digest = crate::live_execution::live_delegation_result_digest(result_text);
         let _mutation_guard = self
@@ -8479,6 +11104,11 @@ impl MeerkatMachine {
             crate::live_execution::LiveDelegationResultDeliveryObservation::Ambiguous
         )
         .then(|| meerkat_core::LiveChannelId::new(uuid::Uuid::new_v4().to_string()));
+        let canonical_seed_cursor = if replacement_channel_id.is_some() {
+            known_live_context_canonical_cursor(&state, &channel)?
+        } else {
+            0
+        };
         let (_, effects) = self
             .apply_session_dsl_input(
                 session_id,
@@ -8495,6 +11125,7 @@ impl MeerkatMachine {
                         .as_ref()
                         .map_or_else(String::new, ToString::to_string),
                     observation: dsl_observation,
+                    canonical_seed_cursor,
                 },
                 "ResolveLiveDelegationResultDelivery",
             )
@@ -8902,7 +11533,15 @@ impl MeerkatMachine {
             _ => None,
         });
         match authority {
-            Some(authority) => authority.map_err(RuntimeDriverError::Internal),
+            Some(authority) => {
+                let authority = authority.map_err(RuntimeDriverError::Internal)?;
+                if let Some(commit) = authority.channel_close_commit_authority()
+                    && let Some(host) = self.live_context_mirror_host()
+                {
+                    host.retire_closed_channel(session_id, commit).await;
+                }
+                Ok(authority)
+            }
             None => Err(RuntimeDriverError::Internal(format!(
                 "RecordLiveCloseClosed for channel '{channel_id}' emitted no LiveCloseResultResolved effect"
             ))),
@@ -10229,6 +12868,32 @@ impl MeerkatMachine {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
+        self.accept_input_with_completion_for_attachment_and_replay_policy(
+            witness,
+            input,
+            crate::accept::InputReplayPolicy::KeyOnly,
+        )
+        .await
+    }
+
+    /// Exact-attachment ingress with an explicit request-only replay contract.
+    /// `ExactPrompt` refuses a non-prompt, missing key, or an old admission
+    /// whose retained witness cannot prove the same prompt and context.
+    pub async fn accept_input_with_completion_for_attachment_and_replay_policy(
+        &self,
+        witness: &RuntimeExecutorAttachmentWitness,
+        input: Input,
+        replay_policy: crate::accept::InputReplayPolicy,
+    ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
+    {
+        if replay_policy == crate::accept::InputReplayPolicy::ExactPrompt
+            && (!matches!(input, Input::Prompt(_)) || input.header().idempotency_key.is_none())
+        {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "exact prompt replay requires a prompt with a stable idempotency key"
+                    .to_string(),
+            });
+        }
         if !witness.belongs_to(self) {
             return Err(RuntimeDriverError::StaleAuthority {
                 reason: "input admission attachment witness belongs to another machine".to_string(),
@@ -10239,6 +12904,7 @@ impl MeerkatMachine {
                 session_id: witness.session_id().clone(),
                 input,
                 register_completion: true,
+                replay_policy,
                 member_residency: MemberResidencyExpectation::Unfenced,
                 expected_attachment: Some(witness.clone()),
             })
@@ -10283,6 +12949,7 @@ impl MeerkatMachine {
                 session_id: witness.session_id().clone(),
                 input,
                 register_completion: true,
+                replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                 member_residency,
                 expected_attachment: Some(witness.clone()),
             })
@@ -10322,6 +12989,7 @@ impl MeerkatMachine {
                 session_id: session_id.clone(),
                 input,
                 register_completion: true,
+                replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                 member_residency,
                 expected_attachment: None,
             })
@@ -10843,6 +13511,7 @@ impl MeerkatMachine {
                         session_id: session_id.clone(),
                         input,
                         register_completion: true,
+                        replay_policy: crate::accept::InputReplayPolicy::KeyOnly,
                         member_residency: MemberResidencyExpectation::Unfenced,
                         expected_attachment: None,
                     },

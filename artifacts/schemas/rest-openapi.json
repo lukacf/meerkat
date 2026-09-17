@@ -22263,13 +22263,19 @@
                 ]
               },
               "stop_reason": {
-                "$ref": "#/components/schemas/WireStopReason"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WireStopReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "role",
               "blocks",
-              "stop_reason",
               "created_at"
             ],
             "type": "object"
@@ -22510,6 +22516,19 @@
             "properties": {
               "kind": {
                 "const": "spoken",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Canonical assistant speech observation without measured playback or\nhearing evidence. Provider termination uses the message's separate,\noptional stop reason.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
                 "type": "string"
               }
             },
@@ -23587,7 +23606,7 @@
   },
   "info": {
     "title": "Meerkat REST API",
-    "version": "0.8.39"
+    "version": "0.8.40"
   },
   "openapi": "3.1.0",
   "paths": {

@@ -498,13 +498,17 @@ impl OpenAiCompatibleClient {
                     let mut tool_calls = Vec::new();
                     for block in &assistant.blocks {
                         match block {
-                            AssistantBlock::Text { text, .. }
-                            | AssistantBlock::Transcript { text, .. } => {
+                            AssistantBlock::Text { text, .. } => {
                                 // Display text and spoken transcripts both
                                 // replay as plain assistant text on the
                                 // Chat Completions–compatible surface.
                                 if !text.is_empty() {
                                     text_parts.push(text.clone());
+                                }
+                            }
+                            AssistantBlock::Transcript { text, source, .. } => {
+                                if !text.is_empty() {
+                                    text_parts.push(source.text_for_model(text).into_owned());
                                 }
                             }
                             AssistantBlock::ToolUse { id, name, args, .. } => {
@@ -1396,6 +1400,31 @@ mod tests {
             supports_reasoning,
             supports_image_tool_results,
         }
+    }
+
+    #[test]
+    fn text_followup_keeps_unmeasured_voice_provenance_in_provider_request() {
+        let messages = vec![
+            Message::BlockAssistant(BlockAssistantMessage::snapshot(vec![
+                AssistantBlock::Transcript {
+                    text: "ordinary speech".into(),
+                    source: meerkat_core::TranscriptSource::Spoken,
+                    meta: None,
+                },
+                AssistantBlock::Transcript {
+                    text: "voice-only discussion".into(),
+                    source: meerkat_core::TranscriptSource::SpokenUnmeasured,
+                    meta: None,
+                },
+            ])),
+            Message::User(UserMessage::text("follow up on what we discussed")),
+        ];
+        let wire = OpenAiCompatibleClient::convert_to_chat_messages(&messages).unwrap();
+        let text = wire[0]["content"].as_str().unwrap();
+        assert!(text.starts_with("ordinary speech"));
+        assert!(text.contains("voice-only discussion") && text.contains("UNMEASURED"));
+        assert!(text.contains("Not proof"));
+        assert_eq!(wire[1]["content"], "follow up on what we discussed");
     }
 
     /// Regression (A2): the Chat Completions path (the self-hosted

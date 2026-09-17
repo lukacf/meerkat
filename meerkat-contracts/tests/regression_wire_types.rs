@@ -310,7 +310,7 @@ fn wire_session_history_roundtrip() {
         messages: vec![
             WireSessionMessage::BlockAssistant {
                 blocks: vec![],
-                stop_reason: meerkat_contracts::WireStopReason::EndTurn,
+                stop_reason: Some(meerkat_contracts::WireStopReason::EndTurn),
                 interaction_id: None,
                 run_id: None,
                 created_at: "2026-04-27T00:00:02Z".to_string(),

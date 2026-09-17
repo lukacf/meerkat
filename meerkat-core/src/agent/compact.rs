@@ -13,6 +13,7 @@ use crate::event::AgentEvent;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::types::{AssistantBlock, Message, TurnUsage, Usage};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -596,9 +597,11 @@ pub fn persist_compaction_cadence(
 ///    directly (no summarization LLM call, zero summary usage); otherwise
 ///    call the LLM with the compaction prompt
 /// 3. If the summary request itself exceeds provider capacity, use a
-///    deterministic mechanical handoff so an oversized session always makes
-///    forward progress. Other failures emit CompactionFailed and preserve the
-///    original session (a failing curator never falls back to either path).
+///    deterministic mechanical handoff for ordinary canonical history. A
+///    source containing unmeasured voice dialogue instead preserves the source
+///    when a mechanical rebuild would discard its unsummarized details.
+///    Other failures emit CompactionFailed and preserve the original session
+///    (a failing curator never falls back to either path).
 /// 4. Rebuild history via compactor
 /// 5. Return a typed outcome; the caller commits it and emits CompactionCompleted
 const MECHANICAL_CAPACITY_SUMMARY: &str = "The summarization request exceeded the active provider capacity. Older transcript rows were mechanically compacted so the session can continue. A durable transcript or memory store may retain the discarded detail when configured; re-establish any critical working detail before relying on it.";
@@ -624,9 +627,55 @@ pub(crate) struct CompactionInvocation<'a> {
     /// the durable `window` for rewrite validation but never enter forecasts
     /// or the summarization request.
     pub(crate) model_messages: &'a [Message],
+    /// Unmeasured dialogue must reach a generated summary or remain intact
+    /// when a mechanical rebuild would discard its unsummarized details.
+    pub(crate) observation_source: CompactionObservationSource,
     pub(crate) window: CompactionWindow<'a>,
     pub(crate) request_pressure: Option<crate::ProviderRequestPressure>,
     pub(crate) parent_revision: String,
+}
+
+/// Exact canonical unmeasured transcript subset incorporated by this attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompactionObservationSource {
+    digest: [u8; 32],
+    has_observations: bool,
+}
+
+impl CompactionObservationSource {
+    pub(crate) fn from_session(session: &Session) -> Result<Self, serde_json::Error> {
+        let observations = session
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::BlockAssistant(assistant) => Some(&assistant.blocks),
+                _ => None,
+            })
+            .flatten()
+            .filter(|block| {
+                matches!(
+                    block,
+                    crate::AssistantBlock::Transcript {
+                        source: crate::types::TranscriptSource::SpokenUnmeasured,
+                        ..
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
+        Self::from_observations(&observations)
+    }
+
+    fn from_observations(
+        observations: &[&crate::AssistantBlock],
+    ) -> Result<Self, serde_json::Error> {
+        let mut digest = Sha256::new();
+        digest.update(b"meerkat.compaction-observation-source.v1\0");
+        digest.update(serde_json::to_vec(observations)?);
+        Ok(Self {
+            digest: digest.finalize().into(),
+            has_observations: !observations.is_empty(),
+        })
+    }
 }
 
 pub(crate) async fn run_compaction<C>(
@@ -642,6 +691,7 @@ where
 {
     let CompactionInvocation {
         model_messages,
+        observation_source,
         window,
         request_pressure,
         parent_revision,
@@ -763,7 +813,7 @@ where
                 summary_usage_identity_dispute = dispute;
                 (summary, usage)
             }
-            Err(e) if is_compaction_capacity_error(&e) => {
+            Err(e) if is_compaction_capacity_error(&e) && !observation_source.has_observations => {
                 tracing::warn!(
                     error = %e,
                     message_count,
@@ -829,8 +879,12 @@ where
         }
         return Err(error);
     }
-    let rewrite_authority =
-        ValidatedCompactionRewrite::from_validated(parent_revision, messages, &result.messages)?;
+    let rewrite_authority = ValidatedCompactionRewrite::from_validated(
+        parent_revision,
+        messages,
+        &result.messages,
+        observation_source,
+    )?;
     let messages_after = result.messages.len();
 
     Ok(CompactionOutcome {
@@ -854,6 +908,7 @@ pub(crate) struct ValidatedCompactionRewrite {
     revision: String,
     messages_before: usize,
     messages_after: usize,
+    observation_source: CompactionObservationSource,
 }
 
 impl ValidatedCompactionRewrite {
@@ -870,6 +925,7 @@ impl ValidatedCompactionRewrite {
         parent_revision: String,
         messages: &[Message],
         rebuilt: &[Message],
+        observation_source: CompactionObservationSource,
     ) -> Result<Self, CompactionError> {
         #[cfg(debug_assertions)]
         {
@@ -888,7 +944,12 @@ impl ValidatedCompactionRewrite {
             revision,
             messages_before: messages.len(),
             messages_after: rebuilt.len(),
+            observation_source,
         })
+    }
+
+    pub(crate) fn authorizes_observations(&self, source: &CompactionObservationSource) -> bool {
+        &self.observation_source == source
     }
 
     /// Whether the token's parent side binds this exact live transcript:
@@ -945,7 +1006,13 @@ impl ValidatedCompactionRewrite {
     ) -> Result<Self, CompactionError> {
         let parent_revision = crate::session::transcript_messages_digest(messages)
             .map_err(|error| CompactionError::InvalidRebuild(error.to_string()))?;
-        Self::from_validated(parent_revision, messages, rebuilt)
+        Self::from_validated(
+            parent_revision,
+            messages,
+            rebuilt,
+            CompactionObservationSource::from_observations(&[])
+                .map_err(|error| CompactionError::InvalidRebuild(error.to_string()))?,
+        )
     }
 }
 
@@ -987,6 +1054,398 @@ mod tests {
         )));
         let mapping = CompactionSummary::new(0, message.clone());
         (message, mapping)
+    }
+
+    fn unmeasured_voice(message: &Message, expected: &str) -> bool {
+        matches!(message, Message::BlockAssistant(assistant) if assistant.blocks.iter().any(|block| matches!(block,
+            AssistantBlock::Transcript { text, source: crate::types::TranscriptSource::SpokenUnmeasured, .. }
+                if text.contains(expected)
+        )))
+    }
+
+    fn session_with_unmeasured_voice() -> Session {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("Discuss the project.")));
+        retain_voice_observation(&mut session, "first", "The blueprints need review.");
+        session.push(Message::User(UserMessage::text(
+            "Follow up on what we discussed.",
+        )));
+        assert_eq!(
+            session
+                .messages()
+                .iter()
+                .filter(|message| unmeasured_voice(message, ""))
+                .count(),
+            1
+        );
+        session
+    }
+
+    fn retain_voice_observation(session: &mut Session, item: &str, text: &str) {
+        let channel = crate::LiveChannelId::new("observation-context");
+        let interaction = crate::InteractionId::new();
+        session
+            .admit_live_assistant_playback_target(&channel, interaction, item, item, 0)
+            .unwrap();
+        session.append_realtime_transcript_event(
+            crate::RealtimeTranscriptEvent::AssistantUnmeasuredSnapshotCommitted {
+                channel_id: channel.to_string(),
+                interaction_id: interaction,
+                response_id: item.into(),
+                item_id: item.into(),
+                content_index: 0,
+                text: text.into(),
+                evidence: crate::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(
+                    text.into(),
+                ),
+            },
+        );
+        session
+            .resolve_live_assistant_playback_target(&channel, interaction, item, item, 0)
+            .unwrap();
+    }
+
+    #[test]
+    fn ordinary_text_context_includes_unmeasured_voice_after_reload() {
+        let session = session_with_unmeasured_voice();
+        let encoded = serde_json::to_vec(&session).unwrap();
+        let reloaded: Session = serde_json::from_slice(&encoded).unwrap();
+        let projected = reloaded.messages_for_model_boundary();
+        assert_eq!(
+            reloaded.messages().len(),
+            3,
+            "observed dialogue is canonical without claiming playback"
+        );
+        assert_eq!(projected.len(), 3);
+        assert!(unmeasured_voice(
+            &projected[1],
+            "The blueprints need review."
+        ));
+        assert_eq!(projected[0], reloaded.messages()[0]);
+        assert_eq!(projected[2], reloaded.messages()[2]);
+        assert_eq!(projected, session.messages_for_model_boundary());
+        let mut ordinary = Session::new();
+        ordinary.push(Message::User(UserMessage::text("Plain text.")));
+        assert_eq!(ordinary.messages_for_model_boundary(), ordinary.messages());
+    }
+
+    struct ObservationCompactor;
+
+    impl Compactor for ObservationCompactor {
+        fn should_compact(&self, _: &CompactionContext) -> bool {
+            true
+        }
+        fn compaction_prompt(&self) -> &'static str {
+            "Summarize context, retaining uncertainty."
+        }
+        fn max_summary_tokens(&self) -> u32 {
+            100
+        }
+        fn rebuild_history(
+            &self,
+            messages: &[Message],
+            summary: &str,
+        ) -> crate::compact::CompactionResult {
+            let (message, mapping) = valid_summary(summary);
+            crate::compact::CompactionResult {
+                messages: vec![message],
+                summary: mapping,
+                retained: Vec::new(),
+                discarded: messages
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, message)| CompactionDiscard::new(offset as u64, message.clone()))
+                    .collect(),
+            }
+        }
+    }
+
+    struct ObservationCurator;
+
+    #[async_trait::async_trait]
+    impl CompactionCurator for ObservationCurator {
+        async fn curate_summary(
+            &self,
+            window: CompactionWindow<'_>,
+        ) -> Result<crate::compact::CuratedCompactionSummary, crate::compact::CompactionCuratorError>
+        {
+            assert!(
+                window
+                    .messages
+                    .iter()
+                    .any(|message| unmeasured_voice(message, "The blueprints need review."))
+            );
+            crate::compact::CuratedCompactionSummary::new(
+                "Observed voice discussion concerned blueprint review; playback remains UNMEASURED.",
+            )
+        }
+    }
+
+    struct UnusedSummaryClient;
+
+    #[async_trait::async_trait]
+    impl crate::agent::AgentLlmClient for UnusedSummaryClient {
+        async fn stream_response(
+            &self,
+            _: &[Message],
+            _: &[Arc<crate::ToolDef>],
+            _: u32,
+            _: Option<f32>,
+            _: Option<&crate::ProviderParamsOverride>,
+        ) -> Result<crate::LlmStreamResult, crate::error::AgentError> {
+            Err(crate::error::AgentError::InternalError(
+                "curator must own summary production".into(),
+            ))
+        }
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::OpenAI
+        }
+        fn model(&self) -> &'static str {
+            "test-observation-summary"
+        }
+    }
+
+    struct ObservationSummaryClient {
+        expect_observation: bool,
+        capacity_failure: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agent::AgentLlmClient for ObservationSummaryClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            tools: &[Arc<crate::ToolDef>],
+            _: u32,
+            _: Option<f32>,
+            _: Option<&crate::ProviderParamsOverride>,
+        ) -> Result<crate::LlmStreamResult, crate::error::AgentError> {
+            assert!(tools.is_empty());
+            assert_eq!(
+                messages
+                    .iter()
+                    .any(|message| unmeasured_voice(message, "The blueprints need review.")),
+                self.expect_observation
+            );
+            if self.capacity_failure {
+                return Err(crate::error::AgentError::llm(
+                    "openai",
+                    crate::error::LlmFailureReason::ProviderError(
+                        crate::error::LlmProviderError::non_retryable(
+                            crate::error::LlmProviderErrorKind::RequestTooLarge,
+                            serde_json::json!({}),
+                        ),
+                    ),
+                    "summary request exceeded capacity",
+                ));
+            }
+            Ok(crate::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "Blueprint review was discussed in observed speech; playback UNMEASURED."
+                        .into(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage {
+                    input_tokens: 10,
+                    output_tokens: 3,
+                    provider_accounting: Some(crate::ProviderTokenAccounting::openai(
+                        "test-observation-summary",
+                        10,
+                    )),
+                    ..Usage::default()
+                },
+            ))
+        }
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::OpenAI
+        }
+        fn model(&self) -> &'static str {
+            "test-observation-summary"
+        }
+    }
+
+    async fn compact_observed_source(
+        session: &Session,
+        client: &ObservationSummaryClient,
+    ) -> Result<CompactionOutcome, CompactionError> {
+        let model_messages = session.messages_for_model_boundary();
+        let compactor: Arc<dyn Compactor> = Arc::new(ObservationCompactor);
+        run_compaction(
+            client,
+            &compactor,
+            None,
+            CompactionInvocation {
+                model_messages: &model_messages,
+                observation_source: CompactionObservationSource::from_session(session).unwrap(),
+                window: CompactionWindow {
+                    messages: session.messages(),
+                    last_input_tokens: 200,
+                    session_boundary_index: 4,
+                },
+                request_pressure: None,
+                parent_revision: session.transcript_revision().unwrap(),
+            },
+            &None,
+            &crate::event_tap::new_event_tap(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn stale_compaction_cannot_consume_later_unmeasured_transcript() {
+        let mut session = session_with_unmeasured_voice();
+        let revision = session.transcript_revision().unwrap();
+        let outcome = compact_observed_source(
+            &session,
+            &ObservationSummaryClient {
+                expect_observation: true,
+                capacity_failure: false,
+            },
+        )
+        .await
+        .unwrap();
+        retain_voice_observation(&mut session, "late", "A later voice-only decision.");
+        assert_ne!(session.transcript_revision().unwrap(), revision);
+        let before = serde_json::to_vec(&session).unwrap();
+        assert!(
+            session
+                .replace_messages_for_compaction_internal(
+                    outcome.new_messages,
+                    &outcome.rewrite_authority,
+                )
+                .is_err(),
+            "the prior canonical authority cannot cover newly observed dialogue"
+        );
+        assert_eq!(serde_json::to_vec(&session).unwrap(), before);
+        assert_eq!(
+            session
+                .messages()
+                .iter()
+                .filter(|message| unmeasured_voice(message, ""))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_llm_receives_observed_dialogue_without_tools() {
+        let mut session = session_with_unmeasured_voice();
+        let outcome = compact_observed_source(
+            &session,
+            &ObservationSummaryClient {
+                expect_observation: true,
+                capacity_failure: false,
+            },
+        )
+        .await
+        .unwrap();
+        session
+            .replace_messages_for_compaction_internal(
+                outcome.new_messages,
+                &outcome.rewrite_authority,
+            )
+            .unwrap()
+            .expect("validated compaction");
+        let reloaded: Session =
+            serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+        assert!(
+            matches!(&reloaded.messages_for_model_boundary()[0], Message::User(user)
+                if user.text_content().contains("Blueprint review")
+                    && user.text_content().contains("UNMEASURED"))
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_fallback_cannot_erase_unsummarized_voice_observations() {
+        let session = session_with_unmeasured_voice();
+        let before = serde_json::to_vec(&session).unwrap();
+        assert!(matches!(
+            compact_observed_source(
+                &session,
+                &ObservationSummaryClient {
+                    expect_observation: true,
+                    capacity_failure: true,
+                }
+            )
+            .await,
+            Err(CompactionError::LlmFailed(_))
+        ));
+        assert_eq!(serde_json::to_vec(&session).unwrap(), before);
+        let mut ordinary = Session::new();
+        ordinary.push(Message::User(UserMessage::text("One")));
+        ordinary.push(Message::User(UserMessage::text("Two")));
+        let outcome = compact_observed_source(
+            &ordinary,
+            &ObservationSummaryClient {
+                expect_observation: false,
+                capacity_failure: true,
+            },
+        )
+        .await
+        .expect("ordinary mechanical capacity fallback remains available");
+        assert!(matches!(&outcome.new_messages[0], Message::User(user)
+                if user.text_content().contains(MECHANICAL_CAPACITY_SUMMARY)));
+    }
+
+    #[tokio::test]
+    async fn compaction_integrates_voice_observations_before_rebase_and_reload() {
+        let mut session = session_with_unmeasured_voice();
+        let model_messages = session.messages_for_model_boundary();
+        let compactor: Arc<dyn Compactor> = Arc::new(ObservationCompactor);
+        let curator: Arc<dyn CompactionCurator> = Arc::new(ObservationCurator);
+        let outcome = run_compaction(
+            &UnusedSummaryClient,
+            &compactor,
+            Some(&curator),
+            CompactionInvocation {
+                model_messages: &model_messages,
+                observation_source: CompactionObservationSource::from_session(&session).unwrap(),
+                window: CompactionWindow {
+                    messages: session.messages(),
+                    last_input_tokens: 200,
+                    session_boundary_index: 4,
+                },
+                request_pressure: None,
+                parent_revision: session.transcript_revision().unwrap(),
+            },
+            &None,
+            &crate::event_tap::new_event_tap(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            outcome
+                .discarded
+                .iter()
+                .all(|discard| discard.source_offset < session.messages().len() as u64),
+            "observed transcript discard offsets refer to actual canonical rows"
+        );
+        session
+            .replace_messages_for_compaction_internal(
+                outcome.new_messages,
+                &outcome.rewrite_authority,
+            )
+            .unwrap()
+            .expect("generated compaction commits");
+        assert_eq!(
+            session
+                .messages()
+                .iter()
+                .filter(|message| unmeasured_voice(message, ""))
+                .count(),
+            0,
+            "raw observations retire only after their source reached the summary producer"
+        );
+        let reloaded: Session =
+            serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+        let projected = reloaded.messages_for_model_boundary();
+        assert_eq!(projected.len(), 1);
+        assert!(matches!(&projected[0], Message::User(user)
+            if user.transcript_role.is_compaction_summary()
+                && user.text_content().contains("blueprint review")
+                && user.text_content().contains("UNMEASURED")));
+        assert_eq!(projected, reloaded.messages_for_model_boundary());
     }
 
     /// These two cases used to fail the compaction closed. They are now

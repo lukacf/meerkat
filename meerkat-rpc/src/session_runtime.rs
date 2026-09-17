@@ -1156,12 +1156,14 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
     #[cfg(feature = "openai-live")]
     async fn commit_live_delegation_final_transcript(
         &self,
+        machine: &meerkat_runtime::MeerkatMachine,
         session_id: &SessionId,
         provisional: meerkat_core::ProvisionalLiveHandoff,
         final_event: meerkat_core::RealtimeTranscriptEvent,
     ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
         <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_final_transcript(
             &self.service,
+            machine,
             session_id,
             provisional,
             final_event,
@@ -4446,6 +4448,24 @@ impl SessionRuntime {
             .await
     }
 
+    /// Experimental physical retirement and terminal reporting via the shared owner.
+    #[cfg(feature = "openai-live")]
+    pub async fn close_experimental_live_channel(
+        &self,
+        host: &Arc<meerkat_live::LiveAdapterHost>,
+        authority: &dyn meerkat::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<
+        Option<meerkat_contracts::LiveCloseResult>,
+        meerkat::surface::ExperimentalLiveChannelCloseError,
+    > {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        self.live_orchestrator(&snapshot, cleanup)
+            .close_experimental_live_channel(host, authority, channel_id)
+            .await
+    }
+
     /// Phase 6b: `live/status` via the shared pipeline.
     pub async fn live_channel_status(
         &self,
@@ -5768,6 +5788,22 @@ impl SessionRuntime {
             .await
     }
 
+    pub async fn append_realtime_transcript_event_from_channel(
+        &self,
+        session_id: &SessionId,
+        event: meerkat_core::RealtimeTranscriptEvent,
+        channel_id: meerkat_core::LiveChannelId,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
+        self.service
+            .append_realtime_transcript_event_from_channel_with_machine(
+                self.runtime_adapter.as_ref(),
+                session_id,
+                event,
+                channel_id,
+            )
+            .await
+    }
+
     /// Admit an assistant playback target only from the generated foreground
     /// user interaction already sealed by provider TurnStarted authority.
     #[allow(clippy::too_many_arguments)]
@@ -5780,6 +5816,29 @@ impl SessionRuntime {
         item_id: String,
         content_index: u32,
     ) -> Result<meerkat_live::LiveAssistantOutputAddress, SessionError> {
+        self.admit_live_assistant_playback_target_with_context_observation(
+            session_id,
+            channel_id,
+            provider_turn_ref,
+            response_id,
+            item_id,
+            content_index,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn admit_live_assistant_playback_target_with_context_observation(
+        &self,
+        session_id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        provider_turn_ref: String,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        observation_id: Option<meerkat_core::LiveContextObservationId>,
+    ) -> Result<meerkat_live::LiveAssistantOutputAddress, SessionError> {
         let handle = self
             .runtime_adapter
             .live_assistant_output_handle_for_turn(session_id, &channel_id, &provider_turn_ref)
@@ -5790,13 +5849,14 @@ impl SessionRuntime {
             })?;
         let target = self
             .service
-            .admit_live_assistant_playback_target(
+            .admit_live_assistant_playback_target_with_context_observation(
                 session_id,
                 channel_id.clone(),
                 handle.interaction_id(),
                 response_id.clone(),
                 item_id.clone(),
                 content_index,
+                observation_id,
             )
             .await?;
         if target.interaction_id() != handle.interaction_id() {

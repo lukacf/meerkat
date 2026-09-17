@@ -544,6 +544,8 @@ impl std::fmt::Display for LiveToolDispatchTimeout {
 ///   final is not a delta).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LiveTranscriptIdentity<'a> {
+    pub channel_id: Option<&'a LiveChannelId>,
+    pub context_observation_id: Option<&'a meerkat_core::LiveContextObservationId>,
     pub provider_item_id: Option<&'a str>,
     pub previous_item_id: Option<&'a str>,
     pub content_index: Option<u32>,
@@ -552,6 +554,21 @@ pub struct LiveTranscriptIdentity<'a> {
 }
 
 impl<'a> LiveTranscriptIdentity<'a> {
+    #[must_use]
+    pub fn with_context_observation(
+        mut self,
+        observation_id: Option<&'a meerkat_core::LiveContextObservationId>,
+    ) -> Self {
+        self.context_observation_id = observation_id;
+        self
+    }
+
+    #[must_use]
+    pub fn with_channel(mut self, channel_id: &'a LiveChannelId) -> Self {
+        self.channel_id = Some(channel_id);
+        self
+    }
+
     /// Build identity for a user-side observation (response/delta IDs are
     /// always `None` on the user side).
     pub fn user(
@@ -560,6 +577,8 @@ impl<'a> LiveTranscriptIdentity<'a> {
         content_index: Option<u32>,
     ) -> Self {
         Self {
+            channel_id: None,
+            context_observation_id: None,
             provider_item_id,
             previous_item_id,
             content_index,
@@ -577,6 +596,8 @@ impl<'a> LiveTranscriptIdentity<'a> {
         delta_id: Option<&'a str>,
     ) -> Self {
         Self {
+            channel_id: None,
+            context_observation_id: None,
             provider_item_id,
             previous_item_id,
             content_index,
@@ -594,6 +615,8 @@ impl<'a> LiveTranscriptIdentity<'a> {
         response_id: Option<&'a str>,
     ) -> Self {
         Self {
+            channel_id: None,
+            context_observation_id: None,
             provider_item_id: Some(provider_item_id),
             previous_item_id,
             content_index,
@@ -762,6 +785,35 @@ pub trait LiveProjectionSink: Send + Sync {
         provider_item_id: &str,
         content_index: u32,
     ) -> Result<LiveAssistantOutputAddress, LiveProjectionError>;
+
+    /// Forward opaque source provenance in the same admission as the target.
+    /// Legacy sinks remain usable for unsequenced observations only.
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_assistant_playback_target_with_context_observation(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        provider_turn_ref: &str,
+        response_id: &str,
+        provider_item_id: &str,
+        content_index: u32,
+        observation_id: Option<&meerkat_core::LiveContextObservationId>,
+    ) -> Result<LiveAssistantOutputAddress, LiveProjectionError> {
+        if observation_id.is_some() {
+            return Err(LiveProjectionError::Rejected(
+                "assistant source-observation forwarding is unavailable".into(),
+            ));
+        }
+        self.admit_assistant_playback_target(
+            session_id,
+            channel_id,
+            provider_turn_ref,
+            response_id,
+            provider_item_id,
+            content_index,
+        )
+        .await
+    }
 
     /// Resolve a playback-complete terminal through session authority.
     async fn complete_assistant_playback(
@@ -1209,7 +1261,72 @@ struct ChannelState {
     /// `next_observation_raw` — must come before `adapter_for` so the
     /// synthetic obs survives a concurrent `close_channel`.
     pending_synthetic_obs: Option<LiveAdapterObservation>,
+    close_projection_retention: Arc<()>,
+    terminal_error_projection: Arc<Mutex<Option<(LiveAdapterErrorCode, String)>>>,
     playback_terminal_waiters: HashMap<LivePlaybackTerminalKey, PendingLivePlaybackTerminal>,
+}
+
+/// Keeps transport projection state reachable while an already-observed
+/// terminal fault awaits generated close and publication. Not lifecycle authority.
+#[derive(Debug)]
+pub struct LiveChannelCloseProjectionLease {
+    _retention: Arc<()>,
+}
+
+/// Owned realization target for an exact generated-close handoff. It pins only
+/// transport projection resources; committing still requires generated authority.
+pub struct LiveChannelCloseCommitTarget {
+    inner: Arc<Mutex<HostInner>>,
+    observation: LiveChannelCloseObservation,
+    _retention: LiveChannelCloseProjectionLease,
+}
+
+impl LiveChannelCloseCommitTarget {
+    pub async fn commit(
+        self,
+        authority: &LiveChannelCloseCommitAuthority,
+    ) -> Result<(), LiveAdapterHostError> {
+        if authority.channel_id() != self.observation.channel_id()
+            || authority.close_sequence() != self.observation.close_sequence()
+        {
+            return Err(LiveAdapterHostError::CloseNotAuthorized);
+        }
+        let channel_id = LiveChannelId::new(self.observation.channel_id().to_owned());
+        #[cfg(feature = "test-support")]
+        {
+            let barrier = self
+                .inner
+                .lock()
+                .await
+                .close_commit_barriers
+                .remove(&channel_id);
+            if let Some((entered, release)) = barrier {
+                let _ = entered.send(());
+                release
+                    .await
+                    .map_err(|_| LiveAdapterHostError::CloseNotAuthorized)?;
+            }
+        }
+        let mut inner = self.inner.lock().await;
+        let channel = inner
+            .channels
+            .get_mut(&channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        if !channel.physical_close_confirmed || channel.adapter.is_some() {
+            return Err(LiveAdapterHostError::CloseNotAuthorized);
+        }
+        authority.consume_once()?;
+        channel.status = LiveAdapterStatus::Closed;
+        channel.retire_at = Some(std::time::Instant::now() + CLOSED_CHANNEL_TTL);
+        for (_, waiter) in channel.playback_terminal_waiters.drain() {
+            let _ = waiter.settlement_tx.send(Err(
+                LiveAdapterHostError::PlaybackTerminalSettlementFailed(
+                    "live channel closed before playback terminal settlement".to_string(),
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Non-forgeable generated-authority handoff for materializing a live channel.
@@ -1707,7 +1824,7 @@ impl LiveToolDispatchError {
 /// - Routes adapter observations to the right Meerkat API
 /// - Exposes transport bootstrap info for the surface API
 pub struct LiveAdapterHost {
-    inner: Mutex<HostInner>,
+    inner: Arc<Mutex<HostInner>>,
     // G41: removed `next_channel_id: AtomicU64` — channel ids are now v4 UUIDs
     // minted by `LiveChannelId::random_uuid()` so the per-process counter is
     // dead weight (and would imply a process-monotonic guarantee the new ids
@@ -1765,6 +1882,8 @@ struct HostInner {
     fail_next_command_receipt: HashSet<LiveChannelId>,
     #[cfg(feature = "test-support")]
     fail_next_projection: HashMap<LiveChannelId, bool>,
+    #[cfg(feature = "test-support")]
+    close_commit_barriers: HashMap<LiveChannelId, (oneshot::Sender<()>, oneshot::Receiver<()>)>,
 }
 
 impl LiveAdapterHost {
@@ -1778,14 +1897,16 @@ impl LiveAdapterHost {
     #[must_use]
     pub fn new(projection_sink: Arc<dyn LiveProjectionSink>) -> Self {
         Self {
-            inner: Mutex::new(HostInner {
+            inner: Arc::new(Mutex::new(HostInner {
                 channels: IndexMap::new(),
                 by_session: HashMap::new(),
                 #[cfg(feature = "test-support")]
                 fail_next_command_receipt: HashSet::new(),
                 #[cfg(feature = "test-support")]
                 fail_next_projection: HashMap::new(),
-            }),
+                #[cfg(feature = "test-support")]
+                close_commit_barriers: HashMap::new(),
+            })),
             projection_sink,
             tool_dispatcher: std::sync::Mutex::new(None),
             tool_timeout: DEFAULT_LIVE_TOOL_TIMEOUT,
@@ -1915,6 +2036,8 @@ impl LiveAdapterHost {
                 physical_close_confirmed: true,
                 retire_at: None,
                 pending_synthetic_obs: None,
+                close_projection_retention: Arc::new(()),
+                terminal_error_projection: Arc::new(Mutex::new(None)),
                 playback_terminal_waiters: HashMap::new(),
             },
         );
@@ -2380,6 +2503,24 @@ impl LiveAdapterHost {
         channel_id: &LiveChannelId,
         observation: &LiveAdapterObservation,
     ) -> Result<ObservationOutcome, LiveAdapterHostError> {
+        let (observation, context_observation_id) = match observation {
+            LiveAdapterObservation::WithContextObservation {
+                observation_id,
+                observation,
+            } => {
+                if matches!(
+                    observation.as_ref(),
+                    LiveAdapterObservation::WithContextObservation { .. }
+                ) {
+                    return Err(LiveProjectionError::Rejected(
+                        "nested source-observation provenance is invalid".into(),
+                    )
+                    .into());
+                }
+                (observation.as_ref(), Some(observation_id))
+            }
+            observation => (observation, None),
+        };
         #[cfg(feature = "test-support")]
         let injected_failure = self
             .inner
@@ -2416,13 +2557,14 @@ impl LiveAdapterHost {
                 },
             ) => self
                 .projection_sink
-                .admit_assistant_playback_target(
+                .admit_assistant_playback_target_with_context_observation(
                     &session_id,
                     channel_id,
                     provider_turn_ref,
                     response_id,
                     provider_item_id,
                     *content_index,
+                    context_observation_id,
                 )
                 .await
                 .map(ObservationOutcome::AssistantOutputAvailable)
@@ -2446,7 +2588,9 @@ impl LiveAdapterHost {
                     provider_item_id.as_deref(),
                     previous_item_id.as_deref(),
                     *content_index,
-                );
+                )
+                .with_channel(channel_id)
+                .with_context_observation(context_observation_id);
                 self.projection_sink
                     .append_user_transcript(&session_id, text, identity)
                     .await?;
@@ -2471,7 +2615,8 @@ impl LiveAdapterHost {
                     *content_index,
                     response_id.as_deref(),
                     delta_id.as_deref(),
-                );
+                )
+                .with_context_observation(context_observation_id);
                 // T6: display text routes to the text lane; flushed as
                 // AssistantBlock::Text.
                 self.projection_sink
@@ -2498,7 +2643,8 @@ impl LiveAdapterHost {
                     *content_index,
                     response_id.as_deref(),
                     delta_id.as_deref(),
-                );
+                )
+                .with_context_observation(context_observation_id);
                 // T6: spoken transcript routes to the transcript lane;
                 // flushed as AssistantBlock::Transcript { source: Spoken }.
                 self.projection_sink
@@ -2525,7 +2671,8 @@ impl LiveAdapterHost {
                     previous_item_id.as_deref(),
                     *content_index,
                     response_id.as_deref(),
-                );
+                )
+                .with_context_observation(context_observation_id);
                 // R6: forward the response_id so the sink keys its
                 // per-turn buffer on (SessionId, response_id). T6:
                 // spoken-transcript final routes to the transcript lane.
@@ -2682,9 +2829,12 @@ impl LiveAdapterHost {
                 ObservationRouting::AppendRealtimeTranscript,
                 LiveAdapterObservation::RealtimeTranscript { event },
             ) => {
+                let event = event
+                    .clone()
+                    .with_context_observation(context_observation_id.cloned());
                 let outcome = self
                     .projection_sink
-                    .append_realtime_transcript(&session_id, event)
+                    .append_realtime_transcript(&session_id, &event)
                     .await?;
                 match outcome.user_content {
                     Some(RealtimeUserContentApplyOutcome::Committed(identity))
@@ -2775,9 +2925,32 @@ impl LiveAdapterHost {
                 ObservationRouting::TerminalError,
                 LiveAdapterObservation::Error { code, message },
             ) => {
+                let terminal_projection = {
+                    let inner = self.inner.lock().await;
+                    Arc::clone(
+                        &inner
+                            .channels
+                            .get(channel_id)
+                            .ok_or_else(|| {
+                                LiveAdapterHostError::ChannelNotFound(channel_id.clone())
+                            })?
+                            .terminal_error_projection,
+                    )
+                };
+                let mut reported = terminal_projection.lock().await;
+                if let Some((reported_code, reported_message)) = reported.as_ref() {
+                    if reported_code != code || reported_message != message {
+                        return Err(LiveProjectionError::Rejected(
+                            "terminal fault replay has conflicting evidence".to_string(),
+                        )
+                        .into());
+                    }
+                    return Ok(ObservationOutcome::Terminal { code: code.clone() });
+                }
                 self.projection_sink
                     .signal_terminal_error(&session_id, code.clone(), message)
                     .await?;
+                *reported = Some((code.clone(), message.clone()));
                 Ok(ObservationOutcome::Terminal { code: code.clone() })
             }
 
@@ -3153,41 +3326,87 @@ impl LiveAdapterHost {
         .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
     }
 
+    pub async fn retain_channel_close_projection(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+    ) -> Result<LiveChannelCloseProjectionLease, LiveAdapterHostError> {
+        let inner = self.inner.lock().await;
+        let channel = inner
+            .channels
+            .get(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        if &channel.session_id != session_id {
+            return Err(LiveAdapterHostError::CloseNotAuthorized);
+        }
+        Ok(LiveChannelCloseProjectionLease {
+            _retention: Arc::clone(&channel.close_projection_retention),
+        })
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn __block_next_close_commit_for_test(
+        &self,
+        channel_id: LiveChannelId,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        self.inner
+            .lock()
+            .await
+            .close_commit_barriers
+            .insert(channel_id, (entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn __expire_closed_projection_for_test(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<(), LiveAdapterHostError> {
+        let mut inner = self.inner.lock().await;
+        let channel = inner
+            .channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        if !channel.status.is_terminal() {
+            return Err(LiveAdapterHostError::CloseNotAuthorized);
+        }
+        channel.retire_at = Some(std::time::Instant::now());
+        Self::reap_retired_locked(&mut inner);
+        Ok(())
+    }
+
     pub async fn commit_channel_close_observation(
         &self,
         observation: &LiveChannelCloseObservation,
         authority: &LiveChannelCloseCommitAuthority,
     ) -> Result<(), LiveAdapterHostError> {
-        if authority.channel_id() != observation.channel_id()
-            || authority.close_sequence() != observation.close_sequence()
-        {
-            return Err(LiveAdapterHostError::CloseNotAuthorized);
-        }
-        // G42: keep the channel reachable for `live/status` until the TTL
-        // elapses. We unbind the adapter (releasing transport resources) and
-        // mark the channel as `Closed`, but leave the entry in `channels`
-        // so post-close reads can report the terminal status. This commit is
-        // called only after generated close authority accepts the typed close
-        // observation.
+        self.channel_close_commit_target(observation)
+            .await?
+            .commit(authority)
+            .await
+    }
+
+    pub async fn channel_close_commit_target(
+        &self,
+        observation: &LiveChannelCloseObservation,
+    ) -> Result<LiveChannelCloseCommitTarget, LiveAdapterHostError> {
         let channel_id = LiveChannelId::new(observation.channel_id().to_owned());
-        {
-            let mut inner = self.inner.lock().await;
-            Self::reap_retired_locked(&mut inner);
-            let channel = inner
-                .channels
-                .get_mut(&channel_id)
-                .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-            if !channel.physical_close_confirmed || channel.adapter.is_some() {
-                return Err(LiveAdapterHostError::CloseNotAuthorized);
-            }
-            // Consume and commit under the same host lock as the physical
-            // proof check. An adapter reattachment cannot slip between proof
-            // validation and terminal cache publication.
-            authority.consume_once()?;
-            channel.status = LiveAdapterStatus::Closed;
-            channel.retire_at = Some(std::time::Instant::now() + CLOSED_CHANNEL_TTL);
-        }
-        Ok(())
+        let inner = self.inner.lock().await;
+        let channel = inner
+            .channels
+            .get(&channel_id)
+            .ok_or(LiveAdapterHostError::ChannelNotFound(channel_id))?;
+        Ok(LiveChannelCloseCommitTarget {
+            inner: Arc::clone(&self.inner),
+            observation: observation.clone(),
+            _retention: LiveChannelCloseProjectionLease {
+                _retention: Arc::clone(&channel.close_projection_retention),
+            },
+        })
     }
 
     /// Establish transport-mechanical absence before generated close
@@ -3519,6 +3738,9 @@ impl LiveAdapterHost {
 
     pub fn classify_observation(observation: &LiveAdapterObservation) -> ObservationRouting {
         match observation {
+            LiveAdapterObservation::WithContextObservation { observation, .. } => {
+                Self::classify_observation(observation)
+            }
             LiveAdapterObservation::Ready => {
                 ObservationRouting::UpdateStatus(LiveAdapterStatus::Ready)
             }
@@ -3648,7 +3870,12 @@ impl LiveAdapterHost {
             .channels
             .iter()
             .filter_map(|(id, ch)| match ch.retire_at {
-                Some(deadline) if deadline <= now => Some(id.clone()),
+                Some(deadline)
+                    if deadline <= now
+                        && Arc::strong_count(&ch.close_projection_retention) == 1 =>
+                {
+                    Some(id.clone())
+                }
                 _ => None,
             })
             .collect();
@@ -5758,6 +5985,67 @@ mod tests {
     }
 
     // -- A10: terminal error projection --
+
+    #[tokio::test]
+    async fn terminal_projection_custody_pins_expired_channel_and_rejects_conflicting_replay() {
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let host = LiveAdapterHost::new(sink.clone());
+        let session = test_session_id();
+        let channel = host
+            .open_channel_with_generated_test_machine_authority(session.clone())
+            .await
+            .unwrap();
+        assert!(
+            host.retain_channel_close_projection(&SessionId::new(), &channel)
+                .await
+                .is_err()
+        );
+        let custody = host
+            .retain_channel_close_projection(&session, &channel)
+            .await
+            .unwrap();
+        host.close_channel_with_generated_test_machine_authority(&channel)
+            .await
+            .unwrap();
+        host.inner
+            .lock()
+            .await
+            .channels
+            .get_mut(&channel)
+            .unwrap()
+            .retire_at = Some(std::time::Instant::now());
+        assert_eq!(
+            host.channel_status(&channel).await.unwrap(),
+            LiveAdapterStatus::Closed
+        );
+        let observation = LiveAdapterObservation::Error {
+            code: LiveAdapterErrorCode::ConnectionLost,
+            message: "provider socket lost".to_string(),
+        };
+        host.apply_observation(&channel, &observation)
+            .await
+            .unwrap();
+        host.apply_observation(&channel, &observation)
+            .await
+            .unwrap();
+        assert_eq!(sink.terminal_errors.lock().unwrap().len(), 1);
+        assert!(
+            host.apply_observation(
+                &channel,
+                &LiveAdapterObservation::Error {
+                    code: LiveAdapterErrorCode::ProviderError,
+                    message: "different terminal fault".to_string(),
+                }
+            )
+            .await
+            .is_err()
+        );
+        drop(custody);
+        assert!(matches!(
+            host.channel_status(&channel).await,
+            Err(LiveAdapterHostError::ChannelNotFound(_))
+        ));
+    }
 
     #[tokio::test]
     async fn terminal_error_observation_signals_sink_without_closing_host_directly() {

@@ -196,6 +196,7 @@ impl MobSeamEffect {
                 session_id,
                 work_id,
                 origin,
+                ..
             } => {
                 if id == &seam_facts::fields::agent_runtime_id() {
                     Some(FieldValue::Str(agent_runtime_id.as_str()))
@@ -739,6 +740,7 @@ mod tests {
                     session_id: mob_dsl::SessionId::from("session-1"),
                     work_id: mob_dsl::WorkId::from("work-1"),
                     origin: mob_dsl::WorkOrigin::External,
+                    content_attribution: mob_dsl::WorkContentAttribution::Conversational,
                 }),
                 seam_facts::route_work_request_reaches_meerkat(),
             ),
@@ -822,6 +824,7 @@ mod tests {
             session_id: mob_dsl::SessionId::from("session-1"),
             work_id: mob_dsl::WorkId::from("work-1"),
             origin: mob_dsl::WorkOrigin::External,
+            content_attribution: mob_dsl::WorkContentAttribution::Conversational,
         });
         assert!(matches!(
             refusal_feedback_input(&ingress, &error).expect("ingress closure"),
@@ -863,6 +866,7 @@ mod tests {
             session_id: mob_dsl::SessionId::from("session-x"),
             work_id: mob_dsl::WorkId::from("w-1"),
             origin: mob_dsl::WorkOrigin::External,
+            content_attribution: mob_dsl::WorkContentAttribution::Conversational,
         };
         let effect = seam(body);
 
@@ -963,6 +967,7 @@ mod tests {
                 session_id: mob_dsl::SessionId::from("session-1"),
                 work_id: mob_dsl::WorkId::from("work-1"),
                 origin: mob_dsl::WorkOrigin::External,
+                content_attribution: mob_dsl::WorkContentAttribution::Conversational,
             },
             DslEffect::RequestRuntimeRetire {
                 agent_identity: mob_dsl::AgentIdentity::from("agent"),
@@ -1053,6 +1058,7 @@ mod tests {
                 session_id: mob_dsl::SessionId::from("session-1"),
                 work_id: mob_dsl::WorkId::from("work-1"),
                 origin: mob_dsl::WorkOrigin::External,
+                content_attribution: mob_dsl::WorkContentAttribution::Conversational,
             },
             mob_dsl::MobMachineEffect::RequestRuntimeRetire {
                 agent_identity: mob_dsl::AgentIdentity::from("agent"),

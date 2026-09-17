@@ -9,6 +9,9 @@
 //! public and unused items in one target are expected.
 #![allow(dead_code)]
 
+#[path = "gpt_live_evidence.rs"]
+pub mod evidence;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
@@ -352,17 +355,61 @@ impl BrowserPeerProtocol {
 }
 
 pub struct BrowserPeer {
+    evidence: Option<(evidence::Journal, u32)>,
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout: BrowserOutput,
     next_id: u64,
     pub protocol: BrowserPeerProtocol,
     pub last_raw_messages: u64,
     pub last_parse_failures: u64,
 }
 
+enum BrowserOutput {
+    Direct(BufReader<ChildStdout>),
+    Recorded {
+        responses: tokio::sync::mpsc::Receiver<Value>,
+        task: tokio::task::AbortHandle,
+        closing: Arc<std::sync::atomic::AtomicBool>,
+    },
+}
+
+impl Drop for BrowserOutput {
+    fn drop(&mut self) {
+        if let Self::Recorded { task, .. } = self {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for BrowserPeer {
+    fn drop(&mut self) {
+        if let Some((journal, channel)) = &self.evidence {
+            let _ = journal.channel(*channel, evidence::ChannelAction::BrowserDropping);
+            if let Err(fault) = journal.finish(evidence::Outcome::CancelledOrPanicked) {
+                eprintln!("{fault}; journal={}", journal.path().display());
+            }
+        }
+    }
+}
+
 impl BrowserPeer {
     pub async fn start(protocol: BrowserPeerProtocol) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_inner(protocol, None).await
+    }
+
+    pub async fn start_recorded(
+        protocol: BrowserPeerProtocol,
+        journal: evidence::Journal,
+        channel: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_inner(protocol, Some((journal, channel))).await
+    }
+
+    async fn start_inner(
+        protocol: BrowserPeerProtocol,
+        evidence: Option<(evidence::Journal, u32)>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let browser_root = workspace_root().join("tests/live_smoke/browser");
         let script = browser_root.join("harness/gpt-live-peer-e2e.mjs");
         let node = [
@@ -381,16 +428,64 @@ impl BrowserPeer {
             .arg(script)
             .arg("--protocol")
             .arg(protocol.harness_flag())
+            .args(evidence.as_ref().map(|_| "--capture-evidence"))
             .env_remove("MEERKAT_E2E_AUTH_OPENAI_OAUTH_TOKENS_JSON")
             .env_remove("OPENAI_API_KEY")
+            .env_remove("OPENAI_API_KEY_OLD")
             .env_remove("RKAT_OPENAI_API_KEY")
+            .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()?;
         let stdin = child.stdin.take().ok_or("missing peer stdin")?;
-        let stdout = BufReader::new(child.stdout.take().ok_or("missing peer stdout")?);
+        let mut stdout = BufReader::new(child.stdout.take().ok_or("missing peer stdout")?);
+        let stdout = if let Some((journal, channel)) = &evidence {
+            let journal = journal.clone();
+            let channel = *channel;
+            let (responses, receiver) = tokio::sync::mpsc::channel(4);
+            let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let reader_closing = closing.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let mut line = String::new();
+                    match stdout.read_line(&mut line).await {
+                        Ok(0) | Err(_) => {
+                            if !reader_closing.load(std::sync::atomic::Ordering::Acquire) {
+                                let _ = journal.fail(evidence::Fault::BrowserReaderClosed);
+                            }
+                            break;
+                        }
+                        Ok(_) => {}
+                    }
+                    let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                        let _ = journal.fail(evidence::Fault::InvalidBrowserEvidence);
+                        continue;
+                    };
+                    if let Some(record) = message.get("evidence") {
+                        match serde_json::from_value(record.clone()) {
+                            Ok(record) => {
+                                let _ = journal.native(channel, record);
+                            }
+                            Err(_) => {
+                                let _ = journal.fail(evidence::Fault::InvalidBrowserEvidence);
+                            }
+                        }
+                    } else if responses.send(message).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            BrowserOutput::Recorded {
+                responses: receiver,
+                task: task.abort_handle(),
+                closing,
+            }
+        } else {
+            BrowserOutput::Direct(stdout)
+        };
         Ok(Self {
+            evidence,
             child,
             stdin,
             stdout,
@@ -409,9 +504,18 @@ impl BrowserPeer {
         self.stdin.write_all(command.to_string().as_bytes()).await?;
         self.stdin.write_all(b"\n").await?;
         self.stdin.flush().await?;
-        let mut line = String::new();
-        timeout(Duration::from_secs(120), self.stdout.read_line(&mut line)).await??;
-        let response: Value = serde_json::from_str(line.trim())?;
+        let response: Value = match &mut self.stdout {
+            BrowserOutput::Direct(stdout) => {
+                let mut line = String::new();
+                timeout(Duration::from_secs(120), stdout.read_line(&mut line)).await??;
+                serde_json::from_str(line.trim())?
+            }
+            BrowserOutput::Recorded { responses, .. } => {
+                timeout(Duration::from_secs(120), responses.recv())
+                    .await?
+                    .ok_or("browser evidence reader closed")?
+            }
+        };
         if response["id"].as_u64() != Some(id) {
             return Err("browser peer response id mismatch".into());
         }
@@ -438,13 +542,7 @@ impl BrowserPeer {
 
     pub async fn audio_evidence(&mut self) -> Result<AudioEvidence, Box<dyn std::error::Error>> {
         let snapshot = self.snapshot().await?;
-        let audio = &snapshot["audio"];
-        Ok(AudioEvidence {
-            decoded_non_silent_frames: audio["decoded_non_silent_frames"].as_u64().unwrap_or(0),
-            non_silent_frames: audio["non_silent_frames"].as_u64().unwrap_or(0),
-            total_audio_energy: audio["total_audio_energy"].as_f64().unwrap_or(0.0),
-            total_samples_received: audio["total_samples_received"].as_u64().unwrap_or(0),
-        })
+        Ok(serde_json::from_value(snapshot["audio"].clone())?)
     }
 
     /// Payload-free summary of `events` under this peer's protocol.
@@ -453,39 +551,179 @@ impl BrowserPeer {
     }
 
     pub async fn close(mut self) {
+        if self.evidence.is_some() {
+            let _ = self.stop_evidence().await;
+        }
         let _ = self.call(json!({"type":"close"})).await;
         let _ = self.child.kill().await;
     }
+
+    pub async fn stop_evidence(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some((journal, channel)) = self.evidence.take() {
+            let result = timeout(
+                Duration::from_secs(5),
+                self.call(json!({"type":"stop_evidence"})),
+            )
+            .await;
+            if let BrowserOutput::Recorded { closing, .. } = &self.stdout {
+                closing.store(true, std::sync::atomic::Ordering::Release);
+            }
+            journal.channel(channel, evidence::ChannelAction::BrowserDropping)?;
+            match result {
+                Ok(Ok(_)) => Ok(()),
+                _ => {
+                    journal.fail(evidence::Fault::BrowserReaderClosed)?;
+                    Err("browser evidence flush failed".into())
+                }
+            }
+        } else {
+            Ok(())
+        }
+    }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct AudioEvidence {
     pub decoded_non_silent_frames: u64,
+    pub decoded_non_silent_seconds: f64,
     pub non_silent_frames: u64,
-    pub total_audio_energy: f64,
-    pub total_samples_received: u64,
+    pub total_audio_energy: Option<f64>,
+    pub total_samples_received: Option<u64>,
+    pub total_samples_duration: Option<f64>,
+    pub bytes_received: u64,
+    pub packets_received: u64,
+}
+
+impl AudioEvidence {
+    /// S99 requires decoded native remote speech, not analyser-only evidence.
+    pub fn has_decoded_speech_since(self, baseline: Self) -> bool {
+        self.bytes_received > baseline.bytes_received
+            && self.packets_received > baseline.packets_received
+            && self.decoded_non_silent_frames > baseline.decoded_non_silent_frames
+            && self.decoded_non_silent_seconds - baseline.decoded_non_silent_seconds >= 0.1
+    }
+
+    /// Require new remote RTP plus measured non-silent media, never protocol
+    /// events or counters accumulated before this exchange.
+    pub fn has_spoken_since(self, baseline: Self) -> bool {
+        self.bytes_received > baseline.bytes_received
+            && self.packets_received > baseline.packets_received
+            && (self.decoded_non_silent_seconds - baseline.decoded_non_silent_seconds >= 0.1
+                || self
+                    .non_silent_frames
+                    .saturating_sub(baseline.non_silent_frames)
+                    >= 2)
+    }
+}
+
+#[cfg(test)]
+mod audio_evidence_tests {
+    use super::AudioEvidence;
+
+    #[test]
+    fn silence_rtp_readiness_and_stale_audio_are_not_spoken_output() {
+        let silence = AudioEvidence {
+            bytes_received: 10_000,
+            packets_received: 100,
+            total_samples_received: Some(48_000),
+            total_samples_duration: Some(1.0),
+            ..AudioEvidence::default()
+        };
+        assert!(!silence.has_spoken_since(AudioEvidence::default()));
+        let energy_only = AudioEvidence {
+            total_audio_energy: Some(0.01),
+            ..silence
+        };
+        assert!(!energy_only.has_spoken_since(AudioEvidence::default()));
+        let spoken = AudioEvidence {
+            decoded_non_silent_frames: 4_800,
+            decoded_non_silent_seconds: 0.1,
+            ..energy_only
+        };
+        assert!(spoken.has_spoken_since(AudioEvidence::default()));
+        assert!(!spoken.has_spoken_since(spoken));
+        let stale = AudioEvidence {
+            bytes_received: spoken.bytes_received + 100,
+            packets_received: spoken.packets_received + 1,
+            total_samples_duration: Some(2.0),
+            ..spoken
+        };
+        assert!(!stale.has_spoken_since(spoken));
+    }
+
+    #[test]
+    fn decoded_audio_requires_remote_rtp_and_a_measured_duration() {
+        let mut evidence = AudioEvidence {
+            decoded_non_silent_frames: 4_800,
+            decoded_non_silent_seconds: 0.1,
+            ..AudioEvidence::default()
+        };
+        assert!(!evidence.has_spoken_since(AudioEvidence::default()));
+        evidence.bytes_received = 5_000;
+        evidence.packets_received = 10;
+        assert!(evidence.has_spoken_since(AudioEvidence::default()));
+        evidence.decoded_non_silent_seconds = 0.001;
+        assert!(!evidence.has_spoken_since(AudioEvidence::default()));
+    }
+
+    #[test]
+    fn missing_browser_audio_measurement_is_an_error_not_a_zero_default() {
+        assert!(serde_json::from_value::<AudioEvidence>(serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn concurrent_bootstrap_requires_fresh_decoded_speech_not_analyser_or_transcript() {
+        let analyser_only = AudioEvidence {
+            bytes_received: 10_000,
+            packets_received: 100,
+            non_silent_frames: 100,
+            total_audio_energy: Some(0.5),
+            ..AudioEvidence::default()
+        };
+        assert!(analyser_only.has_spoken_since(AudioEvidence::default()));
+        assert!(!analyser_only.has_decoded_speech_since(AudioEvidence::default()));
+        let decoded = AudioEvidence {
+            decoded_non_silent_frames: 4_800,
+            decoded_non_silent_seconds: 0.1,
+            ..analyser_only
+        };
+        assert!(decoded.has_decoded_speech_since(AudioEvidence::default()));
+        assert!(!decoded.has_decoded_speech_since(decoded));
+        assert!(
+            !AudioEvidence {
+                bytes_received: decoded.bytes_received + 1,
+                packets_received: decoded.packets_received + 1,
+                ..decoded
+            }
+            .has_decoded_speech_since(decoded)
+        );
+        assert!(
+            !AudioEvidence {
+                bytes_received: 0,
+                packets_received: 0,
+                ..decoded
+            }
+            .has_decoded_speech_since(AudioEvidence::default())
+        );
+    }
 }
 
 pub async fn wait_for_spoken_output(
     peer: &mut BrowserPeer,
     baseline: AudioEvidence,
     timeout_secs: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    const REQUIRED_NEW_FRAMES: u64 = 2;
+) -> Result<AudioEvidence, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
         let snapshot = peer.snapshot().await?;
         let audio = &snapshot["audio"];
+        let evidence: AudioEvidence = serde_json::from_value(audio.clone())?;
         let non_silent_frames = audio["non_silent_frames"].as_u64().unwrap_or(0);
         let decoded_non_silent_frames = audio["decoded_non_silent_frames"].as_u64().unwrap_or(0);
-        let total_audio_energy = audio["total_audio_energy"].as_f64().unwrap_or(0.0);
-        let total_samples_received = audio["total_samples_received"].as_u64().unwrap_or(0);
-        if decoded_non_silent_frames > baseline.decoded_non_silent_frames
-            || non_silent_frames.saturating_sub(baseline.non_silent_frames) >= REQUIRED_NEW_FRAMES
-            || (total_audio_energy > baseline.total_audio_energy
-                && total_samples_received > baseline.total_samples_received)
-        {
-            return Ok(());
+        let total_audio_energy = evidence.total_audio_energy;
+        let total_samples_received = evidence.total_samples_received;
+        if evidence.has_spoken_since(baseline) {
+            return Ok(evidence);
         }
         if Instant::now() >= deadline {
             let sampled_frames = audio["sampled_frames"].as_u64().unwrap_or(0);
@@ -497,7 +735,7 @@ pub async fn wait_for_spoken_output(
             let bytes_received = audio["bytes_received"].as_u64().unwrap_or(0);
             let packets_received = audio["packets_received"].as_u64().unwrap_or(0);
             return Err(format!(
-                "timed out waiting for spoken output; decoded_frames={decoded_frames}, decoded_non_silent_frames={decoded_non_silent_frames}, max_decoded_rms={max_decoded_rms:.6}, processor_supported={processor_supported}, processor_errors={processor_errors}, sampled_frames={sampled_frames}, non_silent_frames={non_silent_frames}, max_rms={max_rms:.6}, bytes_received={bytes_received}, packets_received={packets_received}, total_audio_energy={total_audio_energy:.6}, total_samples_received={total_samples_received}"
+                "timed out waiting for spoken output; decoded_frames={decoded_frames}, decoded_non_silent_frames={decoded_non_silent_frames}, max_decoded_rms={max_decoded_rms:.6}, processor_supported={processor_supported}, processor_errors={processor_errors}, sampled_frames={sampled_frames}, non_silent_frames={non_silent_frames}, max_rms={max_rms:.6}, bytes_received={bytes_received}, packets_received={packets_received}, total_audio_energy={total_audio_energy:?}, total_samples_received={total_samples_received:?}"
             )
             .into());
         }

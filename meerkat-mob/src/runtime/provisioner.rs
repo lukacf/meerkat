@@ -1540,6 +1540,20 @@ pub trait MobProvisioner: Send + Sync {
             reason: "tracked completion is not supported by this provisioner".to_string(),
         })
     }
+    /// Host-designated conversational input with exact replay semantics.
+    /// Implementations must not emulate this through an autonomous inbox.
+    async fn admit_host_human_turn(
+        &self,
+        member_ref: &MemberRef,
+        req: StartTurnRequest,
+        completion_tx: Option<super::handle::ExactTurnCompletionSender>,
+    ) -> Result<(), MobError> {
+        let _ = (member_ref, req, completion_tx);
+        Err(MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::AutonomousHost,
+            reason: "host human input is not supported by this provisioner".to_string(),
+        })
+    }
     async fn admit_turn_for_operation(
         &self,
         member_ref: &MemberRef,
@@ -4681,11 +4695,10 @@ impl SessionBackend {
             Err(err) => {
                 drop(queued_context);
                 drop(operation_guard);
-                let error = err.to_string();
                 if let Some(delivery) = deferred_delivery {
                     delivery.release(DeferredTurnEventOutcome::Failed);
                 }
-                return Err(MobError::Internal(error));
+                return Err(MobError::Internal(err.to_string()));
             }
         };
         tracing::debug!(
@@ -4822,6 +4835,26 @@ impl SessionBackend {
         completion_tx: Option<super::handle::ExactTurnCompletionSender>,
         llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     ) -> Result<(), MobError> {
+        self.admit_runtime_input_with_replay_policy(
+            session_id,
+            input,
+            event_tx,
+            completion_tx,
+            llm_identity_applied_tx,
+            meerkat_runtime::accept::InputReplayPolicy::KeyOnly,
+        )
+        .await
+    }
+
+    async fn admit_runtime_input_with_replay_policy(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+        event_tx: Option<TurnEventTx>,
+        completion_tx: Option<super::handle::ExactTurnCompletionSender>,
+        llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+        replay_policy: meerkat_runtime::accept::InputReplayPolicy,
+    ) -> Result<(), MobError> {
         let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
             MobError::Internal(format!(
                 "runtime-backed turn requested without runtime adapter: {session_id}"
@@ -4858,7 +4891,11 @@ impl SessionBackend {
                 llm_identity_applied_tx,
             )?;
             let accept_result = adapter
-                .accept_input_with_completion_for_attachment(state.witness(), input)
+                .accept_input_with_completion_for_attachment_and_replay_policy(
+                    state.witness(),
+                    input,
+                    replay_policy,
+                )
                 .await;
 
             let (outcome, handle) = match accept_result {
@@ -4866,11 +4903,18 @@ impl SessionBackend {
                 Err(err) => {
                     drop(queued_context);
                     drop(operation_guard);
-                    let error = err.to_string();
                     if let Some(delivery) = deferred_delivery {
                         delivery.release(DeferredTurnEventOutcome::Failed);
                     }
-                    return Err(MobError::Internal(error));
+                    return Err(match err {
+                        meerkat_runtime::RuntimeDriverError::InputIdempotencyConflict {
+                            existing_id,
+                        } => MobError::WorkInputIdempotencyConflict {
+                            session_id: session_id.clone(),
+                            input_id: existing_id,
+                        },
+                        other => MobError::Internal(other.to_string()),
+                    });
                 }
             };
             let owns_committed_parent_projection = outcome.is_accepted();
@@ -4899,6 +4943,51 @@ impl SessionBackend {
                     queued_context.resolve_without_execution(None);
                 }
                 drop(queued_context);
+                if replay_policy == meerkat_runtime::accept::InputReplayPolicy::ExactPrompt {
+                    if completion_tx.is_none() && deferred_delivery.is_none() {
+                        return Ok(());
+                    }
+                    let input_id = match &outcome {
+                        meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => input_id,
+                        meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => {
+                            existing_id
+                        }
+                        _ => {
+                            return Err(MobError::Internal(
+                                "strict prompt ingress returned neither admission nor replay"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    let result = adapter
+                        .input_terminal_completion(session_id, input_id)
+                        .await
+                        .map_err(|error| MobError::Internal(error.to_string()))
+                        .and_then(|completion| {
+                            completion.ok_or_else(|| MobError::WorkInputCompletionUnavailable {
+                                session_id: session_id.clone(),
+                                input_id: input_id.clone(),
+                            })
+                        });
+                    if let Some(delivery) = deferred_delivery {
+                        let outcome = match &result {
+                            Ok(completion) => {
+                                deferred_turn_outcome_from_completion(&Ok(completion.clone()))
+                            }
+                            Err(_) => DeferredTurnEventOutcome::Failed,
+                        };
+                        delivery.release(outcome);
+                    }
+                    if let Some(completion_tx) = completion_tx {
+                        let _ = completion_tx.send(result.map(|terminal| {
+                            super::handle::ExactTurnCompletion {
+                                session_id: session_id.clone(),
+                                terminal: super::handle::ExactTurnTerminal::Runtime(terminal),
+                            }
+                        }));
+                    }
+                    return Ok(());
+                }
                 if let Some(delivery) = deferred_delivery {
                     delivery.release(DeferredTurnEventOutcome::Succeeded);
                 }
@@ -8267,6 +8356,20 @@ mod tests {
 
             #[async_trait::async_trait]
             impl crate::runtime::session_service::MobSessionService for StubService {
+                #[cfg(feature = "openai-live")]
+                async fn commit_live_delegation_final_transcript(
+                    &self,
+                    _machine: &meerkat_runtime::MeerkatMachine,
+                    _session_id: &CoreSessionId,
+                    _provisional: meerkat_core::ProvisionalLiveHandoff,
+                    _final_event: meerkat_core::RealtimeTranscriptEvent,
+                ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError>
+                {
+                    Err(SessionError::Unsupported(
+                        "stub service does not support live delegation canonical projection".into(),
+                    ))
+                }
+
                 async fn create_session_under_runtime_turn_boundary(
                     &self,
                     _req: meerkat_core::service::CreateSessionRequest,
@@ -10115,7 +10218,11 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 session_snapshot,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "openai-live")]
+        self.runtime_adapter
+            .notify_committed_live_context(&self.bridge_session_id);
+        Ok(())
     }
 
     async fn acknowledge_committed_session_boundary(
@@ -10128,7 +10235,11 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 authority,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "openai-live")]
+        self.runtime_adapter
+            .notify_committed_live_context(&self.bridge_session_id);
+        Ok(())
     }
 
     async fn reconcile_committed_compaction_projections(
@@ -11468,6 +11579,26 @@ impl MobProvisioner for SessionBackend {
             req,
             Some(completion_tx),
             llm_identity_applied_tx,
+        )
+        .await
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn admit_host_human_turn(
+        &self,
+        member_ref: &MemberRef,
+        req: StartTurnRequest,
+        completion_tx: Option<super::handle::ExactTurnCompletionSender>,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "admit host human turn")?;
+        let input = Self::runtime_input_from_turn_request(&req)?;
+        self.admit_runtime_input_with_replay_policy(
+            &session_id,
+            input,
+            req.event_tx,
+            completion_tx,
+            None,
+            meerkat_runtime::accept::InputReplayPolicy::ExactPrompt,
         )
         .await
     }
@@ -15106,6 +15237,25 @@ impl MobProvisioner for MultiBackendProvisioner {
         }
     }
 
+    async fn admit_host_human_turn(
+        &self,
+        member_ref: &MemberRef,
+        req: StartTurnRequest,
+        completion_tx: Option<super::handle::ExactTurnCompletionSender>,
+    ) -> Result<(), MobError> {
+        match member_ref {
+            MemberRef::Session { .. } => {
+                self.session
+                    .admit_host_human_turn(member_ref, req, completion_tx)
+                    .await
+            }
+            MemberRef::BackendPeer { .. } => Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::AutonomousHost,
+                reason: "host human input requires a local session-backed member".to_string(),
+            }),
+        }
+    }
+
     async fn admit_turn_for_operation(
         &self,
         member_ref: &MemberRef,
@@ -16031,6 +16181,7 @@ mod bridge_rejection_tests {
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::runtime_metadata(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                     transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
+                        realtime_origin: None,
                         interaction_id: None,
                         run_id: None,
                         objective_id: Some(objective_id),

@@ -4580,8 +4580,13 @@ fn json_value_payload_bytes(value: &serde_json::Value) -> usize {
 
 fn realtime_transcript_payload_bytes(event: &RealtimeTranscriptEvent) -> usize {
     match event {
+        RealtimeTranscriptEvent::WithContextObservation { event, .. } => {
+            realtime_transcript_payload_bytes(event)
+        }
+        RealtimeTranscriptEvent::ContextObservationBound { .. } => 0,
         RealtimeTranscriptEvent::UserTranscriptFinal { text, .. }
         | RealtimeTranscriptEvent::AssistantPlaybackSnapshotCommitted { text, .. }
+        | RealtimeTranscriptEvent::AssistantUnmeasuredSnapshotCommitted { text, .. }
         | RealtimeTranscriptEvent::AssistantTranscriptTruncated { text, .. }
         | RealtimeTranscriptEvent::AssistantTranscriptFinalText { text, .. } => text.len(),
         RealtimeTranscriptEvent::UserContentFinal { content, .. } => {
@@ -7117,7 +7122,7 @@ mod tests {
                         text: "Remembering amber lantern.".to_string(),
                         meta: None,
                     }],
-                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    stop_reason: Some(meerkat_core::StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
@@ -7518,7 +7523,7 @@ mod tests {
                     text: "world".to_string(),
                     meta: None,
                 }],
-                stop_reason: meerkat_core::StopReason::EndTurn,
+                stop_reason: Some(meerkat_core::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
@@ -7527,7 +7532,7 @@ mod tests {
                     text: "silver harbor".to_string(),
                     meta: None,
                 }],
-                stop_reason: meerkat_core::StopReason::EndTurn,
+                stop_reason: Some(meerkat_core::StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
@@ -7720,7 +7725,7 @@ mod tests {
                     text: "Remembering amber lantern.".to_string(),
                     meta: None,
                 }],
-                stop_reason: meerkat_core::StopReason::EndTurn,
+                stop_reason: Some(meerkat_core::StopReason::EndTurn),
                         identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: meerkat_core::types::message_timestamp_now(),
             }),
@@ -7735,7 +7740,7 @@ mod tests {
                         text: format!("Later assistant turn {index}"),
                         meta: None,
                     }],
-                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    stop_reason: Some(meerkat_core::StopReason::EndTurn),
                     identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                     created_at: meerkat_core::types::message_timestamp_now(),
                 },
@@ -12112,7 +12117,7 @@ mod tests {
                     text: "looks rainy".to_string(),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
+                stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: types::message_timestamp_now(),
             }),
@@ -12270,7 +12275,7 @@ mod tests {
                     text: "second turn".to_string(),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
+                stop_reason: Some(StopReason::EndTurn),
                 identity: meerkat_core::types::TranscriptMessageIdentity::default(),
                 created_at: types::message_timestamp_now(),
             }),

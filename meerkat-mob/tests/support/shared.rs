@@ -852,6 +852,22 @@ impl meerkat_core::service::SessionServiceHistoryExt for FailingOnceSessionServi
 
 #[async_trait::async_trait]
 impl meerkat_mob::MobSessionService for FailingOnceSessionService {
+    #[cfg(feature = "openai-live")]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &meerkat_core::SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<
+        meerkat_core::FinalLiveUserTranscriptCommitEvidence,
+        meerkat_core::service::SessionError,
+    > {
+        self.inner
+            .commit_live_delegation_final_transcript(machine, session_id, provisional, final_event)
+            .await
+    }
+
     async fn observe_session_resume_authority(
         &self,
         session_id: &meerkat_core::SessionId,

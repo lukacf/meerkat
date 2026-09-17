@@ -36,6 +36,222 @@ use crate::gpt_live_broker::{
 
 pub use crate::runtime::GPT_LIVE_MODEL_FAMILY;
 
+/// Scoped diagnostic capture for offline fixtures and explicitly opted-in live
+/// acceptance tests. No raw frames, credentials, SDP, or provider session IDs.
+#[cfg(feature = "test-realtime-fixtures")]
+#[doc(hidden)]
+pub mod thinking_capture {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub enum EventKind {
+        SessionAttached,
+        ThinkingAppendAttempt {
+            client_event_id: String,
+            text: String,
+        },
+        ThinkingAppended {
+            client_event_id: Option<String>,
+            matched_owned: bool,
+            accepted: bool,
+        },
+        InstructionsAppendAttempt {
+            client_event_id: String,
+            text: String,
+        },
+        InstructionsAppended {
+            client_event_id: Option<String>,
+            matched_owned: bool,
+            accepted: bool,
+        },
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    pub struct Event {
+        pub channel_ordinal: u32,
+        pub elapsed_ms: u64,
+        pub event: EventKind,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Fault {
+        Overflow,
+        StringLimit,
+        Contention,
+    }
+
+    struct Inner {
+        started: Instant,
+        events: Mutex<VecDeque<Event>>,
+        fault: AtomicU8,
+    }
+
+    #[derive(Clone)]
+    pub struct Capture {
+        inner: Arc<Inner>,
+        channel_ordinal: u32,
+    }
+
+    tokio::task_local! {
+        static CURRENT: Capture;
+    }
+
+    impl Default for Capture {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Capture {
+        pub const MAX_EVENTS: usize = 512;
+        pub const MAX_TEXT_BYTES: usize = 1024;
+        pub const MAX_ID_BYTES: usize = 256;
+
+        pub fn new() -> Self {
+            Self {
+                inner: Arc::new(Inner {
+                    started: Instant::now(),
+                    events: Mutex::new(VecDeque::new()),
+                    fault: AtomicU8::new(0),
+                }),
+                channel_ordinal: 0,
+            }
+        }
+
+        pub fn for_channel(&self, channel_ordinal: u32) -> Self {
+            Self {
+                inner: self.inner.clone(),
+                channel_ordinal,
+            }
+        }
+
+        pub async fn scope<F: std::future::Future>(&self, future: F) -> F::Output {
+            CURRENT.scope(self.clone(), future).await
+        }
+
+        pub(super) fn current() -> Option<Self> {
+            CURRENT.try_with(Clone::clone).ok()
+        }
+
+        pub fn fault(&self) -> Option<Fault> {
+            match self.inner.fault.load(Ordering::Acquire) {
+                0 => None,
+                1 => Some(Fault::Overflow),
+                2 => Some(Fault::StringLimit),
+                _ => Some(Fault::Contention),
+            }
+        }
+
+        pub fn drain(&self) -> Result<Vec<Event>, Fault> {
+            self.inner
+                .events
+                .lock()
+                .map(|mut events| events.drain(..).collect())
+                .map_err(|_| Fault::Contention)
+        }
+
+        pub(super) fn string_limit(&self) {
+            self.inner.fault.store(2, Ordering::Release);
+        }
+
+        pub(super) fn record(&self, event: EventKind) {
+            if self.fault().is_some() {
+                return;
+            }
+            let valid = match &event {
+                EventKind::SessionAttached => true,
+                EventKind::ThinkingAppendAttempt {
+                    client_event_id,
+                    text,
+                }
+                | EventKind::InstructionsAppendAttempt {
+                    client_event_id,
+                    text,
+                } => {
+                    client_event_id.len() <= Self::MAX_ID_BYTES
+                        && text.len() <= Self::MAX_TEXT_BYTES
+                }
+                EventKind::ThinkingAppended {
+                    client_event_id, ..
+                }
+                | EventKind::InstructionsAppended {
+                    client_event_id, ..
+                } => client_event_id
+                    .as_ref()
+                    .is_none_or(|id| id.len() <= Self::MAX_ID_BYTES),
+            };
+            if !valid {
+                self.inner.fault.store(2, Ordering::Release);
+                return;
+            }
+            let Ok(mut events) = self.inner.events.try_lock() else {
+                self.inner.fault.store(3, Ordering::Release);
+                return;
+            };
+            if events.len() == Self::MAX_EVENTS {
+                self.inner.fault.store(1, Ordering::Release);
+                return;
+            }
+            events.push_back(Event {
+                channel_ordinal: self.channel_ordinal,
+                elapsed_ms: u64::try_from(self.inner.started.elapsed().as_millis())
+                    .unwrap_or(u64::MAX),
+                event,
+            });
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn capture_is_opt_in_task_scoped_and_follows_the_selected_session_clone() {
+            let capture = Capture::new().for_channel(7);
+            assert!(Capture::current().is_none());
+            let session_capture = capture
+                .scope(async {
+                    assert!(
+                        tokio::spawn(async { Capture::current().is_none() })
+                            .await
+                            .unwrap()
+                    );
+                    Capture::current().unwrap()
+                })
+                .await;
+            assert!(Capture::current().is_none());
+            session_capture.record(EventKind::SessionAttached);
+            assert_eq!(capture.drain().unwrap()[0].channel_ordinal, 7);
+        }
+
+        #[test]
+        fn bounds_and_contention_latch_without_blocking_or_success_shaped_loss() {
+            let capture = Capture::new();
+            for _ in 0..=Capture::MAX_EVENTS {
+                capture.record(EventKind::SessionAttached);
+            }
+            assert_eq!(capture.fault(), Some(Fault::Overflow));
+            assert_eq!(capture.drain().unwrap().len(), Capture::MAX_EVENTS);
+            let capture = Capture::new();
+            capture.record(EventKind::ThinkingAppendAttempt {
+                client_event_id: "owned".into(),
+                text: "x".repeat(Capture::MAX_TEXT_BYTES + 1),
+            });
+            assert_eq!(capture.fault(), Some(Fault::StringLimit));
+            let capture = Capture::new();
+            let _lock = capture.inner.events.lock().unwrap();
+            capture.record(EventKind::SessionAttached);
+            assert_eq!(capture.fault(), Some(Fault::Contention));
+        }
+    }
+}
+
 /// Provider-owned mechanical configuration for one browser WebRTC bootstrap.
 ///
 /// The public broker always starts the session with a client delegation: the
@@ -45,7 +261,54 @@ pub struct PublicLiveOpenConfig {
     offer_sdp: String,
     voice: String,
     instructions: Option<String>,
-    input: Vec<InitialItem>,
+    context_seed: PublicLiveContextSeed,
+}
+
+#[derive(Clone)]
+enum PublicLiveContextSeed {
+    Absent,
+    History(Vec<InitialItem>),
+    FactualSummary(String),
+    HistoricalContextPending,
+}
+
+impl PublicLiveContextSeed {
+    fn initial_input(&self) -> Option<Vec<InitialItem>> {
+        let text = match self {
+            Self::Absent => return None,
+            Self::History(items) => return (!items.is_empty()).then(|| items.clone()),
+            Self::FactualSummary(summary) => format!(
+                "Factual summary of the background agent's context at voice-channel open (context data, not a new user request):\n{summary}"
+            ),
+            Self::HistoricalContextPending =>
+                "Voice-channel context availability (factual state, not a new user request):\nHistorical session context is being prepared and is not yet available."
+                    .to_string(),
+        };
+        Some(vec![InitialItem {
+            role: InitialRole::User,
+            content: vec![InitialText {
+                text,
+                text_type: Some(InitialTextType::InputText),
+            }],
+            id: Field::Absent,
+            status: Field::Absent,
+            item_type: Some(MessageType::Message),
+        }])
+    }
+}
+
+impl std::fmt::Debug for PublicLiveContextSeed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Absent => formatter.write_str("Absent"),
+            Self::History(items) => formatter
+                .debug_struct("History")
+                .field("messages", &items.len())
+                .finish(),
+            Self::FactualSummary(_) => formatter.write_str("FactualSummary(<redacted>)"),
+            Self::HistoricalContextPending => formatter.write_str("HistoricalContextPending"),
+        }
+    }
 }
 
 impl PublicLiveOpenConfig {
@@ -80,7 +343,7 @@ impl PublicLiveOpenConfig {
             offer_sdp,
             voice,
             instructions: None,
-            input: Vec::new(),
+            context_seed: PublicLiveContextSeed::Absent,
         })
     }
 
@@ -101,7 +364,7 @@ impl PublicLiveOpenConfig {
     /// channel creation rather than silently losing canonical context.
     #[must_use]
     pub fn with_history(mut self, messages: &[Message]) -> Self {
-        self.input = messages
+        let input = messages
             .iter()
             .filter_map(|message| {
                 let (role, text_type, text) = match message {
@@ -113,7 +376,21 @@ impl PublicLiveOpenConfig {
                     Message::BlockAssistant(assistant) => (
                         InitialRole::Assistant,
                         InitialTextType::OutputText,
-                        assistant.to_string(),
+                        if assistant.blocks.iter().any(|block| {
+                            matches!(
+                                block,
+                                meerkat_core::AssistantBlock::Transcript {
+                                    source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                                    ..
+                                }
+                            )
+                        }) {
+                            meerkat_core::types::TranscriptSource::SpokenUnmeasured
+                                .text_for_model(&assistant.to_string())
+                                .into_owned()
+                        } else {
+                            assistant.to_string()
+                        },
                     ),
                     Message::System(_) | Message::SystemNotice(_) | Message::ToolResults { .. } => {
                         return None;
@@ -131,6 +408,27 @@ impl PublicLiveOpenConfig {
                 })
             })
             .collect();
+        self.context_seed = PublicLiveContextSeed::History(input);
+        self
+    }
+
+    /// Lower an owner-generated factual summary as unprivileged startup data.
+    /// This never changes the catalog-owned behavior instructions.
+    #[must_use]
+    pub fn with_context_summary(mut self, summary: &str) -> Self {
+        self.context_seed = PublicLiveContextSeed::FactualSummary(summary.to_owned());
+        self
+    }
+
+    /// Declare that historical context is not yet available when media opens.
+    ///
+    /// The provider-owned availability fact is native startup input, not
+    /// instructions, a summary, canonical replay, or speech-prompting
+    /// commentary. It requires no summary work or sideband acknowledgement.
+    /// Later factual context arrives through [`PublicLiveBrokerSession::append_thinking_context`].
+    #[must_use]
+    pub fn with_pending_context(mut self) -> Self {
+        self.context_seed = PublicLiveContextSeed::HistoricalContextPending;
         self
     }
 }
@@ -145,7 +443,7 @@ impl std::fmt::Debug for PublicLiveOpenConfig {
                 "instructions",
                 &self.instructions.as_ref().map(|_| "<catalog-bound>"),
             )
-            .field("history_messages", &self.input.len())
+            .field("context_seed", &self.context_seed)
             .finish()
     }
 }
@@ -154,6 +452,8 @@ impl std::fmt::Debug for PublicLiveOpenConfig {
 pub struct PublicLiveBrokerFactory {
     model: String,
     client: LiveClient,
+    #[cfg(feature = "test-realtime-fixtures")]
+    thinking_capture: Option<thinking_capture::Capture>,
 }
 
 impl std::fmt::Debug for PublicLiveBrokerFactory {
@@ -219,6 +519,8 @@ impl PublicLiveBrokerFactory {
         Ok(Self {
             model: admitted.model,
             client,
+            #[cfg(feature = "test-realtime-fixtures")]
+            thinking_capture: thinking_capture::Capture::current(),
         })
     }
 
@@ -291,12 +593,18 @@ impl PublicLiveBrokerFactory {
             .await
             .map_err(map_live_error)?;
         let (sender, receiver) = sideband.split();
+        #[cfg(feature = "test-realtime-fixtures")]
+        if let Some(capture) = &self.thinking_capture {
+            capture.record(thinking_capture::EventKind::SessionAttached);
+        }
         Ok(PublicLiveBootstrap {
             answer_sdp,
             session: PublicLiveBrokerSession {
                 sender,
                 receiver: Mutex::new(receiver),
                 state: Mutex::new(SessionState::default()),
+                #[cfg(feature = "test-realtime-fixtures")]
+                thinking_capture: self.thinking_capture.clone(),
             },
         })
     }
@@ -313,7 +621,7 @@ impl PublicLiveBrokerFactory {
             }),
             client: None,
             delegation: Field::Value(DelegationConfig::Client),
-            input: (!config.input.is_empty()).then(|| config.input.clone()),
+            input: config.context_seed.initial_input(),
             instructions: config
                 .instructions
                 .clone()
@@ -361,6 +669,8 @@ pub struct PublicLiveBrokerSession {
     sender: LiveSender,
     receiver: Mutex<LiveReceiver>,
     state: Mutex<SessionState>,
+    #[cfg(feature = "test-realtime-fixtures")]
+    thinking_capture: Option<thinking_capture::Capture>,
 }
 
 impl std::fmt::Debug for PublicLiveBrokerSession {
@@ -442,6 +752,62 @@ impl PublicLiveBrokerSession {
         self.deliver_append(token, event).await
     }
 
+    /// Append factual background data through the quiet native thinking lane.
+    ///
+    /// This neither changes instructions nor requests speech or a response.
+    /// Content is preserved in UTF-8 fragments of at most 500 bytes, a
+    /// conservative payload bound for the provider's 500-token append limit;
+    /// actual tokenizer rejection remains provider evidence. At most 64
+    /// outstanding fragments are admitted across all append lanes.
+    ///
+    /// One local token identifies the whole append. Only exact, lane-matching
+    /// receipts for every fragment acknowledge it. Any rejection may follow
+    /// partial consumption and never authorizes replay. Native errors report
+    /// rejection; only confirmed session closure reports interruption by close.
+    /// Send failures preserve the same ambiguous-delivery/no-retry contract as
+    /// commentary appends.
+    pub async fn append_thinking_context(
+        &self,
+        text: impl Into<String>,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        let text = require_context(text)?;
+        let fragments = thinking_fragments(&text);
+        let count = fragments
+            .clone()
+            .take(SessionState::MAX_PENDING_APPENDS + 1)
+            .count();
+        let token = self.state.lock().await.reserve_thinking_append(count)?;
+        for (index, content) in fragments.enumerate() {
+            let event = Self::thinking_event(token, index, content.to_owned());
+            self.deliver_append(token, event).await?;
+        }
+        Ok(token)
+    }
+
+    /// Append trusted background knowledge through the native instructions
+    /// lane. The provider treats instructions as authoritative context the
+    /// model may use to answer; unlike the thinking lane it is not limited to
+    /// quiet progress notes, and the provider may interrupt speech to apply
+    /// it. Fragmenting, receipts, rejection, and close semantics match the
+    /// thinking lane.
+    pub async fn append_instructions_context(
+        &self,
+        text: impl Into<String>,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        let text = require_context(text)?;
+        let fragments = thinking_fragments(&text);
+        let count = fragments
+            .clone()
+            .take(SessionState::MAX_PENDING_APPENDS + 1)
+            .count();
+        let token = self.state.lock().await.reserve_instructions_append(count)?;
+        for (index, content) in fragments.enumerate() {
+            let event = Self::instructions_event(token, index, content.to_owned());
+            self.deliver_append(token, event).await?;
+        }
+        Ok(token)
+    }
+
     /// Append executor context to an observed client delegation.
     ///
     /// The provider identifier remains inside the opaque delegation reference.
@@ -476,11 +842,55 @@ impl PublicLiveBrokerSession {
         }
     }
 
+    fn instructions_event(token: GptLiveAppendToken, index: usize, content: String) -> ClientEvent {
+        ClientEvent {
+            event_id: Field::Value(instructions_event_id(token, index)),
+            command: Command::InstructionsAppend {
+                content,
+                delegation_id: Nullable(None),
+            },
+        }
+    }
+
+    fn thinking_event(token: GptLiveAppendToken, index: usize, content: String) -> ClientEvent {
+        ClientEvent {
+            event_id: Field::Value(thinking_event_id(token, index)),
+            command: Command::ThinkingAppend {
+                content,
+                delegation_id: Nullable(None),
+            },
+        }
+    }
+
     async fn deliver_append(
         &self,
         token: GptLiveAppendToken,
         event: ClientEvent,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        #[cfg(feature = "test-realtime-fixtures")]
+        if let Some(capture) = &self.thinking_capture
+            && let ClientEvent {
+                event_id: Field::Value(client_event_id),
+                command: Command::ThinkingAppend { content, .. },
+            } = &event
+        {
+            capture.record(thinking_capture::EventKind::ThinkingAppendAttempt {
+                client_event_id: client_event_id.clone(),
+                text: content.clone(),
+            });
+        }
+        #[cfg(feature = "test-realtime-fixtures")]
+        if let Some(capture) = &self.thinking_capture
+            && let ClientEvent {
+                event_id: Field::Value(client_event_id),
+                command: Command::InstructionsAppend { content, .. },
+            } = &event
+        {
+            capture.record(thinking_capture::EventKind::InstructionsAppendAttempt {
+                client_event_id: client_event_id.clone(),
+                text: content.clone(),
+            });
+        }
         if self.sender.send(event).await.is_err() {
             self.state.lock().await.append_delivery_ambiguous = true;
             return Err(GptLiveBrokerError::AppendDeliveryAmbiguous { token });
@@ -519,7 +929,73 @@ impl PublicLiveBrokerSession {
                 }
                 return Ok(None);
             };
-            self.state.lock().await.apply_frame(frame)?;
+            let mut state = self.state.lock().await;
+            #[cfg(feature = "test-realtime-fixtures")]
+            let instructions_ack = self.thinking_capture.as_ref().and_then(|capture| {
+                if !matches!(&frame.event, ServerEvent::InstructionsAppended { .. }) {
+                    return None;
+                }
+                if frame
+                    .client_event_id
+                    .as_ref()
+                    .is_some_and(|id| id.len() > thinking_capture::Capture::MAX_ID_BYTES)
+                {
+                    capture.string_limit();
+                    return None;
+                }
+                let matched_owned = frame
+                    .client_event_id
+                    .as_deref()
+                    .and_then(|id| state.find_append_receipt(id))
+                    .is_some_and(|(append, _)| {
+                        state.pending_appends[append.0].lane == PendingAppendLane::Instructions
+                    });
+                Some((frame.client_event_id.clone(), matched_owned))
+            });
+            #[cfg(feature = "test-realtime-fixtures")]
+            let thinking_ack = self.thinking_capture.as_ref().and_then(|capture| {
+                if !matches!(&frame.event, ServerEvent::ThinkingAppended { .. }) {
+                    return None;
+                }
+                if frame
+                    .client_event_id
+                    .as_ref()
+                    .is_some_and(|id| id.len() > thinking_capture::Capture::MAX_ID_BYTES)
+                {
+                    capture.string_limit();
+                    return None;
+                }
+                let matched_owned = frame
+                    .client_event_id
+                    .as_deref()
+                    .and_then(|id| state.find_append_receipt(id))
+                    .is_some_and(|(append, _)| {
+                        state.pending_appends[append.0].lane == PendingAppendLane::Thinking
+                    });
+                Some((frame.client_event_id.clone(), matched_owned))
+            });
+            let applied = state.apply_frame(frame);
+            #[cfg(feature = "test-realtime-fixtures")]
+            if let Some(capture) = &self.thinking_capture
+                && let Some((client_event_id, matched_owned)) = instructions_ack
+            {
+                capture.record(thinking_capture::EventKind::InstructionsAppended {
+                    client_event_id,
+                    matched_owned,
+                    accepted: applied.is_ok(),
+                });
+            }
+            #[cfg(feature = "test-realtime-fixtures")]
+            if let Some(capture) = &self.thinking_capture
+                && let Some((client_event_id, matched_owned)) = thinking_ack
+            {
+                capture.record(thinking_capture::EventKind::ThinkingAppended {
+                    client_event_id,
+                    matched_owned,
+                    accepted: applied.is_ok(),
+                });
+            }
+            applied?;
         }
     }
 
@@ -532,6 +1008,16 @@ impl PublicLiveBrokerSession {
         if state.close_requested || state.closed_observed {
             return Ok(());
         }
+        // Measured against gpt-live-1: a pending quiet (thinking) append is
+        // injected and acknowledged only at an input frame stall, and the
+        // provider withholds `session.closed` until then. With microphone
+        // audio still flowing that stall never comes. Muting input first
+        // creates it, so a close issued while an append is in flight can
+        // complete instead of waiting on media the client has not stopped.
+        self.sender
+            .send(ClientEvent::new(Command::InputAudioMute))
+            .await
+            .map_err(map_live_error)?;
         self.sender
             .send(ClientEvent::new(Command::Close))
             .await
@@ -545,12 +1031,84 @@ impl PublicLiveBrokerSession {
 enum PendingAppendLane {
     Session,
     Delegation,
+    Thinking,
+    Instructions,
+}
+
+impl PendingAppendLane {
+    fn acknowledged(self, token: GptLiveAppendToken) -> GptLiveBrokerObservation {
+        match self {
+            Self::Session => GptLiveBrokerObservation::SessionContextAppendAcknowledged { token },
+            Self::Delegation => {
+                GptLiveBrokerObservation::DelegationContextAppendAcknowledged { token }
+            }
+            Self::Thinking => GptLiveBrokerObservation::ThinkingContextAppendAcknowledged { token },
+            Self::Instructions => {
+                GptLiveBrokerObservation::InstructionsContextAppendAcknowledged { token }
+            }
+        }
+    }
+
+    fn rejected(self, token: GptLiveAppendToken) -> GptLiveBrokerObservation {
+        match self {
+            Self::Session => GptLiveBrokerObservation::SessionContextAppendRejected { token },
+            Self::Delegation => GptLiveBrokerObservation::DelegationContextAppendRejected { token },
+            Self::Thinking => GptLiveBrokerObservation::ThinkingContextAppendRejected { token },
+            Self::Instructions => {
+                GptLiveBrokerObservation::InstructionsContextAppendRejected { token }
+            }
+        }
+    }
+}
+
+impl PendingAppendLane {
+    /// Lanes delivered as bounded UTF-8 fragments with one receipt each.
+    fn is_fragmented(self) -> bool {
+        matches!(self, Self::Thinking | Self::Instructions)
+    }
+
+    fn interrupted_by_close(self, token: GptLiveAppendToken) -> Option<GptLiveBrokerObservation> {
+        match self {
+            Self::Thinking => {
+                Some(GptLiveBrokerObservation::ThinkingContextAppendInterruptedByClose { token })
+            }
+            Self::Instructions => Some(
+                GptLiveBrokerObservation::InstructionsContextAppendInterruptedByClose { token },
+            ),
+            Self::Session | Self::Delegation => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AppendReceiptKind {
+    Commentary,
+    Thinking,
+    Instructions,
+}
+
+impl AppendReceiptKind {
+    fn matches(self, lane: PendingAppendLane) -> bool {
+        matches!(
+            (self, lane),
+            (
+                Self::Commentary,
+                PendingAppendLane::Session | PendingAppendLane::Delegation
+            ) | (Self::Thinking, PendingAppendLane::Thinking)
+                | (Self::Instructions, PendingAppendLane::Instructions)
+        )
+    }
 }
 
 struct PendingAppend {
     lane: PendingAppendLane,
     token: GptLiveAppendToken,
+    outstanding_receipts: Vec<String>,
+    rejected: bool,
 }
+
+struct PendingAppendIndex(usize);
+struct PendingReceiptIndex(usize);
 
 struct OpenTurn {
     provider_ref: String,
@@ -618,14 +1176,60 @@ impl SessionState {
         &mut self,
         lane: PendingAppendLane,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
-        if self.append_delivery_ambiguous || self.pending_appends.len() >= Self::MAX_PENDING_APPENDS
+        self.reserve_append_fragments(lane, 1)
+    }
+
+    fn reserve_thinking_append(
+        &mut self,
+        count: usize,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        self.reserve_append_fragments(PendingAppendLane::Thinking, count)
+    }
+
+    fn reserve_instructions_append(
+        &mut self,
+        count: usize,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        self.reserve_append_fragments(PendingAppendLane::Instructions, count)
+    }
+
+    fn outstanding_receipt_count(&self) -> usize {
+        self.pending_appends
+            .iter()
+            .map(|pending| pending.outstanding_receipts.len())
+            .sum()
+    }
+
+    fn reserve_append_fragments(
+        &mut self,
+        lane: PendingAppendLane,
+        count: usize,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        if self.append_delivery_ambiguous
+            || count == 0
+            || count > Self::MAX_PENDING_APPENDS.saturating_sub(self.outstanding_receipt_count())
         {
             return Err(GptLiveBrokerError::AppendInFlight);
         }
         let token = GptLiveAppendToken(self.next_append_token);
         self.next_append_token = self.next_append_token.saturating_add(1);
-        self.pending_appends
-            .push_back(PendingAppend { lane, token });
+        let outstanding_receipts = match lane {
+            PendingAppendLane::Thinking => (0..count)
+                .map(|index| thinking_event_id(token, index))
+                .collect(),
+            PendingAppendLane::Instructions => (0..count)
+                .map(|index| instructions_event_id(token, index))
+                .collect(),
+            PendingAppendLane::Session | PendingAppendLane::Delegation => {
+                vec![pending_event_id(token)]
+            }
+        };
+        self.pending_appends.push_back(PendingAppend {
+            lane,
+            token,
+            outstanding_receipts,
+            rejected: false,
+        });
         Ok(token)
     }
 
@@ -645,27 +1249,28 @@ impl SessionState {
                 // open turn so its final transcript is not lost.
                 self.closed_observed = true;
                 self.finish_open_turn();
-            }
-            ServerEvent::CommentaryAppended { .. } => {
-                let pending = self.take_acknowledged_append(client_event_id.as_deref())?;
-                self.queued_observations.push_back(match pending.lane {
-                    PendingAppendLane::Session => {
-                        GptLiveBrokerObservation::SessionContextAppendAcknowledged {
-                            token: pending.token,
-                        }
+                let observations = &mut self.queued_observations;
+                self.pending_appends.retain(|pending| {
+                    let Some(interrupted) = pending.lane.interrupted_by_close(pending.token) else {
+                        return true;
+                    };
+                    if !pending.rejected {
+                        observations.push_back(interrupted);
                     }
-                    PendingAppendLane::Delegation => {
-                        GptLiveBrokerObservation::DelegationContextAppendAcknowledged {
-                            token: pending.token,
-                        }
-                    }
+                    false
                 });
             }
-            // This broker never appends instructions or thinking; their
-            // acknowledgements would indicate another controller on the
-            // session and carry no observation for this channel.
-            ServerEvent::InstructionsAppended { .. } | ServerEvent::ThinkingAppended { .. } => {
-                tracing::debug!("public Live acknowledged an append this broker did not send");
+            ServerEvent::CommentaryAppended { .. } => {
+                self.acknowledge_append(AppendReceiptKind::Commentary, client_event_id.as_deref())?;
+            }
+            ServerEvent::ThinkingAppended { .. } => {
+                self.acknowledge_append(AppendReceiptKind::Thinking, client_event_id.as_deref())?;
+            }
+            ServerEvent::InstructionsAppended { .. } => {
+                self.acknowledge_append(
+                    AppendReceiptKind::Instructions,
+                    client_event_id.as_deref(),
+                )?;
             }
             ServerEvent::InputTranscriptDelta {
                 delta, start_ms, ..
@@ -725,13 +1330,6 @@ impl SessionState {
                     .client_event_id
                     .as_deref()
                     .or(client_event_id.as_deref());
-                let pending = rejected
-                    .and_then(|id| {
-                        self.pending_appends
-                            .iter()
-                            .position(|pending| pending_event_id(pending.token) == id)
-                    })
-                    .and_then(|index| self.pending_appends.remove(index));
                 let summary = summarize_unknown_provider_event("error", &raw);
                 tracing::warn!(
                     provider_event_class = "error",
@@ -741,25 +1339,25 @@ impl SessionState {
                     message_bytes = summary.message_bytes,
                     "public Live reported a provider error on the sideband"
                 );
-                // Closing rejects in-flight context injections. Preserve their
-                // exact failed delivery, but keep draining the final transcript
-                // and session.closed. An unrelated error remains fatal.
-                if self.close_requested
-                    && let Some(pending) = pending
+                if let Some((append_index, receipt_index)) =
+                    rejected.and_then(|id| self.find_append_receipt(id))
                 {
-                    self.queued_observations.push_back(match pending.lane {
-                        PendingAppendLane::Session => {
-                            GptLiveBrokerObservation::SessionContextAppendRejected {
-                                token: pending.token,
-                            }
-                        }
-                        PendingAppendLane::Delegation => {
-                            GptLiveBrokerObservation::DelegationContextAppendRejected {
-                                token: pending.token,
-                            }
-                        }
-                    });
-                    return Ok(());
+                    let pending = &mut self.pending_appends[append_index.0];
+                    pending.outstanding_receipts.remove(receipt_index.0);
+                    let report_rejection = self.close_requested || pending.lane.is_fragmented();
+                    if report_rejection && !pending.rejected {
+                        self.queued_observations
+                            .push_back(pending.lane.rejected(pending.token));
+                        pending.rejected = true;
+                    }
+                    // Retain unmatched fragments after partial rejection so
+                    // later exact receipts can drain without fabricating ACK.
+                    if pending.outstanding_receipts.is_empty() {
+                        self.pending_appends.remove(append_index.0);
+                    }
+                    if report_rejection {
+                        return Ok(());
+                    }
                 }
                 self.queued_observations
                     .push_back(GptLiveBrokerObservation::UnsupportedProviderEvent);
@@ -786,24 +1384,55 @@ impl SessionState {
         Ok(())
     }
 
-    /// Resolve which pending append an acknowledgement settles. The echoed
-    /// `client_event_id` is authoritative; without it only a single pending
-    /// append is unambiguous.
-    fn take_acknowledged_append(
+    fn find_append_receipt(&self, id: &str) -> Option<(PendingAppendIndex, PendingReceiptIndex)> {
+        self.pending_appends
+            .iter()
+            .enumerate()
+            .find_map(|(append_index, pending)| {
+                pending
+                    .outstanding_receipts
+                    .iter()
+                    .position(|receipt| receipt == id)
+                    .map(|receipt_index| {
+                        (
+                            PendingAppendIndex(append_index),
+                            PendingReceiptIndex(receipt_index),
+                        )
+                    })
+            })
+    }
+
+    /// Existing single-commentary ID-less receipts remain supported. Quiet
+    /// thinking fragments always require the exact echoed ID and native kind.
+    fn acknowledge_append(
         &mut self,
+        kind: AppendReceiptKind,
         client_event_id: Option<&str>,
-    ) -> Result<PendingAppend, GptLiveBrokerError> {
-        let index = match client_event_id {
-            Some(id) => self
-                .pending_appends
-                .iter()
-                .position(|pending| pending_event_id(pending.token) == id),
-            None if self.pending_appends.len() == 1 => Some(0),
+    ) -> Result<(), GptLiveBrokerError> {
+        let indices = match client_event_id {
+            Some(id) => self.find_append_receipt(id),
+            None if matches!(kind, AppendReceiptKind::Commentary)
+                && self.outstanding_receipt_count() == 1 =>
+            {
+                Some((PendingAppendIndex(0), PendingReceiptIndex(0)))
+            }
             None => None,
-        };
-        index
-            .and_then(|index| self.pending_appends.remove(index))
-            .ok_or_else(protocol_error)
+        }
+        .ok_or_else(protocol_error)?;
+        let (append_index, receipt_index) = indices;
+        let pending = &mut self.pending_appends[append_index.0];
+        if !kind.matches(pending.lane) {
+            return Err(protocol_error());
+        }
+        pending.outstanding_receipts.remove(receipt_index.0);
+        if pending.outstanding_receipts.is_empty() {
+            if !pending.rejected {
+                self.queued_observations
+                    .push_back(pending.lane.acknowledged(pending.token));
+            }
+            self.pending_appends.remove(append_index.0);
+        }
+        Ok(())
     }
 
     fn record_transcript_delta(&mut self, role: GptLiveTurnRole, start_ms: f64, delta: String) {
@@ -975,6 +1604,26 @@ fn pending_event_id(token: GptLiveAppendToken) -> String {
     format!("meerkat-append-{}", token.0)
 }
 
+fn thinking_event_id(token: GptLiveAppendToken, index: usize) -> String {
+    format!("meerkat-thinking-{}-{index}", token.0)
+}
+
+fn instructions_event_id(token: GptLiveAppendToken, index: usize) -> String {
+    format!("meerkat-instructions-{}-{index}", token.0)
+}
+
+fn thinking_fragments(mut text: &str) -> impl Iterator<Item = &str> + Clone {
+    std::iter::from_fn(move || {
+        if text.is_empty() {
+            return None;
+        }
+        let end = text.floor_char_boundary(text.len().min(500));
+        let (fragment, remaining) = text.split_at(end);
+        text = remaining;
+        Some(fragment)
+    })
+}
+
 fn map_live_error(error: LiveError) -> GptLiveBrokerError {
     let class = match error {
         LiveError::Invalid(reason) => {
@@ -1101,6 +1750,30 @@ mod tests {
             value["client_event_id"] = json!(id);
         }
         value
+    }
+
+    fn thinking_ack(client_event_id: Option<&str>) -> Value {
+        let mut value = ack(client_event_id);
+        value["type"] = json!("session.thinking.appended");
+        value
+    }
+
+    fn append_rejected(client_event_id: Option<&str>) -> Value {
+        let mut value = json!({"type":"error","event_id":"e","error":{
+            "type":"invalid_request_error","code":"invalid_value","message":"PRIVATE_REJECTION"
+        }});
+        if let Some(id) = client_event_id {
+            value["error"]["client_event_id"] = json!(id);
+        }
+        value
+    }
+
+    fn session_closed() -> Value {
+        json!({
+            "type":"session.closed","event_id":"c","session":{
+                "id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0
+            },"reason":"close_requested","usage":{"seconds":1.0}
+        })
     }
 
     fn output_delta(text: &str) -> Value {
@@ -1237,6 +1910,104 @@ mod tests {
     }
 
     #[test]
+    fn startup_history_preserves_unmeasured_assistant_provenance_when_flattened() {
+        let history = [Message::BlockAssistant(
+            meerkat_core::types::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::Transcript {
+                    text: "Observed voice dialogue.".into(),
+                    source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                    meta: None,
+                }],
+                meerkat_core::StopReason::EndTurn,
+            ),
+        )];
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_history(&history);
+        let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
+            "gpt-live-1",
+            OpenAiBackendKind::OpenAiApi,
+        ))
+        .unwrap();
+        let encoded = serde_json::to_value(factory.session_config(&config)).unwrap();
+        assert_eq!(encoded["input"][0]["role"], "assistant");
+        let text = encoded["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Observed voice dialogue."));
+        assert!(text.contains("UNMEASURED"));
+        assert!(text.contains("Not proof"));
+        assert!(encoded["input"][0].get("status").is_none());
+    }
+
+    #[test]
+    fn startup_summary_is_factual_input_not_behavior_or_a_canonical_replay() {
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_instructions("Speak briefly.")
+            .with_context_summary("The agent is comparing two tables.");
+        let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
+            "gpt-live-1",
+            OpenAiBackendKind::OpenAiApi,
+        ))
+        .unwrap();
+        let encoded = serde_json::to_value(factory.session_config(&config)).unwrap();
+        assert_eq!(encoded["instructions"], "Speak briefly.");
+        assert_eq!(encoded["input"].as_array().unwrap().len(), 1);
+        assert_eq!(encoded["input"][0]["role"], "user");
+        let text = encoded["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("context data, not a new user request"));
+        assert!(text.ends_with("The agent is comparing two tables."));
+        assert!(!format!("{config:?}").contains("two tables"));
+    }
+
+    #[test]
+    fn pending_context_is_distinct_native_startup_data_not_summary_or_instructions() {
+        let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
+            "gpt-live-1",
+            OpenAiBackendKind::OpenAiApi,
+        ))
+        .unwrap();
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_instructions("Catalog behavior.")
+            .with_context_summary("PRIVATE_PRIOR_SUMMARY")
+            .with_pending_context();
+        assert!(matches!(
+            config.context_seed,
+            PublicLiveContextSeed::HistoricalContextPending
+        ));
+        let session = factory.session_config(&config);
+        session
+            .validate()
+            .expect("pinned SDK accepts native initial factual input");
+        let encoded = serde_json::to_value(session).unwrap();
+        assert_eq!(encoded["instructions"], "Catalog behavior.");
+        assert_eq!(
+            encoded["input"],
+            json!([{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "Voice-channel context availability (factual state, not a new user request):\nHistorical session context is being prepared and is not yet available."
+                }]
+            }])
+        );
+        assert!(!encoded.to_string().contains("PRIVATE_PRIOR_SUMMARY"));
+        assert!(format!("{config:?}").contains("HistoricalContextPending"));
+        assert!(!format!("{config:?}").contains("PRIVATE_PRIOR_SUMMARY"));
+        let summarized = config.with_context_summary("Prepared facts.");
+        assert!(matches!(
+            summarized.context_seed,
+            PublicLiveContextSeed::FactualSummary(_)
+        ));
+        let summary = serde_json::to_value(factory.session_config(&summarized)).unwrap();
+        let text = summary["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("Factual summary"));
+        assert!(!text.contains("not yet available"));
+        assert_eq!(summary["instructions"], "Catalog behavior.");
+    }
+
+    #[test]
     fn startup_history_does_not_silently_trim_over_limit_dialogue() {
         let messages = (0..129)
             .map(|index| Message::User(meerkat_core::types::UserMessage::text(index.to_string())))
@@ -1254,7 +2025,7 @@ mod tests {
             .unwrap()
             .with_history(&messages);
         assert!(factory.session_config(&oversize).validate().is_err());
-        assert_eq!(oversize.input.len(), 129);
+        assert_eq!(factory.session_config(&oversize).input.unwrap().len(), 129);
     }
 
     #[test]
@@ -1507,6 +2278,334 @@ mod tests {
             state.reserve_append(PendingAppendLane::Session),
             Err(GptLiveBrokerError::AppendInFlight)
         ));
+    }
+
+    #[test]
+    fn thinking_commands_are_quiet_bounded_utf8_fragments_without_authority_fields() {
+        for text in [
+            "factual context ".repeat(130),
+            "🦀日本語 é\n".repeat(150),
+            format!("{}🦀tail", "x".repeat(499)),
+        ] {
+            let fragments = thinking_fragments(&text).collect::<Vec<_>>();
+            assert_eq!(fragments.concat(), text);
+            assert!(fragments.len() > 1);
+            for (index, &fragment) in fragments.iter().enumerate() {
+                assert!(!fragment.is_empty() && fragment.len() <= 500);
+                let event = PublicLiveBrokerSession::thinking_event(
+                    GptLiveAppendToken(5),
+                    index,
+                    fragment.to_owned(),
+                );
+                assert!(matches!(
+                    &event.command,
+                    Command::ThinkingAppend { content, delegation_id: Nullable(None) }
+                        if content == fragment
+                ));
+                event.validate().unwrap();
+                let encoded = serde_json::to_value(&event).unwrap();
+                assert_eq!(
+                    encoded,
+                    json!({
+                        "type": "session.thinking.append",
+                        "event_id": thinking_event_id(GptLiveAppendToken(5), index),
+                        "content": fragment,
+                        "delegation_id": null
+                    })
+                );
+                assert!(!format!("{event:?}").contains(fragment));
+            }
+        }
+        assert_eq!(thinking_fragments("").count(), 0);
+        assert_eq!(thinking_fragments(&"x".repeat(500)).count(), 1);
+        assert_eq!(thinking_fragments(&"x".repeat(501)).count(), 2);
+    }
+
+    #[test]
+    fn thinking_ack_requires_every_exact_fragment_receipt_without_consuming_other_lanes() {
+        let mut state = SessionState::default();
+        let session = state.reserve_append(PendingAppendLane::Session).unwrap();
+        let thinking = state.reserve_thinking_append(3).unwrap();
+        let delegation = state.reserve_append(PendingAppendLane::Delegation).unwrap();
+        for index in [2, 0] {
+            state
+                .apply_frame(frame(thinking_ack(Some(&thinking_event_id(
+                    thinking, index,
+                )))))
+                .unwrap();
+            assert!(
+                drain(&mut state).is_empty(),
+                "partial ACK is not full delivery"
+            );
+        }
+        assert_protocol_error(
+            state
+                .apply_frame(frame(thinking_ack(Some(&thinking_event_id(thinking, 0)))))
+                .unwrap_err(),
+        );
+        assert_protocol_error(
+            state
+                .apply_frame(frame(thinking_ack(Some("unknown"))))
+                .unwrap_err(),
+        );
+        assert_eq!(state.outstanding_receipt_count(), 3);
+        state
+            .apply_frame(frame(ack(Some(&pending_event_id(delegation)))))
+            .unwrap();
+        state
+            .apply_frame(frame(thinking_ack(Some(&thinking_event_id(thinking, 1)))))
+            .unwrap();
+        // The legacy single-commentary ID-less receipt still works.
+        state.apply_frame(frame(ack(None))).unwrap();
+        assert_eq!(
+            drain(&mut state),
+            vec![
+                GptLiveBrokerObservation::DelegationContextAppendAcknowledged { token: delegation },
+                GptLiveBrokerObservation::ThinkingContextAppendAcknowledged { token: thinking },
+                GptLiveBrokerObservation::SessionContextAppendAcknowledged { token: session },
+            ]
+        );
+        assert!(state.pending_appends.is_empty());
+    }
+
+    #[test]
+    fn cross_lane_and_idless_thinking_receipts_fail_without_spending_reservations() {
+        let mut state = SessionState::default();
+        let thinking = state.reserve_thinking_append(1).unwrap();
+        let id = thinking_event_id(thinking, 0);
+        for value in [ack(Some(&id)), ack(None), thinking_ack(None)] {
+            assert_protocol_error(state.apply_frame(frame(value)).unwrap_err());
+            assert_eq!(state.outstanding_receipt_count(), 1);
+            assert!(drain(&mut state).is_empty());
+        }
+        let mut instructions = ack(Some(&id));
+        instructions["type"] = json!("session.instructions.appended");
+        assert_protocol_error(state.apply_frame(frame(instructions)).unwrap_err());
+        assert_eq!(state.outstanding_receipt_count(), 1);
+        for lane in [PendingAppendLane::Session, PendingAppendLane::Delegation] {
+            let token = state.reserve_append(lane).unwrap();
+            let before = state.outstanding_receipt_count();
+            assert_protocol_error(
+                state
+                    .apply_frame(frame(thinking_ack(Some(&pending_event_id(token)))))
+                    .unwrap_err(),
+            );
+            assert_eq!(state.outstanding_receipt_count(), before);
+        }
+    }
+
+    #[test]
+    fn thinking_partial_rejection_is_exact_once_and_never_becomes_acknowledged() {
+        for closing in [false, true] {
+            let mut state = SessionState::default();
+            let thinking = state.reserve_thinking_append(4).unwrap();
+            let session = state.reserve_append(PendingAppendLane::Session).unwrap();
+            state.close_requested = closing;
+            state
+                .apply_frame(frame(thinking_ack(Some(&thinking_event_id(thinking, 2)))))
+                .unwrap();
+            assert!(drain(&mut state).is_empty());
+            state
+                .apply_frame(frame(append_rejected(Some(&thinking_event_id(
+                    thinking, 1,
+                )))))
+                .unwrap();
+            let observations = drain(&mut state);
+            assert_eq!(
+                observations,
+                vec![GptLiveBrokerObservation::ThinkingContextAppendRejected { token: thinking }]
+            );
+            assert!(!format!("{observations:?}").contains("PRIVATE_REJECTION"));
+            state
+                .apply_frame(frame(append_rejected(Some(&thinking_event_id(
+                    thinking, 3,
+                )))))
+                .unwrap();
+            state
+                .apply_frame(frame(thinking_ack(Some(&thinking_event_id(thinking, 0)))))
+                .unwrap();
+            assert!(
+                drain(&mut state).is_empty(),
+                "rejected aggregate cannot also ACK"
+            );
+            assert_eq!(state.outstanding_receipt_count(), 1);
+            state
+                .apply_frame(frame(ack(Some(&pending_event_id(session)))))
+                .unwrap();
+            assert_eq!(
+                drain(&mut state),
+                vec![GptLiveBrokerObservation::SessionContextAppendAcknowledged { token: session }]
+            );
+        }
+    }
+
+    #[test]
+    fn only_confirmed_session_close_interrupts_unresolved_thinking_tokens() {
+        for close_requested in [false, true] {
+            let mut state = SessionState::default();
+            let session = state.reserve_append(PendingAppendLane::Session).unwrap();
+            let partial = state.reserve_thinking_append(3).unwrap();
+            let delegation = state.reserve_append(PendingAppendLane::Delegation).unwrap();
+            let untouched = state.reserve_thinking_append(1).unwrap();
+            let completed = state.reserve_thinking_append(1).unwrap();
+            state.close_requested = close_requested;
+            state
+                .apply_frame(frame(thinking_ack(Some(&thinking_event_id(partial, 1)))))
+                .unwrap();
+            assert!(drain(&mut state).is_empty());
+            state
+                .apply_frame(frame(thinking_ack(Some(&thinking_event_id(completed, 0)))))
+                .unwrap();
+            assert_eq!(
+                drain(&mut state),
+                vec![
+                    GptLiveBrokerObservation::ThinkingContextAppendAcknowledged {
+                        token: completed
+                    }
+                ]
+            );
+            state
+                .apply_frame(frame(output_delta("final transcript")))
+                .unwrap();
+            drain(&mut state);
+            state.apply_frame(frame(session_closed())).unwrap();
+            let observations = drain(&mut state);
+            assert!(matches!(
+                observations.as_slice(),
+                [
+                    GptLiveBrokerObservation::TurnFinished { transcript, .. },
+                    GptLiveBrokerObservation::ThinkingContextAppendInterruptedByClose { token: first },
+                    GptLiveBrokerObservation::ThinkingContextAppendInterruptedByClose { token: second },
+                ] if transcript == "final transcript" && *first == partial && *second == untouched
+            ));
+            assert!(
+                format!("{:?}", observations[1])
+                    .contains("thinking_context_append_interrupted_by_close")
+            );
+            assert_eq!(state.pending_appends.len(), 2);
+            assert_eq!(state.pending_appends[0].token, session);
+            assert_eq!(state.pending_appends[1].token, delegation);
+            assert!(state.closed_observed);
+            state.apply_frame(frame(session_closed())).unwrap();
+            assert!(
+                drain(&mut state).is_empty(),
+                "repeated closure emits no duplicate result"
+            );
+            for token in [partial, untouched] {
+                assert_protocol_error(
+                    state
+                        .apply_frame(frame(thinking_ack(Some(&thinking_event_id(token, 0)))))
+                        .expect_err("late receipt cannot ACK a close-interrupted append"),
+                );
+            }
+            assert!(drain(&mut state).is_empty());
+        }
+    }
+
+    #[test]
+    fn native_thinking_error_is_not_a_close_interruption_even_while_closing() {
+        for close_requested in [false, true] {
+            let mut state = SessionState::default();
+            let thinking = state.reserve_thinking_append(3).unwrap();
+            state.close_requested = close_requested;
+            state
+                .apply_frame(frame(thinking_ack(Some(&thinking_event_id(thinking, 0)))))
+                .unwrap();
+            assert!(drain(&mut state).is_empty());
+            state
+                .apply_frame(frame(append_rejected(Some(&thinking_event_id(
+                    thinking, 1,
+                )))))
+                .unwrap();
+            assert_eq!(
+                drain(&mut state),
+                vec![GptLiveBrokerObservation::ThinkingContextAppendRejected { token: thinking }]
+            );
+            assert_eq!(state.outstanding_receipt_count(), 1);
+            state.apply_frame(frame(session_closed())).unwrap();
+            assert!(state.pending_appends.is_empty());
+            assert!(
+                drain(&mut state).is_empty(),
+                "native rejection is never relabeled as close interruption"
+            );
+            assert_protocol_error(
+                state
+                    .apply_frame(frame(thinking_ack(Some(&thinking_event_id(thinking, 2)))))
+                    .expect_err("close cannot restore rejected append receipt"),
+            );
+            assert!(drain(&mut state).is_empty());
+        }
+    }
+
+    #[test]
+    fn uncorrelated_or_conflicting_thinking_rejections_do_not_spend_fragments() {
+        let mut state = SessionState::default();
+        let thinking = state.reserve_thinking_append(2).unwrap();
+        for id in [None, Some("unrelated"), Some("meerkat-thinking-999-0")] {
+            state.apply_frame(frame(append_rejected(id))).unwrap();
+            assert_eq!(
+                drain(&mut state),
+                vec![GptLiveBrokerObservation::UnsupportedProviderEvent]
+            );
+            assert_eq!(state.outstanding_receipt_count(), 2);
+        }
+        let mut conflicting = append_rejected(Some(&thinking_event_id(thinking, 0)));
+        conflicting["client_event_id"] = json!(thinking_event_id(thinking, 1));
+        assert_protocol_error(state.apply_frame(frame(conflicting)).unwrap_err());
+        assert_eq!(state.outstanding_receipt_count(), 2);
+        // The outer-only error receipt is also exact evidence.
+        let mut outer = append_rejected(None);
+        outer["client_event_id"] = json!(thinking_event_id(thinking, 1));
+        state.apply_frame(frame(outer)).unwrap();
+        assert_eq!(
+            drain(&mut state),
+            vec![GptLiveBrokerObservation::ThinkingContextAppendRejected { token: thinking }]
+        );
+        assert_eq!(state.outstanding_receipt_count(), 1);
+    }
+
+    #[test]
+    fn thinking_reservations_are_bounded_atomically_and_share_ambiguous_delivery_fence() {
+        let mut state = SessionState::default();
+        for count in [0, SessionState::MAX_PENDING_APPENDS + 1] {
+            assert!(matches!(
+                state.reserve_thinking_append(count),
+                Err(GptLiveBrokerError::AppendInFlight)
+            ));
+            assert!(state.pending_appends.is_empty());
+        }
+        state.reserve_append(PendingAppendLane::Session).unwrap();
+        assert!(matches!(
+            state.reserve_thinking_append(SessionState::MAX_PENDING_APPENDS),
+            Err(GptLiveBrokerError::AppendInFlight)
+        ));
+        assert_eq!(state.outstanding_receipt_count(), 1);
+        let thinking = state
+            .reserve_thinking_append(SessionState::MAX_PENDING_APPENDS - 1)
+            .unwrap();
+        assert_eq!(
+            state.outstanding_receipt_count(),
+            SessionState::MAX_PENDING_APPENDS
+        );
+        assert!(matches!(
+            state.reserve_append(PendingAppendLane::Delegation),
+            Err(GptLiveBrokerError::AppendInFlight)
+        ));
+        state
+            .apply_frame(frame(thinking_ack(Some(&thinking_event_id(thinking, 0)))))
+            .unwrap();
+        state.reserve_append(PendingAppendLane::Delegation).unwrap();
+        state.append_delivery_ambiguous = true;
+        for lane in [
+            PendingAppendLane::Session,
+            PendingAppendLane::Delegation,
+            PendingAppendLane::Thinking,
+        ] {
+            assert!(matches!(
+                state.reserve_append(lane),
+                Err(GptLiveBrokerError::AppendInFlight)
+            ));
+        }
     }
 
     #[test]
@@ -1786,6 +2885,8 @@ mod tests {
         assert_eq!(release["type"], "session.commentary.append");
         assert_eq!(release["delegation_id"], "dlg_public");
         send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a2","client_event_id":release["event_id"],"start_ms":2.0,"end_ms":2.0})).await;
+        let mute = recv_json(&mut socket, &capture).await;
+        assert_eq!(mute["type"], "session.input_audio.mute");
         let close = recv_json(&mut socket, &capture).await;
         assert_eq!(close["type"], "session.close");
         send_json(&mut socket, json!({"type":"session.closed","event_id":"c","session":snapshot,"reason":"close_requested","usage":{"seconds":2.5}})).await;
@@ -1915,7 +3016,7 @@ mod tests {
                 if transcript == "one moment"
         ));
         let events = capture.lock().expect("capture lock").client_events.clone();
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 4);
         assert_eq!(events[0]["content"], "{\"canonical_messages\":[]}");
         assert_eq!(events[1]["content"], "Table booked for two.");
         assert!(
@@ -1923,8 +3024,306 @@ mod tests {
                 .iter()
                 .all(|event| event["event_id"].is_string())
         );
-        assert_eq!(events[2]["type"], "session.close");
+        // Close mutes input first so a pending quiet append can be injected
+        // and the provider can confirm closure.
+        assert_eq!(events[2]["type"], "session.input_audio.mute");
+        assert_eq!(events[3]["type"], "session.close");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn thinking_append_sends_only_native_quiet_fragments_and_drains_exact_receipts() {
+        for reject_middle in [false, true] {
+            let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+            let attach_thinking =
+                move |State(capture): State<SharedCapture>, upgrade: WebSocketUpgrade| async move {
+                    upgrade.on_upgrade(move |mut socket| async move {
+                    let mut commands = Vec::new();
+                    for _ in 0..3 {
+                        let event = recv_json(&mut socket, &capture).await;
+                        assert_eq!(event["type"], "session.thinking.append");
+                        assert!(event["delegation_id"].is_null());
+                        commands.push(event);
+                    }
+                    send_json(&mut socket, output_delta("existing reply")).await;
+                    send_json(&mut socket, thinking_ack(commands[2]["event_id"].as_str())).await;
+                    send_json(
+                        &mut socket,
+                        if reject_middle {
+                            append_rejected(commands[1]["event_id"].as_str())
+                        } else {
+                            thinking_ack(commands[1]["event_id"].as_str())
+                        },
+                    ).await;
+                    send_json(&mut socket, output_delta(" continues")).await;
+                    send_json(&mut socket, thinking_ack(commands[0]["event_id"].as_str())).await;
+                    let mute = recv_json(&mut socket, &capture).await;
+                    assert_eq!(mute["type"], "session.input_audio.mute");
+                    let close = recv_json(&mut socket, &capture).await;
+                    assert_eq!(close["type"], "session.close");
+                    send_json(&mut socket, json!({
+                        "type":"session.closed","event_id":"c","session":{
+                            "id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0
+                        },"reason":"close_requested","usage":{"seconds":1.0}
+                    })).await;
+                })
+                };
+            let app = Router::new()
+                .route("/v1/live/sessions", post(create_session))
+                .route(
+                    "/v1/live/sessions/{session_id}/attach",
+                    get(attach_thinking),
+                )
+                .with_state(Arc::clone(&capture));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let thinking_evidence = thinking_capture::Capture::new().for_channel(9);
+            let factory = thinking_evidence
+                .scope(async {
+                    PublicLiveBrokerFactory::__try_from_target_with_base_url(
+                        realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
+                        &format!("http://{address}/v1/"),
+                    )
+                    .unwrap()
+                })
+                .await;
+            let (_, session) = factory
+                .open(
+                    PublicLiveOpenConfig::new("v=0", "marin")
+                        .unwrap()
+                        .with_pending_context(),
+                )
+                .await
+                .unwrap()
+                .into_parts();
+            {
+                let captured = capture.lock().unwrap();
+                let body = captured.create_body.as_ref().unwrap();
+                let startup = body["session"]["input"][0]["content"][0]["text"]
+                    .as_str()
+                    .unwrap();
+                assert!(startup.ends_with(
+                    "Historical session context is being prepared and is not yet available."
+                ));
+                assert!(body["session"].get("instructions").is_none());
+                assert!(
+                    captured.client_events.is_empty(),
+                    "pending startup never sends commentary"
+                );
+            }
+            assert!(matches!(
+                session.append_thinking_context("  ").await,
+                Err(GptLiveBrokerError::MissingContext)
+            ));
+            assert!(matches!(
+                session.append_thinking_context("x".repeat(500 * 65)).await,
+                Err(GptLiveBrokerError::AppendInFlight)
+            ));
+            let text = "fact ".repeat(250);
+            let token = session.append_thinking_context(text.clone()).await.unwrap();
+            let mut observations = Vec::new();
+            for _ in 0..6 {
+                observations.push(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        session.next_observation(),
+                    )
+                    .await
+                    .expect("receipt or transcript arrives")
+                    .unwrap()
+                    .unwrap(),
+                );
+            }
+            let expected = if reject_middle {
+                GptLiveBrokerObservation::ThinkingContextAppendRejected { token }
+            } else {
+                GptLiveBrokerObservation::ThinkingContextAppendAcknowledged { token }
+            };
+            assert_eq!(
+                observations
+                    .iter()
+                    .filter(|item| **item == expected)
+                    .count(),
+                1
+            );
+            let turn_ids = observations
+                .iter()
+                .filter_map(|observation| match observation {
+                    GptLiveBrokerObservation::TurnStarted { turn, .. }
+                    | GptLiveBrokerObservation::TurnSnapshotDelta { turn, .. } => Some(turn),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(turn_ids.len(), 3);
+            assert!(turn_ids.iter().all(|turn| *turn == turn_ids[0]));
+            session.close().await.unwrap();
+            assert!(matches!(
+                session.next_observation().await.unwrap(),
+                Some(GptLiveBrokerObservation::TurnFinished { transcript, .. })
+                    if transcript == "existing reply continues"
+            ));
+            assert!(session.next_observation().await.unwrap().is_none());
+            let events = capture.lock().unwrap().client_events.clone();
+            assert_eq!(
+                events.len(),
+                5,
+                "three fragments, the close-time input mute, and the close; no automatic retry"
+            );
+            assert_eq!(
+                events[..3]
+                    .iter()
+                    .map(|event| event["content"].as_str().unwrap())
+                    .collect::<String>(),
+                text
+            );
+            let ids = events[..3]
+                .iter()
+                .map(|event| event["event_id"].as_str().unwrap())
+                .collect::<HashSet<_>>();
+            assert_eq!(ids.len(), 3);
+            let recorded = thinking_evidence.drain().unwrap();
+            assert!(thinking_evidence.fault().is_none());
+            assert!(recorded.iter().all(|event| event.channel_ordinal == 9));
+            let recorded_fragments = recorded
+                .iter()
+                .filter_map(|event| match &event.event {
+                    thinking_capture::EventKind::ThinkingAppendAttempt {
+                        client_event_id,
+                        text,
+                    } => {
+                        assert!(ids.contains(client_event_id.as_str()));
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(
+                recorded_fragments, text,
+                "recorder must retain exact outgoing fragments"
+            );
+            let acknowledgements = recorded
+                .iter()
+                .filter(|event| {
+                    matches!(&event.event,
+                        thinking_capture::EventKind::ThinkingAppended {
+                            client_event_id: Some(id), matched_owned: true, accepted: true,
+                        } if ids.contains(id.as_str())
+                    )
+                })
+                .count();
+            assert_eq!(acknowledgements, if reject_middle { 2 } else { 3 });
+            let encoded = serde_json::to_string(&recorded).unwrap();
+            for forbidden in [
+                "authorization",
+                "offer_sdp",
+                "instructions",
+                "api_key",
+                "existing reply",
+            ] {
+                assert!(!encoded.contains(forbidden));
+            }
+            assert!(session.state.lock().await.pending_appends.is_empty());
+            // A failed transport write still retains the whole append token and
+            // fences every later lane instead of retrying an uncertain fragment.
+            let error = session
+                .append_thinking_context("x".repeat(501))
+                .await
+                .unwrap_err();
+            let GptLiveBrokerError::AppendDeliveryAmbiguous { token: ambiguous } = error else {
+                panic!("closed sender must preserve ambiguous delivery");
+            };
+            assert_ne!(ambiguous, token);
+            assert_eq!(session.state.lock().await.outstanding_receipt_count(), 2);
+            assert!(matches!(
+                session.append_thinking_context("later").await,
+                Err(GptLiveBrokerError::AppendInFlight)
+            ));
+            assert!(matches!(
+                session.append_session_context("later").await,
+                Err(GptLiveBrokerError::AppendInFlight)
+            ));
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_close_interruption_drains_through_ingress_but_transport_eof_does_not() {
+        for confirmed_close in [false, true] {
+            let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+            let attach_closing = move |State(capture): State<SharedCapture>,
+                                       upgrade: WebSocketUpgrade| async move {
+                upgrade.on_upgrade(move |mut socket| async move {
+                    let first = recv_json(&mut socket, &capture).await;
+                    let second = recv_json(&mut socket, &capture).await;
+                    assert_eq!(first["type"], "session.thinking.append");
+                    assert_eq!(second["type"], "session.thinking.append");
+                    send_json(&mut socket, thinking_ack(first["event_id"].as_str())).await;
+                    if confirmed_close {
+                        send_json(&mut socket, session_closed()).await;
+                    } else {
+                        socket.send(AxumMessage::Close(None)).await.unwrap();
+                    }
+                })
+            };
+            let app = Router::new()
+                .route("/v1/live/sessions", post(create_session))
+                .route("/v1/live/sessions/{session_id}/attach", get(attach_closing))
+                .with_state(capture);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let factory = PublicLiveBrokerFactory::__try_from_target_with_base_url(
+                realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
+                &format!("http://{address}/v1/"),
+            )
+            .unwrap();
+            let (_, session) = factory
+                .open(PublicLiveOpenConfig::new("v=0", "marin").unwrap())
+                .await
+                .unwrap()
+                .into_parts();
+            let token = session
+                .append_thinking_context("x".repeat(501))
+                .await
+                .unwrap();
+            let observation = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                session.next_observation(),
+            )
+            .await
+            .expect("provider closes the transport or session");
+            if confirmed_close {
+                assert_eq!(
+                    observation.unwrap(),
+                    Some(
+                        GptLiveBrokerObservation::ThinkingContextAppendInterruptedByClose { token }
+                    )
+                );
+                assert!(session.next_observation().await.unwrap().is_none());
+                assert!(session.state.lock().await.pending_appends.is_empty());
+            } else {
+                assert!(matches!(
+                    observation,
+                    Err(GptLiveBrokerError::Transport {
+                        class: GptLiveBrokerTerminalClass::WebSocket
+                    })
+                ));
+                let mut state = session.state.lock().await;
+                assert!(!state.closed_observed);
+                assert_eq!(state.outstanding_receipt_count(), 1);
+                assert_eq!(state.pending_appends[0].token, token);
+                assert!(
+                    drain(&mut state).is_empty(),
+                    "bare EOF cannot mint a close interruption"
+                );
+            }
+            server.abort();
+        }
     }
 
     #[test]
@@ -1982,6 +3381,8 @@ mod tests {
             send_json(&mut socket, output_delta(", booked")).await;
             tokio::time::sleep(std::time::Duration::from_millis(1750)).await;
             send_json(&mut socket, output_delta(" for two")).await;
+            let mute = recv_json(&mut socket, &capture).await;
+            assert_eq!(mute["type"], "session.input_audio.mute");
             let close = recv_json(&mut socket, &capture).await;
             assert_eq!(close["type"], "session.close");
             send_json(&mut socket, json!({"type":"session.closed","event_id":"c","session":snapshot,"reason":"close_requested","usage":{"seconds":6.5}})).await;
@@ -2066,66 +3467,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_eof_without_session_closed_never_finishes_output() {
-        async fn attach_unconfirmed(upgrade: WebSocketUpgrade) -> Response {
-            upgrade.on_upgrade(|mut socket| async move {
-                send_json(
+    async fn transport_eof_before_or_during_close_without_session_closed_never_finishes_output() {
+        for during_close in [false, true] {
+            let attach_unconfirmed = move |upgrade: WebSocketUpgrade| async move {
+                upgrade.on_upgrade(move |mut socket| async move {
+                    send_json(
                     &mut socket,
                     json!({"type":"session.started","event_id":"s","session":{
                         "id":"live_fixture","model":"gpt-live-1","status":"active","expires_at":1.0
                     }}),
                 )
                 .await;
-                send_json(&mut socket, output_delta("unfinished")).await;
-                socket.send(AxumMessage::Close(None)).await.unwrap();
-            })
-        }
-        let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
-        let app = Router::new()
-            .route("/v1/live/sessions", post(create_session))
-            .route(
-                "/v1/live/sessions/{session_id}/attach",
-                get(attach_unconfirmed),
+                    send_json(&mut socket, output_delta("unfinished")).await;
+                    if during_close {
+                        for expected in ["session.input_audio.mute", "session.close"] {
+                            let message = socket.recv().await.unwrap().unwrap();
+                            let AxumMessage::Text(text) = message else {
+                                panic!("expected {expected} request");
+                            };
+                            let request: Value = serde_json::from_str(&text).unwrap();
+                            assert_eq!(request["type"], expected);
+                        }
+                    }
+                    socket.send(AxumMessage::Close(None)).await.unwrap();
+                })
+            };
+            let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+            let app = Router::new()
+                .route("/v1/live/sessions", post(create_session))
+                .route(
+                    "/v1/live/sessions/{session_id}/attach",
+                    get(attach_unconfirmed),
+                )
+                .with_state(capture);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let factory = PublicLiveBrokerFactory::__try_from_target_with_base_url(
+                realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
+                &format!("http://{address}/v1/"),
             )
-            .with_state(capture);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        let factory = PublicLiveBrokerFactory::__try_from_target_with_base_url(
-            realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
-            &format!("http://{address}/v1/"),
-        )
-        .unwrap();
-        let (_, session) = factory
-            .open(PublicLiveOpenConfig::new("v=0", "marin").unwrap())
-            .await
-            .unwrap()
-            .into_parts();
-        for _ in 0..3 {
-            let observation = session.next_observation().await.unwrap().unwrap();
-            assert!(!matches!(
-                observation,
-                GptLiveBrokerObservation::TurnFinished { .. }
+            .unwrap();
+            let (_, session) = factory
+                .open(PublicLiveOpenConfig::new("v=0", "marin").unwrap())
+                .await
+                .unwrap()
+                .into_parts();
+            for _ in 0..3 {
+                let observation = session.next_observation().await.unwrap().unwrap();
+                assert!(!matches!(
+                    observation,
+                    GptLiveBrokerObservation::TurnFinished { .. }
+                ));
+            }
+            if during_close {
+                session
+                    .close()
+                    .await
+                    .expect("request close before bare transport EOF");
+            }
+            assert!(matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    session.next_observation()
+                )
+                .await
+                .expect("closed socket is observed"),
+                Err(GptLiveBrokerError::Transport {
+                    class: GptLiveBrokerTerminalClass::WebSocket
+                })
             ));
+            let state = session.state.lock().await;
+            assert!(!state.closed_observed);
+            assert_eq!(state.close_requested, during_close);
+            assert_eq!(
+                join_segments(&state.open_turn.as_ref().unwrap().segments),
+                "unfinished"
+            );
+            server.abort();
         }
-        assert!(matches!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                session.next_observation()
-            )
-            .await
-            .expect("closed socket is observed"),
-            Err(GptLiveBrokerError::Transport { .. })
-        ));
-        let state = session.state.lock().await;
-        assert!(!state.closed_observed);
-        assert_eq!(
-            join_segments(&state.open_turn.as_ref().unwrap().segments),
-            "unfinished"
-        );
-        server.abort();
     }
 
     #[tokio::test]
@@ -2144,6 +3566,8 @@ mod tests {
                 json!({"type":"session.future.event","event_id":"x"}),
             )
             .await;
+            let mute = recv_json(&mut socket, &capture).await;
+            assert_eq!(mute["type"], "session.input_audio.mute");
             let close = recv_json(&mut socket, &capture).await;
             assert_eq!(close["type"], "session.close");
         }

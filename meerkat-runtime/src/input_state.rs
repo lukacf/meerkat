@@ -1467,6 +1467,75 @@ impl DirectedRunStartedAttribution {
     }
 }
 
+/// Exact prompt admission identity, retained after the replay payload retires.
+/// Fresh input IDs and timestamps are observation details, not replay identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptReplayIdentity([u8; 32]);
+
+impl PromptReplayIdentity {
+    pub(crate) fn from_input(input: &Input) -> Result<Option<Self>, crate::RuntimeDriverError> {
+        let Input::Prompt(prompt) = input else {
+            return Ok(None);
+        };
+        if prompt.header.idempotency_key.is_none() {
+            return Ok(None);
+        }
+        let crate::input::PromptInput {
+            header,
+            content,
+            typed_turn_appends,
+            injected_context,
+            turn_metadata,
+        } = prompt;
+        let crate::input::InputHeader {
+            id: _,
+            timestamp: _,
+            source,
+            durability,
+            visibility,
+            idempotency_key: _,
+            supersession_key,
+            correlation_id,
+        } = header;
+        let bytes = serde_json::to_vec(&(
+            source,
+            durability,
+            visibility,
+            supersession_key,
+            correlation_id,
+            content,
+            typed_turn_appends,
+            injected_context,
+            turn_metadata,
+        ))
+        .map_err(|error| {
+            crate::RuntimeDriverError::Internal(format!(
+                "failed to bind prompt replay identity: {error}"
+            ))
+        })?;
+        Ok(Some(Self(Sha256::digest(bytes).into())))
+    }
+
+    /// Strict callers must prove exact original content and semantic slots.
+    /// Generic callers retain their existing key-only replay contract.
+    pub(crate) fn verify_replay(
+        state: &InputState,
+        input: &Input,
+        policy: crate::accept::InputReplayPolicy,
+    ) -> Result<(), crate::RuntimeDriverError> {
+        if policy == crate::accept::InputReplayPolicy::KeyOnly {
+            return Ok(());
+        }
+        let incoming = Self::from_input(input)?;
+        if incoming.is_none() || state.prompt_replay_identity != incoming {
+            return Err(crate::RuntimeDriverError::InputIdempotencyConflict {
+                existing_id: state.input_id.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InputState {
     pub input_id: InputId,
@@ -1483,6 +1552,9 @@ pub struct InputState {
     pub directed_run_started_attribution: Option<DirectedRunStartedAttribution>,
     pub durability: Option<crate::input::InputDurability>,
     pub idempotency_key: Option<crate::identifiers::IdempotencyKey>,
+    /// Runtime-issued exact prompt witness; absent for non-prompt and older
+    /// admissions. Absence never authorizes a new prompt's replay claim.
+    pub prompt_replay_identity: Option<PromptReplayIdentity>,
     pub recovery_count: u32,
     pub reconstruction_source: Option<ReconstructionSource>,
     /// Durable pre-finalization candidate or exact finalized public completion
@@ -1520,6 +1592,7 @@ impl InputState {
             directed_run_started_attribution: None,
             durability: None,
             idempotency_key: None,
+            prompt_replay_identity: None,
             recovery_count: 0,
             reconstruction_source: None,
             terminal_completion: None,
@@ -1572,6 +1645,8 @@ struct InputStateSerde {
     durability: Option<crate::input::InputDurability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     idempotency_key: Option<crate::identifiers::IdempotencyKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_replay_identity: Option<PromptReplayIdentity>,
     #[serde(default)]
     attempt_count: u32,
     #[serde(default)]
@@ -1624,6 +1699,7 @@ impl Serialize for StoredInputState {
             terminal_outcome: self.seed.terminal_outcome.clone(),
             durability: self.state.durability,
             idempotency_key: self.state.idempotency_key.clone(),
+            prompt_replay_identity: self.state.prompt_replay_identity.clone(),
             attempt_count: self.seed.attempt_count,
             recovery_count: self.state.recovery_count,
             history: self.state.history.clone(),
@@ -1742,6 +1818,7 @@ impl<'de> Deserialize<'de> for StoredInputState {
             directed_run_started_attribution,
             durability: helper.durability,
             idempotency_key: helper.idempotency_key,
+            prompt_replay_identity: helper.prompt_replay_identity,
             recovery_count: helper.recovery_count,
             reconstruction_source: helper.reconstruction_source,
             terminal_completion: helper.terminal_completion,
@@ -1771,6 +1848,56 @@ mod tests {
         ApplyMode, ConsumePoint, DrainPolicy, QueueMode, RoutingDisposition, WakeMode,
     };
     use meerkat_core::ops::{OpEvent, OperationId};
+
+    #[test]
+    fn strict_prompt_replay_binds_roles_context_and_mode_not_attempt_identity() {
+        use crate::accept::InputReplayPolicy;
+        use crate::identifiers::IdempotencyKey;
+        use crate::input::PromptInput;
+        use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+
+        let mut prompt = PromptInput::new("human intent", None);
+        prompt.header.idempotency_key = Some(IdempotencyKey::new("stable-human"));
+        let input = Input::Prompt(prompt.clone());
+        let mut state = InputState::new_accepted(input.id().clone());
+        state.prompt_replay_identity = PromptReplayIdentity::from_input(&input).unwrap();
+        prompt.header.id = InputId::new();
+        prompt.header.timestamp = Utc::now();
+        PromptReplayIdentity::verify_replay(
+            &state,
+            &Input::Prompt(prompt.clone()),
+            InputReplayPolicy::ExactPrompt,
+        )
+        .unwrap();
+        let mut injected = prompt.clone();
+        injected.injected_context.push("ambient memory".into());
+        let mut steered = prompt.clone();
+        steered.turn_metadata = Some(RuntimeTurnMetadata {
+            handling_mode: Some(HandlingMode::Steer),
+            ..Default::default()
+        });
+        let mut system = prompt.clone();
+        system.turn_metadata = Some(RuntimeTurnMetadata {
+            system_prompts: vec!["platform instruction".into()],
+            ..Default::default()
+        });
+        for changed in [injected, steered, system] {
+            assert!(matches!(
+                PromptReplayIdentity::verify_replay(
+                    &state,
+                    &Input::Prompt(changed),
+                    InputReplayPolicy::ExactPrompt,
+                ),
+                Err(crate::RuntimeDriverError::InputIdempotencyConflict { .. }),
+            ));
+        }
+        let legacy = InputState::new_accepted(InputId::new());
+        assert!(matches!(
+            PromptReplayIdentity::verify_replay(&legacy, &input, InputReplayPolicy::ExactPrompt,),
+            Err(crate::RuntimeDriverError::InputIdempotencyConflict { .. }),
+        ));
+        PromptReplayIdentity::verify_replay(&legacy, &input, InputReplayPolicy::KeyOnly).unwrap();
+    }
 
     fn terminal_outbox_batch_fixture() -> Vec<InteractionTerminalOutbox> {
         let mut completion_input_ids = vec![InputId::new(), InputId::new(), InputId::new()];

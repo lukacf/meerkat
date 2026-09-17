@@ -33,6 +33,10 @@ pub enum RuntimeDriverError {
     #[error("Input validation failed: {reason}")]
     ValidationFailed { reason: String },
 
+    /// The key is already bound to different or unprovable prompt semantics.
+    #[error("input idempotency conflicts with existing input {existing_id}")]
+    InputIdempotencyConflict { existing_id: InputId },
+
     /// The runtime has been destroyed.
     #[error("Runtime destroyed")]
     Destroyed,

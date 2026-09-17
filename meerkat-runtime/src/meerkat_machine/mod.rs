@@ -1084,6 +1084,8 @@ pub mod dsl;
 pub(crate) mod dsl_authority;
 mod dsl_effects;
 mod durability_health;
+#[cfg(feature = "live")]
+mod live_context_preparation;
 mod llm_reconfigure;
 mod runtime_control;
 mod session_management;
@@ -6878,6 +6880,7 @@ impl LiveProviderTurnStartedAuthority {
 pub struct LiveAssistantOutputHandle {
     binding: crate::live_execution::LiveDelegationRuntimeBinding,
     interaction_id: meerkat_core::InteractionId,
+    origin: dsl::LiveAssistantTurnOrigin,
     assistant_turn_ref: String,
     playback_segment: u64,
     output_id: String,
@@ -6892,6 +6895,7 @@ impl std::fmt::Debug for LiveAssistantOutputHandle {
         f.debug_struct("LiveAssistantOutputHandle")
             .field("binding", &self.binding)
             .field("interaction_id", &self.interaction_id)
+            .field("origin", &self.origin)
             .field("assistant_turn_ref", &"<opaque>")
             .field("output_id", &self.output_id)
             .field(
@@ -6938,6 +6942,13 @@ impl LiveAssistantOutputHandle {
     #[must_use]
     pub fn output_id(&self) -> &str {
         &self.output_id
+    }
+
+    /// Machine-owned attribution; provider-initiated output does not prove
+    /// consumption of any particular context append.
+    #[must_use]
+    pub const fn origin(&self) -> dsl::LiveAssistantTurnOrigin {
+        self.origin
     }
 
     #[doc(hidden)]
@@ -7276,6 +7287,7 @@ pub struct LiveChannelCustodyProjection {
     channel_id: meerkat_core::LiveChannelId,
     mode: meerkat_core::LiveExecutionMode,
     state: LiveChannelCustodyState,
+    preparation: crate::live_execution::LiveContextPreparationStatus,
 }
 
 #[cfg(feature = "live")]
@@ -7315,6 +7327,18 @@ impl LiveChannelCustodyProjection {
     pub const fn state(&self) -> &LiveChannelCustodyState {
         &self.state
     }
+
+    #[must_use]
+    pub const fn preparation(&self) -> crate::live_execution::LiveContextPreparationStatus {
+        self.preparation
+    }
+
+    #[must_use]
+    pub const fn context_preparation(
+        &self,
+    ) -> &crate::live_execution::LiveContextPreparationStatus {
+        &self.preparation
+    }
 }
 
 /// Caller-held machine receipt accepted for strict close. The enum provides
@@ -7332,6 +7356,8 @@ pub struct LiveChannelCloseCustodyAuthority {
     session_id: SessionId,
     channel_id: meerkat_core::LiveChannelId,
     already_closed: bool,
+    context_recovery_channel_id: Option<meerkat_core::LiveChannelId>,
+    result_recovery_channel_id: Option<meerkat_core::LiveChannelId>,
 }
 
 #[cfg(feature = "live")]
@@ -7349,6 +7375,13 @@ impl LiveChannelCloseCustodyAuthority {
     #[must_use]
     pub const fn already_closed(&self) -> bool {
         self.already_closed
+    }
+
+    /// Exact cancelled recovery candidates, never a later unrelated open.
+    pub fn recovery_channel_ids(&self) -> impl Iterator<Item = &meerkat_core::LiveChannelId> {
+        self.context_recovery_channel_id
+            .iter()
+            .chain(self.result_recovery_channel_id.iter())
     }
 }
 
@@ -7459,20 +7492,6 @@ impl std::fmt::Debug for LiveWebrtcAnswerExecutionBindingAuthority {
 
 #[cfg(feature = "live")]
 impl LiveWebrtcAnswerExecutionBindingAuthority {
-    pub(crate) fn new(
-        answer: LiveWebrtcAnswerResultAuthority,
-        binding: crate::live_execution::LiveDelegationRuntimeBinding,
-    ) -> Self {
-        Self {
-            rollback: LiveWebrtcAnswerExecutionRollbackAuthority {
-                binding: binding.clone(),
-            },
-            answer,
-            binding,
-            activation: None,
-        }
-    }
-
     pub(crate) fn new_active(
         answer: LiveWebrtcAnswerResultAuthority,
         binding: crate::live_execution::LiveDelegationRuntimeBinding,
@@ -7712,6 +7731,28 @@ pub struct MeerkatMachineShared {
     #[cfg(feature = "live")]
     live_context_queued_rows:
         StdMutex<HashMap<(SessionId, u64), crate::live_execution::LiveContextQueuedRow>>,
+    #[cfg(feature = "live")]
+    live_context_preparation_leases: StdMutex<
+        HashMap<
+            (SessionId, meerkat_core::LiveChannelId),
+            crate::live_execution::LiveContextPreparationLease,
+        >,
+    >,
+    /// Serialize local row projection and generated claim selection only;
+    /// never hold this mechanical gate while awaiting provider delivery.
+    #[cfg(feature = "live")]
+    live_context_projection_gates:
+        StdMutex<HashMap<SessionId, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    #[cfg(feature = "live")]
+    live_context_drain_tasks: StdMutex<
+        HashMap<
+            (SessionId, meerkat_core::LiveChannelId),
+            Arc<crate::live_context_mirror::LiveContextDrainTask>,
+        >,
+    >,
+    #[cfg(feature = "live")]
+    live_context_projection_tasks:
+        StdMutex<HashMap<SessionId, Arc<crate::live_context_mirror::LiveContextDrainTask>>>,
     /// Process-local custody of generated assistant-output handles. Semantic
     /// identity was frozen by the generated Assistant TurnStarted transition;
     /// these maps provide only exact host addressability.
@@ -9121,6 +9162,14 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
+                live_context_projection_gates: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_context_preparation_leases: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_context_drain_tasks: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_context_projection_tasks: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
                 live_assistant_output_by_turn: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_assistant_output_by_id: StdMutex::new(HashMap::new()),
@@ -9201,6 +9250,14 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
+                live_context_projection_gates: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_context_preparation_leases: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_context_drain_tasks: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_context_projection_tasks: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
                 live_assistant_output_by_turn: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_assistant_output_by_id: StdMutex::new(HashMap::new()),
@@ -9280,6 +9337,14 @@ impl MeerkatMachine {
                 live_context_mirror_host: StdRwLock::new(None),
                 #[cfg(feature = "live")]
                 live_context_queued_rows: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_context_projection_gates: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_context_preparation_leases: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_context_drain_tasks: StdMutex::new(HashMap::new()),
+                #[cfg(feature = "live")]
+                live_context_projection_tasks: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]
                 live_assistant_output_by_turn: StdMutex::new(HashMap::new()),
                 #[cfg(feature = "live")]

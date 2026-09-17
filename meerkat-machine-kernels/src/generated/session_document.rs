@@ -323,6 +323,8 @@ pub enum LiveContextCommittedRowDisposition {
     MirrorParentText,
     #[serde(rename = "AlreadyPresentInLiveChannel")]
     AlreadyPresentInLiveChannel,
+    #[serde(rename = "AssistantObservation")]
+    AssistantObservation,
     #[serde(rename = "ExcludedFromLiveContext")]
     ExcludedFromLiveContext,
 }
@@ -331,6 +333,7 @@ impl LiveContextCommittedRowDisposition {
         match self {
             Self::MirrorParentText => "MirrorParentText",
             Self::AlreadyPresentInLiveChannel => "AlreadyPresentInLiveChannel",
+            Self::AssistantObservation => "AssistantObservation",
             Self::ExcludedFromLiveContext => "ExcludedFromLiveContext",
         }
     }
@@ -341,6 +344,7 @@ impl std::convert::TryFrom<&str> for LiveContextCommittedRowDisposition {
         match value {
             "MirrorParentText" => Ok(Self::MirrorParentText),
             "AlreadyPresentInLiveChannel" => Ok(Self::AlreadyPresentInLiveChannel),
+            "AssistantObservation" => Ok(Self::AssistantObservation),
             "ExcludedFromLiveContext" => Ok(Self::ExcludedFromLiveContext),
             other => Err(format!(
                 "invalid LiveContextCommittedRowDisposition value `{other}`"
@@ -379,6 +383,8 @@ pub enum LiveContextCommittedRowKind {
     UserText,
     #[serde(rename = "AssistantText")]
     AssistantText,
+    #[serde(rename = "AssistantTranscript")]
+    AssistantTranscript,
     #[serde(rename = "NonText")]
     NonText,
 }
@@ -387,6 +393,7 @@ impl LiveContextCommittedRowKind {
         match self {
             Self::UserText => "UserText",
             Self::AssistantText => "AssistantText",
+            Self::AssistantTranscript => "AssistantTranscript",
             Self::NonText => "NonText",
         }
     }
@@ -397,6 +404,7 @@ impl std::convert::TryFrom<&str> for LiveContextCommittedRowKind {
         match value {
             "UserText" => Ok(Self::UserText),
             "AssistantText" => Ok(Self::AssistantText),
+            "AssistantTranscript" => Ok(Self::AssistantTranscript),
             "NonText" => Ok(Self::NonText),
             other => Err(format!(
                 "invalid LiveContextCommittedRowKind value `{other}`"
@@ -819,12 +827,15 @@ pub enum RealtimeTranscriptLaneKind {
     Display,
     #[serde(rename = "Spoken")]
     Spoken,
+    #[serde(rename = "SpokenUnmeasured")]
+    SpokenUnmeasured,
 }
 impl RealtimeTranscriptLaneKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Display => "Display",
             Self::Spoken => "Spoken",
+            Self::SpokenUnmeasured => "SpokenUnmeasured",
         }
     }
 }
@@ -834,6 +845,7 @@ impl std::convert::TryFrom<&str> for RealtimeTranscriptLaneKind {
         match value {
             "Display" => Ok(Self::Display),
             "Spoken" => Ok(Self::Spoken),
+            "SpokenUnmeasured" => Ok(Self::SpokenUnmeasured),
             other => Err(format!(
                 "invalid RealtimeTranscriptLaneKind value `{other}`"
             )),
@@ -2107,6 +2119,7 @@ pub mod inputs {
         pub snapshot_present: bool,
         pub response_discarded: bool,
         pub item_materialized: bool,
+        pub requested_lane: RealtimeTranscriptLaneKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveRealtimeMaterializeCandidate {
@@ -2216,6 +2229,7 @@ pub mod inputs {
         pub canonical_chars: u64,
         pub canonical_digest: String,
         pub prefix_matches_snapshot: bool,
+        pub observation_only: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ObserveLiveAssistantPlaybackFinal {
@@ -2587,6 +2601,10 @@ pub mod effects {
     #[allow(unused_imports)]
     use super::*;
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RealtimeAssistantSnapshotMaterializationAuthorized {
+        pub lane: RealtimeTranscriptLaneKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SessionFirstTurnPhaseResolved {
         pub phase: SessionFirstTurnPhase,
         pub was_pending: bool,
@@ -2752,6 +2770,8 @@ pub mod effects {
         pub canonical_chars: Option<u64>,
         pub canonical_text_digest: Option<String>,
         pub biological_hearing_claimed: bool,
+        pub continues_provider_group: bool,
+        pub observed_snapshot_digest: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveContextCommittedRowClassified {
@@ -2833,6 +2853,9 @@ pub mod effects {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Effect {
+    RealtimeAssistantSnapshotMaterializationAuthorized(
+        effects::RealtimeAssistantSnapshotMaterializationAuthorized,
+    ),
     SessionFirstTurnPhaseResolved(effects::SessionFirstTurnPhaseResolved),
     SessionFirstTurnOverridesResolved(effects::SessionFirstTurnOverridesResolved),
     SessionInitialPromptStageResolved(effects::SessionInitialPromptStageResolved),
@@ -2880,6 +2903,7 @@ pub enum Effect {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
+    RealtimeAssistantSnapshotMaterializationAuthorized,
     SessionFirstTurnPhaseResolved,
     SessionFirstTurnOverridesResolved,
     SessionInitialPromptStageResolved,

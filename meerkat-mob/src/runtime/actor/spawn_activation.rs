@@ -2864,6 +2864,7 @@ impl MobActor {
                 fence_token: dsl_fence_token,
                 work_id: dsl_work_id.clone(),
                 origin: dsl_origin,
+                content_attribution: mob_dsl::WorkContentAttribution::Conversational,
             },
         ) {
             Ok(transition) => transition,
@@ -2919,6 +2920,7 @@ impl MobActor {
                     bounded_result_spec: None,
                     llm_identity_applied_tx: None,
                     ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+                    content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
                     operation_id: Some(operation_id.clone()),
                     placed_completion_obligation: None,
                     placed_completion_context: None,

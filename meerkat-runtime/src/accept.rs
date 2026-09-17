@@ -10,6 +10,15 @@ use crate::meerkat_machine::dsl as mm_dsl;
 use crate::policy::PolicyDecision;
 use crate::runtime_state::RuntimeState;
 
+/// Request-only replay contract. Generic ingress retains first-key-wins;
+/// trusted hosts can require proof of the exact original prompt semantics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InputReplayPolicy {
+    #[default]
+    KeyOnly,
+    ExactPrompt,
+}
+
 // `AcceptOutcome` is a domain envelope. The wire shape lives in
 // `meerkat-contracts::wire::runtime::RuntimeAcceptResult` and is materialized
 // by per-surface handlers (see `meerkat-rpc::handlers::runtime`). The envelope
@@ -183,6 +192,7 @@ impl RuntimeIngressExecutionCapability {
 // `peer_response_terminal` fact whose render payload is a `serde_json::Value`.
 #[derive(Debug, PartialEq)]
 pub struct ResolvedAdmission {
+    replay_policy: InputReplayPolicy,
     policy: PolicyDecision,
     handling_mode: HandlingMode,
     runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
@@ -208,6 +218,7 @@ impl ResolvedAdmission {
         execution_capability: Option<(String, mm_dsl::InputLane, mm_dsl::AdmissionPlanKind)>,
     ) -> Self {
         Self {
+            replay_policy: InputReplayPolicy::KeyOnly,
             policy,
             handling_mode,
             runtime_semantics,
@@ -222,6 +233,15 @@ impl ResolvedAdmission {
                 )
             }),
         }
+    }
+
+    pub(crate) fn with_replay_policy(mut self, replay_policy: InputReplayPolicy) -> Self {
+        self.replay_policy = replay_policy;
+        self
+    }
+
+    pub(crate) fn replay_policy(&self) -> InputReplayPolicy {
+        self.replay_policy
     }
 
     pub(crate) fn coarse_flags(&self) -> CoarseAdmissionFlags {

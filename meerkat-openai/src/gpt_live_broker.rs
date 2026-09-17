@@ -119,6 +119,37 @@ pub enum GptLiveBrokerObservation {
     SessionContextAppendRejected {
         token: GptLiveAppendToken,
     },
+    /// Every fragment of a quiet factual-context append was acknowledged.
+    ThinkingContextAppendAcknowledged {
+        token: GptLiveAppendToken,
+    },
+    /// A native error rejected at least one fragment; other fragments may
+    /// already be consumed. This is ambiguous aggregate delivery, not a
+    /// definitive pre-delivery refusal, even after a local close request.
+    /// It does not authorize replay.
+    ThinkingContextAppendRejected {
+        token: GptLiveAppendToken,
+    },
+    /// Confirmed provider session closure interrupted an unresolved append.
+    /// Prior fragments may be consumed; this does not authorize replay.
+    ThinkingContextAppendInterruptedByClose {
+        token: GptLiveAppendToken,
+    },
+    /// Every fragment of a trusted instructions-lane append (the historical
+    /// bootstrap summary) was acknowledged.
+    InstructionsContextAppendAcknowledged {
+        token: GptLiveAppendToken,
+    },
+    /// A native error rejected at least one instructions fragment; other
+    /// fragments may already be consumed. Ambiguous aggregate delivery.
+    InstructionsContextAppendRejected {
+        token: GptLiveAppendToken,
+    },
+    /// Confirmed provider session closure interrupted an unresolved
+    /// instructions append. Prior fragments may be consumed.
+    InstructionsContextAppendInterruptedByClose {
+        token: GptLiveAppendToken,
+    },
     UserTranscriptFragment {
         item: GptLiveTranscriptItemRef,
         text: String,
@@ -170,6 +201,22 @@ impl std::fmt::Debug for GptLiveBrokerObservation {
             Self::SessionReady => "session_ready",
             Self::SessionContextAppendAcknowledged { .. } => "session_context_append_acknowledged",
             Self::SessionContextAppendRejected { .. } => "session_context_append_rejected",
+            Self::ThinkingContextAppendAcknowledged { .. } => {
+                "thinking_context_append_acknowledged"
+            }
+            Self::ThinkingContextAppendRejected { .. } => "thinking_context_append_rejected",
+            Self::ThinkingContextAppendInterruptedByClose { .. } => {
+                "thinking_context_append_interrupted_by_close"
+            }
+            Self::InstructionsContextAppendAcknowledged { .. } => {
+                "instructions_context_append_acknowledged"
+            }
+            Self::InstructionsContextAppendRejected { .. } => {
+                "instructions_context_append_rejected"
+            }
+            Self::InstructionsContextAppendInterruptedByClose { .. } => {
+                "instructions_context_append_interrupted_by_close"
+            }
             Self::UserTranscriptFragment { .. } => "user_transcript_fragment",
             Self::AssistantTranscriptFragment { .. } => "assistant_transcript_fragment",
             Self::TurnStarted { .. } => "turn_started",

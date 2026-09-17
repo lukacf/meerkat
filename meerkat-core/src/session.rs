@@ -3531,6 +3531,14 @@ impl Session {
         messages: Vec<Message>,
         authority: &crate::agent::compact::ValidatedCompactionRewrite,
     ) -> Result<Option<TranscriptRewriteCommit>, TranscriptEditError> {
+        let observations =
+            crate::agent::compact::CompactionObservationSource::from_session(self)
+                .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+        if !authority.authorizes_observations(&observations) {
+            return Err(TranscriptEditError::InvalidTranscriptShape(
+                "validated compaction witness does not cover the current voice observations".into(),
+            ));
+        }
         // Authority first. The parent side binds against the session
         // accumulator (O(delta), byte-identical to
         // `transcript_messages_digest(self.messages())`); the rebuilt side
@@ -4358,19 +4366,65 @@ impl Session {
         &mut self,
         event: RealtimeTranscriptEvent,
     ) -> RealtimeTranscriptApplyOutcome {
-        let (commit, recorded) =
-            self.realtime_transcript
-                .apply_event(event)
-                .unwrap_or_else(|err| {
-                    fail_closed_generated_restore(
-                        "realtime-transcript",
-                        <serde_json::Error as serde::de::Error>::custom(err),
-                    )
-                });
+        self.append_realtime_transcript_event_with_origin(event, None)
+    }
+
+    pub fn append_realtime_transcript_event_for_channel(
+        &mut self,
+        event: RealtimeTranscriptEvent,
+        channel_id: crate::LiveChannelId,
+    ) -> RealtimeTranscriptApplyOutcome {
+        self.append_realtime_transcript_event_with_origin(event, Some(channel_id))
+    }
+
+    fn append_realtime_transcript_event_with_origin(
+        &mut self,
+        event: RealtimeTranscriptEvent,
+        channel_id: Option<crate::LiveChannelId>,
+    ) -> RealtimeTranscriptApplyOutcome {
+        let applied = match channel_id {
+            Some(channel) => self
+                .realtime_transcript
+                .apply_event_from_channel(event, Some(channel)),
+            None => self.realtime_transcript.apply_event(event),
+        };
+        let (commit, recorded) = applied.unwrap_or_else(|err| {
+            fail_closed_generated_restore(
+                "realtime-transcript",
+                <serde_json::Error as serde::de::Error>::custom(err),
+            )
+        });
+        let start = self.messages.len() as u64;
+        let messages = commit
+            .messages
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let mut message = row.message;
+                if let Some(channel_id) = row.source_channel {
+                    let mut origin = crate::types::RealtimeMessageOrigin::new(
+                        self.id.clone(),
+                        channel_id,
+                        start + index as u64 + 1,
+                    );
+                    if let Some(observation_id) = row.context_observation_id {
+                        origin = origin.with_context_observation(observation_id);
+                    }
+                    match &mut message {
+                        Message::User(user) => user.identity.realtime_origin = Some(origin),
+                        Message::BlockAssistant(assistant) => {
+                            assistant.identity.realtime_origin = Some(origin);
+                        }
+                        _ => {}
+                    }
+                }
+                message
+            })
+            .collect();
         if recorded {
             self.mark_content_mutated(SystemTime::now());
         }
-        self.push_batch(commit.messages);
+        self.push_batch(messages);
         if commit.usage != Usage::default() {
             self.record_cumulative_usage(commit.usage);
         }
@@ -4465,6 +4519,25 @@ impl Session {
         item_id: &str,
         content_index: u32,
     ) -> Result<crate::LiveAssistantPlaybackTarget, crate::error::AgentError> {
+        self.admit_live_assistant_playback_target_with_context_observation(
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            None,
+        )
+    }
+
+    pub fn admit_live_assistant_playback_target_with_context_observation(
+        &mut self,
+        channel_id: &crate::LiveChannelId,
+        interaction_id: crate::InteractionId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+        observation_id: Option<crate::LiveContextObservationId>,
+    ) -> Result<crate::LiveAssistantPlaybackTarget, crate::error::AgentError> {
         if let Some(existing) = realtime_transcript_revision::live_assistant_playback_target(
             self.realtime_transcript.state(),
             channel_id.as_str(),
@@ -4472,6 +4545,15 @@ impl Session {
             content_index,
         ) {
             if existing.response_id() == response_id {
+                if observation_id
+                    .as_ref()
+                    .is_some_and(|id| existing.context_observation_id() != Some(id))
+                {
+                    return Err(crate::error::AgentError::ConfigError(
+                        "live assistant playback source observation conflicts with admitted target"
+                            .into(),
+                    ));
+                }
                 return Ok(existing);
             }
 
@@ -4486,7 +4568,8 @@ impl Session {
                 response_id: response_id.to_string(),
                 item_id: item_id.to_string(),
                 content_index,
-            },
+            }
+            .with_context_observation(observation_id),
         );
         realtime_transcript_revision::live_assistant_playback_target(
             self.realtime_transcript.state(),
@@ -6245,7 +6328,7 @@ impl Session {
     pub fn commit_transcript_rewrite(
         &mut self,
         selection: TranscriptRewriteSelection,
-        replacement: Vec<Message>,
+        mut replacement: Vec<Message>,
         reason: TranscriptRewriteReason,
         actor: Option<String>,
         expected_parent_revision: Option<String>,
@@ -6255,6 +6338,13 @@ impl Session {
             return Err(TranscriptEditError::InvalidTranscriptShape(
                 "typed compaction rewrites require a core-validated compaction witness".to_string(),
             ));
+        }
+        for message in &mut replacement {
+            match message {
+                Message::User(user) => user.identity.realtime_origin = None,
+                Message::BlockAssistant(assistant) => assistant.identity.realtime_origin = None,
+                _ => {}
+            }
         }
         self.validate_generic_rewrite_prompt_versions(&replacement)?;
         self.commit_transcript_rewrite_authorized(
@@ -8042,8 +8132,9 @@ mod tests {
                     text: "answer one".to_string(),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
+                stop_reason: Some(StopReason::EndTurn),
                 identity: crate::types::TranscriptMessageIdentity {
+                    realtime_origin: None,
                     interaction_id: None,
                     run_id: Some(crate::lifecycle::RunId::new()),
                     objective_id: None,
@@ -8059,6 +8150,7 @@ mod tests {
                 }
                 Message::BlockAssistant(assistant) => {
                     assistant.identity = crate::types::TranscriptMessageIdentity {
+                        realtime_origin: None,
                         interaction_id: None,
                         run_id: Some(crate::lifecycle::RunId::new()),
                         objective_id: None,
@@ -9840,6 +9932,116 @@ mod tests {
     }
 
     #[test]
+    fn deferred_realtime_user_keeps_its_origin_across_other_channel_release_and_restore() {
+        for releasing_channel in [None, Some(crate::LiveChannelId::new("release-channel"))] {
+            let mut session = Session::new();
+            let original_channel = crate::LiveChannelId::new("original-channel");
+            let held = session.append_realtime_transcript_event_for_channel(
+                RealtimeTranscriptEvent::UserTranscriptFinal {
+                    item_id: "waiting-user".to_string(),
+                    previous_item_id: Some("predecessor".to_string()),
+                    content_index: 0,
+                    text: "original spoken user".to_string(),
+                },
+                original_channel.clone(),
+            );
+            assert!(held.materialized_messages.is_empty());
+            let mut restored: Session =
+                serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+            let event = RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "predecessor".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "unblocking user".to_string(),
+            };
+            match releasing_channel.clone() {
+                Some(channel) => {
+                    restored.append_realtime_transcript_event_for_channel(event, channel);
+                }
+                None => {
+                    restored.append_realtime_transcript_event(event);
+                }
+            }
+            assert_eq!(restored.messages().len(), 2);
+            let Message::User(first) = &restored.messages()[0] else {
+                panic!("first user")
+            };
+            let Message::User(second) = &restored.messages()[1] else {
+                panic!("second user")
+            };
+            assert!(second.identity.realtime_origin.as_ref().unwrap().matches(
+                restored.id(),
+                &original_channel,
+                2
+            ));
+            match releasing_channel {
+                Some(channel) => assert!(first.identity.realtime_origin.as_ref().unwrap().matches(
+                    restored.id(),
+                    &channel,
+                    1
+                )),
+                None => assert!(first.identity.realtime_origin.is_none()),
+            }
+        }
+    }
+
+    #[test]
+    fn realtime_row_origin_roundtrips_but_cannot_authorize_rewrite_or_fork() {
+        let mut session = Session::new();
+        let channel = crate::LiveChannelId::new("origin-channel");
+        session.append_realtime_transcript_event_for_channel(
+            RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "origin-item".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "actually spoken".to_string(),
+            },
+            channel.clone(),
+        );
+        let Message::User(user) = &session.messages()[0] else {
+            panic!("user row")
+        };
+        let origin = user
+            .identity
+            .realtime_origin
+            .as_ref()
+            .expect("materializer provenance");
+        assert!(origin.matches(session.id(), &channel, 1));
+        assert!(!origin.matches(session.id(), &crate::LiveChannelId::new("replacement"), 1));
+        assert!(!origin.matches(session.id(), &channel, 2));
+        let fork = session.fork();
+        assert!(!origin.matches(fork.id(), &channel, 1));
+        let decoded: Message =
+            serde_json::from_slice(&serde_json::to_vec(&session.messages()[0]).unwrap()).unwrap();
+        let Message::User(decoded) = decoded else {
+            panic!("decoded user")
+        };
+        assert_eq!(decoded.identity.realtime_origin.as_ref(), Some(origin));
+        let mut changed = session.messages()[0].clone();
+        let Message::User(changed_user) = &mut changed else {
+            panic!("changed user")
+        };
+        changed_user.content = crate::ContentBlock::text_vec("caller-edited text".to_string());
+        let revision = session.transcript_revision().unwrap();
+        session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 0, end: 1 },
+                vec![changed],
+                TranscriptRewriteReason::new("ordinary edit"),
+                None,
+                Some(revision),
+            )
+            .expect("rewrite through canonical owner");
+        let Message::User(rewritten) = &session.messages()[0] else {
+            panic!("rewritten user")
+        };
+        assert!(
+            rewritten.identity.realtime_origin.is_none(),
+            "a caller cannot retain already-present authority while rewriting content"
+        );
+    }
+
+    #[test]
     fn transcript_rewrite_preserves_full_assistant_block_trace() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text(
@@ -9924,7 +10126,7 @@ mod tests {
                 text: "plain answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -9965,7 +10167,7 @@ mod tests {
                 text: "unchanged".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10002,7 +10204,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10017,7 +10219,7 @@ mod tests {
                         text: "compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10032,7 +10234,7 @@ mod tests {
                 text: "follow-up answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10070,7 +10272,7 @@ mod tests {
                         text: "no tool after all".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10094,7 +10296,7 @@ mod tests {
                 text: "plain answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10111,7 +10313,7 @@ mod tests {
                             .expect("valid args"),
                         meta: None,
                     }],
-                    stop_reason: StopReason::ToolUse,
+                    stop_reason: Some(StopReason::ToolUse),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10135,7 +10337,7 @@ mod tests {
                 text: "plain answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10180,7 +10382,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10195,7 +10397,7 @@ mod tests {
                         text: "compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10235,7 +10437,7 @@ mod tests {
                 text: "verbose first answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10249,7 +10451,7 @@ mod tests {
                         text: "compact first answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10265,7 +10467,7 @@ mod tests {
                 text: "verbose second answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10289,7 +10491,7 @@ mod tests {
                         text: "compact second answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10322,7 +10524,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10337,7 +10539,7 @@ mod tests {
                         text: "first compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10360,7 +10562,7 @@ mod tests {
                         text: "second compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10395,7 +10597,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10409,7 +10611,7 @@ mod tests {
                         text: "compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10459,7 +10661,7 @@ mod tests {
                             text: "compacted answer".to_string(),
                             meta: None,
                         }],
-                        stop_reason: StopReason::EndTurn,
+                        stop_reason: Some(StopReason::EndTurn),
                         identity: crate::types::TranscriptMessageIdentity::default(),
                         created_at: crate::types::message_timestamp_now(),
                     }),
@@ -10490,7 +10692,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10504,7 +10706,7 @@ mod tests {
                         text: "compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10570,7 +10772,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10584,7 +10786,7 @@ mod tests {
                         text: "compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10641,7 +10843,7 @@ mod tests {
                 text: "verbose answer".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10655,7 +10857,7 @@ mod tests {
                         text: "compact answer".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -10671,7 +10873,7 @@ mod tests {
                 text: "verbose follow-up".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -10686,7 +10888,7 @@ mod tests {
                         text: "compact follow-up".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason: Some(StopReason::EndTurn),
                     identity: crate::types::TranscriptMessageIdentity::default(),
                     created_at: crate::types::message_timestamp_now(),
                 })],
@@ -12714,7 +12916,7 @@ mod tests {
                 text: "Hi!".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));
@@ -13346,7 +13548,7 @@ mod tests {
                 text: "Hi!".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
+            stop_reason: Some(StopReason::EndTurn),
             identity: crate::types::TranscriptMessageIdentity::default(),
             created_at: crate::types::message_timestamp_now(),
         }));

@@ -18,13 +18,13 @@ pub mod wire_input;
 
 pub use host::{
     DEFAULT_LIVE_TOOL_TIMEOUT, DeltaIdentity, LiveAdapterHost, LiveAdapterHostError,
-    LiveAssistantOutputAddress, LiveChannelCloseCommitAuthority, LiveChannelCloseObservation,
-    LiveChannelId, LiveChannelOpenAuthority, LiveChannelStatusCommitAuthority,
-    LiveChannelStatusObservation, LiveCommandAcceptanceKind, LiveCommandQueueAcceptance,
-    LiveProjectionError, LiveProjectionSink, LiveRefreshQueueAcceptance, LiveToolDispatchError,
-    LiveToolDispatchTimeout, LiveToolDispatcher, LiveTranscriptIdentity,
-    LiveTranscriptIdentityError, NoOpProjectionSink, ObservationOutcome, ObservationRouting,
-    ToolDispatchSkipReason,
+    LiveAssistantOutputAddress, LiveChannelCloseCommitAuthority, LiveChannelCloseCommitTarget,
+    LiveChannelCloseObservation, LiveChannelCloseProjectionLease, LiveChannelId,
+    LiveChannelOpenAuthority, LiveChannelStatusCommitAuthority, LiveChannelStatusObservation,
+    LiveCommandAcceptanceKind, LiveCommandQueueAcceptance, LiveProjectionError, LiveProjectionSink,
+    LiveRefreshQueueAcceptance, LiveToolDispatchError, LiveToolDispatchTimeout, LiveToolDispatcher,
+    LiveTranscriptIdentity, LiveTranscriptIdentityError, NoOpProjectionSink, ObservationOutcome,
+    ObservationRouting, ToolDispatchSkipReason,
 };
 pub use provider_webrtc::{
     LiveRuntimeBindingFence, LiveRuntimeBindingGeneration, LiveSidebandAppendAttempt,
@@ -34,9 +34,10 @@ pub use provider_webrtc::{
     LiveSidebandTranscriptItemRef, LiveSidebandTurnRef, LiveSidebandTurnRole,
     LiveWebrtcAdmissionSealError, LiveWebrtcAnswerAdmissionSeal, LiveWebrtcRuntimeBinding,
     ProviderWebrtcBinding, ProviderWebrtcBoundReadyReceipt, ProviderWebrtcBroker,
-    ProviderWebrtcBrokerAnswer, ProviderWebrtcBrokerError, ProviderWebrtcOffer,
-    ProviderWebrtcPendingBoundReadyResolver, ProviderWebrtcPendingBoundReadySeal,
-    ProviderWebrtcSidebandSession, ProviderWebrtcSignalingError,
+    ProviderWebrtcBrokerAnswer, ProviderWebrtcBrokerError, ProviderWebrtcEofEvidence,
+    ProviderWebrtcOffer, ProviderWebrtcPendingBoundReadyResolver,
+    ProviderWebrtcPendingBoundReadySeal, ProviderWebrtcSidebandSession,
+    ProviderWebrtcSignalingError,
 };
 pub use transport::{
     LIVE_WS_PATH, LiveChannelCloseFeedback, LiveChannelStatusFeedback, LiveTokenString,

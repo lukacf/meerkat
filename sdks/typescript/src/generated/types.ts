@@ -1,9 +1,9 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.8.39
+// Contract version: 0.8.40
 
 import { MeerkatError } from "./errors.js";
 
-export const CONTRACT_VERSION = "0.8.39";
+export const CONTRACT_VERSION = "0.8.40";
 
 export type Value = unknown;
 
@@ -6032,12 +6032,16 @@ export interface WireTranscriptSourceSpoken {
   kind: "spoken";
 }
 
+export interface WireTranscriptSourceSpokenUnmeasured {
+  kind: "spoken_unmeasured";
+}
+
 export interface WireTranscriptSourceUnknown {
   debug: string;
   kind: "unknown";
 }
 
-export type WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceUnknown;
+export type WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceSpokenUnmeasured | WireTranscriptSourceUnknown;
 
 export interface WireAssistantBlockText {
   block_type: "text";
@@ -6309,7 +6313,7 @@ export interface TranscriptRewriteMessageBlockAssistant {
   blocks: WireAssistantBlock[];
   created_at?: string | null;
   role: "block_assistant";
-  stop_reason?: WireStopReason;
+  stop_reason?: WireStopReason | null;
 }
 
 export interface TranscriptRewriteMessageToolResults {
@@ -6430,7 +6434,7 @@ export interface WireSessionMessageBlockAssistant {
   interaction_id?: string | null;
   role: "block_assistant";
   run_id?: RunId | null;
-  stop_reason: WireStopReason;
+  stop_reason?: WireStopReason | null;
 }
 
 export interface WireSessionMessageToolResults {

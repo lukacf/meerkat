@@ -7,6 +7,8 @@
 
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use meerkat_core::exact_operation::ExactOperationIdentity;
 pub use meerkat_core::{
     CanonicalContextRevision, LiveBridgeCancellationReason, LiveBridgeEffectKind,
@@ -246,6 +248,29 @@ pub(crate) const MAX_DURABLE_LIVE_BRIDGE_OPERATIONS: usize = 128;
 #[serde(deny_unknown_fields)]
 pub(crate) struct LiveBridgeRecoveryImage {
     operations: Vec<LiveBridgeRecoveryOperation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    delegations: Vec<LiveDelegationRecoveryOperation>,
+}
+
+/// Payload-free persisted image of generated ClientContext execution custody.
+/// No provider output capability or process-local tool gate is recoverable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveDelegationRecoveryOperation {
+    operation_id: String,
+    channel_id: String,
+    channel_revoked: bool,
+    interaction_id: String,
+    provider_turn_ref: String,
+    worker_identity: String,
+    worker_ownership: LiveDelegationWorkerOwnership,
+    phase: crate::meerkat_machine::dsl::LiveDelegationWorkerPhase,
+    reconciliation: LiveDelegationReconciliation,
+    terminal: Option<DslLiveDelegationWorkerTerminalKind>,
+    cancellation_reason: Option<DslLiveDelegationCancellationReason>,
+    abandoned: bool,
+    late: bool,
+    result_eligible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -436,7 +461,78 @@ impl LiveBridgeRecoveryImage {
                 channel_revoked: state.live_revoked_execution_channels.contains(channel_id),
             });
         }
-        Ok(Self { operations })
+        let mut delegations =
+            Vec::with_capacity(state.live_delegation_worker_identity_by_operation.len());
+        for (operation_id, worker_identity) in &state.live_delegation_worker_identity_by_operation {
+            let key = operation_id.0.as_str();
+            let interaction_id = required(
+                state
+                    .live_delegation_interaction_by_operation
+                    .get(operation_id)
+                    .cloned(),
+                key,
+                "delegation interaction",
+            )?;
+            let channel_id = required(
+                state
+                    .live_interaction_channel_by_id
+                    .get(&interaction_id)
+                    .cloned(),
+                key,
+                "delegation channel",
+            )?;
+            delegations.push(LiveDelegationRecoveryOperation {
+                operation_id: operation_id.0.clone(),
+                channel_revoked: state.live_revoked_execution_channels.contains(&channel_id),
+                channel_id,
+                abandoned: state.live_abandoned_interactions.contains(&interaction_id),
+                interaction_id,
+                provider_turn_ref: required(
+                    state
+                        .live_delegation_provider_turn_by_operation
+                        .get(operation_id)
+                        .cloned(),
+                    key,
+                    "delegation provider turn",
+                )?,
+                worker_identity: worker_identity.clone(),
+                worker_ownership: if state
+                    .live_delegation_existing_member_operations
+                    .contains(operation_id)
+                {
+                    LiveDelegationWorkerOwnership::ExistingMember
+                } else {
+                    LiveDelegationWorkerOwnership::OwnedMember
+                },
+                phase: *state
+                    .live_delegation_worker_phase_by_operation
+                    .get(operation_id)
+                    .ok_or_else(|| format!("delegation {key} has no generated worker phase"))?,
+                reconciliation: *state
+                    .live_delegation_reconciliation_by_operation
+                    .get(operation_id)
+                    .ok_or_else(|| format!("delegation {key} has no generated reconciliation"))?,
+                terminal: state
+                    .live_delegation_worker_terminal_by_operation
+                    .get(operation_id)
+                    .copied(),
+                cancellation_reason: state
+                    .live_delegation_cancellation_reason_by_operation
+                    .get(operation_id)
+                    .copied(),
+                late: state
+                    .live_delegation_late_terminal_operations
+                    .contains(operation_id),
+                result_eligible: state
+                    .live_delegation_result_eligible_operations
+                    .contains(operation_id),
+            });
+        }
+        delegations.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
+        Ok(Self {
+            operations,
+            delegations,
+        })
     }
 
     pub(crate) fn restore_into(
@@ -604,6 +700,79 @@ impl LiveBridgeRecoveryImage {
                     operation.channel_id.clone(),
                     crate::meerkat_machine::dsl::LiveExecutionChannelPhase::Revoked,
                 );
+            }
+        }
+        for delegation in &self.delegations {
+            let operation = DslOperationId(delegation.operation_id.clone());
+            if delegation.channel_revoked {
+                state
+                    .live_revoked_execution_channels
+                    .insert(delegation.channel_id.clone());
+                state.live_execution_phase_by_channel.insert(
+                    delegation.channel_id.clone(),
+                    crate::meerkat_machine::dsl::LiveExecutionChannelPhase::Revoked,
+                );
+            }
+            if state
+                .live_delegation_worker_identity_by_operation
+                .insert(operation.clone(), delegation.worker_identity.clone())
+                .is_some()
+            {
+                return Err(format!(
+                    "durable live image duplicates delegation {}",
+                    delegation.operation_id
+                ));
+            }
+            if let Some(channel) = state.live_interaction_channel_by_id.insert(
+                delegation.interaction_id.clone(),
+                delegation.channel_id.clone(),
+            ) && channel != delegation.channel_id
+            {
+                return Err(
+                    "durable delegation interaction has conflicting channel custody".to_string(),
+                );
+            }
+            state
+                .live_delegation_interaction_by_operation
+                .insert(operation.clone(), delegation.interaction_id.clone());
+            state
+                .live_delegation_provider_turn_by_operation
+                .insert(operation.clone(), delegation.provider_turn_ref.clone());
+            state
+                .live_delegation_reconciliation_by_operation
+                .insert(operation.clone(), delegation.reconciliation);
+            state
+                .live_delegation_worker_phase_by_operation
+                .insert(operation.clone(), delegation.phase);
+            if delegation.worker_ownership == LiveDelegationWorkerOwnership::ExistingMember {
+                state
+                    .live_delegation_existing_member_operations
+                    .insert(operation.clone());
+            }
+            if let Some(terminal) = delegation.terminal {
+                state
+                    .live_delegation_worker_terminal_by_operation
+                    .insert(operation.clone(), terminal);
+            }
+            if let Some(reason) = delegation.cancellation_reason {
+                state
+                    .live_delegation_cancellation_reason_by_operation
+                    .insert(operation.clone(), reason);
+            }
+            if delegation.abandoned {
+                state
+                    .live_abandoned_interactions
+                    .insert(delegation.interaction_id.clone());
+            }
+            if delegation.late {
+                state
+                    .live_delegation_late_terminal_operations
+                    .insert(operation.clone());
+            }
+            if delegation.result_eligible {
+                state
+                    .live_delegation_result_eligible_operations
+                    .insert(operation);
             }
         }
         Ok(())
@@ -2425,6 +2594,7 @@ pub struct LiveDelegationExecutionAdmission {
     session_id: SessionId,
     operation: ExactOperationIdentity<LiveUserTurnCorrelation>,
     worker_identity: String,
+    worker_ownership: LiveDelegationWorkerOwnership,
     tool_gate: Arc<LiveToolExecutionAdmissionGate>,
 }
 
@@ -2460,6 +2630,7 @@ impl LiveDelegationExecutionAdmission {
             interaction_id,
             operation_id,
             worker_identity: authorized_worker_identity,
+            worker_ownership,
         } = effect
         else {
             return Ok(None);
@@ -2477,6 +2648,7 @@ impl LiveDelegationExecutionAdmission {
             session_id: session_id.clone(),
             operation: operation.clone(),
             worker_identity: worker_identity.to_string(),
+            worker_ownership: *worker_ownership,
             tool_gate: Arc::new(LiveToolExecutionAdmissionGate::new(operation.clone())),
         }))
     }
@@ -2499,6 +2671,24 @@ impl LiveDelegationExecutionAdmission {
     #[must_use]
     pub fn worker_identity(&self) -> &str {
         &self.worker_identity
+    }
+
+    #[must_use]
+    pub fn worker_ownership(&self) -> LiveDelegationWorkerOwnership {
+        self.worker_ownership
+    }
+
+    /// Existing-member admission must cross final-input authority before any
+    /// work is queued; its session-wide tool gate cannot be replaced.
+    pub fn require_released_execution(&self) -> Result<(), LiveExecutionAuthorityError> {
+        match &*self.tool_gate.state_tx.borrow() {
+            LiveToolExecutionAdmissionState::Released(witness)
+                if witness.authorizes(&self.session_id, &self.operation) =>
+            {
+                Ok(())
+            }
+            _ => Err(LiveExecutionAuthorityError::ToolExecutionAdmissionTerminal),
+        }
     }
 
     #[must_use]
@@ -2787,6 +2977,8 @@ pub enum LiveDelegationRecoveryPhase {
     Failed,
 }
 
+pub use crate::meerkat_machine::dsl::LiveDelegationWorkerOwnership;
+
 /// Read-only durable projection of one ClientContext worker operation.
 ///
 /// Provider delegation identity is deliberately absent. After restart the
@@ -2800,6 +2992,7 @@ pub struct LiveDelegationRecoverySnapshot {
     operation_id: meerkat_core::OperationId,
     interaction_id: meerkat_core::InteractionId,
     worker_identity: String,
+    worker_ownership: LiveDelegationWorkerOwnership,
     phase: LiveDelegationRecoveryPhase,
     terminal: Option<LiveDelegationWorkerTerminalKind>,
     late: bool,
@@ -2814,6 +3007,7 @@ impl LiveDelegationRecoverySnapshot {
         operation_id: meerkat_core::OperationId,
         interaction_id: meerkat_core::InteractionId,
         worker_identity: String,
+        worker_ownership: LiveDelegationWorkerOwnership,
         phase: LiveDelegationRecoveryPhase,
         terminal: Option<LiveDelegationWorkerTerminalKind>,
         late: bool,
@@ -2825,6 +3019,7 @@ impl LiveDelegationRecoverySnapshot {
             operation_id,
             interaction_id,
             worker_identity,
+            worker_ownership,
             phase,
             terminal,
             late,
@@ -2855,6 +3050,11 @@ impl LiveDelegationRecoverySnapshot {
     #[must_use]
     pub fn worker_identity(&self) -> &str {
         &self.worker_identity
+    }
+
+    #[must_use]
+    pub fn worker_ownership(&self) -> LiveDelegationWorkerOwnership {
+        self.worker_ownership
     }
 
     #[must_use]
@@ -3368,7 +3568,271 @@ pub struct LiveContextAppendAuthority {
     append_id: String,
     previous_cursor: u64,
     next_cursor: u64,
+    kind: LiveContextAppendKind,
     provider_dispatch_consumed: Arc<AtomicBool>,
+}
+
+/// Generated purpose of an append, never a caller-selected provider role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveContextAppendKind {
+    Ordinary,
+    CausalReassertion,
+    HistoryBootstrap,
+}
+
+pub use crate::meerkat_machine::dsl::LiveContextPreparationFailure;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveContextPreparationStage {
+    Capturing,
+    Generating,
+    Delivering,
+}
+
+/// Independent of the media channel's Pending/Active lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveContextPreparationStatus {
+    NotRequested,
+    Preparing(LiveContextPreparationStage),
+    ProviderAcknowledged,
+    Failed(LiveContextPreparationFailure),
+}
+
+#[cfg_attr(not(feature = "live"), allow(dead_code))]
+impl LiveContextPreparationStatus {
+    pub(crate) fn from_state(
+        state: &crate::meerkat_machine::dsl::MeerkatMachineState,
+        channel: &str,
+    ) -> Result<Self, LiveExecutionAuthorityError> {
+        use crate::meerkat_machine::dsl::LiveContextPreparationPhase as Phase;
+        Ok(
+            match state.live_context_preparation_phase_by_channel.get(channel) {
+                None => Self::NotRequested,
+                Some(Phase::Capturing) => Self::Preparing(LiveContextPreparationStage::Capturing),
+                Some(Phase::Generating) => Self::Preparing(LiveContextPreparationStage::Generating),
+                Some(Phase::Delivering) => Self::Preparing(LiveContextPreparationStage::Delivering),
+                Some(Phase::ProviderAcknowledged) => Self::ProviderAcknowledged,
+                Some(Phase::Failed) => Self::Failed(
+                    *state
+                        .live_context_preparation_failure_by_channel
+                        .get(channel)
+                        .ok_or(LiveExecutionAuthorityError::AppendAuthorityMismatch)?,
+                ),
+            },
+        )
+    }
+}
+
+/// One capture/generation job for one exact channel. Clones share cancellation
+/// and never grant restart or replacement-channel authority.
+#[derive(Clone, Debug, Default)]
+pub struct LiveContextPreparationCancellation {
+    cancelled: Arc<AtomicBool>,
+    pub(crate) changed: Arc<tokio::sync::Notify>,
+}
+
+#[cfg_attr(not(feature = "live"), allow(dead_code))]
+impl LiveContextPreparationCancellation {
+    pub(crate) fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.changed.notify_waiters();
+    }
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub async fn cancelled(&self) {
+        loop {
+            let changed = self.changed.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct LiveContextPreparationLease {
+    pub(crate) session_id: SessionId,
+    pub(crate) channel_id: LiveChannelId,
+    #[cfg_attr(not(feature = "live"), allow(dead_code))]
+    pub(crate) lease_id: String,
+    pub(crate) reserved_cursor: u64,
+    pub(crate) binding: LiveDelegationRuntimeBinding,
+    pub(crate) cancellation: LiveContextPreparationCancellation,
+}
+
+impl std::fmt::Debug for LiveContextPreparationLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveContextPreparationLease")
+            .field("identity", &"[REDACTED]")
+            .field("cancelled", &self.cancellation.is_cancelled())
+            .finish_non_exhaustive()
+    }
+}
+
+impl LiveContextPreparationLease {
+    /// Allocate an identifier only. Admission/order requires the generated
+    /// record step; copying or constructing an ID does not grant a claim.
+    #[must_use]
+    pub fn new_observation_id(&self) -> meerkat_core::LiveContextObservationId {
+        meerkat_core::LiveContextObservationId::new(self.lease_id.clone(), self.channel_id.clone())
+    }
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+    #[must_use]
+    pub fn channel_id(&self) -> &LiveChannelId {
+        &self.channel_id
+    }
+    #[must_use]
+    pub const fn reserved_cursor(&self) -> u64 {
+        self.reserved_cursor
+    }
+    #[must_use]
+    pub fn cancellation_token(&self) -> LiveContextPreparationCancellation {
+        self.cancellation.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveContextObservationReceipt {
+    pub(crate) observation_id: meerkat_core::LiveContextObservationId,
+    pub(crate) ordinal: u64,
+}
+
+impl LiveContextObservationReceipt {
+    #[must_use]
+    pub fn observation_id(&self) -> &meerkat_core::LiveContextObservationId {
+        &self.observation_id
+    }
+    #[must_use]
+    pub const fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+}
+
+/// Dedicated quiet bootstrap lane. It cannot be used as an ordinary
+/// canonical-row append or advance a cursor without its exact provider ACK.
+#[derive(Clone)]
+#[cfg_attr(not(feature = "live"), allow(dead_code))]
+pub struct LiveContextBootstrapAppendAuthority {
+    pub(crate) lease: LiveContextPreparationLease,
+    pub(crate) append_id: String,
+    pub(crate) content_digest: String,
+    provider_dispatch_consumed: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for LiveContextBootstrapAppendAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveContextBootstrapAppendAuthority")
+            .field("lease", &self.lease)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg_attr(not(feature = "live"), allow(dead_code))]
+impl LiveContextBootstrapAppendAuthority {
+    #[must_use]
+    pub const fn kind(&self) -> LiveContextAppendKind {
+        LiveContextAppendKind::HistoryBootstrap
+    }
+
+    pub(crate) fn from_generated_effect(
+        lease: &LiveContextPreparationLease,
+        append_id: &str,
+        content_digest: &str,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveContextBootstrapAppendAuthorized {
+            session_id,
+            channel_id,
+            lease_id,
+            append_id: observed_append,
+            content_digest: observed_digest,
+            reserved_cursor,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        if session_id != &lease.session_id.to_string()
+            || channel_id != lease.channel_id.as_str()
+            || lease_id != &lease.lease_id
+            || observed_append != append_id
+            || observed_digest != content_digest
+            || reserved_cursor != &lease.reserved_cursor
+        {
+            return Err(LiveExecutionAuthorityError::AppendAuthorityMismatch);
+        }
+        Ok(Some(Self {
+            lease: lease.clone(),
+            append_id: append_id.to_string(),
+            content_digest: content_digest.to_string(),
+            provider_dispatch_consumed: Arc::new(AtomicBool::new(false)),
+        }))
+    }
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        self.lease.session_id()
+    }
+    #[must_use]
+    pub fn channel_id(&self) -> &LiveChannelId {
+        self.lease.channel_id()
+    }
+    #[must_use]
+    pub fn append_id(&self) -> &str {
+        &self.append_id
+    }
+    #[must_use]
+    pub const fn previous_cursor(&self) -> u64 {
+        0
+    }
+    #[must_use]
+    pub const fn next_cursor(&self) -> u64 {
+        self.lease.reserved_cursor
+    }
+    #[must_use]
+    pub fn cancellation_token(&self) -> LiveContextPreparationCancellation {
+        self.lease.cancellation_token()
+    }
+
+    #[cfg(feature = "live")]
+    pub fn into_sideband_append_authority(
+        self,
+        binding: ProviderWebrtcBinding,
+        context: &str,
+    ) -> Result<(Self, LiveSidebandAppendAuthority), LiveExecutionAuthorityError> {
+        if self.session_id() != binding.session_id()
+            || self.channel_id() != binding.channel_id()
+            || self.lease.cancellation.is_cancelled()
+        {
+            return Err(LiveExecutionAuthorityError::ProviderBindingMismatch);
+        }
+        if format!("{:x}", Sha256::digest(context.as_bytes())) != self.content_digest {
+            return Err(LiveExecutionAuthorityError::AppendAuthorityMismatch);
+        }
+        self.provider_dispatch_consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| LiveExecutionAuthorityError::ProviderDispatchAlreadyConverted)?;
+        let sideband = LiveSidebandAppendAuthority::__from_generated_authority(
+            binding,
+            self.append_id.clone(),
+            self.next_cursor(),
+        )
+        .ok_or(LiveExecutionAuthorityError::AppendAuthorityMismatch)?;
+        Ok((self, sideband))
+    }
+}
+
+/// Generated disposition of one exact queued context-append attempt.
+#[derive(Debug)]
+pub enum LiveContextAppendAdmission {
+    Authorized(LiveContextAppendAuthority),
+    Deferred,
+    AlreadyCovered,
 }
 
 /// Sealed custody for one SessionDocument-classified row admitted into the
@@ -3378,6 +3842,7 @@ pub struct LiveContextQueuedRow {
     binding: LiveDelegationRuntimeBinding,
     append_id: String,
     row: CommittedLiveContextRow,
+    disposition: LiveContextRowDisposition,
 }
 
 impl LiveContextQueuedRow {
@@ -3400,13 +3865,26 @@ impl LiveContextQueuedRow {
         let expected_disposition = match row.disposition() {
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::MirrorParentText => LiveContextRowDisposition::MirrorParentText,
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel => LiveContextRowDisposition::AlreadyPresentInLiveChannel,
+            meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::AssistantObservation => LiveContextRowDisposition::AssistantObservation,
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::ExcludedFromLiveContext => LiveContextRowDisposition::ExcludedFromLiveContext,
+        };
+        let reasserted = *disposition == LiveContextRowDisposition::ReassertCausalTail
+            && row.payload_availability()
+                == crate::meerkat_machine::dsl::LiveContextPayloadAvailability::Materializable;
+        let disposition_matches = match expected_disposition {
+            LiveContextRowDisposition::AssistantObservation => {
+                *disposition == LiveContextRowDisposition::ExcludedFromLiveContext || reasserted
+            }
+            LiveContextRowDisposition::AlreadyPresentInLiveChannel => {
+                *disposition == LiveContextRowDisposition::AlreadyPresentInLiveChannel || reasserted
+            }
+            _ => disposition == &expected_disposition,
         };
         if session_id != &binding.session_id().to_string()
             || channel_id != binding.channel_id().as_str()
             || effect_append_id != append_id
             || *canonical_cursor != row.canonical_row_sequence()
-            || disposition != &expected_disposition
+            || !disposition_matches
             || row.session_id() != binding.session_id()
         {
             return Err(LiveExecutionAuthorityError::AppendAuthorityMismatch);
@@ -3415,6 +3893,7 @@ impl LiveContextQueuedRow {
             binding: binding.clone(),
             append_id: append_id.to_string(),
             row,
+            disposition: *disposition,
         }))
     }
 
@@ -3431,6 +3910,22 @@ impl LiveContextQueuedRow {
     #[must_use]
     pub fn row(&self) -> &CommittedLiveContextRow {
         &self.row
+    }
+
+    #[must_use]
+    pub fn provider_context(&self) -> Option<&str> {
+        match self.disposition {
+            LiveContextRowDisposition::MirrorParentText => self.row.provider_context(),
+            LiveContextRowDisposition::ReassertCausalTail => self.row.causal_context(),
+            LiveContextRowDisposition::AlreadyPresentInLiveChannel
+            | LiveContextRowDisposition::AssistantObservation
+            | LiveContextRowDisposition::ExcludedFromLiveContext => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_causal_reassertion(&self) -> bool {
+        self.disposition == LiveContextRowDisposition::ReassertCausalTail
     }
 }
 
@@ -3458,6 +3953,7 @@ impl LiveContextCanonicalCoverageReceipt {
         let expected_disposition = match queued.row.disposition() {
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel => LiveContextRowDisposition::AlreadyPresentInLiveChannel,
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::ExcludedFromLiveContext => LiveContextRowDisposition::ExcludedFromLiveContext,
+            meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::AssistantObservation => LiveContextRowDisposition::ExcludedFromLiveContext,
             meerkat_core::generated::session_document::LiveContextCommittedRowDisposition::MirrorParentText => return Err(LiveExecutionAuthorityError::AppendAuthorityMismatch),
         };
         if channel_id != queued.binding.channel_id().as_str()
@@ -3497,6 +3993,7 @@ impl LiveContextAmbiguityRecoveryAuthority {
     pub(crate) fn from_generated_effect(
         append: &LiveContextAppendAuthority,
         replacement_channel_id: &LiveChannelId,
+        expected_canonical_seed_cursor: u64,
         effect: &MeerkatMachineEffect,
     ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
         let MeerkatMachineEffect::LiveContextAmbiguityRecoveryAuthorized {
@@ -3517,7 +4014,8 @@ impl LiveContextAmbiguityRecoveryAuthority {
             || closing_channel_id != append.channel_id.as_str()
             || effect_replacement != replacement_channel_id.as_str()
             || append_id != &append.append_id
-            || *canonical_seed_cursor != append.next_cursor
+            || *canonical_seed_cursor != expected_canonical_seed_cursor
+            || *canonical_seed_cursor < append.next_cursor
         {
             return Err(LiveExecutionAuthorityError::AppendAuthorityMismatch);
         }
@@ -3590,6 +4088,7 @@ impl PartialEq for LiveContextAppendAuthority {
             && self.append_id == other.append_id
             && self.previous_cursor == other.previous_cursor
             && self.next_cursor == other.next_cursor
+            && self.kind == other.kind
             && Arc::ptr_eq(
                 &self.provider_dispatch_consumed,
                 &other.provider_dispatch_consumed,
@@ -3612,6 +4111,34 @@ impl std::fmt::Debug for LiveContextAppendAuthority {
 }
 
 impl LiveContextAppendAuthority {
+    pub(crate) fn from_queued_generated_effect(
+        queued: &LiveContextQueuedRow,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let next_cursor = queued.row.canonical_row_sequence();
+        let previous_cursor = next_cursor
+            .checked_sub(1)
+            .ok_or(LiveExecutionAuthorityError::AppendAuthorityMismatch)?;
+        Self::from_generated_effect(
+            queued.binding.session_id(),
+            queued.binding.channel_id(),
+            queued.append_id(),
+            previous_cursor,
+            next_cursor,
+            effect,
+        )
+        .map(|authority| {
+            authority.map(|mut authority| {
+                authority.kind = if queued.is_causal_reassertion() {
+                    LiveContextAppendKind::CausalReassertion
+                } else {
+                    LiveContextAppendKind::Ordinary
+                };
+                authority
+            })
+        })
+    }
+
     pub(crate) fn from_generated_effect(
         session_id: &SessionId,
         channel_id: &LiveChannelId,
@@ -3642,6 +4169,7 @@ impl LiveContextAppendAuthority {
             append_id: append_id.to_string(),
             previous_cursor,
             next_cursor,
+            kind: LiveContextAppendKind::Ordinary,
             provider_dispatch_consumed: Arc::new(AtomicBool::new(false)),
         }))
     }
@@ -3669,6 +4197,11 @@ impl LiveContextAppendAuthority {
     #[must_use]
     pub const fn next_cursor(&self) -> u64 {
         self.next_cursor
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> LiveContextAppendKind {
+        self.kind
     }
 
     /// Convert one generated append edge into the provider-neutral send
@@ -4562,6 +5095,75 @@ mod tests {
             ),
             Err(LiveExecutionAuthorityError::AppendAuthorityMismatch)
         );
+    }
+
+    #[cfg(feature = "live")]
+    #[test]
+    fn bootstrap_append_is_digest_bound_one_use_and_cancelled_before_conversion() {
+        let lease = LiveContextPreparationLease {
+            session_id: session(1),
+            channel_id: LiveChannelId::new("bootstrap-channel"),
+            lease_id: "one-job".into(),
+            reserved_cursor: 7,
+            binding: LiveDelegationRuntimeBinding::new(
+                session(1),
+                LiveChannelId::new("bootstrap-channel"),
+                crate::identifiers::LogicalRuntimeId::new("test-runtime"),
+                9,
+                7,
+            ),
+            cancellation: Default::default(),
+        };
+        let digest = format!("{:x}", Sha256::digest(b"exact captured summary"));
+        let effect = MeerkatMachineEffect::LiveContextBootstrapAppendAuthorized {
+            session_id: lease.session_id.to_string(),
+            channel_id: lease.channel_id.to_string(),
+            lease_id: lease.lease_id.clone(),
+            append_id: "one-append".into(),
+            content_digest: digest.clone(),
+            reserved_cursor: 7,
+        };
+        let authority = LiveContextBootstrapAppendAuthority::from_generated_effect(
+            &lease,
+            "one-append",
+            &digest,
+            &effect,
+        )
+        .expect("exact effect")
+        .expect("sealed authority");
+        let binding = ProviderWebrtcBinding::new(
+            lease.channel_id.clone(),
+            lease.session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(7),
+            meerkat_live::LiveRuntimeBindingFence::new(9),
+        );
+        assert!(matches!(
+            authority
+                .clone()
+                .into_sideband_append_authority(binding.clone(), "changed summary"),
+            Err(LiveExecutionAuthorityError::AppendAuthorityMismatch)
+        ));
+        authority
+            .clone()
+            .into_sideband_append_authority(binding.clone(), "exact captured summary")
+            .expect("first exact send");
+        assert!(matches!(
+            authority.into_sideband_append_authority(binding.clone(), "exact captured summary"),
+            Err(LiveExecutionAuthorityError::ProviderDispatchAlreadyConverted)
+        ));
+        let cancelled = LiveContextBootstrapAppendAuthority::from_generated_effect(
+            &lease,
+            "one-append",
+            &digest,
+            &effect,
+        )
+        .expect("test effect")
+        .expect("test authority");
+        lease.cancellation.cancel();
+        assert!(matches!(
+            cancelled.into_sideband_append_authority(binding, "exact captured summary"),
+            Err(LiveExecutionAuthorityError::ProviderBindingMismatch)
+        ));
     }
 
     #[cfg(feature = "live")]

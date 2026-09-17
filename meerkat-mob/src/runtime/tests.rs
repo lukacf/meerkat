@@ -1,4 +1,8 @@
 use super::*;
+
+#[cfg(feature = "openai-live")]
+mod existing_live_delegation;
+mod host_human_input;
 use crate::definition::{
     BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowSpec,
     FlowStepSpec, LimitsSpec, MobDefinition, OrchestratorConfig, PolicyMode, RoleWiringRule,
@@ -4030,6 +4034,19 @@ impl SessionServiceControlExt for MockSessionService {
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    #[cfg(feature = "openai-live")]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        Err(SessionError::Unsupported(
+            "mock session service does not support live delegation canonical projection".into(),
+        ))
+    }
+
     async fn start_turn_with_admission_notification(
         &self,
         session_id: &SessionId,
@@ -4649,7 +4666,13 @@ impl MobSessionService for MockSessionService {
         boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::InputId>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
-        let exact_result_text = req.prompt.text_content();
+        let exact_result_text = if req.runtime.typed_turn_appends.is_empty() {
+            req.prompt.text_content()
+        } else {
+            meerkat_core::lifecycle::run_primitive::model_projection_content_input_from_conversation_appends(
+                &req.runtime.typed_turn_appends,
+            ).text_content()
+        };
         let replaced = self
             .runtime_apply_runs
             .write()
@@ -10967,6 +10990,19 @@ impl SessionServiceControlExt for PersistedListingSessionService {
 
 #[async_trait]
 impl MobSessionService for PersistedListingSessionService {
+    #[cfg(feature = "openai-live")]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        self.inner
+            .commit_live_delegation_final_transcript(machine, session_id, provisional, final_event)
+            .await
+    }
+
     async fn materialize_session_resume_verdict(
         &self,
         session_id: &SessionId,
@@ -11326,6 +11362,19 @@ impl SessionServiceControlExt for InactiveReadSessionService {
 
 #[async_trait]
 impl MobSessionService for InactiveReadSessionService {
+    #[cfg(feature = "openai-live")]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        self.inner
+            .commit_live_delegation_final_transcript(machine, session_id, provisional, final_event)
+            .await
+    }
+
     async fn materialize_session_resume_verdict(
         &self,
         session_id: &SessionId,
@@ -47778,6 +47827,19 @@ impl SessionServiceControlExt for RealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RealCommsSessionService {
+    #[cfg(feature = "openai-live")]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        Err(SessionError::Unsupported(
+            "real-comms test service does not support live delegation canonical projection".into(),
+        ))
+    }
+
     async fn materialize_session_resume_verdict(
         &self,
         session_id: &SessionId,
@@ -49073,6 +49135,20 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RuntimeBackedRealCommsSessionService {
+    #[cfg(feature = "openai-live")]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        Err(SessionError::Unsupported(
+            "runtime-backed real-comms test service has no store-sealed live delegation projection"
+                .into(),
+        ))
+    }
+
     async fn materialize_session_resume_verdict(
         &self,
         session_id: &SessionId,
@@ -67049,6 +67125,12 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "identity_convergence_admission_closed".to_string()
         }
         MobError::NotExternallyAddressable(_) => "not_externally_addressable".to_string(),
+        MobError::WorkInputIdempotencyConflict { .. } => {
+            "work_input_idempotency_conflict".to_string()
+        }
+        MobError::WorkInputCompletionUnavailable { .. } => {
+            "work_input_completion_unavailable".to_string()
+        }
         MobError::InvalidTransition { from, to } => {
             format!("invalid_transition:{}->{}", from.as_str(), to.as_str())
         }
@@ -72493,6 +72575,90 @@ async fn test_head_canonical_same_member_queue_admissions_serialize_committed_bo
         .await
         .expect("queued member handle");
 
+    #[cfg(feature = "openai-live")]
+    struct CommittedMobContextHost {
+        service: Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
+        appends: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[cfg(feature = "openai-live")]
+    #[async_trait::async_trait]
+    impl meerkat_runtime::live_context_mirror::LiveContextMirrorHost for CommittedMobContextHost {
+        async fn committed_boundary(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<
+            (
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+                String,
+            ),
+            String,
+        > {
+            self.service
+                .export_live_context_committed_boundary(session_id)
+                .await
+                .map_err(|error| error.to_string())
+        }
+
+        async fn append_context(
+            &self,
+            authority: meerkat_runtime::live_execution::LiveContextAppendAuthority,
+            context: String,
+        ) -> Result<
+            (
+                meerkat_runtime::live_execution::LiveContextAppendAuthority,
+                meerkat_core::LiveAppendDeliveryOutcome,
+            ),
+            String,
+        > {
+            self.appends.lock().expect("context appends").push(context);
+            Ok((
+                authority,
+                meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+            ))
+        }
+
+        async fn recover_ambiguous_append(
+            &self,
+            _authority: meerkat_runtime::live_execution::LiveContextAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            panic!("acknowledged fixture context must not recover");
+        }
+
+        async fn recover_ambiguous_delegation_result(
+            &self,
+            _authority: meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            panic!("ordinary queued turns are not delegation results");
+        }
+    }
+
+    #[cfg(feature = "openai-live")]
+    let context_host = Arc::new(CommittedMobContextHost {
+        service: Arc::clone(&service),
+        appends: std::sync::Mutex::new(Vec::new()),
+    });
+    #[cfg(feature = "openai-live")]
+    let context_adapter = service.runtime_adapter().expect("persistent runtime owner");
+    #[cfg(feature = "openai-live")]
+    let context_binding = {
+        let (seed, _) = service
+            .export_live_context_committed_boundary(&session_id)
+            .await
+            .expect("store-sealed HeadCanonical seed");
+        let seed_cursor = seed
+            .session()
+            .expect("materialized canonical seed")
+            .messages()
+            .len() as u64;
+        let binding = context_adapter
+            .__test_open_live_context_channel(&session_id, seed_cursor)
+            .await
+            .expect("generated live context binding");
+        context_adapter.set_live_context_mirror_host(context_host.clone());
+        binding
+    };
+
     let first = tokio::time::timeout(
         Duration::from_secs(30),
         member.start_turn(
@@ -72533,6 +72699,15 @@ async fn test_head_canonical_same_member_queue_admissions_serialize_committed_bo
         "back-to-back Queue admission must not start a second same-session turn \
          while the first owns the executor"
     );
+    #[cfg(feature = "openai-live")]
+    assert!(
+        context_host
+            .appends
+            .lock()
+            .expect("context appends")
+            .is_empty(),
+        "uncommitted member work must not be mirrored"
+    );
 
     client.release();
     for (index, turn) in turns.into_iter().enumerate() {
@@ -72572,6 +72747,37 @@ async fn test_head_canonical_same_member_queue_admissions_serialize_committed_bo
             "post-pipeline HeadCanonical store remains writable",
         )
         .await;
+
+    #[cfg(feature = "openai-live")]
+    {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            context_adapter.drain_live_context_outbox(&session_id),
+        )
+        .await
+        .expect("mob-owned post-commit projection finishes")
+        .expect("exact store-owned HeadCanonical context reaches the mirror");
+        let appends = context_host.appends.lock().expect("context appends");
+        for index in 0..PIPELINED_TURNS {
+            let expected = format!("queued-boundary-{index}");
+            assert_eq!(
+                appends
+                    .iter()
+                    .filter(|text| text.contains(&expected))
+                    .count(),
+                1,
+                "the actual mob executor must mirror each committed turn exactly once"
+            );
+        }
+        assert_eq!(
+            appends
+                .iter()
+                .filter(|text| text.contains("queued-boundary-follow-up"))
+                .count(),
+            1,
+            "later ordinary member work must also reach the current live channel"
+        );
+    }
 
     let durable = tokio::time::timeout(
         Duration::from_secs(30),
@@ -72662,6 +72868,11 @@ async fn test_head_canonical_same_member_queue_admissions_serialize_committed_bo
         "all queued turn candidates must be finalized after committed completion"
     );
 
+    #[cfg(feature = "openai-live")]
+    context_adapter
+        .__test_close_live_context_channel(&context_binding)
+        .await
+        .expect("retire transport-free live fixture before mob shutdown");
     tokio::time::timeout(Duration::from_secs(30), handle.shutdown())
         .await
         .expect("HeadCanonical queue mob shutdown timed out")

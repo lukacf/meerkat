@@ -2076,6 +2076,10 @@ fn seam_submit_work_input() -> CompositionWitnessInput {
             witness_field("fence_token", Expr::U64(1)),
             witness_field("work_id", Expr::String("workid_1".into())),
             witness_field("origin", named_variant("WorkOrigin", "External")),
+            witness_field(
+                "content_attribution",
+                named_variant("WorkContentAttribution", "Conversational"),
+            ),
         ],
     )
 }

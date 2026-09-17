@@ -104,6 +104,18 @@ fn build_agent_error_to_session_error(
 }
 
 impl FactoryAgent {
+    fn account_realtime_transcript(&self, outcome: &meerkat_core::RealtimeTranscriptApplyOutcome) {
+        for materialized in &outcome.materialized_messages {
+            if let meerkat_core::RealtimeTranscriptMaterializedMessage::Assistant {
+                usage: Some(usage),
+                ..
+            } = materialized
+            {
+                self.agent.budget().record_turn_usage(usage);
+            }
+        }
+    }
+
     /// Access the underlying agent.
     pub fn agent(&self) -> &DynAgent {
         &self.agent
@@ -816,15 +828,20 @@ impl SessionAgent for FactoryAgent {
             .agent
             .session_mut()
             .append_realtime_transcript_event(event);
-        for materialized in &outcome.materialized_messages {
-            if let meerkat_core::RealtimeTranscriptMaterializedMessage::Assistant {
-                usage: Some(usage),
-                ..
-            } = materialized
-            {
-                self.agent.budget().record_turn_usage(usage);
-            }
-        }
+        self.account_realtime_transcript(&outcome);
+        Ok(outcome)
+    }
+
+    fn append_realtime_transcript_event_for_channel(
+        &mut self,
+        event: meerkat_core::RealtimeTranscriptEvent,
+        channel_id: meerkat_core::LiveChannelId,
+    ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError> {
+        let outcome = self
+            .agent
+            .session_mut()
+            .append_realtime_transcript_event_for_channel(event, channel_id);
+        self.account_realtime_transcript(&outcome);
         Ok(outcome)
     }
 
@@ -868,6 +885,27 @@ impl SessionAgent for FactoryAgent {
                 response_id,
                 item_id,
                 content_index,
+            )
+    }
+
+    fn admit_live_assistant_playback_target_with_context_observation(
+        &mut self,
+        channel_id: &meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+        observation_id: Option<meerkat_core::LiveContextObservationId>,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, meerkat_core::error::AgentError> {
+        self.agent
+            .session_mut()
+            .admit_live_assistant_playback_target_with_context_observation(
+                channel_id,
+                interaction_id,
+                response_id,
+                item_id,
+                content_index,
+                observation_id,
             )
     }
 

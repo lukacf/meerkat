@@ -411,6 +411,12 @@ impl MeerkatMachine {
                 .map_err(|error| RuntimeDriverError::ValidationFailed {
                     reason: dsl_authority::map_error(error, context),
                 })?;
+            #[cfg(feature = "live")]
+            self.realize_live_context_preparation_cancellation(
+                session_id,
+                authority.state(),
+                &effects,
+            );
             (previous_snapshot, effects)
         };
         drop(sessions);
@@ -465,6 +471,12 @@ impl MeerkatMachine {
             let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
                 .map(|transition| DslTransitionEffects::new(transition.into_effects()))
                 .map_err(|err| dsl_authority::map_error(err, context))?;
+            #[cfg(feature = "live")]
+            self.realize_live_context_preparation_cancellation(
+                session_id,
+                authority.state(),
+                &effects,
+            );
             (previous_snapshot, effects)
         };
         drop(sessions);
@@ -533,6 +545,12 @@ impl MeerkatMachine {
             let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
                 .map(|transition| DslTransitionEffects::new(transition.into_effects()))
                 .map_err(|err| dsl_authority::refusal(err, context))?;
+            #[cfg(feature = "live")]
+            self.realize_live_context_preparation_cancellation(
+                session_id,
+                authority.state(),
+                &effects,
+            );
             (previous_snapshot, effects)
         };
         drop(sessions);

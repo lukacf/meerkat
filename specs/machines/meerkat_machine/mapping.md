@@ -3128,6 +3128,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DeferInputBehindBacklogAlreadyResolvedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyArchivedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyArchivedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyArchivedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyArchivedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferInputBehindBacklogAlreadyArchivedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `StageForRunIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4739,6 +4754,90 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecoverLiveBridgeSubmissionExactReplayStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ObserveLiveContextDeliveryReadinessIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveContextDeliveryReadinessAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveContextDeliveryReadinessRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveContextDeliveryReadinessRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveLiveContextDeliveryReadinessStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginLiveContextPreparationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginLiveContextPreparationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginLiveContextPreparationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveContextObservationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveContextObservationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveContextObservationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveContextBootstrapAckCutIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveContextBootstrapAckCutAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordLiveContextBootstrapAckCutRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `GenerateLiveContextPreparationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `GenerateLiveContextPreparationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `GenerateLiveContextPreparationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextBootstrapAppendIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextBootstrapAppendAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextBootstrapAppendRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextBootstrapAppendIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextBootstrapAppendAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveContextBootstrapAppendRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailLiveContextPreparationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailLiveContextPreparationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailLiveContextPreparationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailLiveContextPreparationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FailLiveContextPreparationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `EnqueueLiveContextRowIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4764,6 +4863,51 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeLiveContextAppendRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendPendingReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendPendingReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendPendingReplayRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByTurnIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByTurnAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByTurnRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByCloseIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByCloseAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByCloseRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByRecoveryIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByRecoveryAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeferredByRecoveryRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeliveredReplayIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeliveredReplayAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveContextAppendDeliveredReplayRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveLiveContextAppendDeliveredIdle`
@@ -7663,7 +7807,28 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveBridgeSubmissionRecoveredAmbiguous`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveContextPreparationChanged`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextObservationRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextBootstrapAckCutRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextDeliveryReadinessObserved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextBootstrapAppendAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveContextAppendAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextAppendDeferred`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveContextAppendAlreadyCovered`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `LiveContextRowQueued`
@@ -7863,7 +8028,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `live_provider_turn_occupancy_has_exact_interaction`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `live_assistant_turn_is_frozen_to_exact_foreground_interaction`
+- `live_assistant_turn_has_frozen_typed_attribution`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_pending_delegation_is_serialized_and_complete`
@@ -7873,6 +8038,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_delegation_worker_binding_is_exact`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_delegation_existing_member_has_worker_binding`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_delegation_terminal_is_worker_bound`
@@ -7900,6 +8068,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_pending_context_append_is_exact_and_channel_scoped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_context_bootstrap_reservation_is_not_delivery`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_context_observation_order_is_exact_and_scoped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_context_outbox_is_exact_and_session_scoped`

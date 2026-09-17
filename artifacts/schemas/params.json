@@ -15284,13 +15284,19 @@
                 ]
               },
               "stop_reason": {
-                "$ref": "#/$defs/WireStopReason"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireStopReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
               "role",
               "blocks",
-              "stop_reason",
               "created_at"
             ],
             "type": "object"
@@ -15479,6 +15485,19 @@
             "properties": {
               "kind": {
                 "const": "spoken",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Canonical assistant speech observation without measured playback or\nhearing evidence. Provider termination uses the message's separate,\noptional stop reason.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
                 "type": "string"
               }
             },
@@ -19836,8 +19855,14 @@
                 "type": "string"
               },
               "stop_reason": {
-                "$ref": "#/$defs/WireStopReason",
-                "default": "end_turn"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireStopReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -20762,6 +20787,19 @@
             "properties": {
               "kind": {
                 "const": "spoken",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Canonical assistant speech observation without measured playback or\nhearing evidence. Provider termination uses the message's separate,\noptional stop reason.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
                 "type": "string"
               }
             },
@@ -35958,8 +35996,14 @@
                 "type": "string"
               },
               "stop_reason": {
-                "$ref": "#/$defs/WireStopReason",
-                "default": "end_turn"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireStopReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -36805,6 +36849,19 @@
             "properties": {
               "kind": {
                 "const": "spoken",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Canonical assistant speech observation without measured playback or\nhearing evidence. Provider termination uses the message's separate,\noptional stop reason.",
+            "properties": {
+              "kind": {
+                "const": "spoken_unmeasured",
                 "type": "string"
               }
             },

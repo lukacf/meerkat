@@ -7,7 +7,7 @@
 //! diagnostic fallback, while nightly owns low-churn heavy coverage. These
 //! tests ratchet the load-bearing invariants: the typed governance gates
 //! (rmat-audit set) bind every run, both selected lanes stay on the hot path,
-//! and the aggregate gate enforces the 20-minute terminal budget.
+//! and the aggregate gate enforces the 40-minute terminal budget.
 
 use std::path::{Path, PathBuf};
 
@@ -77,7 +77,7 @@ fn ci_runs_buildbuddy_and_hosted_dense_topology_lanes() {
         "CI must not route by actor — one lane for everyone"
     );
     assert!(ci.contains("name: Enforce push-to-terminal budget"));
-    assert!(ci.contains("MAX_SECONDS: \"1200\""));
+    assert!(ci.contains("MAX_SECONDS: \"2400\""));
     assert!(
         ci.contains("id-token: write"),
         "the caller must grant the OIDC permission requested by the reusable BuildBuddy workflow"

@@ -6578,6 +6578,7 @@ def test_generated_wire_assistant_block_variant_data_is_typed_typeddict():
         WireAssistantBlockTranscriptData,
         WireTranscriptSource,
         WireTranscriptSourceSpoken,
+        WireTranscriptSourceSpokenUnmeasured,
         WireTranscriptSourceUnknown,
     )
 
@@ -6637,12 +6638,13 @@ def test_generated_wire_assistant_block_variant_data_is_typed_typeddict():
     assert "source" in transcript_data_hints
     assert "meta" in transcript_data_hints
     # `source` is typed against the discriminated `WireTranscriptSource`
-    # union (a PEP-604 `Spoken | Unknown` alias). It must NOT be a
+    # union (`Spoken | SpokenUnmeasured | Unknown`). It must NOT be a
     # free-form dict — callers must be able to type-narrow on
     # `source["kind"]`. The annotation comes through as the unwrapped
     # union (TypedDict alias inlining), so we check by string contents.
     rendered_source = str(transcript_data_hints["source"])
     assert "WireTranscriptSourceSpoken" in rendered_source
+    assert "WireTranscriptSourceSpokenUnmeasured" in rendered_source
     assert "WireTranscriptSourceUnknown" in rendered_source
     assert "dict[str, Any]" not in rendered_source
     # Reference `WireTranscriptSource` so the import isn't unused — the
@@ -6650,8 +6652,12 @@ def test_generated_wire_assistant_block_variant_data_is_typed_typeddict():
     # resolved TypedDict annotation inlines its members.
     assert set(get_args(WireTranscriptSource)) == {
         WireTranscriptSourceSpoken,
+        WireTranscriptSourceSpokenUnmeasured,
         WireTranscriptSourceUnknown,
     }
+    assert get_args(get_type_hints(WireTranscriptSourceSpokenUnmeasured)["kind"]) == (
+        "spoken_unmeasured",
+    )
     # Required/Optional discipline matches the JSON-schema `required`
     # list: `text` + `source` Required, `meta` NotRequired. Inspect raw
     # annotations because the generated TypedDict is declared with

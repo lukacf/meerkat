@@ -249,6 +249,7 @@ impl TranscriptIdentityConsensus {
 
     fn finish(self) -> TranscriptMessageIdentity {
         TranscriptMessageIdentity {
+            realtime_origin: None,
             interaction_id: self.interaction_id.finish(),
             run_id: self.run_id.finish(),
             objective_id: self.objective_id.finish(),
@@ -739,6 +740,7 @@ impl InteractionTerminalPublicationError {
             | crate::RuntimeDriverError::MaterializationRegistrationNotCurrent { .. }
             | crate::RuntimeDriverError::StaleAuthority { .. } => Self::StaleAuthority(detail),
             crate::RuntimeDriverError::ValidationFailed { .. }
+            | crate::RuntimeDriverError::InputIdempotencyConflict { .. }
             | crate::RuntimeDriverError::RecoveryCorruption { .. }
             | crate::RuntimeDriverError::RecoveryRepairBlocked { .. } => Self::Corrupt(detail),
             crate::RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
@@ -5711,6 +5713,7 @@ async fn resolve_failed_batch_backlog(
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     input_ids: &[InputId],
+    cancelled_run_id: Option<&RunId>,
     handoff: &mut RuntimeLoopTerminalHandoff,
     turn_finalization_guard: Option<
         Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
@@ -5736,7 +5739,8 @@ async fn resolve_failed_batch_backlog(
             // terminalizes it as MaxAttemptsExhausted.
             return FailedBatchBacklogOutcome::ContinueProcessing;
         }
-        d.defer_queued_inputs_behind_backlog(input_ids).err()
+        d.defer_queued_inputs_behind_backlog(input_ids, cancelled_run_id)
+            .err()
     };
     let Some(err) = defer_error else {
         return FailedBatchBacklogOutcome::ContinueProcessing;
@@ -6319,6 +6323,7 @@ async fn process_queue(
                             completions,
                             executor,
                             &input_ids,
+                            None,
                             handoff,
                             turn_finalization_guard,
                         )
@@ -6464,6 +6469,7 @@ async fn process_queue(
                         completions,
                         executor,
                         &input_ids,
+                        None,
                         handoff,
                         turn_finalization_guard,
                     )
@@ -7245,6 +7251,7 @@ async fn process_queue(
                             completions,
                             executor,
                             &input_ids,
+                            cancelled.then_some(&run_id),
                             handoff,
                             turn_finalization_guard,
                         )

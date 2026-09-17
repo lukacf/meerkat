@@ -48,8 +48,8 @@ use meerkat_openai::public_live::{
     PublicLiveBrokerFactory, PublicLiveBrokerSession, PublicLiveOpenConfig,
 };
 use meerkat_runtime::live_execution::{
-    LiveContextAppendAuthority, LiveDelegationResultDeliveryAuthority,
-    LiveDelegationResultDeliveryObservation,
+    LiveContextAppendAuthority, LiveContextBootstrapAppendAuthority,
+    LiveDelegationResultDeliveryAuthority, LiveDelegationResultDeliveryObservation,
 };
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -97,6 +97,32 @@ pub trait ExperimentalLivePendingOpen: Send {
     /// projection before shared machine admission.
     fn apply_execution_identity(&self, projection: &mut RealtimeSessionOpenProjection);
 
+    /// Accept only a summary sealed by the shared snapshot owner. Alternate
+    /// factories must explicitly support this instead of silently replaying
+    /// the full history while claiming summarized continuity.
+    fn set_context_summary(
+        &mut self,
+        _summary: crate::session_runtime::live_summary::LiveContextSummary,
+    ) -> Result<(), crate::session_runtime::live_summary::LiveContextSummaryError> {
+        Err(crate::session_runtime::live_summary::LiveContextSummaryError::Unsupported)
+    }
+
+    /// Opt in to an explicitly unseeded native session. Historical delivery
+    /// remains a separate generated obligation, not opening seed coverage.
+    fn enable_concurrent_context(
+        &mut self,
+    ) -> Result<(), crate::session_runtime::live_summary::LiveContextSummaryError> {
+        Err(crate::session_runtime::live_summary::LiveContextSummaryError::Unsupported)
+    }
+
+    #[doc(hidden)]
+    fn retain_context_preparation_job(
+        &mut self,
+        _job: crate::session_runtime::live_summary::LiveContextSummaryJob,
+    ) -> Result<(), crate::session_runtime::live_summary::LiveContextSummaryError> {
+        Err(crate::session_runtime::live_summary::LiveContextSummaryError::Unsupported)
+    }
+
     /// The one-use prepared factory consumed by the shared S7-S9 pipeline.
     fn session_factory(&self) -> &dyn RealtimeSessionFactory;
 
@@ -118,6 +144,19 @@ pub trait ExperimentalLivePendingOpen: Send {
 /// facade admission service.
 #[async_trait]
 pub trait ExperimentalLiveOpenAuthorityProvider: Send + Sync {
+    /// Positive per-target readiness, including exact configured credential
+    /// resolution and durable-source authorization. This prepares and drops
+    /// one unbound factory: it performs no provider session open or channel
+    /// registration. The eventual open independently revalidates authority.
+    async fn probe_execution_readiness(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
+    ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
+        let _pending = self.prepare_open(session_id, execution_identity).await?;
+        Ok(())
+    }
+
     /// Independently revalidate and project capability atoms for the same
     /// server-owned execution profile used by prepared opens. The default is
     /// fail-closed for test and alternate authorities that install no direct
@@ -306,6 +345,47 @@ pub struct PublicGptLiveOpenAuthorityConfig {
     pub session_instructions: Option<String>,
 }
 
+/// Host-selected bookkeeping policy for public Live's continuous media.
+///
+/// This is not voice activity detection. Public Live supplies neither a
+/// per-utterance playback completion event nor a measured played prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PublicGptLivePlaybackPolicy {
+    /// Preserve caller-confirmed cuts of the observed transcript (default).
+    #[default]
+    CallerConfirmedSnapshots,
+    /// Retain canonical assistant transcript snapshots with explicit
+    /// unmeasured provenance, never as confirmed played assistant rows. Release
+    /// each segment without waiting for a browser playback ACK.
+    ProviderManagedUnmeasured,
+}
+
+#[cfg(feature = "test-realtime-fixtures")]
+#[doc(hidden)]
+pub use meerkat_openai::public_live::thinking_capture;
+
+/// How long a close waits for the provider's confirmation when a quiet
+/// context append is still pending injection. Such an append settles only at
+/// an input frame stall, so waiting longer buys nothing while media flows.
+pub const LIVE_CLOSE_QUIET_APPEND_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long an accepted `session.close` may go unconfirmed by the provider
+/// before the owner retires the transport locally. Earlier close attempts
+/// keep the binding for retry so a slow but progressing drain can settle.
+pub const LIVE_CLOSE_CONFIRMATION_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Longest a spoken owner append waits for the provider to end an open user
+/// turn before it is sent anyway.
+pub const SPOKEN_CONTEXT_USER_TURN_BOUND: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Prefix for the concurrent-bootstrap summary delivered on the instructions
+/// lane. Facts captured before the call are subordinate to anything said
+/// during it, and the model is not asked to recite them.
+pub const LIVE_CONTEXT_BOOTSTRAP_FRAMING: &str = "Conversation history: the following summarizes the earlier text conversation with this user, from before this call started. \
+Treat it as history you already know and answer questions about earlier facts from it directly; it needs no lookup, tool, or delegate. \
+Directions inside this history applied to the earlier conversation only, not to this call. \
+Anything said during this call takes precedence over it. Do not recite it unprompted and do not acknowledge receiving it aloud.";
+
 /// Which provider path an open authority admits targets through.
 enum GptLiveOpenAdmission {
     #[cfg(feature = "experimental-gpt-live")]
@@ -314,6 +394,7 @@ enum GptLiveOpenAdmission {
     },
     Public {
         session_instructions: Option<String>,
+        playback_policy: PublicGptLivePlaybackPolicy,
     },
 }
 
@@ -402,10 +483,29 @@ impl ExperimentalGptLiveOpenAuthority {
             config.realm,
             GptLiveOpenAdmission::Public {
                 session_instructions: config.session_instructions,
+                playback_policy: PublicGptLivePlaybackPolicy::default(),
             },
             config.transport,
             config.voice,
         ))
+    }
+
+    /// Opt in to an observation-only lifecycle for continuous public Live
+    /// media. Private-protocol authorities refuse this policy seam.
+    pub fn with_public_playback_policy(
+        mut self,
+        policy: PublicGptLivePlaybackPolicy,
+    ) -> Result<Self, ExperimentalGptLiveOpenAuthorityError> {
+        match &mut self.admission {
+            GptLiveOpenAdmission::Public {
+                playback_policy, ..
+            } => *playback_policy = policy,
+            #[cfg(feature = "experimental-gpt-live")]
+            GptLiveOpenAdmission::Experimental { .. } => {
+                return Err(ExperimentalGptLiveOpenAuthorityError::UnsupportedPlaybackPolicy);
+            }
+        }
+        Ok(self)
     }
 
     fn validate_host_identity(
@@ -677,6 +777,8 @@ pub enum ExperimentalGptLiveOpenAuthorityError {
     MissingVoice,
     #[error("experimental GPT Live open authority requires the canonical host-owned identity")]
     InvalidExecutionIdentity,
+    #[error("provider-managed playback policy requires the public Live authority")]
+    UnsupportedPlaybackPolicy,
 }
 
 #[async_trait]
@@ -729,8 +831,9 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
             }
             GptLiveOpenAdmission::Public {
                 session_instructions,
-            } => {
-                self.prepare_public_pending(
+                playback_policy,
+            } => self
+                .prepare_public_pending(
                     canonical_session_id,
                     execution_identity,
                     &config,
@@ -738,7 +841,8 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
                     session_instructions.clone(),
                 )
                 .await?
-            }
+                .with_public_playback_policy(*playback_policy)
+                .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?,
         };
         Ok(Box::new(ExperimentalGptLivePreparedOpen::new(
             pending,
@@ -806,7 +910,10 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
         self.transport
             .close_physical_if_bound(channel_id, canonical_session_id)
             .await
-            .map_err(|_| ExperimentalLiveOpenAuthorityError::ChannelBindingFailed)
+            .map_err(|error| {
+                tracing::warn!(%error, %channel_id, "experimental live physical close remains incomplete");
+                ExperimentalLiveOpenAuthorityError::ChannelBindingFailed
+            })
     }
 
     fn control_plane(&self) -> Option<Arc<dyn ExperimentalGptLiveControlPlane>> {
@@ -830,10 +937,105 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ExperimentalLivePhysicalClose {
     NotBound,
     Closed,
+    /// Local transport retirement, not a graceful provider close or model final.
+    Terminated(Arc<ExperimentalLiveTerminalCloseReceipt>),
+}
+
+/// Exact transport-owned fault retained until generated close and fault
+/// projection both complete. Callers cannot mint or rebind this receipt.
+pub struct ExperimentalLiveTerminalCloseReceipt {
+    binding: ProviderWebrtcBinding,
+    observation: LiveAdapterObservation,
+    _projection_custody: meerkat_live::LiveChannelCloseProjectionLease,
+    report: Mutex<ExperimentalLiveTerminalReport>,
+}
+
+#[derive(Default)]
+enum ExperimentalLiveTerminalReport {
+    #[default]
+    Pending,
+    Running(JoinHandle<Result<(), meerkat_live::LiveAdapterHostError>>),
+    Completed,
+    Failed(meerkat_live::LiveAdapterHostError),
+}
+
+impl fmt::Debug for ExperimentalLiveTerminalCloseReceipt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExperimentalLiveTerminalCloseReceipt")
+            .field("channel_id", self.binding.channel_id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ExperimentalLiveTerminalCloseReceipt {
+    async fn report(
+        &self,
+        host: &Arc<meerkat_live::LiveAdapterHost>,
+        session_id: &meerkat_core::SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<(), meerkat_live::LiveAdapterHostError> {
+        if self.binding.session_id() != session_id || self.binding.channel_id() != channel_id {
+            return Err(meerkat_live::LiveAdapterHostError::CloseNotAuthorized);
+        }
+        let mut report = self.report.lock().await;
+        if matches!(*report, ExperimentalLiveTerminalReport::Pending) {
+            let host = Arc::clone(host);
+            let channel = channel_id.clone();
+            let observation = self.observation.clone();
+            // Cancellation of a close observer must not duplicate an already
+            // published fault. The receipt owns the in-flight handoff.
+            *report = ExperimentalLiveTerminalReport::Running(tokio::spawn(async move {
+                host.apply_observation(&channel, &observation).await?;
+                Ok(())
+            }));
+        }
+        let task = match &mut *report {
+            ExperimentalLiveTerminalReport::Running(task) => task,
+            ExperimentalLiveTerminalReport::Completed => return Ok(()),
+            ExperimentalLiveTerminalReport::Failed(error) => return Err(error.clone()),
+            ExperimentalLiveTerminalReport::Pending => {
+                return Err(meerkat_live::LiveAdapterHostError::CloseNotAuthorized);
+            }
+        };
+        let outcome = task.await;
+        match outcome {
+            Ok(Ok(())) => {
+                *report = ExperimentalLiveTerminalReport::Completed;
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                *report = ExperimentalLiveTerminalReport::Pending;
+                Err(error)
+            }
+            Err(error) => {
+                let error = meerkat_live::LiveAdapterHostError::ProjectionError(
+                    meerkat_live::LiveProjectionError::Rejected(format!(
+                        "terminal fault reporting task failed: {error}"
+                    )),
+                );
+                *report = ExperimentalLiveTerminalReport::Failed(error.clone());
+                Err(error)
+            }
+        }
+    }
+}
+
+impl ExperimentalLivePhysicalClose {
+    pub(crate) async fn report_terminal(
+        &self,
+        host: &Arc<meerkat_live::LiveAdapterHost>,
+        session_id: &meerkat_core::SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<(), meerkat_live::LiveAdapterHostError> {
+        if let Self::Terminated(receipt) = self {
+            receipt.report(host, session_id, channel_id).await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -853,6 +1055,20 @@ pub trait ExperimentalGptLiveControlPlane: Send + Sync {
         authority: LiveContextAppendAuthority,
         text: String,
     ) -> Result<ExperimentalGptLiveAppendDispatch, ExperimentalGptLiveBridgeError>;
+
+    async fn append_bootstrap_context(
+        &self,
+        _authority: LiveContextBootstrapAppendAuthority,
+        _text: String,
+    ) -> Result<
+        (
+            LiveContextBootstrapAppendAuthority,
+            meerkat_core::LiveAppendDeliveryOutcome,
+        ),
+        ExperimentalGptLiveBridgeError,
+    > {
+        Err(ExperimentalGptLiveBridgeError::ContextAuthorityRejected)
+    }
 
     /// Client-context capability only. Responses function output uses an
     /// independently qualified call-bound settlement path and must never
@@ -1429,6 +1645,15 @@ impl ExperimentalGptLiveAppendWaiter {
 }
 
 enum PendingExperimentalGptLiveDelivery {
+    BootstrapAppend {
+        authority: LiveContextBootstrapAppendAuthority,
+        observation_recorder:
+            Arc<crate::session_runtime::live_summary::LiveContextObservationRecorder>,
+        resolution_tx: oneshot::Sender<(
+            LiveContextBootstrapAppendAuthority,
+            meerkat_core::LiveAppendDeliveryOutcome,
+        )>,
+    },
     CanonicalAppend {
         authority: LiveContextAppendAuthority,
         resolution_tx: oneshot::Sender<ExperimentalGptLiveAppendResolution>,
@@ -1442,6 +1667,7 @@ enum PendingExperimentalGptLiveDelivery {
 impl PendingExperimentalGptLiveDelivery {
     fn channel_id(&self) -> &meerkat_live::LiveChannelId {
         match self {
+            Self::BootstrapAppend { authority, .. } => authority.channel_id(),
             Self::CanonicalAppend { authority, .. } => authority.channel_id(),
             Self::DelegationResult { authority, .. } => {
                 authority.operation().domain_correlation().channel_id()
@@ -1477,6 +1703,9 @@ struct ExperimentalGptLiveInitialSeed {
 
 enum GptLiveSeedContext {
     Canonical(Vec<meerkat_core::types::Message>),
+    Concurrent,
+    Summary(crate::session_runtime::live_summary::LiveContextSummary),
+    SeededSummary(crate::session_runtime::live_summary::LiveContextSummary),
     #[cfg(any(feature = "experimental-gpt-live", test))]
     Commentary(Option<String>),
     SeededAtCreation,
@@ -1492,14 +1721,24 @@ impl GptLiveSeedContext {
         }
     }
 
-    fn into_commentary(self) -> Result<Option<String>, GptLiveBrokerError> {
+    async fn into_commentary(self) -> Result<Option<String>, GptLiveBrokerError> {
         match self {
             Self::SeededAtCreation => Ok(None),
+            Self::SeededSummary(summary) => {
+                summary.validate_provider_source().await.map_err(|_| {
+                    GptLiveBrokerError::Transport {
+                        class: GptLiveBrokerTerminalClass::Protocol,
+                    }
+                })?;
+                Ok(None)
+            }
             #[cfg(any(feature = "experimental-gpt-live", test))]
             Self::Commentary(commentary) => Ok(commentary),
-            Self::Canonical(_) => Err(GptLiveBrokerError::Transport {
-                class: GptLiveBrokerTerminalClass::Protocol,
-            }),
+            Self::Canonical(_) | Self::Concurrent | Self::Summary(_) => {
+                Err(GptLiveBrokerError::Transport {
+                    class: GptLiveBrokerTerminalClass::Protocol,
+                })
+            }
         }
     }
 }
@@ -1527,6 +1766,10 @@ impl ProviderWebrtcPendingBoundReadyResolver for ExperimentalGptLivePendingBound
 
 #[async_trait]
 trait ExperimentalGptLiveBrokerSession: Send + Sync {
+    fn eof_evidence(&self) -> meerkat_live::ProviderWebrtcEofEvidence {
+        meerkat_live::ProviderWebrtcEofEvidence::Unconfirmed
+    }
+
     async fn await_ready_and_seed_session_context(
         &self,
         commentary: Option<String>,
@@ -1536,6 +1779,24 @@ trait ExperimentalGptLiveBrokerSession: Send + Sync {
         &self,
         text: String,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError>;
+
+    async fn append_thinking_context(
+        &self,
+        _text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        Err(GptLiveBrokerError::Transport {
+            class: GptLiveBrokerTerminalClass::Protocol,
+        })
+    }
+
+    async fn append_instructions_context(
+        &self,
+        _text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        Err(GptLiveBrokerError::Transport {
+            class: GptLiveBrokerTerminalClass::Protocol,
+        })
+    }
 
     async fn append_delegation_context(
         &self,
@@ -1588,6 +1849,11 @@ impl ExperimentalGptLiveBrokerSession for GptLiveBrokerSession {
 
 #[async_trait]
 impl ExperimentalGptLiveBrokerSession for PublicLiveBrokerSession {
+    fn eof_evidence(&self) -> meerkat_live::ProviderWebrtcEofEvidence {
+        // PublicLiveBrokerSession rejects EOF lacking `session.closed`.
+        meerkat_live::ProviderWebrtcEofEvidence::ProviderConfirmed
+    }
+
     async fn await_ready_and_seed_session_context(
         &self,
         commentary: Option<String>,
@@ -1600,6 +1866,20 @@ impl ExperimentalGptLiveBrokerSession for PublicLiveBrokerSession {
         text: String,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         PublicLiveBrokerSession::append_session_context(self, text).await
+    }
+
+    async fn append_thinking_context(
+        &self,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        PublicLiveBrokerSession::append_thinking_context(self, text).await
+    }
+
+    async fn append_instructions_context(
+        &self,
+        text: String,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        PublicLiveBrokerSession::append_instructions_context(self, text).await
     }
 
     async fn append_delegation_context(
@@ -1629,6 +1909,10 @@ impl ExperimentalGptLiveBrokerSession for PublicLiveBrokerSession {
 /// is rejected before any provider I/O.
 #[async_trait]
 trait GptLiveBrokerOpen: Send + Sync {
+    fn supports_context_summary(&self) -> bool {
+        false
+    }
+
     fn supports_snapshot_playback_cuts(&self) -> bool {
         false
     }
@@ -1681,6 +1965,10 @@ impl GptLiveBrokerOpen for GptLiveBrokerFactory {
 
 #[async_trait]
 impl GptLiveBrokerOpen for PublicLiveBrokerFactory {
+    fn supports_context_summary(&self) -> bool {
+        true
+    }
+
     fn supports_snapshot_playback_cuts(&self) -> bool {
         true
     }
@@ -1696,15 +1984,30 @@ impl GptLiveBrokerOpen for PublicLiveBrokerFactory {
         if execution_mode != meerkat_core::LiveExecutionMode::ClientContext {
             return Err(GptLiveBrokerError::InvalidResponsesProfile);
         }
-        let mut config = PublicLiveOpenConfig::new(offer_sdp, voice)?
-            .with_history(seed.context.canonical_messages()?);
+        let config = PublicLiveOpenConfig::new(offer_sdp, voice)?;
+        let mut config = match &seed.context {
+            GptLiveSeedContext::Concurrent => config.with_pending_context(),
+            GptLiveSeedContext::Summary(summary) => {
+                summary.validate_provider_source().await.map_err(|_| {
+                    GptLiveBrokerError::Transport {
+                        class: GptLiveBrokerTerminalClass::Protocol,
+                    }
+                })?;
+                config.with_context_summary(summary.text())
+            }
+            _ => config.with_history(seed.context.canonical_messages()?),
+        };
         if let Some(instructions) = session_instructions {
             config = config.with_instructions(instructions);
         }
         let (answer_sdp, session) = PublicLiveBrokerFactory::open(self, config)
             .await?
             .into_parts();
-        seed.context = GptLiveSeedContext::SeededAtCreation;
+        seed.context =
+            match std::mem::replace(&mut seed.context, GptLiveSeedContext::SeededAtCreation) {
+                GptLiveSeedContext::Summary(summary) => GptLiveSeedContext::SeededSummary(summary),
+                _ => GptLiveSeedContext::SeededAtCreation,
+            };
         Ok((answer_sdp, Arc::new(session)))
     }
 }
@@ -1905,7 +2208,11 @@ struct ActiveExperimentalGptLiveBinding {
     answer_observation_sequence: u64,
     command_tx: mpsc::Sender<SidebandCommandEnvelope>,
     observation_rx: Arc<
-        Mutex<mpsc::Receiver<Result<Option<LiveSidebandObservation>, ProviderWebrtcBrokerError>>>,
+        Mutex<
+            mpsc::Receiver<
+                Result<Option<ExperimentalGptLiveControlObservation>, ProviderWebrtcBrokerError>,
+            >,
+        >,
     >,
     command_actor: JoinHandle<()>,
     observation_actor: JoinHandle<()>,
@@ -1920,14 +2227,27 @@ struct ActiveExperimentalGptLiveBinding {
 struct ExperimentalGptLiveDrain {
     requested: AtomicBool,
     close_sent: AtomicBool,
-    unactivated_closed: AtomicBool,
-    reader: std::sync::Mutex<Option<Result<(), ProviderWebrtcBrokerError>>>,
+    /// When `session.close` was accepted by the transport; the bound for
+    /// owner-side termination of an unconfirmed closure counts from here.
+    close_sent_at: std::sync::Mutex<Option<tokio::time::Instant>>,
+    physically_retired: AtomicBool,
+    reader: std::sync::Mutex<
+        Option<Result<meerkat_live::ProviderWebrtcEofEvidence, ProviderWebrtcBrokerError>>,
+    >,
     projection: std::sync::Mutex<Option<Result<(), ProviderWebrtcBrokerError>>>,
+    terminal: std::sync::Mutex<Option<Arc<ExperimentalLiveTerminalCloseReceipt>>>,
     control_finished: AtomicBool,
     close_task: Mutex<Option<JoinHandle<Result<(), ProviderWebrtcBrokerError>>>>,
+    retirement_task: Mutex<Option<JoinHandle<()>>>,
     projection_retry: AtomicU64,
     projection_retryable: AtomicBool,
     changed: Notify,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExperimentalGptLiveDrainOutcome {
+    Graceful,
+    Terminated,
 }
 
 impl Drop for ExperimentalGptLiveDrain {
@@ -1939,6 +2259,25 @@ impl Drop for ExperimentalGptLiveDrain {
 }
 
 impl ExperimentalGptLiveDrain {
+    async fn await_physical_retirement(&self) -> Result<(), ProviderWebrtcBrokerError> {
+        let mut pending = self.retirement_task.lock().await;
+        if self.physically_retired.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let task = pending
+            .as_mut()
+            .ok_or(ProviderWebrtcBrokerError::Unavailable)?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?
+            .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
+        *pending = None;
+        if !self.physically_retired.load(Ordering::Acquire) {
+            return Err(ProviderWebrtcBrokerError::Unavailable);
+        }
+        Ok(())
+    }
+
     fn retry_projection(&self) {
         if self.projection_retryable.swap(false, Ordering::AcqRel) {
             if let Ok(mut receipt) = self.projection.lock() {
@@ -1983,11 +2322,28 @@ impl ExperimentalGptLiveDrain {
             .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
         *pending = None;
         outcome.map_err(|_| ProviderWebrtcBrokerError::Unavailable)??;
+        if let Ok(mut sent_at) = self.close_sent_at.lock()
+            && sent_at.is_none()
+        {
+            *sent_at = Some(tokio::time::Instant::now());
+        }
         self.close_sent.store(true, Ordering::Release);
         Ok(())
     }
 
-    fn result(&self) -> Option<Result<(), ProviderWebrtcBrokerError>> {
+    /// Whether `session.close` was accepted at least `bound` ago and the
+    /// provider has still not confirmed closure.
+    fn closure_unconfirmed_for(&self, bound: std::time::Duration) -> bool {
+        self.close_sent.load(Ordering::Acquire)
+            && self
+                .close_sent_at
+                .lock()
+                .ok()
+                .and_then(|sent_at| *sent_at)
+                .is_some_and(|sent_at| sent_at.elapsed() >= bound)
+    }
+
+    fn result(&self) -> Option<Result<ExperimentalGptLiveDrainOutcome, ProviderWebrtcBrokerError>> {
         let reader = match self.reader.lock() {
             Ok(receipt) => *receipt,
             Err(_) => return Some(Err(ProviderWebrtcBrokerError::Unavailable)),
@@ -1996,16 +2352,59 @@ impl ExperimentalGptLiveDrain {
             Ok(receipt) => *receipt,
             Err(_) => return Some(Err(ProviderWebrtcBrokerError::Unavailable)),
         };
+        let terminal = match self.terminal.lock() {
+            Ok(receipt) => receipt.is_some(),
+            Err(_) => return Some(Err(ProviderWebrtcBrokerError::Unavailable)),
+        };
         match (reader, projection) {
-            (Some(Err(error)), _) | (_, Some(Err(error))) => Some(Err(error)),
-            (Some(Ok(())), Some(Ok(()))) if self.control_finished.load(Ordering::Acquire) => {
-                Some(Ok(()))
+            (_, Some(Err(error))) => Some(Err(error)),
+            (Some(reader), Some(Ok(()))) if self.control_finished.load(Ordering::Acquire) => {
+                Some(if terminal {
+                    Ok(ExperimentalGptLiveDrainOutcome::Terminated)
+                } else {
+                    reader.and_then(|evidence| match evidence {
+                        meerkat_live::ProviderWebrtcEofEvidence::ProviderConfirmed => {
+                            Ok(ExperimentalGptLiveDrainOutcome::Graceful)
+                        }
+                        meerkat_live::ProviderWebrtcEofEvidence::Unconfirmed => {
+                            Err(ProviderWebrtcBrokerError::ProtocolDrift)
+                        }
+                    })
+                })
             }
             _ => None,
         }
     }
 
-    fn finish_reader(&self, result: Result<(), ProviderWebrtcBrokerError>) {
+    async fn retain_terminal(
+        &self,
+        host: &meerkat_live::LiveAdapterHost,
+        binding: &ProviderWebrtcBinding,
+        observation: LiveAdapterObservation,
+    ) -> Result<(), ProviderWebrtcBrokerError> {
+        let projection_custody = host
+            .retain_channel_close_projection(binding.session_id(), binding.channel_id())
+            .await
+            .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
+        let mut terminal = self
+            .terminal
+            .lock()
+            .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
+        if terminal.is_none() {
+            *terminal = Some(Arc::new(ExperimentalLiveTerminalCloseReceipt {
+                binding: binding.clone(),
+                observation,
+                _projection_custody: projection_custody,
+                report: Mutex::new(ExperimentalLiveTerminalReport::default()),
+            }));
+        }
+        Ok(())
+    }
+
+    fn finish_reader(
+        &self,
+        result: Result<meerkat_live::ProviderWebrtcEofEvidence, ProviderWebrtcBrokerError>,
+    ) {
         if let Ok(mut receipt) = self.reader.lock() {
             *receipt = Some(result);
         }
@@ -2019,7 +2418,7 @@ impl ExperimentalGptLiveDrain {
         self.changed.notify_waiters();
     }
 
-    async fn wait(&self) -> Result<(), ProviderWebrtcBrokerError> {
+    async fn wait(&self) -> Result<ExperimentalGptLiveDrainOutcome, ProviderWebrtcBrokerError> {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let changed = self.changed.notified();
@@ -2040,6 +2439,9 @@ struct RegisteredExperimentalGptLiveChannel {
     adapter: Arc<ExperimentalGptLiveDeferredAdapter>,
     identity: meerkat_core::SessionLlmIdentity,
     execution_profile_id: String,
+    context_summary_provenance:
+        Option<crate::session_runtime::live_summary::LiveContextSummaryProvenance>,
+    context_preparation_job: Option<crate::session_runtime::live_summary::LiveContextSummaryJob>,
 }
 
 /// Opaque one-use provider custody prepared from one exact per-open admission.
@@ -2049,6 +2451,9 @@ pub struct ExperimentalGptLivePendingChannel {
     initial_seed: Arc<Mutex<Option<ExperimentalGptLiveInitialSeed>>>,
     adapter_taken: AtomicBool,
     execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
+    context_summary: Option<crate::session_runtime::live_summary::LiveContextSummary>,
+    supports_context_summary: bool,
+    concurrent_context: bool,
 }
 
 impl fmt::Debug for ExperimentalGptLivePendingChannel {
@@ -2073,6 +2478,7 @@ impl ExperimentalGptLivePendingChannel {
     ) -> Result<Self, ExperimentalGptLiveBridgeError> {
         let initial_seed = Arc::new(Mutex::new(None));
         let snapshot_cuts = provider_factory.supports_snapshot_playback_cuts();
+        let supports_context_summary = provider_factory.supports_context_summary();
         let broker = ExperimentalGptLiveWebrtcBroker::new(
             provider_factory,
             voice,
@@ -2090,10 +2496,15 @@ impl ExperimentalGptLivePendingChannel {
                 adapter,
                 identity,
                 execution_profile_id: execution_profile.profile_id().to_string(),
+                context_summary_provenance: None,
+                context_preparation_job: None,
             },
             initial_seed,
             adapter_taken: AtomicBool::new(false),
             execution_profile,
+            context_summary: None,
+            supports_context_summary,
+            concurrent_context: false,
         })
     }
 
@@ -2240,6 +2651,17 @@ impl ExperimentalGptLivePendingChannel {
     pub fn apply_execution_identity(&self, projection: &mut RealtimeSessionOpenProjection) {
         projection.open_config.llm_identity = self.registration.identity.clone();
     }
+
+    fn with_public_playback_policy(
+        mut self,
+        policy: PublicGptLivePlaybackPolicy,
+    ) -> Result<Self, ExperimentalGptLiveBridgeError> {
+        let adapter = Arc::get_mut(&mut self.registration.adapter)
+            .filter(|adapter| adapter.snapshot_cuts)
+            .ok_or(ExperimentalGptLiveBridgeError::TargetRejected)?;
+        adapter.playback_policy = policy;
+        Ok(self)
+    }
 }
 
 #[async_trait]
@@ -2277,6 +2699,23 @@ impl RealtimeSessionFactory for ExperimentalGptLivePendingChannel {
                     .to_string(),
             });
         }
+        if self.concurrent_context
+            && (self.context_summary.is_some()
+                || !open_config.seed_messages().is_empty()
+                || open_config.canonical_message_cursor() != 0)
+        {
+            return Err(LlmError::InvalidRequest {
+                message: "concurrent live context requires an explicitly unseeded projection"
+                    .to_string(),
+            });
+        }
+        if let Some(summary) = &self.context_summary {
+            summary
+                .validate_projection(&self.registration.session_id, open_config)
+                .map_err(|error| LlmError::InvalidRequest {
+                    message: error.to_string(),
+                })?;
+        }
         self.adapter_taken
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| LlmError::InvalidRequest {
@@ -2307,8 +2746,19 @@ impl RealtimeSessionFactory for ExperimentalGptLivePendingChannel {
         // session. Stable voice behavior belongs to the catalog-owned live
         // profile instructions; only canonical conversation messages cross
         // this context seam.
+        let context = match (&self.context_summary, self.concurrent_context) {
+            (Some(summary), false) => GptLiveSeedContext::Summary(summary.clone()),
+            (None, true) => GptLiveSeedContext::Concurrent,
+            (None, false) => GptLiveSeedContext::Canonical(conversation_messages),
+            (Some(_), true) => {
+                return Err(LlmError::InvalidRequest {
+                    message: "concurrent live context cannot also contain an opening summary"
+                        .to_string(),
+                });
+            }
+        };
         let seed = ExperimentalGptLiveInitialSeed {
-            context: GptLiveSeedContext::Canonical(conversation_messages),
+            context,
             canonical_seed_cursor: open_config.canonical_message_cursor(),
             _projection_lease: projection_lease,
         };
@@ -2353,6 +2803,11 @@ fn experimental_gpt_live_realtime_capabilities() -> RealtimeCapabilities {
 }
 
 struct ExperimentalGptLiveDeferredAdapter {
+    context_observation_recorder: std::sync::OnceLock<
+        Arc<crate::session_runtime::live_summary::LiveContextObservationRecorder>,
+    >,
+    turn_context_observations:
+        std::sync::Mutex<HashMap<String, meerkat_core::LiveContextObservationId>>,
     identity: meerkat_core::SessionLlmIdentity,
     status: std::sync::Mutex<LiveAdapterStatus>,
     // The provider reader must never await the transcript consumer before it
@@ -2367,11 +2822,21 @@ struct ExperimentalGptLiveDeferredAdapter {
     drain: std::sync::Mutex<Option<Arc<ExperimentalGptLiveDrain>>>,
     closed: AtomicBool,
     closed_notify: Notify,
+    /// The provider reported a user turn that has not finished yet. Spoken
+    /// owner context (commentary, delegation results) waits for it to end so
+    /// the assistant never talks over the user; the provider's own user turn
+    /// boundaries are the only evidence used.
+    user_turn_open: AtomicBool,
+    user_turn_changed: Notify,
     snapshot_cuts: bool,
+    playback_policy: PublicGptLivePlaybackPolicy,
 }
 
 enum ExperimentalGptLiveAdapterIngress {
-    Provider(LiveSidebandObservation),
+    Provider {
+        observation: LiveSidebandObservation,
+        context_observation_id: Option<meerkat_core::LiveContextObservationId>,
+    },
     SnapshotCut {
         interaction_id: meerkat_core::InteractionId,
         item_id: String,
@@ -2381,6 +2846,7 @@ enum ExperimentalGptLiveAdapterIngress {
 }
 
 struct PendingExperimentalGptLivePlayback {
+    context_observation_id: Option<meerkat_core::LiveContextObservationId>,
     provider_turn_ref: String,
     response_id: String,
     stop_reason: StopReason,
@@ -2394,10 +2860,25 @@ struct PendingExperimentalGptLivePlayback {
     next_segment: Option<u64>,
 }
 
+fn with_live_context_observation(
+    observation: LiveAdapterObservation,
+    observation_id: Option<meerkat_core::LiveContextObservationId>,
+) -> LiveAdapterObservation {
+    match observation_id {
+        Some(observation_id) => LiveAdapterObservation::WithContextObservation {
+            observation_id,
+            observation: Box::new(observation),
+        },
+        None => observation,
+    }
+}
+
 impl ExperimentalGptLiveDeferredAdapter {
     fn new(identity: meerkat_core::SessionLlmIdentity) -> Self {
         let (observation_tx, observation_rx) = mpsc::unbounded_channel();
         Self {
+            context_observation_recorder: std::sync::OnceLock::new(),
+            turn_context_observations: std::sync::Mutex::new(HashMap::new()),
             identity,
             status: std::sync::Mutex::new(LiveAdapterStatus::Opening),
             observation_tx,
@@ -2408,19 +2889,81 @@ impl ExperimentalGptLiveDeferredAdapter {
             drain: std::sync::Mutex::new(None),
             closed: AtomicBool::new(false),
             closed_notify: Notify::new(),
+            user_turn_open: AtomicBool::new(false),
+            user_turn_changed: Notify::new(),
             snapshot_cuts: false,
+            playback_policy: PublicGptLivePlaybackPolicy::default(),
         }
     }
 
+    #[cfg(any(test, feature = "experimental-gpt-live-gate0-harness"))]
     fn push_observation(
         &self,
         observation: LiveSidebandObservation,
+    ) -> Result<(), ProviderWebrtcBrokerError> {
+        self.push_observation_with_context(observation, None)
+    }
+
+    /// Hold spoken owner context while the provider reports an open user
+    /// turn, so the assistant does not talk over the user. Returns when the
+    /// turn ends, the adapter closes, or `bound` elapses; the bound keeps a
+    /// user turn the provider never closes from stalling context forever.
+    async fn wait_for_quiet_user(&self, bound: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + bound;
+        loop {
+            if !self.user_turn_open.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            let changed = self.user_turn_changed.notified();
+            let closed = self.closed_notify.notified();
+            tokio::select! {
+                () = changed => {}
+                () = closed => {}
+                () = tokio::time::sleep_until(deadline) => return,
+            }
+        }
+    }
+
+    /// Whether the next snapshot delta of this provider turn opens a new
+    /// playback segment that still needs its own observation ordinal. The
+    /// provider keeps one assistant turn open across many responses, so the
+    /// segment, not the turn, is the unit whose position relative to the
+    /// bootstrap acknowledgement cut decides reassertion.
+    fn snapshot_delta_opens_segment(&self, adapter_key: &str) -> bool {
+        let Ok(playback) = self.playback_by_item.lock() else {
+            return false;
+        };
+        playback
+            .values()
+            .find(|pending| pending.provider_turn_ref == adapter_key)
+            .is_some_and(|pending| {
+                pending.next_segment.is_some()
+                    || (!pending.output_started_forwarded
+                        && pending.context_observation_id.is_none())
+            })
+    }
+
+    /// Forget a finished turn's admitted ordinal; the pending playback (if
+    /// any) already carries it, so the by-turn map stays bounded by open turns.
+    fn release_turn_context_observation(&self, adapter_key: &str) {
+        if let Ok(mut observations) = self.turn_context_observations.lock() {
+            observations.remove(adapter_key);
+        }
+    }
+
+    fn push_observation_with_context(
+        &self,
+        observation: LiveSidebandObservation,
+        context_observation_id: Option<meerkat_core::LiveContextObservationId>,
     ) -> Result<(), ProviderWebrtcBrokerError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(ProviderWebrtcBrokerError::Rejected);
         }
         self.observation_tx
-            .send(ExperimentalGptLiveAdapterIngress::Provider(observation))
+            .send(ExperimentalGptLiveAdapterIngress::Provider {
+                observation,
+                context_observation_id,
+            })
             .map_err(|_| ProviderWebrtcBrokerError::Unavailable)
     }
 
@@ -2504,18 +3047,21 @@ impl ExperimentalGptLiveDeferredAdapter {
             ),
         };
         pending.cut_captured = true;
-        Ok(LiveAdapterObservation::AssistantPlaybackTerminalObserved {
-            interaction_id,
-            provider_item_id: item_id,
-            content_index,
-            response_id: pending.response_id.clone(),
-            evidence,
-            stop_reason: pending.stop_reason,
-            usage: pending.usage.clone(),
-        })
+        Ok(with_live_context_observation(
+            LiveAdapterObservation::AssistantPlaybackTerminalObserved {
+                interaction_id,
+                provider_item_id: item_id,
+                content_index,
+                response_id: pending.response_id.clone(),
+                evidence,
+                stop_reason: pending.stop_reason,
+                usage: pending.usage.clone(),
+            },
+            pending.context_observation_id.clone(),
+        ))
     }
 
-    fn snapshot_cut_turn(&self, item_id: &str) -> Option<String> {
+    fn released_segment_turn(&self, item_id: &str) -> Option<String> {
         self.playback_by_item
             .lock()
             .ok()?
@@ -2524,15 +3070,56 @@ impl ExperimentalGptLiveDeferredAdapter {
             .map(|pending| pending.provider_turn_ref.clone())
     }
 
-    fn settle_snapshot_cut(&self, item_id: &str, next_segment: u64) -> Result<(), String> {
+    fn capture_unmeasured_segment(
+        &self,
+        handle: &meerkat_runtime::meerkat_machine::LiveAssistantOutputHandle,
+    ) -> Result<LiveAdapterObservation, String> {
+        if self.playback_policy != PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured {
+            return Err("provider-managed output release was not enabled".to_string());
+        }
+        let (response_id, item_id, content_index) = handle
+            .__target()
+            .ok_or("unmeasured segment has no generated output target")?;
         let mut playback = self
             .playback_by_item
             .lock()
-            .map_err(|_| "playback snapshot custody is unavailable")?;
+            .map_err(|_| "playback observation custody is unavailable")?;
+        let pending = playback
+            .get_mut(&item_id)
+            .filter(|pending| {
+                pending.response_id == response_id
+                    && pending.provider_turn_ref == handle.__assistant_turn_ref()
+                    && pending.output_started_forwarded
+                    && !pending.snapshot.is_empty()
+            })
+            .ok_or("unmeasured segment has no exact observed output")?;
+        pending.cut_captured = true;
+        pending.terminal_forwarded = true;
+        Ok(with_live_context_observation(
+            LiveAdapterObservation::AssistantPlaybackTerminalObserved {
+                interaction_id: handle.interaction_id(),
+                provider_item_id: item_id,
+                content_index,
+                response_id,
+                evidence: meerkat_core::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(
+                    pending.snapshot.clone(),
+                ),
+                stop_reason: pending.stop_reason,
+                usage: pending.usage.clone(),
+            },
+            pending.context_observation_id.clone(),
+        ))
+    }
+
+    fn settle_output_segment(&self, item_id: &str, next_segment: u64) -> Result<(), String> {
+        let mut playback = self
+            .playback_by_item
+            .lock()
+            .map_err(|_| "playback segment custody is unavailable")?;
         let pending = playback
             .get_mut(item_id)
             .filter(|pending| pending.cut_captured)
-            .ok_or("settled snapshot cut has no exact output")?;
+            .ok_or("settled segment has no exact output")?;
         pending.next_segment = Some(next_segment);
         if pending.final_forwarded {
             playback.remove(item_id);
@@ -2544,6 +3131,7 @@ impl ExperimentalGptLiveDeferredAdapter {
         &self,
         turn: &LiveSidebandTurnRef,
         delta: &str,
+        context_observation_id: Option<meerkat_core::LiveContextObservationId>,
     ) -> Result<Option<LiveAdapterObservation>, String> {
         let mut playback = self
             .playback_by_item
@@ -2561,7 +3149,9 @@ impl ExperimentalGptLiveDeferredAdapter {
             let mut pending = playback
                 .remove(&item_id)
                 .ok_or("prior snapshot segment disappeared")?;
-            pending.committed_prefix.push_str(&pending.snapshot);
+            if self.playback_policy == PublicGptLivePlaybackPolicy::CallerConfirmedSnapshots {
+                pending.committed_prefix.push_str(&pending.snapshot);
+            }
             pending.snapshot.clear();
             pending.response_id = format!("{}:segment:{segment}", Self::local_response_id(turn));
             pending.final_forwarded = false;
@@ -2569,6 +3159,11 @@ impl ExperimentalGptLiveDeferredAdapter {
             pending.output_started_forwarded = false;
             pending.cut_captured = false;
             pending.next_segment = None;
+            // A new segment is a new observation: it takes the ordinal
+            // admitted for the delta that opens it, never the previous
+            // segment's, so speech after the acknowledgement cut is never
+            // classified by a position minted before it.
+            pending.context_observation_id = None;
             let next_item = format!("{}:segment:{segment}", Self::local_item_id(turn));
             playback.insert(next_item.clone(), pending);
             next_item
@@ -2583,13 +3178,19 @@ impl ExperimentalGptLiveDeferredAdapter {
         }
         pending.snapshot.push_str(delta);
         if !pending.output_started_forwarded && !pending.snapshot.is_empty() {
+            if pending.context_observation_id.is_none() {
+                pending.context_observation_id = context_observation_id;
+            }
             pending.output_started_forwarded = true;
-            return Ok(Some(LiveAdapterObservation::AssistantOutputStarted {
-                provider_turn_ref: pending.provider_turn_ref.clone(),
-                response_id: pending.response_id.clone(),
-                provider_item_id: item_id,
-                content_index: 0,
-            }));
+            return Ok(Some(with_live_context_observation(
+                LiveAdapterObservation::AssistantOutputStarted {
+                    provider_turn_ref: pending.provider_turn_ref.clone(),
+                    response_id: pending.response_id.clone(),
+                    provider_item_id: item_id,
+                    content_index: 0,
+                },
+                pending.context_observation_id.clone(),
+            )));
         }
         Ok(None)
     }
@@ -2598,6 +3199,7 @@ impl ExperimentalGptLiveDeferredAdapter {
         &self,
         turn: &LiveSidebandTurnRef,
         transcript: &str,
+        context_observation_id: Option<meerkat_core::LiveContextObservationId>,
     ) -> Result<Option<LiveAdapterObservation>, String> {
         let mut playback = self
             .playback_by_item
@@ -2622,8 +3224,11 @@ impl ExperimentalGptLiveDeferredAdapter {
                 return Ok(None);
             }
             drop(playback);
-            let started = self.lower_snapshot_delta(turn, suffix)?;
-            if let Some(final_observation) = self.lower_snapshot_final(turn, transcript)? {
+            let started =
+                self.lower_snapshot_delta(turn, suffix, context_observation_id.clone())?;
+            if let Some(final_observation) =
+                self.lower_snapshot_final(turn, transcript, context_observation_id)?
+            {
                 self.queue_local_observation(final_observation);
             }
             return Ok(started);
@@ -2636,15 +3241,21 @@ impl ExperimentalGptLiveDeferredAdapter {
             .ok_or("assistant final conflicts with committed playback prefix")?;
         pending.snapshot = suffix.to_string();
         pending.final_forwarded = true;
-        let final_observation = LiveAdapterObservation::AssistantTranscriptFinal {
-            provider_item_id: item_id.clone(),
-            previous_item_id: None,
-            content_index: Some(0),
-            response_id: Some(pending.response_id.clone()),
-            text: suffix.to_string(),
-            stop_reason: pending.stop_reason,
-            usage: Usage::default(),
-        };
+        if !pending.output_started_forwarded && pending.context_observation_id.is_none() {
+            pending.context_observation_id = context_observation_id;
+        }
+        let final_observation = with_live_context_observation(
+            LiveAdapterObservation::AssistantTranscriptFinal {
+                provider_item_id: item_id.clone(),
+                previous_item_id: None,
+                content_index: Some(0),
+                response_id: Some(pending.response_id.clone()),
+                text: suffix.to_string(),
+                stop_reason: pending.stop_reason,
+                usage: Usage::default(),
+            },
+            pending.context_observation_id.clone(),
+        );
         if !pending.output_started_forwarded {
             if suffix.is_empty() {
                 playback.remove(&item_id);
@@ -2652,12 +3263,15 @@ impl ExperimentalGptLiveDeferredAdapter {
             }
             pending.output_started_forwarded = true;
             self.queue_local_observation(final_observation);
-            return Ok(Some(LiveAdapterObservation::AssistantOutputStarted {
-                provider_turn_ref: pending.provider_turn_ref.clone(),
-                response_id: pending.response_id.clone(),
-                provider_item_id: item_id,
-                content_index: 0,
-            }));
+            return Ok(Some(with_live_context_observation(
+                LiveAdapterObservation::AssistantOutputStarted {
+                    provider_turn_ref: pending.provider_turn_ref.clone(),
+                    response_id: pending.response_id.clone(),
+                    provider_item_id: item_id,
+                    content_index: 0,
+                },
+                pending.context_observation_id.clone(),
+            )));
         }
         Ok(Some(final_observation))
     }
@@ -2670,26 +3284,47 @@ impl ExperimentalGptLiveDeferredAdapter {
         content_index: u32,
         evidence: meerkat_core::LiveAssistantPlaybackEvidence,
     ) {
-        self.queue_local_observation(LiveAdapterObservation::AssistantPlaybackTerminalObserved {
-            interaction_id,
-            provider_item_id: item_id,
-            content_index,
-            response_id: playback.response_id.clone(),
-            evidence,
-            stop_reason: playback.stop_reason,
-            usage: playback.usage.clone(),
-        });
+        self.queue_local_observation(with_live_context_observation(
+            LiveAdapterObservation::AssistantPlaybackTerminalObserved {
+                interaction_id,
+                provider_item_id: item_id,
+                content_index,
+                response_id: playback.response_id.clone(),
+                evidence,
+                stop_reason: playback.stop_reason,
+                usage: playback.usage.clone(),
+            },
+            playback.context_observation_id.clone(),
+        ));
     }
 
     fn lower_observation(
         &self,
         observation: LiveSidebandObservation,
+        context_observation_id: Option<meerkat_core::LiveContextObservationId>,
     ) -> Option<LiveAdapterObservation> {
         match observation.into_kind() {
+            LiveSidebandObservationKind::TurnFinished {
+                turn,
+                role: LiveSidebandTurnRole::Assistant,
+                ..
+            } if self.playback_policy == PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured => {
+                // A local grouping boundary is not provider-final speech.
+                // Each observed segment already released its bookkeeping.
+                let Ok(mut playback) = self.playback_by_item.lock() else {
+                    return Some(LiveAdapterObservation::Error {
+                        code: LiveAdapterErrorCode::InternalError,
+                        message: "playback observation custody is unavailable".to_string(),
+                    });
+                };
+                playback.retain(|_, pending| pending.provider_turn_ref != turn.adapter_key());
+                self.release_turn_context_observation(turn.adapter_key());
+                None
+            }
             LiveSidebandObservationKind::TurnSnapshotDelta { turn, delta }
                 if self.snapshot_cuts =>
             {
-                self.lower_snapshot_delta(&turn, &delta)
+                self.lower_snapshot_delta(&turn, &delta, context_observation_id)
                     .unwrap_or_else(|message| {
                         Some(LiveAdapterObservation::Error {
                             code: LiveAdapterErrorCode::ProviderError,
@@ -2701,14 +3336,17 @@ impl ExperimentalGptLiveDeferredAdapter {
                 turn,
                 role: LiveSidebandTurnRole::Assistant,
                 transcript,
-            } if self.snapshot_cuts => self
-                .lower_snapshot_final(&turn, &transcript)
-                .unwrap_or_else(|message| {
-                    Some(LiveAdapterObservation::Error {
-                        code: LiveAdapterErrorCode::ProviderError,
-                        message,
+            } if self.snapshot_cuts => {
+                // The pending playback already inherited the turn's ordinal.
+                self.release_turn_context_observation(turn.adapter_key());
+                self.lower_snapshot_final(&turn, &transcript, context_observation_id)
+                    .unwrap_or_else(|message| {
+                        Some(LiveAdapterObservation::Error {
+                            code: LiveAdapterErrorCode::ProviderError,
+                            message,
+                        })
                     })
-                }),
+            }
             LiveSidebandObservationKind::SessionReady => {
                 if !self.closed.load(Ordering::Acquire) {
                     self.replace_status(LiveAdapterStatus::Ready);
@@ -2717,12 +3355,37 @@ impl ExperimentalGptLiveDeferredAdapter {
             }
             LiveSidebandObservationKind::TurnStarted {
                 turn,
+                role: LiveSidebandTurnRole::User,
+            } => {
+                self.user_turn_open.store(true, Ordering::Release);
+                self.user_turn_changed.notify_waiters();
+                if let Some(observation_id) = context_observation_id {
+                    let Ok(mut observations) = self.turn_context_observations.lock() else {
+                        return Some(LiveAdapterObservation::Error {
+                            code: LiveAdapterErrorCode::InternalError,
+                            message: "user source-observation custody is unavailable".into(),
+                        });
+                    };
+                    observations.insert(turn.adapter_key().to_string(), observation_id);
+                }
+                None
+            }
+            LiveSidebandObservationKind::TurnStarted {
+                turn,
                 role: LiveSidebandTurnRole::Assistant,
             } => {
                 let response_id = Self::local_response_id(&turn);
                 let item_id = Self::local_item_id(&turn);
                 let provider_turn_ref = turn.adapter_key().to_string();
+                if let Some(observation_id) = context_observation_id.clone()
+                    && let Ok(mut observations) = self.turn_context_observations.lock()
+                {
+                    // One admitted ordinal per provider turn: later events of
+                    // this turn (deltas, final) inherit it.
+                    observations.insert(provider_turn_ref.clone(), observation_id);
+                }
                 let pending = PendingExperimentalGptLivePlayback {
+                    context_observation_id: context_observation_id.clone(),
                     provider_turn_ref: provider_turn_ref.clone(),
                     response_id: response_id.clone(),
                     stop_reason: StopReason::EndTurn,
@@ -2755,27 +3418,46 @@ impl ExperimentalGptLiveDeferredAdapter {
                 if self.snapshot_cuts {
                     return None;
                 }
-                Some(LiveAdapterObservation::AssistantOutputStarted {
-                    provider_turn_ref,
-                    response_id,
-                    provider_item_id: item_id,
-                    content_index: 0,
-                })
+                Some(with_live_context_observation(
+                    LiveAdapterObservation::AssistantOutputStarted {
+                        provider_turn_ref,
+                        response_id,
+                        provider_item_id: item_id,
+                        content_index: 0,
+                    },
+                    context_observation_id,
+                ))
             }
             LiveSidebandObservationKind::TurnFinished {
                 turn,
                 role,
                 transcript,
             } => match role {
-                LiveSidebandTurnRole::User => Some(LiveAdapterObservation::UserTranscriptFinal {
-                    provider_item_id: Some(format!(
-                        "experimental-gpt-live-user-item:{}",
-                        turn.adapter_key()
-                    )),
-                    previous_item_id: None,
-                    content_index: Some(0),
-                    text: transcript,
-                }),
+                LiveSidebandTurnRole::User => {
+                    self.user_turn_open.store(false, Ordering::Release);
+                    self.user_turn_changed.notify_waiters();
+                    let Ok(mut observations) = self.turn_context_observations.lock() else {
+                        return Some(LiveAdapterObservation::Error {
+                            code: LiveAdapterErrorCode::InternalError,
+                            message: "user source-observation custody is unavailable".into(),
+                        });
+                    };
+                    let source = observations
+                        .remove(turn.adapter_key())
+                        .or(context_observation_id);
+                    Some(with_live_context_observation(
+                        LiveAdapterObservation::UserTranscriptFinal {
+                            provider_item_id: Some(format!(
+                                "experimental-gpt-live-user-item:{}",
+                                turn.adapter_key()
+                            )),
+                            previous_item_id: None,
+                            content_index: Some(0),
+                            text: transcript,
+                        },
+                        source,
+                    ))
+                }
                 LiveSidebandTurnRole::Assistant => {
                     let response_id = Self::local_response_id(&turn);
                     let item_id = Self::local_item_id(&turn);
@@ -2802,15 +3484,24 @@ impl ExperimentalGptLiveDeferredAdapter {
                                 .to_string(),
                         });
                     };
-                    Some(LiveAdapterObservation::AssistantTranscriptFinal {
-                        provider_item_id: item_id,
-                        previous_item_id: None,
-                        content_index: Some(0),
-                        response_id: Some(response_id),
-                        text: transcript,
-                        stop_reason: StopReason::EndTurn,
-                        usage: Usage::default(),
-                    })
+                    let source = self
+                        .turn_context_observations
+                        .lock()
+                        .ok()
+                        .and_then(|mut observations| observations.remove(turn.adapter_key()))
+                        .or(context_observation_id);
+                    Some(with_live_context_observation(
+                        LiveAdapterObservation::AssistantTranscriptFinal {
+                            provider_item_id: item_id,
+                            previous_item_id: None,
+                            content_index: Some(0),
+                            response_id: Some(response_id),
+                            text: transcript,
+                            stop_reason: StopReason::EndTurn,
+                            usage: Usage::default(),
+                        },
+                        source,
+                    ))
                 }
                 LiveSidebandTurnRole::Unknown => None,
             },
@@ -2837,6 +3528,19 @@ impl ExperimentalGptLiveDeferredAdapter {
 #[async_trait]
 impl LiveAdapter for ExperimentalGptLiveDeferredAdapter {
     async fn send_command(&self, command: LiveAdapterCommand) -> Result<(), LiveAdapterError> {
+        if self.playback_policy == PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured
+            && matches!(
+                command,
+                LiveAdapterCommand::CompleteAssistantPlayback { .. }
+                    | LiveAdapterCommand::TruncateAssistantOutput { .. }
+            )
+        {
+            return Err(LiveAdapterError::ProviderError {
+                code: LiveAdapterErrorCode::InternalError,
+                message: "provider-managed observation mode has no measured playback report"
+                    .to_string(),
+            });
+        }
         if self.closed.load(Ordering::Acquire) && !matches!(command, LiveAdapterCommand::Close) {
             return Err(LiveAdapterError::NotReady {
                 status: self.current_status(),
@@ -3040,9 +3744,10 @@ impl LiveAdapter for ExperimentalGptLiveDeferredAdapter {
                 return Ok(None);
             };
             let lowered = match observation {
-                ExperimentalGptLiveAdapterIngress::Provider(observation) => {
-                    self.lower_observation(observation)
-                }
+                ExperimentalGptLiveAdapterIngress::Provider {
+                    observation,
+                    context_observation_id,
+                } => self.lower_observation(observation, context_observation_id),
                 ExperimentalGptLiveAdapterIngress::SnapshotCut {
                     interaction_id,
                     item_id,
@@ -3075,9 +3780,7 @@ impl LiveAdapter for ExperimentalGptLiveDeferredAdapter {
             })?;
         if let Some(drain) = drain.as_ref()
             && (!drain.requested.load(Ordering::Acquire)
-                || !drain.close_sent.load(Ordering::Acquire)
-                || (!drain.unactivated_closed.load(Ordering::Acquire)
-                    && drain.result() != Some(Ok(()))))
+                || !drain.physically_retired.load(Ordering::Acquire))
         {
             return Err(LiveAdapterError::ProviderError {
                 code: LiveAdapterErrorCode::InternalError,
@@ -3160,6 +3863,48 @@ impl ExperimentalGptLivePreparedOpen {
 impl ExperimentalLivePendingOpen for ExperimentalGptLivePreparedOpen {
     fn apply_execution_identity(&self, projection: &mut RealtimeSessionOpenProjection) {
         self.pending.apply_execution_identity(projection);
+    }
+
+    fn set_context_summary(
+        &mut self,
+        summary: crate::session_runtime::live_summary::LiveContextSummary,
+    ) -> Result<(), crate::session_runtime::live_summary::LiveContextSummaryError> {
+        if !self.pending.supports_context_summary || self.pending.concurrent_context {
+            return Err(crate::session_runtime::live_summary::LiveContextSummaryError::Unsupported);
+        }
+        self.pending.context_summary = Some(summary);
+        Ok(())
+    }
+
+    fn enable_concurrent_context(
+        &mut self,
+    ) -> Result<(), crate::session_runtime::live_summary::LiveContextSummaryError> {
+        if !self.pending.supports_context_summary || self.pending.context_summary.is_some() {
+            return Err(crate::session_runtime::live_summary::LiveContextSummaryError::Unsupported);
+        }
+        self.pending.concurrent_context = true;
+        Ok(())
+    }
+
+    fn retain_context_preparation_job(
+        &mut self,
+        job: crate::session_runtime::live_summary::LiveContextSummaryJob,
+    ) -> Result<(), crate::session_runtime::live_summary::LiveContextSummaryError> {
+        if !self.pending.concurrent_context
+            || self.pending.registration.context_preparation_job.is_some()
+        {
+            return Err(crate::session_runtime::live_summary::LiveContextSummaryError::ConflictingProjection);
+        }
+        self.pending
+            .registration
+            .adapter
+            .context_observation_recorder
+            .set(job.observation_recorder())
+            .map_err(|_| {
+                crate::session_runtime::live_summary::LiveContextSummaryError::ConflictingProjection
+            })?;
+        self.pending.registration.context_preparation_job = Some(job);
+        Ok(())
     }
 
     fn session_factory(&self) -> &dyn RealtimeSessionFactory {
@@ -3253,7 +3998,7 @@ impl ExperimentalGptLiveWebrtcTransport {
     /// produced the channel that will be published to the caller.
     pub async fn bind_opened_channel(
         &self,
-        pending: ExperimentalGptLivePendingChannel,
+        mut pending: ExperimentalGptLivePendingChannel,
         opened: &LiveOpenResult,
     ) -> Result<(), ExperimentalGptLiveBridgeError> {
         if !matches!(&opened.transport, WireLiveTransportBootstrap::Webrtc { .. }) {
@@ -3271,8 +4016,33 @@ impl ExperimentalGptLiveWebrtcTransport {
         {
             return Err(ExperimentalGptLiveBridgeError::SessionAlreadyBound);
         }
+        pending.registration.context_summary_provenance = pending
+            .context_summary
+            .as_ref()
+            .map(crate::session_runtime::live_summary::LiveContextSummary::provenance);
         registrations.insert(channel_id, pending.registration);
         Ok(())
+    }
+
+    /// Read-only provenance for the exact registered channel/session pair.
+    /// Unbinding removes it; this is never used as lifecycle authority.
+    pub async fn bound_context_summary(
+        &self,
+        channel_id: &meerkat_live::LiveChannelId,
+        session_id: &meerkat_core::SessionId,
+    ) -> Option<crate::session_runtime::live_summary::LiveContextSummaryProvenance> {
+        self.registered_by_channel
+            .lock()
+            .await
+            .get(channel_id)
+            .filter(|entry| &entry.session_id == session_id)
+            .and_then(|entry| {
+                entry.context_summary_provenance.clone().or_else(|| {
+                    entry.context_preparation_job.as_ref().and_then(
+                        crate::session_runtime::live_summary::LiveContextSummaryJob::provenance,
+                    )
+                })
+            })
     }
 
     async fn bound_execution_profile_id(
@@ -3324,15 +4094,16 @@ impl ExperimentalGptLiveWebrtcTransport {
         channel_id: &meerkat_live::LiveChannelId,
         session_id: &meerkat_core::SessionId,
     ) -> Result<ExperimentalLivePhysicalClose, LiveWebrtcError> {
-        let owns_binding = self
+        let adapter = self
             .registered_by_channel
             .lock()
             .await
             .get(channel_id)
-            .is_some_and(|registration| registration.session_id == *session_id);
-        if !owns_binding {
+            .filter(|registration| registration.session_id == *session_id)
+            .map(|registration| Arc::clone(&registration.adapter));
+        let Some(adapter) = adapter else {
             return Ok(ExperimentalLivePhysicalClose::NotBound);
-        }
+        };
         let provider_binding = self
             .active_by_session
             .lock()
@@ -3344,6 +4115,30 @@ impl ExperimentalGptLiveWebrtcTransport {
             self.close_exact(&provider_binding, None)
                 .await
                 .map_err(provider_signaling_error)?;
+        }
+        let drain = adapter
+            .drain
+            .lock()
+            .map_err(|_| {
+                provider_signaling_error(ProviderWebrtcSignalingError::SidebandClose(
+                    ProviderWebrtcBrokerError::Unavailable,
+                ))
+            })?
+            .clone();
+        if let Some(drain) = drain.as_ref() {
+            drain.await_physical_retirement().await.map_err(|error| {
+                provider_signaling_error(ProviderWebrtcSignalingError::SidebandClose(error))
+            })?;
+            let terminal = drain.terminal.lock().map_err(|_| {
+                provider_signaling_error(ProviderWebrtcSignalingError::SidebandClose(
+                    ProviderWebrtcBrokerError::Unavailable,
+                ))
+            })?;
+            if let Some(receipt) = terminal.as_ref() {
+                return Ok(ExperimentalLivePhysicalClose::Terminated(Arc::clone(
+                    receipt,
+                )));
+            }
         }
         Ok(ExperimentalLivePhysicalClose::Closed)
     }
@@ -3433,13 +4228,115 @@ impl ExperimentalGptLiveWebrtcTransport {
         text: impl Into<String>,
     ) -> Result<ExperimentalGptLiveAppendDispatch, ExperimentalGptLiveBridgeError> {
         let text = require_context_text(text)?;
+        let kind = authority.kind();
         let binding = self.current_binding_for_append(&authority).await?;
         let (authority, sideband) = authority
             .into_sideband_append_authority(binding)
             .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
-        let command = LiveSidebandCommand::append_session_context(sideband, text)
-            .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+        let command = match kind {
+            // A typed row is conversational input the provider has not heard.
+            // It is voiced as commentary: measured against gpt-live-1, the
+            // model keeps the user's later speech authoritative over a row
+            // it voiced itself, whereas the same row delivered as quiet
+            // knowledge became the newest user fact and displaced it.
+            meerkat_runtime::live_execution::LiveContextAppendKind::Ordinary => {
+                LiveSidebandCommand::append_session_context(sideband, text)
+            }
+            meerkat_runtime::live_execution::LiveContextAppendKind::CausalReassertion => {
+                // Speech the provider heard while the summary was being
+                // prepared is replayed quietly after the summary so the model
+                // keeps the live order of facts. Measured against gpt-live-1:
+                // the thinking lane injects promptly (its acknowledgement can
+                // wait for a turn boundary, which the close bound covers) and
+                // does not steer the model, unlike the instructions lane.
+                LiveSidebandCommand::append_thinking_context(sideband, text)
+            }
+            meerkat_runtime::live_execution::LiveContextAppendKind::HistoryBootstrap => {
+                return Err(ExperimentalGptLiveBridgeError::ContextAuthorityRejected);
+            }
+        }
+        .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
         self.dispatch_generated_append(authority, command).await
+    }
+
+    async fn append_bootstrap_context(
+        &self,
+        authority: LiveContextBootstrapAppendAuthority,
+        text: String,
+    ) -> Result<
+        (
+            LiveContextBootstrapAppendAuthority,
+            meerkat_core::LiveAppendDeliveryOutcome,
+        ),
+        ExperimentalGptLiveBridgeError,
+    > {
+        let text = require_context_text(text)?;
+        let observation_recorder = self
+            .registered_by_channel
+            .lock()
+            .await
+            .get(authority.channel_id())
+            .filter(|registration| &registration.session_id == authority.session_id())
+            .and_then(|registration| {
+                registration
+                    .adapter
+                    .context_observation_recorder
+                    .get()
+                    .cloned()
+            })
+            .ok_or(ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+        let binding = self
+            .active_binding(authority.session_id())
+            .await
+            .filter(|binding| binding.channel_id() == authority.channel_id())
+            .ok_or(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable)?;
+        let (authority, sideband) = authority
+            .into_sideband_append_authority(binding, &text)
+            .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+        // The summary travels on the trusted instructions lane: it is the one
+        // piece of history the model did not hear on this call, and the quiet
+        // thinking lane is not treated by the provider as recallable
+        // knowledge. The generated authority is bound to the exact summary
+        // digest above; the framing is wire presentation and keeps the
+        // summary subordinate to what was said live.
+        let wire_text = format!("{LIVE_CONTEXT_BOOTSTRAP_FRAMING}\n{text}");
+        let command = LiveSidebandCommand::append_instructions_context(sideband, wire_text)
+            .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+        let attempt = command.attempt();
+        let (resolution_tx, resolution_rx) = oneshot::channel();
+        self.pending_deliveries.lock().await.insert(
+            attempt.clone(),
+            PendingExperimentalGptLiveDelivery::BootstrapAppend {
+                authority,
+                observation_recorder,
+                resolution_tx,
+            },
+        );
+        let outcome = match self.send_authorized_command(command).await {
+            Ok(LiveSidebandCommandDelivery::Accepted) => {
+                return resolution_rx
+                    .await
+                    .map_err(|_| ExperimentalGptLiveBridgeError::ActiveBindingUnavailable);
+            }
+            Err(ProviderWebrtcBrokerError::Rejected) => {
+                meerkat_core::LiveAppendDeliveryOutcome::Rejected
+            }
+            Ok(LiveSidebandCommandDelivery::AmbiguousTerminal) | Err(_) => {
+                meerkat_core::LiveAppendDeliveryOutcome::Ambiguous
+            }
+        };
+        let pending = self.pending_deliveries.lock().await.remove(&attempt);
+        let Some(pending) = pending else {
+            // The observation actor can settle the exact receipt after the
+            // correlation commit but before the command returns.
+            return resolution_rx
+                .await
+                .map_err(|_| ExperimentalGptLiveBridgeError::ActiveBindingUnavailable);
+        };
+        let PendingExperimentalGptLiveDelivery::BootstrapAppend { authority, .. } = pending else {
+            return Err(ExperimentalGptLiveBridgeError::ContextAuthorityRejected);
+        };
+        Ok((authority, outcome))
     }
 
     /// Deliver executor result context under its distinct one-use generated
@@ -3474,6 +4371,21 @@ impl ExperimentalGptLiveWebrtcTransport {
         command: LiveSidebandCommand,
     ) -> Result<ExperimentalGptLiveAppendDispatch, ExperimentalGptLiveBridgeError> {
         let attempt = command.attempt();
+        // Commentary and delegation results are spoken by the provider as
+        // soon as they land; never start one while the user is speaking.
+        if command.is_spoken() {
+            let adapter = self
+                .registered_by_channel
+                .lock()
+                .await
+                .get(command.binding().channel_id())
+                .map(|registration| Arc::clone(&registration.adapter));
+            if let Some(adapter) = adapter {
+                adapter
+                    .wait_for_quiet_user(SPOKEN_CONTEXT_USER_TURN_BOUND)
+                    .await;
+            }
+        }
         let (resolution_tx, resolution_rx) = oneshot::channel();
         self.pending_deliveries.lock().await.insert(
             attempt.clone(),
@@ -3499,12 +4411,13 @@ impl ExperimentalGptLiveWebrtcTransport {
             ) => meerkat_core::LiveAppendDeliveryOutcome::Ambiguous,
             Err(_) => meerkat_core::LiveAppendDeliveryOutcome::Ambiguous,
         };
-        let pending = self
-            .pending_deliveries
-            .lock()
-            .await
-            .remove(&attempt)
-            .ok_or(ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+        let pending = self.pending_deliveries.lock().await.remove(&attempt);
+        let Some(pending) = pending else {
+            return resolution_rx
+                .await
+                .map(ExperimentalGptLiveAppendDispatch::Resolved)
+                .map_err(|_| ExperimentalGptLiveBridgeError::ActiveBindingUnavailable);
+        };
         let PendingExperimentalGptLiveDelivery::CanonicalAppend {
             authority,
             resolution_tx,
@@ -3551,12 +4464,13 @@ impl ExperimentalGptLiveWebrtcTransport {
             }
             Err(_) => LiveDelegationResultDeliveryObservation::Ambiguous,
         };
-        let pending = self
-            .pending_deliveries
-            .lock()
-            .await
-            .remove(&attempt)
-            .ok_or(ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+        let pending = self.pending_deliveries.lock().await.remove(&attempt);
+        let Some(pending) = pending else {
+            return resolution_rx
+                .await
+                .map(ExperimentalGptLiveResultDeliveryDispatch::Resolved)
+                .map_err(|_| ExperimentalGptLiveBridgeError::ActiveBindingUnavailable);
+        };
         let PendingExperimentalGptLiveDelivery::DelegationResult {
             authority,
             resolution_tx,
@@ -3609,16 +4523,21 @@ impl ExperimentalGptLiveWebrtcTransport {
             Arc::clone(&current.observation_rx)
         };
         let mut receiver = receiver.lock().await;
-        let observation = receiver
+        receiver
             .recv()
             .await
-            .unwrap_or(Err(ProviderWebrtcBrokerError::Unavailable))?;
-        let Some(observation) = observation else {
-            return Ok(None);
-        };
+            .unwrap_or(Err(ProviderWebrtcBrokerError::Unavailable))
+    }
+
+    async fn route_append_delivery(
+        pending_deliveries: &Mutex<
+            HashMap<LiveSidebandAppendAttempt, PendingExperimentalGptLiveDelivery>,
+        >,
+        observation: LiveSidebandObservation,
+    ) -> Result<Option<ExperimentalGptLiveControlObservation>, ProviderWebrtcBrokerError> {
         let observed_delivery = Self::observed_append_delivery(observation.kind());
         if let Some((attempt, outcome)) = observed_delivery {
-            let pending = self.pending_deliveries.lock().await.remove(attempt);
+            let pending = pending_deliveries.lock().await.remove(attempt);
             let Some(pending) = pending else {
                 return if matches!(
                     observation.kind(),
@@ -3633,6 +4552,34 @@ impl ExperimentalGptLiveWebrtcTransport {
                 };
             };
             match pending {
+                PendingExperimentalGptLiveDelivery::BootstrapAppend {
+                    authority,
+                    observation_recorder,
+                    resolution_tx,
+                } => {
+                    let outcome = if outcome
+                        == meerkat_core::LiveAppendDeliveryOutcome::Acknowledged
+                    {
+                        match observation_recorder.record_ack_cut(&authority).await {
+                            Ok(()) => outcome,
+                            Err(error) if authority.cancellation_token().is_cancelled() => {
+                                tracing::debug!(%error, "closed bootstrap rejected late acknowledgement cut");
+                                meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "bootstrap acknowledgement cut failed closed");
+                                meerkat_core::LiveAppendDeliveryOutcome::Ambiguous
+                            }
+                        }
+                    } else {
+                        outcome
+                    };
+                    if let Err((authority, _)) = resolution_tx.send((authority, outcome))
+                        && !authority.cancellation_token().is_cancelled()
+                    {
+                        return Err(ProviderWebrtcBrokerError::ProtocolDrift);
+                    }
+                }
                 PendingExperimentalGptLiveDelivery::CanonicalAppend {
                     authority,
                     resolution_tx,
@@ -3969,6 +4916,7 @@ impl ExperimentalGptLiveWebrtcTransport {
             adapter,
             answer_observation_sequence,
             pump_retirement_tx,
+            Arc::clone(&self.pending_deliveries),
         );
         self.active_by_session
             .lock()
@@ -4009,29 +4957,105 @@ impl ExperimentalGptLiveWebrtcTransport {
             return Ok(false);
         };
         drain.retry_projection();
-        drain
-            .request_close(sideband)
-            .await
-            .map_err(ProviderWebrtcSignalingError::SidebandClose)?;
-        if activated {
+        let (outcome, close_result) = if activated && sideband.quiet_append_pending().await {
+            // A quiet append is awaiting injection. The provider injects it
+            // only at an input frame stall and withholds `session.closed`
+            // until then; with media flowing the drain cannot settle. Ask the
+            // provider to close, give it one bounded chance to confirm, then
+            // retire the transport locally. Not provider-confirmed closure.
+            let close_result = drain.request_close(Arc::clone(&sideband)).await;
+            match tokio::time::timeout(LIVE_CLOSE_QUIET_APPEND_BOUND, drain.wait()).await {
+                Ok(Ok(outcome)) => (outcome, Some(close_result)),
+                Ok(Err(error)) => {
+                    return Err(ProviderWebrtcSignalingError::SidebandClose(error));
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        session_id = %binding.session_id(),
+                        channel_id = %binding.channel_id(),
+                        "provider did not confirm closure while a quiet context append was pending injection; retiring the live transport locally without provider confirmation"
+                    );
+                    (
+                        ExperimentalGptLiveDrainOutcome::Terminated,
+                        Some(close_result),
+                    )
+                }
+            }
+        } else if activated {
             // Keep the exact binding reachable by the control consumer until
             // provider EOF and successful canonical projection are witnessed.
-            drain
-                .wait()
-                .await
-                .map_err(ProviderWebrtcSignalingError::SidebandClose)?;
+            let waited: Result<_, ProviderWebrtcSignalingError> = tokio::select! {
+                result = drain.wait() => result
+                    .map(|outcome| (outcome, None))
+                    .map_err(ProviderWebrtcSignalingError::SidebandClose),
+                result = drain.request_close(Arc::clone(&sideband)) => drain
+                    .wait()
+                    .await
+                    .map(|outcome| (outcome, Some(result)))
+                    .map_err(ProviderWebrtcSignalingError::SidebandClose),
+            };
+            match waited {
+                Ok(settled) => settled,
+                // The provider accepted `session.close` long ago and has not
+                // confirmed closure. Retaining the binding for retry is right
+                // while the drain can still settle; past this bound nothing
+                // will, so the transport is retired locally. This is not
+                // provider-confirmed closure and is logged as such.
+                Err(ProviderWebrtcSignalingError::SidebandClose(
+                    ProviderWebrtcBrokerError::Unavailable,
+                )) if drain.closure_unconfirmed_for(LIVE_CLOSE_CONFIRMATION_BOUND) => {
+                    tracing::warn!(
+                        session_id = %binding.session_id(),
+                        channel_id = %binding.channel_id(),
+                        bound_secs = LIVE_CLOSE_CONFIRMATION_BOUND.as_secs(),
+                        "provider did not confirm closure within the bound after session.close; retiring the live transport locally without provider confirmation"
+                    );
+                    (ExperimentalGptLiveDrainOutcome::Terminated, None)
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            (
+                ExperimentalGptLiveDrainOutcome::Graceful,
+                Some(drain.request_close(Arc::clone(&sideband)).await),
+            )
+        };
+        if outcome == ExperimentalGptLiveDrainOutcome::Graceful {
+            match close_result {
+                Some(result) => result,
+                None => drain.request_close(Arc::clone(&sideband)).await,
+            }
+            .map_err(ProviderWebrtcSignalingError::SidebandClose)?;
+        } else {
+            if let Some(Err(error)) = close_result {
+                tracing::warn!(%error, "failed live transport retired locally without provider close acknowledgement");
+            }
+            if let Some(task) = drain.close_task.lock().await.take() {
+                task.abort();
+                let _ = task.await;
+            }
         }
+        drop(sideband);
+        let mut retirement = drain.retirement_task.lock().await;
         let active = self
             .active_by_session
             .lock()
             .await
             .remove(binding.session_id());
         if let Some(active) = active {
-            retire_sideband_actors(active).await;
+            let retired_drain = Arc::clone(&drain);
+            *retirement = Some(tokio::spawn(async move {
+                retire_sideband_actors(active).await;
+                retired_drain
+                    .physically_retired
+                    .store(true, Ordering::Release);
+            }));
         }
-        if !activated {
-            drain.unactivated_closed.store(true, Ordering::Release);
-        }
+        drop(retirement);
+        drain
+            .await_physical_retirement()
+            .await
+            .map_err(ProviderWebrtcSignalingError::SidebandClose)?;
         retire_pending_deliveries(self.pending_deliveries.as_ref(), binding.channel_id()).await;
         Ok(true)
     }
@@ -4061,6 +5085,20 @@ impl ExperimentalGptLiveControlPlane for ExperimentalGptLiveWebrtcTransport {
         ExperimentalGptLiveWebrtcTransport::append_session_context(self, authority, text).await
     }
 
+    async fn append_bootstrap_context(
+        &self,
+        authority: LiveContextBootstrapAppendAuthority,
+        text: String,
+    ) -> Result<
+        (
+            LiveContextBootstrapAppendAuthority,
+            meerkat_core::LiveAppendDeliveryOutcome,
+        ),
+        ExperimentalGptLiveBridgeError,
+    > {
+        ExperimentalGptLiveWebrtcTransport::append_bootstrap_context(self, authority, text).await
+    }
+
     async fn release_delegation_context(
         &self,
         authority: LiveDelegationResultDeliveryAuthority,
@@ -4080,6 +5118,9 @@ fn spawn_sideband_actors(
     adapter: Arc<ExperimentalGptLiveDeferredAdapter>,
     answer_observation_sequence: u64,
     pump_retirement_tx: mpsc::Sender<ExperimentalGptLivePumpRetirement>,
+    pending_deliveries: Arc<
+        Mutex<HashMap<LiveSidebandAppendAttempt, PendingExperimentalGptLiveDelivery>>,
+    >,
 ) -> ActiveExperimentalGptLiveBinding {
     let activation_gate = Arc::new(ExperimentalGptLiveActivationGate::new());
     let drain = Arc::new(ExperimentalGptLiveDrain::default());
@@ -4116,12 +5157,7 @@ fn spawn_sideband_actors(
                 Ok(Some(observation)) => {
                     let control_observation = matches!(
                         observation.kind(),
-                        LiveSidebandObservationKind::UserTranscriptFragment { .. }
-                            | LiveSidebandObservationKind::AssistantTranscriptFragment { .. }
-                            | LiveSidebandObservationKind::TurnStarted { .. }
-                            | LiveSidebandObservationKind::TurnSnapshotDelta { .. }
-                            | LiveSidebandObservationKind::TurnFinished { .. }
-                            | LiveSidebandObservationKind::DelegationRequested { .. }
+                        LiveSidebandObservationKind::DelegationRequested { .. }
                             | LiveSidebandObservationKind::DelegationActionableInputUnsupported { .. }
                             | LiveSidebandObservationKind::AppendAcknowledged { .. }
                             | LiveSidebandObservationKind::AppendRejected { .. }
@@ -4148,6 +5184,42 @@ fn spawn_sideband_actors(
                             | LiveSidebandObservationKind::TurnFinished { .. }
                             | LiveSidebandObservationKind::DelegationRequested { .. }
                     );
+                    // One admitted ordinal per observation the transcript can
+                    // commit as a row, ordered before adapter fan-out: turn
+                    // start, turn end, and each snapshot delta that opens a
+                    // new playback segment; a segment's other deltas inherit
+                    // its ordinal. A channel that no longer admits
+                    // observations (closed, revoked, or a retired owner)
+                    // degrades to an unsequenced row, which is never
+                    // reasserted; it does not end the provider stream.
+                    let opens_segment = match observation.kind() {
+                        LiveSidebandObservationKind::TurnStarted { .. }
+                        | LiveSidebandObservationKind::TurnFinished { .. } => true,
+                        LiveSidebandObservationKind::TurnSnapshotDelta { turn, .. } => {
+                            observation_adapter.snapshot_delta_opens_segment(turn.adapter_key())
+                        }
+                        _ => false,
+                    };
+                    let context_observation_id = if adapter_observation && opens_segment {
+                        if let Some(recorder) =
+                            observation_adapter.context_observation_recorder.get()
+                        {
+                            match recorder.admit().await {
+                                Ok(observation_id) => Some(observation_id),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        "live source-observation admission unavailable; observation continues unsequenced"
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     if lifecycle_observation
                         && let Err(error) = activation
                             .activator
@@ -4162,31 +5234,48 @@ fn spawn_sideband_actors(
                     }
                     if adapter_observation
                         && observation_adapter
-                            .push_observation(observation.clone())
+                            .push_observation_with_context(
+                                observation.clone(),
+                                context_observation_id,
+                            )
                             .is_err()
                     {
                         break;
                     }
-                    if control_observation
-                        && observation_tx.send(Ok(Some(observation))).await.is_err()
-                    {
-                        break;
+                    if control_observation {
+                        // Delivery receipts must reach their owned waiter even
+                        // while the control consumer commits a transcript.
+                        let routed = ExperimentalGptLiveWebrtcTransport::route_append_delivery(
+                            &pending_deliveries,
+                            observation,
+                        )
+                        .await;
+                        if let Err(error) = observation_tx.try_send(routed) {
+                            tracing::warn!(%error, "live control ingress capacity exhausted or consumer closed");
+                            break;
+                        }
                     }
                 }
                 Ok(None) => {
-                    observation_drain.finish_reader(Ok(()));
+                    observation_drain.finish_reader(Ok(observation_sideband.eof_evidence()));
+                    resolve_pending_deliveries(
+                        &pending_deliveries,
+                        observation_binding.channel_id(),
+                        if observation_drain.requested.load(Ordering::Acquire) {
+                            meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose
+                        } else {
+                            meerkat_core::LiveAppendDeliveryOutcome::Ambiguous
+                        },
+                    )
+                    .await;
                     observation_adapter.close_stream();
-                    let _ = observation_tx.send(Ok(None)).await;
+                    let _ = observation_tx.try_send(Ok(None));
                     break;
                 }
                 Err(error) => {
                     observation_drain.finish_reader(Err(error));
-                    let _ = observation_adapter.push_observation(LiveSidebandObservation::new(
-                        observation_binding.clone(),
-                        LiveSidebandObservationKind::UnsupportedProviderEvent,
-                    ));
                     observation_adapter.close_stream();
-                    let _ = observation_tx.send(Err(error)).await;
+                    let _ = observation_tx.try_send(Err(error));
                     break;
                 }
             }
@@ -4198,6 +5287,16 @@ fn spawn_sideband_actors(
         {
             observation_drain.finish_reader(Err(ProviderWebrtcBrokerError::ProtocolDrift));
         }
+        resolve_pending_deliveries(
+            &pending_deliveries,
+            observation_binding.channel_id(),
+            if observation_drain.requested.load(Ordering::Acquire) {
+                meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose
+            } else {
+                meerkat_core::LiveAppendDeliveryOutcome::Ambiguous
+            },
+        )
+        .await;
         observation_adapter.close_stream();
     });
 
@@ -4245,7 +5344,35 @@ fn spawn_sideband_actors(
                 let observation = match next {
                     Ok(Some(observation)) => observation,
                     Ok(None) => {
-                        pump_drain.finish_projection(Ok(()));
+                        let reader = pump_drain
+                            .reader
+                            .lock()
+                            .map(|receipt| *receipt)
+                            .map_err(|_| ProviderWebrtcBrokerError::Unavailable);
+                        let result = match reader {
+                            Ok(Some(Ok(meerkat_live::ProviderWebrtcEofEvidence::Unconfirmed))) =>
+                                pump_drain.retain_terminal(
+                                    &activation.live_adapter_host,
+                                    &pump_binding,
+                                    LiveAdapterObservation::Error {
+                                        code: LiveAdapterErrorCode::ConnectionLost,
+                                        message: "live provider stream ended without provider closure confirmation".to_string(),
+                                    },
+                                ).await,
+                            Ok(Some(Err(error))) => pump_drain.retain_terminal(
+                                &activation.live_adapter_host,
+                                &pump_binding,
+                                LiveAdapterObservation::Error {
+                                    code: LiveAdapterErrorCode::ProviderError,
+                                    message: format!(
+                                        "live provider observation transport terminated: {error}"
+                                    ),
+                                },
+                            ).await,
+                            Ok(_) => Ok(()),
+                            Err(_) => Err(ProviderWebrtcBrokerError::Unavailable),
+                        };
+                        pump_drain.finish_projection(result);
                         tracing::warn!("experimental live adapter observation stream ended");
                         break;
                     }
@@ -4261,6 +5388,10 @@ fn spawn_sideband_actors(
                     )
                 {
                     tracing::warn!("experimental live adapter emitted a terminal observation");
+                    let retained = pump_drain
+                        .retain_terminal(&activation.live_adapter_host, &pump_binding, observation)
+                        .await;
+                    pump_drain.finish_projection(retained);
                     break;
                 }
                 pending_projection = Some((observation, None));
@@ -4289,7 +5420,7 @@ fn spawn_sideband_actors(
                 if let meerkat_live::ObservationOutcome::PlaybackTerminalSettled {
                     ref item_id, ..
                 } = outcome
-                    && let Some(turn) = pump_adapter.snapshot_cut_turn(item_id)
+                    && let Some(turn) = pump_adapter.released_segment_turn(item_id)
                 {
                     let Some(next) = activation.runtime.live_assistant_output_handle_for_turn(
                         pump_binding.session_id(),
@@ -4300,11 +5431,54 @@ fn spawn_sideband_actors(
                             "snapshot receipt omitted generated continuation custody".to_string()
                         );
                     };
-                    pump_adapter.settle_snapshot_cut(item_id, next.__playback_segment())?;
+                    pump_adapter.settle_output_segment(item_id, next.__playback_segment())?;
                 }
                 if let meerkat_live::ObservationOutcome::AssistantOutputAvailable(ref output) =
                     outcome
                 {
+                    if pump_adapter.playback_policy
+                        == PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured
+                    {
+                        let reservation = activation
+                            .runtime
+                            .reserve_live_assistant_output_handle(
+                                pump_binding.session_id(),
+                                pump_binding.channel_id(),
+                                &output.output_id,
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let handle = reservation.handle();
+                        let release = pump_adapter.capture_unmeasured_segment(handle)?;
+                        let settled = activation
+                            .live_adapter_host
+                            .apply_observation(pump_binding.channel_id(), &release)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let meerkat_live::ObservationOutcome::PlaybackTerminalSettled {
+                            item_id,
+                            ..
+                        } = settled
+                        else {
+                            return Err("unmeasured output release did not settle".to_string());
+                        };
+                        let next = activation
+                            .runtime
+                            .live_assistant_output_handle_for_turn(
+                                pump_binding.session_id(),
+                                pump_binding.channel_id(),
+                                handle.__assistant_turn_ref(),
+                            )
+                            .ok_or("unmeasured release omitted generated continuation custody")?;
+                        pump_adapter.settle_output_segment(&item_id, next.__playback_segment())?;
+                        activation
+                            .runtime
+                            .commit_live_assistant_output_terminal(reservation)
+                            .map_err(|error| error.to_string())?;
+                        // No actionable playback-complete handle is published
+                        // for an observation-only output.
+                        return Ok(());
+                    }
                     let public = ExperimentalLivePublicObservation::assistant_output_available(
                         pump_binding.clone(),
                         output.clone(),
@@ -4348,11 +5522,13 @@ fn spawn_sideband_actors(
         {
             pump_drain.finish_projection(Err(ProviderWebrtcBrokerError::ProtocolDrift));
         }
-        if pump_drain.requested.load(Ordering::Acquire) {
-            return;
+        let closing = pump_drain.requested.load(Ordering::Acquire);
+        if !closing {
+            // Mark the exact binding nonselectable before any awaited close.
+            pump_gate.cancel();
         }
-        // Mark the exact binding nonselectable before any awaited close.
-        pump_gate.cancel();
+        // Playback observers hold lifecycle custody. A terminal pump must
+        // release them even when an explicit close is already draining.
         activation
             .live_adapter_host
             .fail_playback_waiters_for_channel(
@@ -4360,6 +5536,9 @@ fn spawn_sideband_actors(
                 "provider observation pump retired before playback terminal settlement",
             )
             .await;
+        if closing {
+            return;
+        }
         let _ = pump_retirement_tx
             .send(ExperimentalGptLivePumpRetirement {
                 activation,
@@ -4389,6 +5568,21 @@ async fn retire_pending_deliveries(
     >,
     channel_id: &meerkat_live::LiveChannelId,
 ) {
+    resolve_pending_deliveries(
+        pending_deliveries,
+        channel_id,
+        meerkat_core::LiveAppendDeliveryOutcome::Ambiguous,
+    )
+    .await;
+}
+
+async fn resolve_pending_deliveries(
+    pending_deliveries: &Mutex<
+        HashMap<LiveSidebandAppendAttempt, PendingExperimentalGptLiveDelivery>,
+    >,
+    channel_id: &meerkat_live::LiveChannelId,
+    outcome: meerkat_core::LiveAppendDeliveryOutcome,
+) {
     let mut pending_deliveries = pending_deliveries.lock().await;
     let retired_attempts = pending_deliveries
         .iter()
@@ -4398,14 +5592,19 @@ async fn retire_pending_deliveries(
     for attempt in retired_attempts {
         if let Some(pending) = pending_deliveries.remove(&attempt) {
             match pending {
+                PendingExperimentalGptLiveDelivery::BootstrapAppend {
+                    authority,
+                    resolution_tx,
+                    ..
+                } => {
+                    let _ = resolution_tx.send((authority, outcome));
+                }
                 PendingExperimentalGptLiveDelivery::CanonicalAppend {
                     authority,
                     resolution_tx,
                 } => {
-                    let _ = resolution_tx.send(ExperimentalGptLiveAppendResolution {
-                        authority,
-                        outcome: meerkat_core::LiveAppendDeliveryOutcome::Ambiguous,
-                    });
+                    let _ = resolution_tx
+                        .send(ExperimentalGptLiveAppendResolution { authority, outcome });
                 }
                 PendingExperimentalGptLiveDelivery::DelegationResult {
                     authority,
@@ -4413,7 +5612,12 @@ async fn retire_pending_deliveries(
                 } => {
                     let _ = resolution_tx.send(ExperimentalGptLiveResultDeliveryResolution {
                         authority,
-                        observation: LiveDelegationResultDeliveryObservation::Ambiguous,
+                        observation: match outcome {
+                            meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose => {
+                                LiveDelegationResultDeliveryObservation::InterruptedByClose
+                            }
+                            _ => LiveDelegationResultDeliveryObservation::Ambiguous,
+                        },
                     });
                 }
             }
@@ -4550,6 +5754,15 @@ impl LiveWebrtcAnswerTransport for ExperimentalGptLiveWebrtcTransport {
         self.close_exact(&provider_binding, None)
             .await
             .map_err(provider_signaling_error)?;
+        if matches!(
+            self.close_physical_if_bound(&binding.channel_id, &binding.session_id)
+                .await?,
+            ExperimentalLivePhysicalClose::Terminated(_)
+        ) {
+            return Err(LiveWebrtcError::RemoteSignaling {
+                reason: "terminal transport fault requires shared generated close and reporting",
+            });
+        }
         self.unbind_channel(&binding.channel_id, &binding.session_id)
             .await;
         Ok(())
@@ -4568,8 +5781,10 @@ struct SidebandCorrelations {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SidebandAppendLane {
-    SessionContext,
-    DelegationContext,
+    Session,
+    Thinking,
+    Instructions,
+    Delegation,
 }
 
 #[derive(Clone)]
@@ -4792,6 +6007,10 @@ impl fmt::Debug for ExperimentalGptLiveSideband {
 
 #[async_trait]
 impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
+    fn eof_evidence(&self) -> meerkat_live::ProviderWebrtcEofEvidence {
+        self.session.eof_evidence()
+    }
+
     async fn send_command(
         &self,
         command: LiveSidebandCommand,
@@ -4800,13 +6019,33 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
             return Err(ProviderWebrtcBrokerError::Rejected);
         }
         match command.__into_provider_command() {
+            LiveSidebandProviderCommand::AppendThinkingContext { attempt, text, .. } => {
+                let reservation = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .reserve(SidebandAppendLane::Thinking, attempt)?;
+                let result = self.session.append_thinking_context(text).await;
+                self.lower_append_delivery(reservation, result).await
+            }
+            LiveSidebandProviderCommand::AppendInstructionsContext { attempt, text, .. } => {
+                let reservation = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .reserve(SidebandAppendLane::Instructions, attempt)?;
+                let result = self.session.append_instructions_context(text).await;
+                self.lower_append_delivery(reservation, result).await
+            }
             LiveSidebandProviderCommand::AppendSessionContext { attempt, text, .. } => {
                 let reservation = self
                     .correlations
                     .lock()
                     .await
                     .appends
-                    .reserve(SidebandAppendLane::SessionContext, attempt)?;
+                    .reserve(SidebandAppendLane::Session, attempt)?;
                 let result = self.session.append_session_context(text).await;
                 self.lower_append_delivery(reservation, result).await
             }
@@ -4829,7 +6068,7 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                     .lock()
                     .await
                     .appends
-                    .reserve(SidebandAppendLane::DelegationContext, attempt)?;
+                    .reserve(SidebandAppendLane::Delegation, attempt)?;
                 let result = self
                     .session
                     .append_delegation_context(&provider_delegation, text)
@@ -4858,6 +6097,15 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
 
     async fn close(&self) -> Result<(), ProviderWebrtcBrokerError> {
         self.session.close().await.map_err(map_broker_error)
+    }
+
+    async fn quiet_append_pending(&self) -> bool {
+        self.correlations
+            .lock()
+            .await
+            .appends
+            .reservations
+            .contains_key(&SidebandAppendLane::Thinking)
     }
 }
 
@@ -4894,9 +6142,21 @@ impl ExperimentalGptLiveSideband {
                         canonical_seed_cursor: _,
                         _projection_lease,
                     } = seed;
+                    let summary = match &context {
+                        GptLiveSeedContext::SeededSummary(summary) => Some(summary.clone()),
+                        _ => None,
+                    };
                     session
-                        .await_ready_and_seed_session_context(context.into_commentary()?)
-                        .await
+                        .await_ready_and_seed_session_context(context.into_commentary().await?)
+                        .await?;
+                    if let Some(summary) = summary {
+                        summary.validate_provider_source().await.map_err(|_| {
+                            GptLiveBrokerError::Transport {
+                                class: GptLiveBrokerTerminalClass::Protocol,
+                            }
+                        })?;
+                    }
+                    Ok(())
                 }),
             };
         }
@@ -5005,13 +6265,67 @@ impl ExperimentalGptLiveSideband {
     ) -> Result<LiveSidebandObservation, ProviderWebrtcBrokerError> {
         let kind = match observation {
             GptLiveBrokerObservation::SessionReady => LiveSidebandObservationKind::SessionReady,
+            GptLiveBrokerObservation::ThinkingContextAppendAcknowledged { token } => {
+                let attempt = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .observe_terminal(SidebandAppendLane::Thinking, &token)?;
+                LiveSidebandObservationKind::AppendAcknowledged { attempt }
+            }
+            GptLiveBrokerObservation::ThinkingContextAppendRejected { token } => {
+                let attempt = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .observe_terminal(SidebandAppendLane::Thinking, &token)?;
+                LiveSidebandObservationKind::AppendDeliveryAmbiguousTerminal { attempt }
+            }
+            GptLiveBrokerObservation::ThinkingContextAppendInterruptedByClose { token } => {
+                let attempt = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .observe_terminal(SidebandAppendLane::Thinking, &token)?;
+                LiveSidebandObservationKind::AppendRejected { attempt }
+            }
+            GptLiveBrokerObservation::InstructionsContextAppendAcknowledged { token } => {
+                let attempt = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .observe_terminal(SidebandAppendLane::Instructions, &token)?;
+                LiveSidebandObservationKind::AppendAcknowledged { attempt }
+            }
+            GptLiveBrokerObservation::InstructionsContextAppendRejected { token } => {
+                let attempt = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .observe_terminal(SidebandAppendLane::Instructions, &token)?;
+                LiveSidebandObservationKind::AppendDeliveryAmbiguousTerminal { attempt }
+            }
+            GptLiveBrokerObservation::InstructionsContextAppendInterruptedByClose { token } => {
+                let attempt = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .observe_terminal(SidebandAppendLane::Instructions, &token)?;
+                LiveSidebandObservationKind::AppendRejected { attempt }
+            }
             GptLiveBrokerObservation::SessionContextAppendAcknowledged { token } => {
                 let attempt = self
                     .correlations
                     .lock()
                     .await
                     .appends
-                    .observe_terminal(SidebandAppendLane::SessionContext, &token)?;
+                    .observe_terminal(SidebandAppendLane::Session, &token)?;
                 LiveSidebandObservationKind::AppendAcknowledged { attempt }
             }
             GptLiveBrokerObservation::SessionContextAppendRejected { token } => {
@@ -5020,7 +6334,7 @@ impl ExperimentalGptLiveSideband {
                     .lock()
                     .await
                     .appends
-                    .observe_terminal(SidebandAppendLane::SessionContext, &token)?;
+                    .observe_terminal(SidebandAppendLane::Session, &token)?;
                 LiveSidebandObservationKind::AppendRejected { attempt }
             }
             GptLiveBrokerObservation::DelegationContextAppendAcknowledged { token } => {
@@ -5029,7 +6343,7 @@ impl ExperimentalGptLiveSideband {
                     .lock()
                     .await
                     .appends
-                    .observe_terminal(SidebandAppendLane::DelegationContext, &token)?;
+                    .observe_terminal(SidebandAppendLane::Delegation, &token)?;
                 LiveSidebandObservationKind::AppendAcknowledged { attempt }
             }
             GptLiveBrokerObservation::DelegationContextAppendRejected { token } => {
@@ -5038,7 +6352,7 @@ impl ExperimentalGptLiveSideband {
                     .lock()
                     .await
                     .appends
-                    .observe_terminal(SidebandAppendLane::DelegationContext, &token)?;
+                    .observe_terminal(SidebandAppendLane::Delegation, &token)?;
                 LiveSidebandObservationKind::AppendRejected { attempt }
             }
             GptLiveBrokerObservation::UserTranscriptFragment { item, text } => {
@@ -5205,6 +6519,28 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+    fn unmeasured_fragments(session: &meerkat_core::Session) -> impl Iterator<Item = &str> {
+        session
+            .messages()
+            .iter()
+            .filter_map(|message| {
+                if let meerkat_core::Message::BlockAssistant(assistant) = message {
+                    Some(&assistant.blocks)
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .filter_map(|block| match block {
+                meerkat_core::AssistantBlock::Transcript {
+                    text,
+                    source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                    ..
+                } => Some(text.as_str()),
+                _ => None,
+            })
+    }
+
     fn configured_live_identity(
         binding: meerkat_core::AuthBindingRef,
     ) -> meerkat_core::SessionLlmIdentity {
@@ -5226,6 +6562,89 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn spoken_context_waits_for_the_open_user_turn_within_a_bound() {
+        let adapter = Arc::new(ExperimentalGptLiveDeferredAdapter::new(
+            meerkat_core::SessionLlmIdentity {
+                model: "gpt-live-1".to_string(),
+                provider: meerkat_core::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            },
+        ));
+        // No user turn open: no wait at all.
+        adapter
+            .wait_for_quiet_user(SPOKEN_CONTEXT_USER_TURN_BOUND)
+            .await;
+        adapter.user_turn_open.store(true, Ordering::Release);
+        let waiter = Arc::clone(&adapter);
+        let waited = tokio::spawn(async move {
+            let started = tokio::time::Instant::now();
+            waiter
+                .wait_for_quiet_user(SPOKEN_CONTEXT_USER_TURN_BOUND)
+                .await;
+            started.elapsed()
+        });
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(
+            !waited.is_finished(),
+            "an open user turn holds spoken context"
+        );
+        adapter.user_turn_open.store(false, Ordering::Release);
+        adapter.user_turn_changed.notify_waiters();
+        let waited = waited.await.expect("waiter");
+        assert!(
+            waited < SPOKEN_CONTEXT_USER_TURN_BOUND,
+            "the turn end releases the wait"
+        );
+        // A user turn the provider never closes releases at the bound.
+        adapter.user_turn_open.store(true, Ordering::Release);
+        let waiter = Arc::clone(&adapter);
+        let bounded = tokio::spawn(async move {
+            let started = tokio::time::Instant::now();
+            waiter
+                .wait_for_quiet_user(SPOKEN_CONTEXT_USER_TURN_BOUND)
+                .await;
+            started.elapsed()
+        });
+        tokio::time::advance(SPOKEN_CONTEXT_USER_TURN_BOUND + std::time::Duration::from_millis(10))
+            .await;
+        assert!(bounded.await.expect("bounded waiter") >= SPOKEN_CONTEXT_USER_TURN_BOUND);
+    }
+
+    #[tokio::test]
+    async fn quiet_context_ack_cannot_resolve_commentary_and_can_precede_send_return() {
+        let attempt = LiveSidebandAppendAttempt::__from_generated_append_id(
+            "append:quiet-history".to_string(),
+        )
+        .expect("generated attempt");
+        let mut correlations = SidebandAppendCorrelations::<u64>::default();
+        let reservation = correlations
+            .reserve(SidebandAppendLane::Thinking, attempt.clone())
+            .expect("reserve quiet lane");
+        assert!(matches!(
+            correlations.observe_terminal(SidebandAppendLane::Session, &23),
+            Err(ProviderWebrtcBrokerError::ProtocolDrift)
+        ));
+        assert_eq!(
+            correlations
+                .observe_terminal(SidebandAppendLane::Thinking, &23)
+                .expect("exact early thinking acknowledgement"),
+            attempt
+        );
+        assert_eq!(
+            correlations
+                .commit(&reservation, 23)
+                .expect("exact token completes early acknowledgement"),
+            SidebandAppendCommit::TerminalAlreadyObserved
+        );
+        assert!(matches!(
+            correlations.observe_terminal(SidebandAppendLane::Thinking, &23),
+            Err(ProviderWebrtcBrokerError::ProtocolDrift)
+        ));
+    }
+
     #[tokio::test]
     async fn append_rejection_is_a_negative_terminal_even_before_send_returns() {
         let attempt =
@@ -5243,11 +6662,11 @@ mod tests {
         );
         let mut correlations = SidebandAppendCorrelations::<u64>::default();
         let reservation = correlations
-            .reserve(SidebandAppendLane::SessionContext, attempt.clone())
+            .reserve(SidebandAppendLane::Session, attempt.clone())
             .expect("reserve before IO");
         assert_eq!(
             correlations
-                .observe_terminal(SidebandAppendLane::SessionContext, &7)
+                .observe_terminal(SidebandAppendLane::Session, &7)
                 .expect("early rejection resolves exact attempt"),
             attempt
         );
@@ -5269,7 +6688,7 @@ mod tests {
         let reservation = correlations
             .lock()
             .await
-            .reserve(SidebandAppendLane::DelegationContext, attempt.clone())
+            .reserve(SidebandAppendLane::Delegation, attempt.clone())
             .expect("pre-IO reservation");
 
         let acknowledgement_correlations = Arc::clone(&correlations);
@@ -5277,7 +6696,7 @@ mod tests {
             acknowledgement_correlations
                 .lock()
                 .await
-                .observe_terminal(SidebandAppendLane::DelegationContext, &41)
+                .observe_terminal(SidebandAppendLane::Delegation, &41)
                 .expect("acknowledgement can race provider send return")
         })
         .await
@@ -5298,7 +6717,7 @@ mod tests {
         let failed = correlations
             .lock()
             .await
-            .reserve(SidebandAppendLane::DelegationContext, retry_attempt.clone())
+            .reserve(SidebandAppendLane::Delegation, retry_attempt.clone())
             .expect("failed send reservation");
         assert_eq!(
             correlations
@@ -5311,7 +6730,7 @@ mod tests {
         correlations
             .lock()
             .await
-            .reserve(SidebandAppendLane::DelegationContext, retry_attempt)
+            .reserve(SidebandAppendLane::Delegation, retry_attempt)
             .expect("rollback permits a later exact attempt");
     }
 
@@ -5445,6 +6864,37 @@ mod tests {
         calls: Arc<AtomicUsize>,
         auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
         events: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    struct RevocableBindingAuthority {
+        inner: ExactAllowBindingAuthority,
+        allowed: AtomicBool,
+        attempts: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ExperimentalLiveSessionBindingAuthority for RevocableBindingAuthority {
+        async fn validate_live_durable_source_availability(
+            &self,
+            session_id: &meerkat_core::SessionId,
+        ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
+            self.inner
+                .validate_live_durable_source_availability(session_id)
+                .await
+        }
+
+        async fn authorize_binding_use(
+            &self,
+            session_id: &meerkat_core::SessionId,
+            binding: &meerkat_core::AuthBindingRef,
+        ) -> Result<ExperimentalLiveSessionBindingAuthorization, ExperimentalLiveOpenAuthorityError>
+        {
+            self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
+            if !self.allowed.load(Ordering::Acquire) {
+                return Err(ExperimentalLiveOpenAuthorityError::BindingUseDenied);
+            }
+            self.inner.authorize_binding_use(session_id, binding).await
+        }
     }
 
     struct RejectingEligibilityBindingAuthority {
@@ -5681,7 +7131,21 @@ mod tests {
     struct ControlledAmbiguousSideband {
         observation_tx: std::sync::Mutex<Option<mpsc::UnboundedSender<ControlledSidebandEvent>>>,
         observation_rx: Mutex<mpsc::UnboundedReceiver<ControlledSidebandEvent>>,
+        fail_close: AtomicBool,
+        confirmed_eof: AtomicBool,
+        block_close: AtomicBool,
+        close_started: AtomicBool,
+        acknowledge_after_fragment_flood: AtomicBool,
+        acknowledge_context: AtomicBool,
+        received_context: std::sync::Mutex<Vec<String>>,
+        hold_context_ack: AtomicBool,
+        context_commands: Mutex<Vec<LiveSidebandProviderCommand>>,
+        reject_context: AtomicBool,
+        acknowledge_before_ambiguous_return: Mutex<Option<TestPendingLiveDeliveries>>,
     }
+
+    type TestPendingLiveDeliveries =
+        Arc<Mutex<HashMap<LiveSidebandAppendAttempt, PendingExperimentalGptLiveDelivery>>>;
 
     enum ControlledSidebandEvent {
         Observation(LiveSidebandObservation),
@@ -5694,6 +7158,17 @@ mod tests {
             Self {
                 observation_tx: std::sync::Mutex::new(Some(observation_tx)),
                 observation_rx: Mutex::new(observation_rx),
+                fail_close: AtomicBool::new(false),
+                confirmed_eof: AtomicBool::new(true),
+                block_close: AtomicBool::new(false),
+                close_started: AtomicBool::new(false),
+                acknowledge_after_fragment_flood: AtomicBool::new(false),
+                acknowledge_context: AtomicBool::new(false),
+                received_context: std::sync::Mutex::new(Vec::new()),
+                hold_context_ack: AtomicBool::new(false),
+                context_commands: Mutex::new(Vec::new()),
+                reject_context: AtomicBool::new(false),
+                acknowledge_before_ambiguous_return: Mutex::new(None),
             }
         }
 
@@ -5718,10 +7193,81 @@ mod tests {
 
     #[async_trait]
     impl ProviderWebrtcSidebandSession for ControlledAmbiguousSideband {
+        fn eof_evidence(&self) -> meerkat_live::ProviderWebrtcEofEvidence {
+            if self.confirmed_eof.load(Ordering::Acquire) {
+                meerkat_live::ProviderWebrtcEofEvidence::ProviderConfirmed
+            } else {
+                meerkat_live::ProviderWebrtcEofEvidence::Unconfirmed
+            }
+        }
+
         async fn send_command(
             &self,
-            _command: LiveSidebandCommand,
+            command: LiveSidebandCommand,
         ) -> Result<LiveSidebandCommandDelivery, ProviderWebrtcBrokerError> {
+            if self.acknowledge_context.load(Ordering::Acquire) {
+                let observation = LiveSidebandObservation::new(
+                    command.binding().clone(),
+                    if self.reject_context.load(Ordering::Acquire) {
+                        LiveSidebandObservationKind::AppendDeliveryAmbiguousTerminal {
+                            attempt: command.attempt(),
+                        }
+                    } else {
+                        LiveSidebandObservationKind::AppendAcknowledged {
+                            attempt: command.attempt(),
+                        }
+                    },
+                );
+                let provider_command = command.__into_provider_command();
+                if let LiveSidebandProviderCommand::AppendSessionContext { text, .. } =
+                    &provider_command
+                {
+                    self.received_context
+                        .lock()
+                        .expect("context commands")
+                        .push(text.clone());
+                }
+                self.context_commands.lock().await.push(provider_command);
+                if let Some(pending) = self.acknowledge_before_ambiguous_return.lock().await.take()
+                {
+                    ExperimentalGptLiveWebrtcTransport::route_append_delivery(
+                        &pending,
+                        observation,
+                    )
+                    .await?;
+                    return Ok(LiveSidebandCommandDelivery::AmbiguousTerminal);
+                }
+                self.push(observation);
+                return Ok(LiveSidebandCommandDelivery::Accepted);
+            }
+            if self.hold_context_ack.load(Ordering::Acquire) {
+                return Ok(LiveSidebandCommandDelivery::Accepted);
+            }
+            if self
+                .acknowledge_after_fragment_flood
+                .load(Ordering::Acquire)
+            {
+                for ordinal in 0..128 {
+                    self.push(LiveSidebandObservation::new(
+                        command.binding().clone(),
+                        LiveSidebandObservationKind::UserTranscriptFragment {
+                            item: LiveSidebandTranscriptItemRef::__from_provider_observation(
+                                format!("fragment-{ordinal}"),
+                                format!("private-fragment-{ordinal}"),
+                            )
+                            .expect("fixture fragment identity"),
+                            text: "provisional fragment".to_string(),
+                        },
+                    ));
+                }
+                self.push(LiveSidebandObservation::new(
+                    command.binding().clone(),
+                    LiveSidebandObservationKind::AppendAcknowledged {
+                        attempt: command.attempt(),
+                    },
+                ));
+                return Ok(LiveSidebandCommandDelivery::Accepted);
+            }
             Ok(LiveSidebandCommandDelivery::AmbiguousTerminal)
         }
 
@@ -5736,6 +7282,13 @@ mod tests {
         }
 
         async fn close(&self) -> Result<(), ProviderWebrtcBrokerError> {
+            self.close_started.store(true, Ordering::Release);
+            if self.block_close.load(Ordering::Acquire) {
+                return futures::future::pending().await;
+            }
+            if self.fail_close.load(Ordering::Acquire) {
+                return Err(ProviderWebrtcBrokerError::Unavailable);
+            }
             self.observation_tx
                 .lock()
                 .expect("controlled sideband sender")
@@ -5815,6 +7368,8 @@ mod tests {
     struct SerializedLifecycleTestActivator {
         runtime: Arc<meerkat_runtime::MeerkatMachine>,
         rejected_appends: Arc<AtomicUsize>,
+        control_release: Option<Arc<Notify>>,
+        preparation_barrier: Option<Arc<RecoveryRegistrationBarrier>>,
     }
 
     #[async_trait]
@@ -5824,6 +7379,10 @@ mod tests {
             _binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
             _control: Arc<dyn ExperimentalGptLiveControlPlane>,
         ) -> Result<(), String> {
+            if let Some(barrier) = &self.preparation_barrier {
+                barrier.entered.notify_one();
+                barrier.release.notified().await;
+            }
             Ok(())
         }
 
@@ -5832,6 +7391,9 @@ mod tests {
             binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
             control: Arc<dyn ExperimentalGptLiveControlPlane>,
         ) {
+            if let Some(release) = &self.control_release {
+                release.notified().await;
+            }
             let provider_binding = control
                 .active_binding(binding.session_id())
                 .await
@@ -6008,13 +7570,25 @@ mod tests {
         }
     }
 
+    type TestInitialLiveSeed = std::sync::Weak<Mutex<Option<ExperimentalGptLiveInitialSeed>>>;
+
+    #[derive(Default)]
+    struct RecoveryRegistrationBarrier {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
     struct ScriptedStrictOpenAuthority {
         transport: Arc<ExperimentalGptLiveWebrtcTransport>,
         identity: meerkat_core::SessionLlmIdentity,
         latest_sideband: Mutex<Option<Arc<ControlledAmbiguousSideband>>>,
         latest_adapter: Mutex<Option<Arc<ExperimentalGptLiveDeferredAdapter>>>,
+        latest_initial_seed: Mutex<Option<TestInitialLiveSeed>>,
         prepare_sequence: AtomicUsize,
         snapshot_cuts: bool,
+        playback_policy: PublicGptLivePlaybackPolicy,
+        recovery_registration_barrier: Mutex<Option<Arc<RecoveryRegistrationBarrier>>>,
+        physical_close_barrier: Mutex<Option<Arc<RecoveryRegistrationBarrier>>>,
         execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
         pending_context_recovery: Arc<
             Mutex<
@@ -6041,8 +7615,12 @@ mod tests {
                 identity,
                 latest_sideband: Mutex::new(None),
                 latest_adapter: Mutex::new(None),
+                latest_initial_seed: Mutex::new(None),
                 prepare_sequence: AtomicUsize::new(0),
                 snapshot_cuts: false,
+                playback_policy: PublicGptLivePlaybackPolicy::default(),
+                recovery_registration_barrier: Mutex::new(None),
+                physical_close_barrier: Mutex::new(None),
                 execution_profile:
                     meerkat_runtime::live_execution::LiveExecutionProfileSelection::__test_new(
                         crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID,
@@ -6089,8 +7667,10 @@ mod tests {
         {
             self.prepare_sequence.fetch_add(1, AtomicOrdering::SeqCst);
             let initial_seed = Arc::new(Mutex::new(None));
+            *self.latest_initial_seed.lock().await = Some(Arc::downgrade(&initial_seed));
             let mut adapter = ExperimentalGptLiveDeferredAdapter::new(self.identity.clone());
             adapter.snapshot_cuts = self.snapshot_cuts;
+            adapter.playback_policy = self.playback_policy;
             let adapter = Arc::new(adapter);
             let controlled = Arc::new(ControlledAmbiguousSideband::new());
             *self.latest_sideband.lock().await = Some(Arc::clone(&controlled));
@@ -6106,10 +7686,15 @@ mod tests {
                     adapter,
                     identity: self.identity.clone(),
                     execution_profile_id: self.execution_profile.profile_id().to_string(),
+                    context_summary_provenance: None,
+                    context_preparation_job: None,
                 },
                 initial_seed,
                 adapter_taken: AtomicBool::new(false),
                 execution_profile: self.execution_profile.clone(),
+                context_summary: None,
+                supports_context_summary: true,
+                concurrent_context: false,
             };
             Ok(Box::new(ExperimentalGptLivePreparedOpen::new(
                 pending,
@@ -6137,16 +7722,28 @@ mod tests {
             channel_id: &meerkat_live::LiveChannelId,
             canonical_session_id: &meerkat_core::SessionId,
         ) -> Result<ExperimentalLivePhysicalClose, ExperimentalLiveOpenAuthorityError> {
-            self.transport
+            let physical = self
+                .transport
                 .close_physical_if_bound(channel_id, canonical_session_id)
                 .await
-                .map_err(|_| ExperimentalLiveOpenAuthorityError::ChannelBindingFailed)
+                .map_err(|_| ExperimentalLiveOpenAuthorityError::ChannelBindingFailed)?;
+            let barrier = self.physical_close_barrier.lock().await.take();
+            if let Some(barrier) = barrier {
+                barrier.entered.notify_one();
+                barrier.release.notified().await;
+            }
+            Ok(physical)
         }
 
         async fn register_context_recovery_for_answer(
             &self,
             recovery: meerkat_runtime::live_execution::LiveContextAmbiguityRecoveryAuthority,
         ) -> Result<(), ExperimentalLiveOpenAuthorityError> {
+            let barrier = self.recovery_registration_barrier.lock().await.take();
+            if let Some(barrier) = barrier {
+                barrier.entered.notify_one();
+                barrier.release.notified().await;
+            }
             let replacement = recovery.replacement_channel_id().clone();
             let mut pending = self.pending_context_recovery.lock().await;
             if pending.insert(replacement, recovery).is_some() {
@@ -6771,6 +8368,23 @@ mod tests {
         // any binding authorization, credential, or provider effect.
         let authority = compose("marin", public_live_identity(selected_binding.clone()))
             .expect("public authority configuration");
+        assert!(matches!(
+            authority.admission,
+            GptLiveOpenAdmission::Public {
+                playback_policy: PublicGptLivePlaybackPolicy::CallerConfirmedSnapshots,
+                ..
+            }
+        ));
+        let authority = authority
+            .with_public_playback_policy(PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured)
+            .expect("public authority explicitly opts in");
+        assert!(matches!(
+            authority.admission,
+            GptLiveOpenAdmission::Public {
+                playback_policy: PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured,
+                ..
+            }
+        ));
         let error = match authority
             .prepare_open(
                 &meerkat_core::SessionId::new(),
@@ -6903,6 +8517,25 @@ mod tests {
         // connection until the browser offer is answered.
         assert!(transport.registered_by_channel.lock().await.is_empty());
         drop(pending);
+        authority
+            .probe_execution_readiness(&session_id, &public_profile_override())
+            .await
+            .expect("positive readiness resolves the exact configured binding");
+        assert_eq!(config_reads.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(binding_calls.load(AtomicOrdering::SeqCst), 2);
+        assert!(
+            authority
+                .probe_execution_readiness(
+                    &session_id,
+                    &meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
+                        version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
+                        profile_id: "unconfigured-profile".into(),
+                    },
+                )
+                .await
+                .is_err(),
+            "catalog capability cannot authorize a different target profile"
+        );
         tokio::task::yield_now().await;
         assert_eq!(provider_hits.load(AtomicOrdering::SeqCst), 0);
         assert!(transport.registered_by_channel.lock().await.is_empty());
@@ -7029,6 +8662,8 @@ mod tests {
             assert_eq!(release["type"], "session.commentary.append");
             assert_eq!(release["delegation_id"], DELEGATION_ID);
             send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a2","start_ms":2.0,"end_ms":2.0})).await;
+            let mute = recv_json(&mut socket, &capture).await;
+            assert_eq!(mute["type"], "session.input_audio.mute");
             let close = recv_json(&mut socket, &capture).await;
             assert_eq!(close["type"], "session.close");
             send_json(&mut socket, json!({"type":"session.closed","event_id":"c","session":snapshot,"reason":"close_requested","usage":{"seconds":2.5}})).await;
@@ -7097,8 +8732,91 @@ mod tests {
     }
 
     #[cfg(feature = "test-realtime-fixtures")]
+    #[test]
+    fn public_pending_playback_policy_defaults_measured_and_opts_in_before_open() {
+        let realm = meerkat_core::RealmId::parse("voice").expect("realm");
+        let pending = ExperimentalGptLivePendingChannel::from_public_target(
+            public_fixture_target(&realm),
+            meerkat_runtime::live_execution::LiveExecutionProfileSelection::from_public_profile(
+                GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
+                meerkat_core::LiveExecutionMode::ClientContext,
+                meerkat_core::LiveExecutionCapabilities {
+                    function_bridge: false,
+                    client_context: true,
+                },
+            )
+            .expect("public profile"),
+            meerkat_core::SessionId::new(),
+            "marin",
+            None,
+        )
+        .expect("public pending owner");
+        assert!(pending.registration.adapter.snapshot_cuts);
+        assert_eq!(
+            pending.registration.adapter.playback_policy,
+            PublicGptLivePlaybackPolicy::CallerConfirmedSnapshots
+        );
+        let pending = pending
+            .with_public_playback_policy(PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured)
+            .expect("opt-in remains sealed in pending owner");
+        assert_eq!(
+            pending.registration.adapter.playback_policy,
+            PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured
+        );
+        assert!(!pending.adapter_taken.load(Ordering::Acquire));
+    }
+
+    #[cfg(feature = "test-realtime-fixtures")]
     #[tokio::test]
     async fn public_broker_answers_offer_and_lowers_public_events_end_to_end() {
+        run_public_broker_seed_end_to_end(false).await;
+    }
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[tokio::test]
+    async fn public_broker_seeds_generated_summary_with_exact_canonical_cursor_end_to_end() {
+        run_public_broker_seed_end_to_end(true).await;
+    }
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    struct PublicSeedSummarySource(crate::Session, meerkat_core::SessionLlmIdentity);
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[async_trait]
+    impl crate::session_runtime::live_summary::LiveSummarySource for PublicSeedSummarySource {
+        async fn read(
+            &self,
+            id: &meerkat_core::SessionId,
+        ) -> Result<
+            (crate::Session, meerkat_core::SessionLlmIdentity),
+            crate::session_runtime::live_summary::LiveContextSummaryError,
+        > {
+            assert_eq!(id, self.0.id());
+            Ok((self.0.clone(), self.1.clone()))
+        }
+    }
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    struct PublicSeedSummarizer;
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[async_trait]
+    impl crate::session_runtime::live_summary::LiveContextSummarizer for PublicSeedSummarizer {
+        async fn summarize(
+            &self,
+            snapshot: crate::session_runtime::live_summary::LiveContextSummarySnapshot<'_>,
+        ) -> Result<String, crate::session_runtime::live_summary::LiveContextSummaryError> {
+            assert!(
+                serde_json::to_string(snapshot.messages())
+                    .unwrap()
+                    .contains("Earlier conversation detail")
+            );
+            Ok("Earlier discussion covered the project.".into())
+        }
+    }
+
+    #[cfg(feature = "test-realtime-fixtures")]
+    async fn run_public_broker_seed_end_to_end(summarized: bool) {
         let (base_url, capture, server) = public_wire::local_server().await;
         let realm = meerkat_core::RealmId::parse("voice").expect("realm");
         let target = public_fixture_target(&realm);
@@ -7114,7 +8832,7 @@ mod tests {
                 },
             )
             .expect("public client-context profile");
-        let pending = ExperimentalGptLivePendingChannel::__from_public_target_with_base_url(
+        let mut pending = ExperimentalGptLivePendingChannel::__from_public_target_with_base_url(
             target,
             execution_profile,
             session_id.clone(),
@@ -7133,6 +8851,26 @@ mod tests {
             history_text.clone(),
         ));
         let open_config = seed_open_config(identity, vec![user.clone()]);
+        if summarized {
+            let mut source = crate::Session::with_id(session_id.clone());
+            source.push(user.clone());
+            let source_reader = Arc::new(PublicSeedSummarySource(
+                source.clone(),
+                open_config.llm_identity.clone(),
+            ));
+            pending.context_summary = Some(
+                crate::session_runtime::live_summary::LiveContextSummaryPolicy::new(
+                    Arc::new(PublicSeedSummarizer),
+                    128 * 1024,
+                    1024,
+                    std::time::Duration::from_secs(1),
+                )
+                .unwrap()
+                .summarize(source, &open_config, source_reader)
+                .await
+                .unwrap(),
+            );
+        }
         let expected_seed_cursor = open_config.canonical_message_cursor();
         pending
             .open_live_adapter(&open_config)
@@ -7174,13 +8912,23 @@ mod tests {
             assert_eq!(body["session"]["delegation"]["type"], "client");
             assert_eq!(body["session"]["audio"]["output"]["voice"], "marin");
             assert_eq!(body["session"]["instructions"], "Catalog guidance.");
-            assert_eq!(
-                body["session"]["input"],
-                serde_json::json!([{
-                    "type": "message", "role": "user",
-                    "content": [{"type": "input_text", "text": history_text}]
-                }])
-            );
+            if summarized {
+                assert_eq!(body["session"]["input"].as_array().unwrap().len(), 1);
+                let text = body["session"]["input"][0]["content"][0]["text"]
+                    .as_str()
+                    .unwrap();
+                assert!(text.ends_with("Earlier discussion covered the project."));
+                assert!(!text.contains("Earlier conversation detail"));
+                assert!(text.contains("context data, not a new user request"));
+            } else {
+                assert_eq!(
+                    body["session"]["input"],
+                    serde_json::json!([{
+                        "type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": history_text}]
+                    }])
+                );
+            }
             assert_eq!(body["transport"]["type"], "webrtc");
             assert_eq!(body["transport"]["sdp"], "v=0\r\nOFFER_SDP");
             let expected_authorization = format!("Bearer {PUBLIC_LIVE_FIXTURE_SECRET}");
@@ -7315,11 +9063,12 @@ mod tests {
         );
 
         let events = capture.lock().expect("capture lock").client_events.clone();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert_eq!(events[0]["type"], "session.commentary.append");
         assert_eq!(events[0]["delegation_id"], public_wire::DELEGATION_ID);
         assert_eq!(events[0]["content"], "Table booked for two.");
-        assert_eq!(events[1]["type"], "session.close");
+        assert_eq!(events[1]["type"], "session.input_audio.mute");
+        assert_eq!(events[2]["type"], "session.close");
         server.abort();
     }
 
@@ -7348,6 +9097,8 @@ mod tests {
                 adapter: Arc::new(ExperimentalGptLiveDeferredAdapter::new(identity.clone())),
                 identity: identity.clone(),
                 execution_profile_id: crate::GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID.to_string(),
+                context_summary_provenance: None,
+                context_preparation_job: None,
             },
             initial_seed: Arc::clone(&initial_seed),
             adapter_taken: AtomicBool::new(false),
@@ -7361,6 +9112,9 @@ mod tests {
                     },
                 )
                 .expect("qualified client-context test execution profile"),
+            context_summary: None,
+            supports_context_summary: true,
+            concurrent_context: false,
         };
         (
             ExperimentalGptLivePreparedOpen::new(
@@ -7638,8 +9392,14 @@ mod tests {
             meerkat_live::LiveRuntimeBindingFence::new(1),
         );
         let (retirement_tx, _retirement_rx) = mpsc::channel(1);
-        let active =
-            spawn_sideband_actors(binding, sideband, test_deferred_adapter(), 1, retirement_tx);
+        let active = spawn_sideband_actors(
+            binding,
+            sideband,
+            test_deferred_adapter(),
+            1,
+            retirement_tx,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
 
         for _ in 0..32 {
             tokio::task::yield_now().await;
@@ -7815,36 +9575,45 @@ mod tests {
 
         assert!(
             adapter
-                .lower_observation(LiveSidebandObservation::new(
-                    binding.clone(),
-                    LiveSidebandObservationKind::AssistantTranscriptFragment {
-                        item: fragment_item,
-                        text: "transport fragment".to_string(),
-                    },
-                ))
+                .lower_observation(
+                    LiveSidebandObservation::new(
+                        binding.clone(),
+                        LiveSidebandObservationKind::AssistantTranscriptFragment {
+                            item: fragment_item,
+                            text: "transport fragment".to_string(),
+                        },
+                    ),
+                    None
+                )
                 .is_none(),
             "provider transcript fragments are never staged adapter output"
         );
         assert!(
             adapter
-                .lower_observation(LiveSidebandObservation::new(
-                    binding.clone(),
-                    LiveSidebandObservationKind::TurnSnapshotDelta {
-                        turn: turn.clone(),
-                        delta: "unqualified snapshot".to_string(),
-                    },
-                ))
+                .lower_observation(
+                    LiveSidebandObservation::new(
+                        binding.clone(),
+                        LiveSidebandObservationKind::TurnSnapshotDelta {
+                            turn: turn.clone(),
+                            delta: "unqualified snapshot".to_string(),
+                        },
+                    ),
+                    None
+                )
                 .is_none(),
             "turn.delta remains noncanonical until Gate0 qualifies its role semantics"
         );
         let started = adapter
-            .lower_observation(LiveSidebandObservation::new(
-                binding.clone(),
-                LiveSidebandObservationKind::TurnStarted {
-                    turn: turn.clone(),
-                    role: LiveSidebandTurnRole::Assistant,
-                },
-            ))
+            .lower_observation(
+                LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnStarted {
+                        turn: turn.clone(),
+                        role: LiveSidebandTurnRole::Assistant,
+                    },
+                ),
+                None,
+            )
             .expect("assistant turn start publishes a redacted output handle");
         assert!(matches!(
             started,
@@ -7858,14 +9627,17 @@ mod tests {
                 && provider_item_id == ExperimentalGptLiveDeferredAdapter::local_item_id(&turn)
         ));
         let projected = adapter
-            .lower_observation(LiveSidebandObservation::new(
-                binding,
-                LiveSidebandObservationKind::TurnFinished {
-                    turn: turn.clone(),
-                    role: LiveSidebandTurnRole::Assistant,
-                    transcript: "authoritative assistant final".to_string(),
-                },
-            ))
+            .lower_observation(
+                LiveSidebandObservation::new(
+                    binding,
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn: turn.clone(),
+                        role: LiveSidebandTurnRole::Assistant,
+                        transcript: "authoritative assistant final".to_string(),
+                    },
+                ),
+                None,
+            )
             .expect("assistant turn.done projects one typed staged final");
         let LiveAdapterObservation::AssistantTranscriptFinal {
             provider_item_id,
@@ -7920,14 +9692,17 @@ mod tests {
         )
         .expect("assistant-first turn");
         assert!(matches!(
-            adapter.lower_observation(LiveSidebandObservation::new(
-                binding,
-                LiveSidebandObservationKind::TurnFinished {
-                    turn,
-                    role: LiveSidebandTurnRole::Assistant,
-                    transcript: "unadmitted greeting".to_string(),
-                },
-            )),
+            adapter.lower_observation(
+                LiveSidebandObservation::new(
+                    binding,
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn,
+                        role: LiveSidebandTurnRole::Assistant,
+                        transcript: "unadmitted greeting".to_string(),
+                    },
+                ),
+                None
+            ),
             Some(LiveAdapterObservation::Error {
                 code: LiveAdapterErrorCode::ProviderError,
                 ..
@@ -7971,24 +9746,30 @@ mod tests {
         )
         .expect("complete turn");
         assert!(matches!(
-            adapter.lower_observation(LiveSidebandObservation::new(
-                binding.clone(),
-                LiveSidebandObservationKind::TurnStarted {
-                    turn: complete_turn.clone(),
-                    role: LiveSidebandTurnRole::Assistant,
-                },
-            )),
+            adapter.lower_observation(
+                LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnStarted {
+                        turn: complete_turn.clone(),
+                        role: LiveSidebandTurnRole::Assistant,
+                    },
+                ),
+                None
+            ),
             Some(LiveAdapterObservation::AssistantOutputStarted { .. })
         ));
         let complete_final = adapter
-            .lower_observation(LiveSidebandObservation::new(
-                binding.clone(),
-                LiveSidebandObservationKind::TurnFinished {
-                    turn: complete_turn.clone(),
-                    role: LiveSidebandTurnRole::Assistant,
-                    transcript: "played in full".to_string(),
-                },
-            ))
+            .lower_observation(
+                LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn: complete_turn.clone(),
+                        role: LiveSidebandTurnRole::Assistant,
+                        transcript: "played in full".to_string(),
+                    },
+                ),
+                None,
+            )
             .expect("stage full assistant final");
         let LiveAdapterObservation::AssistantTranscriptFinal {
             provider_item_id: complete_item,
@@ -8039,13 +9820,16 @@ mod tests {
         )
         .expect("early truncate turn");
         let early_started = adapter
-            .lower_observation(LiveSidebandObservation::new(
-                binding.clone(),
-                LiveSidebandObservationKind::TurnStarted {
-                    turn: early_turn.clone(),
-                    role: LiveSidebandTurnRole::Assistant,
-                },
-            ))
+            .lower_observation(
+                LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnStarted {
+                        turn: early_turn.clone(),
+                        role: LiveSidebandTurnRole::Assistant,
+                    },
+                ),
+                None,
+            )
             .expect("early output handle");
         let LiveAdapterObservation::AssistantOutputStarted {
             response_id: early_response,
@@ -8080,14 +9864,17 @@ mod tests {
                 && prefix == "early heard prefix"
         ));
         assert!(matches!(
-            adapter.lower_observation(LiveSidebandObservation::new(
-                binding.clone(),
-                LiveSidebandObservationKind::TurnFinished {
-                    turn: early_turn,
-                    role: LiveSidebandTurnRole::Assistant,
-                    transcript: "full late provider final".to_string(),
-                },
-            )),
+            adapter.lower_observation(
+                LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn: early_turn,
+                        role: LiveSidebandTurnRole::Assistant,
+                        transcript: "full late provider final".to_string(),
+                    },
+                ),
+                None
+            ),
             Some(LiveAdapterObservation::AssistantTranscriptFinal { .. })
         ));
         for (suffix, reported_prefix) in [
@@ -8101,24 +9888,30 @@ mod tests {
             )
             .expect("truncate turn");
             assert!(matches!(
-                adapter.lower_observation(LiveSidebandObservation::new(
-                    binding.clone(),
-                    LiveSidebandObservationKind::TurnStarted {
-                        turn: turn.clone(),
-                        role: LiveSidebandTurnRole::Assistant,
-                    },
-                )),
+                adapter.lower_observation(
+                    LiveSidebandObservation::new(
+                        binding.clone(),
+                        LiveSidebandObservationKind::TurnStarted {
+                            turn: turn.clone(),
+                            role: LiveSidebandTurnRole::Assistant,
+                        },
+                    ),
+                    None
+                ),
                 Some(LiveAdapterObservation::AssistantOutputStarted { .. })
             ));
             let projected = adapter
-                .lower_observation(LiveSidebandObservation::new(
-                    binding.clone(),
-                    LiveSidebandObservationKind::TurnFinished {
-                        turn,
-                        role: LiveSidebandTurnRole::Assistant,
-                        transcript: "full but not canonical yet".to_string(),
-                    },
-                ))
+                .lower_observation(
+                    LiveSidebandObservation::new(
+                        binding.clone(),
+                        LiveSidebandObservationKind::TurnFinished {
+                            turn,
+                            role: LiveSidebandTurnRole::Assistant,
+                            transcript: "full but not canonical yet".to_string(),
+                        },
+                    ),
+                    None,
+                )
                 .expect("stage assistant final before truncation");
             let LiveAdapterObservation::AssistantTranscriptFinal {
                 provider_item_id,
@@ -8178,13 +9971,16 @@ mod tests {
                     text: format!("delta-{index}"),
                 },
             );
-            assert!(adapter.lower_observation(fragment).is_none());
+            assert!(adapter.lower_observation(fragment, None).is_none());
         }
         let terminal = adapter
-            .lower_observation(LiveSidebandObservation::new(
-                binding,
-                LiveSidebandObservationKind::UnsupportedProviderEvent,
-            ))
+            .lower_observation(
+                LiveSidebandObservation::new(
+                    binding,
+                    LiveSidebandObservationKind::UnsupportedProviderEvent,
+                ),
+                None,
+            )
             .expect("unsupported terminal remains typed");
         assert!(matches!(terminal, LiveAdapterObservation::Error { .. }));
     }
@@ -8275,7 +10071,7 @@ mod tests {
             }) if text == "observed prefix")
         );
         adapter
-            .settle_snapshot_cut(&first_item, 1)
+            .settle_output_segment(&first_item, 1)
             .expect("observe committed receipt");
         let Some(LiveAdapterObservation::AssistantOutputStarted {
             provider_turn_ref,
@@ -8421,6 +10217,74 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn unconfirmed_provider_closure_is_retired_locally_after_the_bound() {
+        let transport = ExperimentalGptLiveWebrtcTransport::new();
+        let binding = ProviderWebrtcBinding::new(
+            meerkat_live::LiveChannelId::new("close-unconfirmed"),
+            meerkat_core::SessionId::new(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let (retirement_tx, _retirement_rx) = mpsc::channel(1);
+        let active = spawn_sideband_actors(
+            binding.clone(),
+            Arc::new(ControlledAmbiguousSideband::new()),
+            test_deferred_adapter(),
+            1,
+            retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
+        );
+        let drain = Arc::clone(&active.drain);
+        active.observation_actor.abort();
+        active.adapter_pump.abort();
+        active.control_actor.abort();
+        active
+            .activation_gate
+            .committed
+            .store(true, Ordering::Release);
+        transport
+            .active_by_session
+            .lock()
+            .await
+            .insert(binding.session_id().clone(), active);
+        // The provider accepts session.close but never confirms closure:
+        // no EOF, no projection receipt, no control settlement.
+        let started = tokio::time::Instant::now();
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match transport.close_exact(&binding, None).await {
+                Ok(true) => break,
+                Ok(false) => panic!("binding vanished without a close outcome"),
+                Err(_) => {
+                    assert!(
+                        started.elapsed() < LIVE_CLOSE_CONFIRMATION_BOUND,
+                        "an unconfirmed closure must be retired once the bound has elapsed"
+                    );
+                    assert_eq!(
+                        transport.active_binding(binding.session_id()).await,
+                        Some(binding.clone()),
+                        "before the bound the binding is retained for retry"
+                    );
+                }
+            }
+        }
+        assert!(drain.close_sent.load(Ordering::Acquire));
+        assert!(started.elapsed() >= LIVE_CLOSE_CONFIRMATION_BOUND);
+        assert!(
+            attempts >= 4,
+            "several retained attempts precede local retirement"
+        );
+        assert!(
+            transport
+                .active_binding(binding.session_id())
+                .await
+                .is_none(),
+            "local retirement releases the binding"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn close_timeout_retains_binding_until_all_drain_receipts_and_allows_retry() {
         let transport = ExperimentalGptLiveWebrtcTransport::new();
         let binding = ProviderWebrtcBinding::new(
@@ -8436,6 +10300,7 @@ mod tests {
             test_deferred_adapter(),
             1,
             retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
         );
         let drain = Arc::clone(&active.drain);
         active.observation_actor.abort();
@@ -8450,7 +10315,9 @@ mod tests {
             .lock()
             .await
             .insert(binding.session_id().clone(), active);
-        drain.finish_reader(Ok(()));
+        drain.finish_reader(Ok(
+            meerkat_live::ProviderWebrtcEofEvidence::ProviderConfirmed,
+        ));
         assert!(transport.close_exact(&binding, None).await.is_err());
         assert_eq!(
             transport.active_binding(binding.session_id()).await,
@@ -8499,6 +10366,7 @@ mod tests {
             Arc::clone(&adapter),
             1,
             retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
         );
         transport
             .active_by_session
@@ -8588,7 +10456,9 @@ mod tests {
         drain.requested.store(true, Ordering::Release);
         adapter.close_stream();
         assert_eq!(adapter.status(), LiveAdapterStatus::Closing);
-        drain.finish_reader(Ok(()));
+        drain.finish_reader(Ok(
+            meerkat_live::ProviderWebrtcEofEvidence::ProviderConfirmed,
+        ));
         drain.finish_projection(Ok(()));
         drain.control_finished.store(true, Ordering::Release);
         assert!(
@@ -8596,6 +10466,11 @@ mod tests {
             "a concurrent local close still requires the physical close call to succeed"
         );
         drain.close_sent.store(true, Ordering::Release);
+        assert!(
+            adapter.close().await.is_err(),
+            "a provider acknowledgement does not prove local actors were retired"
+        );
+        drain.physically_retired.store(true, Ordering::Release);
         adapter
             .close()
             .await
@@ -8634,7 +10509,14 @@ mod tests {
         let pump_retirement_tx = transport.pump_retirement_sender().await;
         transport.active_by_session.lock().await.insert(
             session_id.clone(),
-            spawn_sideband_actors(binding.clone(), sideband, adapter, 13, pump_retirement_tx),
+            spawn_sideband_actors(
+                binding.clone(),
+                sideband,
+                adapter,
+                13,
+                pump_retirement_tx,
+                Arc::clone(&transport.pending_deliveries),
+            ),
         );
 
         assert!(transport.close_exact(&binding, Some(13)).await.is_err());
@@ -8742,6 +10624,8 @@ mod tests {
                 adapter,
                 identity,
                 execution_profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
+                context_summary_provenance: None,
+                context_preparation_job: None,
             },
         );
         let activator = Arc::new(InspectingFailingActivator {
@@ -8820,13 +10704,442 @@ mod tests {
         feature = "test-realtime-fixtures",
         not(target_arch = "wasm32")
     ))]
+    use meerkat_runtime::live_context_mirror::LiveContextMirrorHost;
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    struct DelayedSourceMirror {
+        inner: Arc<crate::surface::ExperimentalGptLiveContextMirrorHost>,
+        first_read: Mutex<Option<Arc<RecoveryRegistrationBarrier>>>,
+        recoveries: AtomicUsize,
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    #[async_trait]
+    impl LiveContextMirrorHost for DelayedSourceMirror {
+        async fn committed_boundary(
+            &self,
+            session: &meerkat_core::SessionId,
+        ) -> Result<
+            (
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+                String,
+            ),
+            String,
+        > {
+            let barrier = self.first_read.lock().await.take();
+            if let Some(barrier) = barrier {
+                barrier.entered.notify_one();
+                barrier.release.notified().await;
+            }
+            self.inner.committed_boundary(session).await
+        }
+
+        async fn append_context(
+            &self,
+            authority: meerkat_runtime::live_execution::LiveContextAppendAuthority,
+            context: String,
+        ) -> Result<
+            (
+                meerkat_runtime::live_execution::LiveContextAppendAuthority,
+                meerkat_core::LiveAppendDeliveryOutcome,
+            ),
+            String,
+        > {
+            self.inner.append_context(authority, context).await
+        }
+
+        async fn recover_ambiguous_append(
+            &self,
+            authority: meerkat_runtime::live_execution::LiveContextAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            self.recoveries.fetch_add(1, Ordering::SeqCst);
+            self.inner.recover_ambiguous_append(authority).await
+        }
+
+        async fn recover_ambiguous_delegation_result(
+            &self,
+            authority: meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            self.recoveries.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .recover_ambiguous_delegation_result(authority)
+                .await
+        }
+
+        async fn retire_closed_channel(
+            &self,
+            session: &meerkat_core::SessionId,
+            authority: &meerkat_live::LiveChannelCloseCommitAuthority,
+        ) {
+            self.inner.retire_closed_channel(session, authority).await;
+        }
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    async fn assert_channel_close_fences_delayed_canonical_read(
+        service: &Arc<crate::PersistentSessionService<crate::FactoryAgentBuilder>>,
+        runtime: &Arc<meerkat_runtime::MeerkatMachine>,
+        member_host: &Arc<crate::surface::ServiceMemberLiveHost>,
+        authority: &Arc<ScriptedStrictOpenAuthority>,
+        mirror_host: &Arc<crate::surface::ExperimentalGptLiveContextMirrorHost>,
+        session_id: &meerkat_core::SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) {
+        let prepares_before_close = authority.prepare_sequence.load(Ordering::SeqCst);
+        assert!(
+            mirror_host
+                .pending_replacement_required(session_id)
+                .await
+                .is_none(),
+            "race starts only after exact replacement activation"
+        );
+        service
+            .append_external_user_content(
+                session_id,
+                meerkat_core::ContentInput::Text("delayed ordinary background fact".to_string()),
+            )
+            .await
+            .expect("commit real background context");
+        let committed_before_close = service
+            .export_realtime_refresh_session_snapshot(session_id)
+            .await
+            .expect("retain exact canonical source before close");
+        let source_gate = Arc::new(RecoveryRegistrationBarrier::default());
+        let physical_gate = Arc::new(RecoveryRegistrationBarrier::default());
+        let delayed = Arc::new(DelayedSourceMirror {
+            inner: Arc::clone(mirror_host),
+            first_read: Mutex::new(Some(Arc::clone(&source_gate))),
+            recoveries: AtomicUsize::new(0),
+        });
+        runtime.set_live_context_mirror_host(delayed.clone());
+        runtime.notify_committed_live_context(session_id);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            source_gate.entered.notified(),
+        )
+        .await
+        .expect("canonical source read is held");
+        *authority.physical_close_barrier.lock().await = Some(Arc::clone(&physical_gate));
+        let closing_host = Arc::clone(member_host);
+        let closing_authority = Arc::clone(authority);
+        let closing_channel = channel_id.clone();
+        let closing = tokio::spawn(async move {
+            // Ordinary RPC uses channel-addressed close, not a receipt wrapper.
+            closing_host
+                .close_live_channel(Some(closing_authority.as_ref()), &closing_channel)
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            physical_gate.entered.notified(),
+        )
+        .await
+        .expect("physical close must not join an unrelated source read");
+        assert!(
+            authority
+                .transport
+                .active_binding(session_id)
+                .await
+                .is_none(),
+            "barrier is after actual provider retirement, not a fabricated close observation"
+        );
+        source_gate.release.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            runtime.drain_live_context_outbox(session_id),
+        )
+        .await
+        .expect("late committed read settles without replacement")
+        .expect("revoked context remains canonical without sending");
+        physical_gate.release.notify_one();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), closing)
+                .await
+                .expect("channel close finishes")
+                .expect("close task")
+                .expect("channel close"),
+            meerkat_contracts::LiveCloseStatus::Closed,
+        );
+        assert_eq!(
+            delayed.recoveries.load(Ordering::SeqCst),
+            0,
+            "explicit close must never mint a new context or result recovery"
+        );
+        assert_eq!(
+            authority.prepare_sequence.load(Ordering::SeqCst),
+            prepares_before_close,
+            "successful explicit close must not leave a fresh bootstrap"
+        );
+        assert!(
+            runtime
+                .live_active_channel_for_session(session_id)
+                .await
+                .is_none()
+        );
+        assert!(
+            mirror_host
+                .pending_replacement_required(session_id)
+                .await
+                .is_none()
+        );
+        assert!(authority.pending_context_recovery.lock().await.is_empty());
+        assert!(authority.pending_result_recovery.lock().await.is_empty());
+        assert!(
+            authority
+                .transport
+                .active_binding(session_id)
+                .await
+                .is_none()
+        );
+        assert!(
+            authority
+                .transport
+                .registered_by_channel
+                .lock()
+                .await
+                .is_empty()
+        );
+        let committed_after_close = service
+            .export_realtime_refresh_session_snapshot(session_id)
+            .await
+            .expect("closed voice channel leaves source session readable");
+        assert_eq!(committed_after_close.id(), session_id);
+        assert_eq!(
+            committed_after_close.messages(),
+            committed_before_close.messages()
+        );
+        runtime.set_live_context_mirror_host(mirror_host.clone());
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    async fn assert_activated_replacement_custody(
+        member_host: &crate::surface::ServiceMemberLiveHost,
+        authority: &ScriptedStrictOpenAuthority,
+        channel_id: &meerkat_live::LiveChannelId,
+        pending_receipt: &str,
+        old_pending_receipt: &str,
+        old_activation_receipt: &str,
+    ) -> String {
+        let custody = member_host
+            .validate_experimental_live_channel_custody(channel_id, pending_receipt)
+            .await
+            .expect("activated replacement retains its original pending receipt");
+        let activation_receipt = custody
+            .phase()
+            .activation_receipt()
+            .expect("real replacement answer mints active custody")
+            .to_string();
+        assert_ne!(activation_receipt, old_activation_receipt);
+        assert!(
+            member_host
+                .validate_experimental_live_channel_custody_by_activation(
+                    channel_id,
+                    &activation_receipt,
+                )
+                .await
+                .expect("replacement activation receipt validates")
+                .phase()
+                .activation_receipt()
+                .is_some()
+        );
+        assert!(
+            member_host
+                .close_experimental_live_pending_channel(
+                    authority,
+                    channel_id,
+                    old_pending_receipt,
+                )
+                .await
+                .is_err(),
+            "predecessor pending receipt cannot close the activated replacement"
+        );
+        assert!(
+            member_host
+                .close_experimental_live_active_channel(
+                    authority,
+                    channel_id,
+                    old_activation_receipt,
+                )
+                .await
+                .is_err(),
+            "predecessor activation receipt cannot close the activated replacement"
+        );
+        let still_active = member_host
+            .validate_experimental_live_channel_custody_by_activation(
+                channel_id,
+                &activation_receipt,
+            )
+            .await
+            .expect("rejected predecessor receipts leave replacement active");
+        assert_eq!(
+            still_active.phase().activation_receipt(),
+            Some(activation_receipt.as_str()),
+        );
+        activation_receipt
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    struct PublicRecoveryReturnProbe {
+        inner: Arc<crate::surface::ExperimentalGptLiveContextMirrorHost>,
+        member_host: Arc<crate::surface::ServiceMemberLiveHost>,
+        authority: Arc<ScriptedStrictOpenAuthority>,
+        replacement: Mutex<Option<meerkat_live::LiveChannelId>>,
+        returned: Mutex<
+            Option<
+                Result<
+                    crate::surface::ExperimentalLiveReplacementRequired,
+                    crate::surface::ExperimentalLiveContextRecoveryError,
+                >,
+            >,
+        >,
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[async_trait]
+    impl LiveContextMirrorHost for PublicRecoveryReturnProbe {
+        async fn committed_boundary(
+            &self,
+            session: &meerkat_core::SessionId,
+        ) -> Result<
+            (
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+                String,
+            ),
+            String,
+        > {
+            self.inner.committed_boundary(session).await
+        }
+
+        async fn append_context(
+            &self,
+            authority: meerkat_runtime::live_execution::LiveContextAppendAuthority,
+            context: String,
+        ) -> Result<
+            (
+                meerkat_runtime::live_execution::LiveContextAppendAuthority,
+                meerkat_core::LiveAppendDeliveryOutcome,
+            ),
+            String,
+        > {
+            self.inner.append_context(authority, context).await
+        }
+
+        async fn recover_ambiguous_append(
+            &self,
+            recovery: meerkat_runtime::live_execution::LiveContextAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            *self.replacement.lock().await = Some(recovery.replacement_channel_id().clone());
+            // Observe the public owner's return before publish_replacement can
+            // mask an erroneous successful bootstrap with its separate guard.
+            let returned = self
+                .member_host
+                .open_live_context_replacement(self.authority.as_ref(), recovery)
+                .await;
+            let error = match &returned {
+                Ok(_) => "public recovery wrongly returned a revoked bootstrap".to_string(),
+                Err(error) => error.to_string(),
+            };
+            *self.returned.lock().await = Some(returned);
+            Err(error)
+        }
+
+        async fn recover_ambiguous_delegation_result(
+            &self,
+            recovery: meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            self.inner
+                .recover_ambiguous_delegation_result(recovery)
+                .await
+        }
+
+        async fn retire_closed_channel(
+            &self,
+            session: &meerkat_core::SessionId,
+            authority: &meerkat_live::LiveChannelCloseCommitAuthority,
+        ) {
+            self.inner.retire_closed_channel(session, authority).await;
+        }
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
     #[tokio::test]
     async fn shipping_close_matrix_preserves_history_or_retains_failed_custody() {
+        run_shipping_close_matrix(None).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn shipping_context_first_typed_speech_continues_and_reopens_without_native_user() {
+        run_shipping_close_matrix(Some(false)).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn shipping_context_first_peer_speech_continues_and_reopens_without_native_user() {
+        run_shipping_close_matrix(Some(true)).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    async fn run_shipping_close_matrix(context_first_peer: Option<bool>) {
         use meerkat_contracts::{LiveOpenTransport, WireLiveTransportBootstrap};
         use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 
         #[derive(Clone, Copy)]
         enum ExitKind {
+            ContextFirstTyped,
+            ContextFirstPeer,
+            ChannelAddressedCloseWithDelayedContext,
+            ContextReceiptWhileControlBusy,
+            ContextAppendPendingClose,
+            ContextRecoveryFailureThenClose,
+            ProviderManaged,
             SnapshotCut,
             PrefixCut,
             UnmeasuredCut,
@@ -8838,12 +11151,26 @@ mod tests {
             PublicationRetry,
             Graceful,
             Eof,
+            UnconfirmedEof,
+            UnconfirmedEofDuringClose,
             BrokerError,
+            BrokerErrorCloseRejected,
+            BrokerErrorDuringPendingClose,
+            BrokerErrorReportRetry,
+            BrokerErrorReportReceiptLost,
+            BrokerErrorCloseObserverCancelled,
             PublicationRejected,
             ReceiptFailed,
         }
 
         for (ordinal, exit) in [
+            ExitKind::ContextFirstTyped,
+            ExitKind::ContextFirstPeer,
+            ExitKind::ChannelAddressedCloseWithDelayedContext,
+            ExitKind::ContextReceiptWhileControlBusy,
+            ExitKind::ContextAppendPendingClose,
+            ExitKind::ContextRecoveryFailureThenClose,
+            ExitKind::ProviderManaged,
             ExitKind::SnapshotCut,
             ExitKind::PrefixCut,
             ExitKind::UnmeasuredCut,
@@ -8855,13 +11182,27 @@ mod tests {
             ExitKind::PublicationRetry,
             ExitKind::Graceful,
             ExitKind::Eof,
+            ExitKind::UnconfirmedEof,
+            ExitKind::UnconfirmedEofDuringClose,
             ExitKind::BrokerError,
+            ExitKind::BrokerErrorCloseRejected,
+            ExitKind::BrokerErrorDuringPendingClose,
+            ExitKind::BrokerErrorReportRetry,
+            ExitKind::BrokerErrorReportReceiptLost,
+            ExitKind::BrokerErrorCloseObserverCancelled,
             ExitKind::PublicationRejected,
             ExitKind::ReceiptFailed,
         ]
         .into_iter()
         .enumerate()
-        {
+        .filter(|(_, exit)| match context_first_peer {
+            Some(false) => matches!(exit, ExitKind::ContextFirstTyped),
+            Some(true) => matches!(exit, ExitKind::ContextFirstPeer),
+            None => !matches!(
+                exit,
+                ExitKind::ContextFirstTyped | ExitKind::ContextFirstPeer
+            ),
+        }) {
             let persistence = crate::PersistenceBundle::new(
                 Arc::new(crate::MemoryStore::new()),
                 Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
@@ -8974,15 +11315,34 @@ mod tests {
                 });
             authority.snapshot_cuts = matches!(
                 exit,
-                ExitKind::SnapshotCut
+                ExitKind::ContextFirstTyped
+                    | ExitKind::ContextFirstPeer
+                    | ExitKind::SnapshotCut
+                    | ExitKind::ProviderManaged
                     | ExitKind::PrefixCut
                     | ExitKind::UnmeasuredCut
                     | ExitKind::UnmeasuredRetry
                     | ExitKind::ProjectionRetry
             );
+            if matches!(
+                exit,
+                ExitKind::ProviderManaged
+                    | ExitKind::ContextFirstTyped
+                    | ExitKind::ContextFirstPeer
+            ) {
+                authority.playback_policy = PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured;
+            }
+            if matches!(
+                exit,
+                ExitKind::ContextFirstTyped | ExitKind::ContextFirstPeer
+            ) {
+                authority = authority.with_client_context();
+            }
             let authority = Arc::new(authority);
             let authority_trait: Arc<dyn ExperimentalLiveOpenAuthorityProvider> = authority.clone();
             let rejected_appends = Arc::new(AtomicUsize::new(0));
+            let control_release = matches!(exit, ExitKind::ContextReceiptWhileControlBusy)
+                .then(|| Arc::new(Notify::new()));
             let mirror_host = crate::surface::ExperimentalGptLiveContextMirrorHost::new(
                 Arc::clone(&runtime),
                 Arc::clone(&member_host),
@@ -8990,11 +11350,13 @@ mod tests {
                 Arc::new(SerializedLifecycleTestActivator {
                     runtime: Arc::clone(&runtime),
                     rejected_appends: Arc::clone(&rejected_appends),
+                    control_release: control_release.clone(),
+                    preparation_barrier: None,
                 }),
             );
             let execution_identity = meerkat_contracts::WireLiveExecutionIdentityOverrideV1 {
                 version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
-                profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
+                profile_id: authority.execution_profile.profile_id().to_string(),
             };
 
             let opened = member_host
@@ -9041,7 +11403,14 @@ mod tests {
             );
             assert_eq!(
                 pending_status.execution_mode(),
-                meerkat_core::LiveExecutionMode::FunctionBridge
+                if matches!(
+                    exit,
+                    ExitKind::ContextFirstTyped | ExitKind::ContextFirstPeer
+                ) {
+                    meerkat_core::LiveExecutionMode::ClientContext
+                } else {
+                    meerkat_core::LiveExecutionMode::FunctionBridge
+                }
             );
             assert!(
                 member_host
@@ -9105,6 +11474,481 @@ mod tests {
                 .as_ref()
                 .cloned()
                 .expect("pump-exit adapter is retained");
+            if matches!(
+                exit,
+                ExitKind::ContextFirstTyped | ExitKind::ContextFirstPeer
+            ) {
+                let mut channel_id = channel_id;
+                let mut binding = binding;
+                let mut sideband = sideband;
+                let mut prior_interactions = std::collections::BTreeSet::new();
+                for incarnation in 0..2 {
+                    sideband.acknowledge_context.store(true, Ordering::Release);
+                    for update in 0..3 {
+                        let text = format!("canonical background update {update}");
+                        let mut prompt = meerkat_runtime::PromptInput::new(
+                            text.clone(),
+                            Some(
+                                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                                    execution_kind: Some(
+                                        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                                    ),
+                                    ..Default::default()
+                                },
+                            ),
+                        );
+                        let input = if matches!(exit, ExitKind::ContextFirstPeer) {
+                            prompt.header.source = meerkat_runtime::InputOrigin::Peer {
+                                peer_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+                                display_identity: Some("keeper".into()),
+                                runtime_id: None,
+                            };
+                            meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                                header: prompt.header,
+                                directed_interaction_id: None,
+                                convention: Some(meerkat_runtime::PeerConvention::Message),
+                                content: text.clone().into(),
+                                payload: None,
+                                handling_mode: Some(meerkat_core::HandlingMode::Queue),
+                                sender_taint: None,
+                                objective_id: None,
+                                system_prompts: Vec::new(),
+                                injected_context: Vec::new(),
+                            })
+                        } else {
+                            meerkat_runtime::Input::Prompt(prompt)
+                        };
+                        let (_, completion) = runtime
+                            .accept_input_with_completion(&session_id, input)
+                            .await
+                            .expect("actual typed or peer input enters shared runtime");
+                        let outcome = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            completion.expect("runtime completion waiter").try_wait(),
+                        )
+                        .await
+                        .expect("background input completes")
+                        .expect("background completion");
+                        assert!(matches!(
+                            outcome,
+                            meerkat_runtime::CompletionOutcome::Completed(_)
+                        ));
+                        let (committed, token) = service
+                            .export_live_context_committed_boundary(&session_id)
+                            .await
+                            .expect("store-sealed canonical source");
+                        runtime
+                            .enqueue_committed_parent_session_boundary(
+                                &session_id,
+                                &committed,
+                                &token,
+                            )
+                            .await
+                            .expect("enqueue actual committed typed/peer boundary");
+                        runtime
+                            .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+                            .await
+                            .expect("generated outbox delivers committed canonical context");
+                        {
+                            let delivered =
+                                sideband.received_context.lock().expect("context commands");
+                            assert!(
+                                delivered
+                                    .iter()
+                                    .any(|context| context.contains("\"text\":\"ok\"")),
+                                "real text executor answer, not peer notice, reaches provider control: {delivered:?}"
+                            );
+                            if matches!(exit, ExitKind::ContextFirstTyped) {
+                                assert!(delivered.iter().any(|context| context.contains(&text)));
+                            } else {
+                                assert!(
+                                    !delivered.iter().any(|context| context.contains(&text)),
+                                    "peer notice is not promoted to conversational user text"
+                                );
+                            }
+                        }
+                        let assistant = LiveSidebandTurnRef::__from_provider_observation(
+                            binding.channel_id(),
+                            format!("context-only-{update}"),
+                            format!("private-context-only-{update}"),
+                        )
+                        .expect("assistant-only provider evidence");
+                        sideband.push(LiveSidebandObservation::new(
+                            binding.clone(),
+                            LiveSidebandObservationKind::TurnStarted {
+                                turn: assistant.clone(),
+                                role: LiveSidebandTurnRole::Assistant,
+                            },
+                        ));
+                        sideband.push(LiveSidebandObservation::new(
+                            binding.clone(),
+                            LiveSidebandObservationKind::TurnSnapshotDelta {
+                                turn: assistant.clone(),
+                                delta: format!("Observed background answer {update}."),
+                            },
+                        ));
+                        let handle = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                        loop {
+                            if let Some(handle) = runtime.live_assistant_output_handle_for_turn(
+                                &session_id, &channel_id, assistant.adapter_key(),
+                            ) && handle.__playback_segment() >= 1 {
+                                break handle;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("fresh context-first speech must enter generated output authority without a native user turn");
+                        assert!(prior_interactions.insert(handle.interaction_id().to_string()));
+                        assert_eq!(handle.origin(),
+                        meerkat_runtime::meerkat_machine::dsl::LiveAssistantTurnOrigin::ProviderInitiated);
+                        let canonical = service
+                            .load_authoritative_session(&session_id)
+                            .await
+                            .expect("canonical read")
+                            .expect("session remains");
+                        assert_eq!(
+                            canonical
+                                .messages()
+                                .iter()
+                                .filter(|message| matches!(message, meerkat_core::Message::User(_)))
+                                .count(),
+                            if matches!(exit, ExitKind::ContextFirstTyped) {
+                                incarnation * 3 + update + 1
+                            } else {
+                                0
+                            },
+                            "native provider speech must not manufacture a user row"
+                        );
+                        assert_eq!(
+                            unmeasured_fragments(&canonical).count(),
+                            incarnation * 3 + update + 1
+                        );
+                        for message in canonical.messages() {
+                            if let meerkat_core::Message::BlockAssistant(assistant) = message
+                            && assistant.blocks.iter().any(|block| matches!(block,
+                                meerkat_core::AssistantBlock::Transcript {
+                                    source: meerkat_core::types::TranscriptSource::SpokenUnmeasured, ..
+                                }))
+                        {
+                            assert_eq!(assistant.stop_reason, None);
+                        }
+                        }
+                        sideband.push(LiveSidebandObservation::new(
+                            binding.clone(),
+                            LiveSidebandObservationKind::TurnFinished {
+                                turn: assistant,
+                                role: LiveSidebandTurnRole::Assistant,
+                                transcript: format!("Observed background answer {update}."),
+                            },
+                        ));
+                    }
+                    member_host
+                        .close_live_channel(Some(authority.as_ref()), &channel_id)
+                        .await
+                        .expect("ordinary close after context-first speech");
+                    assert!(
+                        runtime
+                            .live_active_channel_for_session(&session_id)
+                            .await
+                            .is_none()
+                    );
+                    let stale = LiveSidebandObservation::new(
+                        binding.clone(),
+                        LiveSidebandObservationKind::TurnStarted {
+                            turn: LiveSidebandTurnRef::__from_provider_observation(
+                                &channel_id,
+                                "late-closed-output".into(),
+                                "private-late-output".into(),
+                            )
+                            .expect("late typed provider output"),
+                            role: LiveSidebandTurnRole::Assistant,
+                        },
+                    );
+                    assert!(
+                        runtime
+                            .observe_live_assistant_turn_started(&stale)
+                            .await
+                            .is_err()
+                    );
+                    if incarnation == 0 {
+                        let reopened = member_host
+                            .open_with_execution_identity(
+                                authority.as_ref(),
+                                &session_id,
+                                &execution_identity,
+                                None,
+                                None,
+                                Some(LiveOpenTransport::Webrtc),
+                            )
+                            .await
+                            .expect("ordinary explicit reopen of same canonical agent");
+                        assert_ne!(reopened.channel_id(), &channel_id);
+                        channel_id = reopened.channel_id().clone();
+                        let WireLiveTransportBootstrap::Webrtc { token, .. } =
+                            &reopened.open().transport
+                        else {
+                            panic!("reopen must remain WebRTC")
+                        };
+                        let binder = authority
+                            .bound_ready_binder_for(
+                                Arc::clone(&mirror_host)
+                                    as Arc<dyn ExperimentalLiveBoundChannelActivator>,
+                                Arc::clone(&live_adapter_host),
+                                Arc::new(NoopPublicObservationPublisher),
+                            )
+                            .expect("same shared binder on explicit reopen");
+                        let ready = member_host
+                            .register_experimental_live_playback_owner(
+                                &channel_id,
+                                reopened.pending_receipt(),
+                            )
+                            .await
+                            .expect("new channel playback custody");
+                        let answer = member_host
+                            .answer_experimental_live_webrtc_offer(
+                                Arc::clone(&authority.transport)
+                                    as Arc<dyn LiveWebrtcAnswerTransport>,
+                                binder,
+                                channel_id.clone(),
+                                reopened.pending_receipt(),
+                                ready.readiness_receipt(),
+                                token.clone(),
+                                "ordinary-reopen".into(),
+                            )
+                            .await
+                            .expect("fresh provider answer");
+                        answer
+                            .delivery_custody
+                            .delivered()
+                            .await
+                            .expect("publish fresh answer");
+                        binding = authority
+                            .transport
+                            .active_binding(&session_id)
+                            .await
+                            .expect("new binding");
+                        sideband = authority
+                            .latest_sideband
+                            .lock()
+                            .await
+                            .as_ref()
+                            .cloned()
+                            .expect("new sideband");
+                        assert!(
+                            runtime
+                                .observe_live_assistant_turn_started(&stale)
+                                .await
+                                .is_err(),
+                            "old-channel evidence cannot borrow new-channel authority"
+                        );
+                    }
+                }
+                continue;
+            }
+            if matches!(exit, ExitKind::ChannelAddressedCloseWithDelayedContext) {
+                assert_channel_close_fences_delayed_canonical_read(
+                    &service,
+                    &runtime,
+                    &member_host,
+                    &authority,
+                    &mirror_host,
+                    &session_id,
+                    &channel_id,
+                )
+                .await;
+                continue;
+            }
+            if matches!(
+                exit,
+                ExitKind::ContextReceiptWhileControlBusy
+                    | ExitKind::ContextAppendPendingClose
+                    | ExitKind::ContextRecoveryFailureThenClose
+            ) {
+                sideband
+                    .acknowledge_after_fragment_flood
+                    .store(true, Ordering::Release);
+                service
+                    .append_external_user_content(
+                        &session_id,
+                        meerkat_core::ContentInput::Text("typed background context".to_string()),
+                    )
+                    .await
+                    .expect("persist real background user row");
+                let canonical = service
+                    .load_authoritative_session(&session_id)
+                    .await
+                    .expect("canonical snapshot")
+                    .expect("session");
+                let persisted = service
+                    .observe_persisted_session_authority(&session_id)
+                    .await
+                    .expect("store authority")
+                    .expect("persisted");
+                let token = match persisted {
+                    meerkat_runtime::store::RuntimeSessionAuthority::WholeBlob(value) => {
+                        value.blob_sha256().to_string()
+                    }
+                    meerkat_runtime::store::RuntimeSessionAuthority::HeadCanonical(value) => {
+                        value.committed_head_token().to_string()
+                    }
+                };
+                let committed = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(
+                    Arc::new(canonical),
+                )
+                .expect("seal committed source");
+                if matches!(exit, ExitKind::ContextRecoveryFailureThenClose) {
+                    sideband
+                        .acknowledge_after_fragment_flood
+                        .store(false, Ordering::Release);
+                    sideband.fail_close.store(true, Ordering::Release);
+                    runtime
+                        .enqueue_committed_parent_session_boundary(&session_id, &committed, &token)
+                        .await
+                        .expect("canonical enqueue is independent of recovery I/O");
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(8),
+                        runtime.drain_live_context_outbox_for_channel(&session_id, &channel_id),
+                    )
+                    .await
+                    .expect("recovery failure observation is bounded")
+                    .expect_err("first physical recovery close fails without losing error");
+                    sideband.fail_close.store(false, Ordering::Release);
+                    sideband
+                        .close()
+                        .await
+                        .expect("physical EOF now becomes observable");
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        member_host.close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &channel_id,
+                            opened.pending_receipt(),
+                        ),
+                    )
+                    .await
+                    .expect("retry close joins quiescent worker")
+                    .expect(
+                        "historical recovery failure cannot poison a now-proven physical close",
+                    );
+                    runtime
+                        .drain_live_context_outbox_for_channel(&session_id, &channel_id)
+                        .await
+                        .expect_err("delivery error remains observable after close");
+                    assert!(
+                        runtime
+                            .live_session_for_active_channel(&channel_id)
+                            .await
+                            .is_none()
+                    );
+                    assert!(
+                        !authority
+                            .transport
+                            .registered_by_channel
+                            .lock()
+                            .await
+                            .contains_key(&channel_id)
+                    );
+                    continue;
+                }
+                if matches!(exit, ExitKind::ContextAppendPendingClose) {
+                    sideband.hold_context_ack.store(true, Ordering::Release);
+                    let sending_runtime = Arc::clone(&runtime);
+                    let sending_session = session_id.clone();
+                    let sending = tokio::spawn(async move {
+                        sending_runtime
+                            .enqueue_committed_parent_session_boundary(
+                                &sending_session,
+                                &committed,
+                                &token,
+                            )
+                            .await
+                    });
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        while authority
+                            .transport
+                            .pending_deliveries
+                            .lock()
+                            .await
+                            .is_empty()
+                        {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("exact authorized context append awaits provider ACK");
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        member_host.close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &channel_id,
+                            opened.pending_receipt(),
+                        ),
+                    )
+                    .await
+                    .expect("close with pending context ACK is bounded")
+                    .expect("close resolves pending delivery without fake acknowledgement");
+                    sending
+                        .await
+                        .expect("context sender joins")
+                        .expect("generated InterruptedByClose");
+                    assert!(
+                        runtime
+                            .live_session_for_active_channel(&channel_id)
+                            .await
+                            .is_none()
+                    );
+                    assert!(
+                        authority
+                            .transport
+                            .pending_deliveries
+                            .lock()
+                            .await
+                            .is_empty()
+                    );
+                    continue;
+                }
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    runtime.enqueue_committed_parent_session_boundary(
+                        &session_id,
+                        &committed,
+                        &token,
+                    ),
+                )
+                .await
+                .expect("enqueue cannot wait on busy control consumer")
+                .expect("canonical context is queued");
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    runtime.drain_live_context_outbox_for_channel(&session_id, &channel_id),
+                )
+                .await
+                .expect("ACK cannot wait on busy control consumer or 128 duplicate fragments")
+                .expect("exact provider ACK advances canonical context");
+                control_release.expect("busy control release").notify_one();
+                member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &channel_id,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .expect("close after independent ACK handoff");
+                continue;
+            }
+            let mut terminal_events = service
+                .subscribe_session_events(&session_id)
+                .await
+                .expect("observe terminal fault projection");
+            let mut snapshot_events = if matches!(exit, ExitKind::ProviderManaged) {
+                Some(
+                    service
+                        .subscribe_session_events(&session_id)
+                        .await
+                        .expect("snapshot events"),
+                )
+            } else {
+                None
+            };
             let user_turn = LiveSidebandTurnRef::__from_provider_observation(
                 binding.channel_id(),
                 format!("matrix-user-{ordinal}"),
@@ -9137,6 +11981,7 @@ mod tests {
             if matches!(
                 exit,
                 ExitKind::SnapshotCut
+                    | ExitKind::ProviderManaged
                     | ExitKind::PrefixCut
                     | ExitKind::UnmeasuredCut
                     | ExitKind::UnmeasuredRetry
@@ -9149,6 +11994,283 @@ mod tests {
                         delta: "First spoken checkpoint.".to_string(),
                     },
                 ));
+            }
+            if matches!(exit, ExitKind::ProviderManaged) {
+                use futures::{FutureExt as _, StreamExt as _};
+                let mut last_turn = assistant_turn.clone();
+                let mut prior_output = None;
+                for group in 0..4 {
+                    if group > 0 {
+                        let user = LiveSidebandTurnRef::__from_provider_observation(
+                            binding.channel_id(),
+                            format!("continuous-user-{group}"),
+                            format!("private-continuous-user-{group}"),
+                        )
+                        .expect("local user grouping");
+                        let assistant = LiveSidebandTurnRef::__from_provider_observation(
+                            binding.channel_id(),
+                            format!("continuous-assistant-{group}"),
+                            format!("private-continuous-assistant-{group}"),
+                        )
+                        .expect("local assistant grouping");
+                        for kind in [
+                            LiveSidebandObservationKind::TurnFinished {
+                                turn: last_turn,
+                                role: LiveSidebandTurnRole::Assistant,
+                                transcript: "revisable grouping, not provider final".to_string(),
+                            },
+                            LiveSidebandObservationKind::TurnStarted {
+                                turn: user.clone(),
+                                role: LiveSidebandTurnRole::User,
+                            },
+                            LiveSidebandObservationKind::TurnFinished {
+                                turn: user,
+                                role: LiveSidebandTurnRole::User,
+                                transcript: format!("continuous user {group}"),
+                            },
+                            LiveSidebandObservationKind::TurnStarted {
+                                turn: assistant.clone(),
+                                role: LiveSidebandTurnRole::Assistant,
+                            },
+                            LiveSidebandObservationKind::TurnSnapshotDelta {
+                                turn: assistant.clone(),
+                                delta: format!("observed assistant {group}"),
+                            },
+                        ] {
+                            sideband.push(LiveSidebandObservation::new(binding.clone(), kind));
+                        }
+                        last_turn = assistant;
+                    }
+                    // Wait for the generated continuation, not for analyser
+                    // silence, role alternation, provider done, or a browser ACK.
+                    for segment in 1..=2 {
+                        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                            loop {
+                                if let Some(handle) = runtime.live_assistant_output_handle_for_turn(
+                                    &session_id,
+                                    &channel_id,
+                                    last_turn.adapter_key(),
+                                ) && handle.__playback_segment() == segment
+                                {
+                                    prior_output = Some(handle);
+                                    break;
+                                }
+                                tokio::task::yield_now().await;
+                            }
+                        })
+                        .await
+                        .expect("continuous output advances without playback reports");
+                        let observed = service
+                            .load_authoritative_session(&session_id)
+                            .await
+                            .expect("read target")
+                            .expect("session");
+                        assert!(
+                            observed
+                                .live_assistant_playback_target_for_channel(&channel_id)
+                                .is_none()
+                        );
+                        let suffix = if segment == 1 {
+                            String::new()
+                        } else {
+                            format!(":segment:{}", segment - 1)
+                        };
+                        let response = format!(
+                            "{}{suffix}",
+                            ExperimentalGptLiveDeferredAdapter::local_response_id(&last_turn)
+                        );
+                        let item = format!(
+                            "{}{suffix}",
+                            ExperimentalGptLiveDeferredAdapter::local_item_id(&last_turn)
+                        );
+                        let receipt = observed
+                            .live_assistant_playback_settlement(
+                                &channel_id,
+                                prior_output
+                                    .as_ref()
+                                    .expect("continuation")
+                                    .interaction_id(),
+                                &response,
+                                &item,
+                                0,
+                            )
+                            .expect("unmeasured bookkeeping is durable");
+                        assert!(matches!(receipt.evidence,
+                            meerkat_core::LiveAssistantPlaybackEvidence::ProviderManagedUnmeasured(ref text)
+                                if !text.is_empty()
+                        ));
+                        assert_eq!(receipt.authoritative_final, None);
+                        assert_eq!(
+                            receipt.completion, None,
+                            "no synthetic stop reason or provider usage enters durable evidence"
+                        );
+                        assert!(
+                            output_rx.try_recv().is_err(),
+                            "unmeasured mode never publishes a measured playback handle"
+                        );
+                        if segment == 1 {
+                            sideband.push(LiveSidebandObservation::new(
+                                binding.clone(),
+                                LiveSidebandObservationKind::TurnSnapshotDelta {
+                                    turn: last_turn.clone(),
+                                    delta: " continuing same group".to_string(),
+                                },
+                            ));
+                        }
+                    }
+                    let canonical = service
+                        .load_authoritative_session(&session_id)
+                        .await
+                        .expect("read canonical users")
+                        .expect("session");
+                    assert_eq!(
+                        canonical
+                            .messages()
+                            .iter()
+                            .filter(|message| matches!(message, meerkat_core::Message::User(_)))
+                            .count(),
+                        group + 1,
+                    );
+                    assert_eq!(
+                        unmeasured_fragments(&canonical).count(),
+                        (group + 1) * 2,
+                        "every assistant fragment is retained despite absent playback measurement"
+                    );
+                    let context = serde_json::to_string(&canonical.messages_for_model_boundary())
+                        .expect("project retained dialogue");
+                    assert!(context.contains("First spoken checkpoint."));
+                    assert!(context.contains("spoken_unmeasured"));
+                }
+                let old_output = prior_output.expect("generated continuation handle");
+                while let Some(Some(envelope)) = snapshot_events
+                    .as_mut()
+                    .expect("snapshot event subscription")
+                    .next()
+                    .now_or_never()
+                {
+                    assert!(
+                        !matches!(
+                            envelope.payload,
+                            meerkat_core::AgentEvent::TurnCompleted { .. }
+                                | meerkat_core::AgentEvent::TextComplete { .. }
+                        ),
+                        "nonterminal transcript snapshots must not emit completion events"
+                    );
+                }
+                let original_context = service
+                    .load_authoritative_session(&session_id)
+                    .await
+                    .expect("read replacement context")
+                    .expect("session");
+                assert_eq!(unmeasured_fragments(&original_context).count(), 8);
+                let voice_context = original_context.messages_for_model_boundary();
+                let rendered = serde_json::to_string(&voice_context).expect("live context");
+                assert!(rendered.contains("First spoken checkpoint."));
+                assert!(rendered.contains("observed assistant 3"));
+                assert!(rendered.contains("spoken_unmeasured"));
+                assert_eq!(
+                    voice_context,
+                    original_context.messages_for_model_boundary(),
+                    "observation projection is deterministic for summary equality"
+                );
+                assert!(
+                    adapter
+                        .send_command(LiveAdapterCommand::CompleteAssistantPlayback {
+                            interaction_id: old_output.interaction_id(),
+                            item_id: "not-a-playback-target".to_string(),
+                            content_index: 0,
+                        })
+                        .await
+                        .is_err(),
+                    "observation mode rejects measured completion"
+                );
+                member_host
+                    .close_live_channel(Some(authority.as_ref()), &channel_id)
+                    .await
+                    .expect("continuous channel drains and closes without playback ACK");
+                assert!(
+                    runtime
+                        .reserve_live_assistant_output_handle(
+                            &session_id,
+                            &channel_id,
+                            old_output.output_id(),
+                        )
+                        .await
+                        .is_err(),
+                    "closed output handles cannot regain custody"
+                );
+                assert!(
+                    adapter
+                        .push_observation(LiveSidebandObservation::new(
+                            binding,
+                            LiveSidebandObservationKind::TurnSnapshotDelta {
+                                turn: last_turn,
+                                delta: "late old-channel fragment".to_string(),
+                            },
+                        ))
+                        .is_err()
+                );
+                assert!(
+                    service
+                        .load_authoritative_session(&session_id)
+                        .await
+                        .expect("closed target")
+                        .expect("session")
+                        .live_assistant_playback_target_for_channel(&channel_id)
+                        .is_none()
+                );
+                let reopened = member_host
+                    .open_with_execution_identity(
+                        authority.as_ref(),
+                        &session_id,
+                        &execution_identity,
+                        None,
+                        None,
+                        Some(LiveOpenTransport::Webrtc),
+                    )
+                    .await
+                    .expect("same session admits a replacement channel");
+                assert_ne!(reopened.channel_id(), &channel_id);
+                let replacement_seed = authority
+                    .latest_initial_seed
+                    .lock()
+                    .await
+                    .clone()
+                    .and_then(|seed| seed.upgrade())
+                    .expect("replacement seed custody");
+                let replacement_context = replacement_seed
+                    .lock()
+                    .await
+                    .as_ref()
+                    .expect("replacement seed")
+                    .context
+                    .canonical_messages()
+                    .expect("raw replacement context")
+                    .to_vec();
+                assert_eq!(
+                    replacement_context,
+                    voice_context
+                        .into_iter()
+                        .filter(|message| !matches!(message, meerkat_core::Message::System(_)))
+                        .collect::<Vec<_>>(),
+                    "replacement preserves prior dialogue without promoting it to played speech"
+                );
+                assert!(
+                    runtime
+                        .reserve_live_assistant_output_handle(
+                            &session_id,
+                            reopened.channel_id(),
+                            old_output.output_id(),
+                        )
+                        .await
+                        .is_err(),
+                    "old handles cannot affect a replacement channel"
+                );
+                member_host
+                    .close_live_channel(Some(authority.as_ref()), reopened.channel_id())
+                    .await
+                    .expect("close pending replacement");
+                continue;
             }
             if let Some((entered, release)) = publication_gate {
                 entered.notified().await;
@@ -9811,8 +12933,63 @@ mod tests {
                     .expect("close pending replacement");
                 continue;
             }
+            if matches!(exit, ExitKind::BrokerErrorCloseRejected) {
+                sideband.fail_close.store(true, Ordering::Release);
+            }
+            if matches!(exit, ExitKind::BrokerErrorDuringPendingClose) {
+                sideband.block_close.store(true, Ordering::Release);
+            }
+            if matches!(
+                exit,
+                ExitKind::UnconfirmedEof | ExitKind::UnconfirmedEofDuringClose
+            ) {
+                sideband.confirmed_eof.store(false, Ordering::Release);
+            }
+            if matches!(
+                exit,
+                ExitKind::BrokerErrorReportRetry
+                    | ExitKind::BrokerErrorReportReceiptLost
+                    | ExitKind::BrokerErrorCloseObserverCancelled
+            ) {
+                adapter
+                    .drain
+                    .lock()
+                    .expect("drain")
+                    .as_ref()
+                    .expect("bound")
+                    .requested
+                    .store(true, Ordering::Release);
+            }
+            if matches!(
+                exit,
+                ExitKind::BrokerErrorReportRetry | ExitKind::BrokerErrorReportReceiptLost
+            ) {
+                live_adapter_host
+                    .__fail_next_projection_for_test(
+                        channel_id.clone(),
+                        matches!(exit, ExitKind::BrokerErrorReportReceiptLost),
+                    )
+                    .await;
+            }
+            let close_barrier = if matches!(exit, ExitKind::BrokerErrorCloseObserverCancelled) {
+                Some(
+                    live_adapter_host
+                        .__block_next_close_commit_for_test(channel_id.clone())
+                        .await,
+                )
+            } else {
+                None
+            };
+            let provider_loss_started = std::time::Instant::now();
             match exit {
-                ExitKind::PrefixCut
+                ExitKind::ContextFirstTyped | ExitKind::ContextFirstPeer => unreachable!(),
+                ExitKind::ChannelAddressedCloseWithDelayedContext => unreachable!(),
+                ExitKind::ContextReceiptWhileControlBusy | ExitKind::ContextAppendPendingClose => {
+                    unreachable!()
+                }
+                ExitKind::ContextRecoveryFailureThenClose => unreachable!(),
+                ExitKind::ProviderManaged
+                | ExitKind::PrefixCut
                 | ExitKind::UnmeasuredCut
                 | ExitKind::UnmeasuredRetry
                 | ExitKind::LegacyCompleteRetry
@@ -9825,12 +13002,172 @@ mod tests {
                 ExitKind::SnapshotCut => unreachable!(),
                 ExitKind::Graceful => unreachable!(),
                 ExitKind::Eof => sideband.close().await.expect("inject EOF"),
-                ExitKind::BrokerError => sideband.fail(ProviderWebrtcBrokerError::Unavailable),
+                ExitKind::UnconfirmedEof => sideband
+                    .close()
+                    .await
+                    .expect("inject unconfirmed stream EOF"),
+                ExitKind::UnconfirmedEofDuringClose => {}
+                ExitKind::BrokerErrorDuringPendingClose => {}
+                ExitKind::BrokerError
+                | ExitKind::BrokerErrorCloseRejected
+                | ExitKind::BrokerErrorReportRetry
+                | ExitKind::BrokerErrorReportReceiptLost
+                | ExitKind::BrokerErrorCloseObserverCancelled => {
+                    sideband.fail(ProviderWebrtcBrokerError::Unavailable);
+                }
                 ExitKind::PublicationRejected => reject_release
                     .as_ref()
                     .expect("publication rejection release")
                     .notify_one(),
                 ExitKind::ReceiptFailed => {}
+            }
+            if matches!(exit, ExitKind::BrokerErrorDuringPendingClose) {
+                let close_host = Arc::clone(&member_host);
+                let close_authority = Arc::clone(&authority);
+                let close_channel = channel_id.clone();
+                let receipt = opened.pending_receipt().to_string();
+                let close = tokio::spawn(async move {
+                    close_host
+                        .close_experimental_live_pending_channel(
+                            close_authority.as_ref(),
+                            &close_channel,
+                            &receipt,
+                        )
+                        .await
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    while !sideband.close_started.load(Ordering::Acquire) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("provider close request starts and remains pending");
+                sideband.fail(ProviderWebrtcBrokerError::Unavailable);
+                tokio::time::timeout(std::time::Duration::from_secs(3), close)
+                    .await
+                    .expect("known failed stream cannot wait for hung remote close")
+                    .expect("close task")
+                    .expect("exact local close");
+            }
+            if matches!(exit, ExitKind::UnconfirmedEofDuringClose) {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    member_host.close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &channel_id,
+                        opened.pending_receipt(),
+                    ),
+                )
+                .await
+                .expect("unconfirmed EOF during close is bounded")
+                .expect("unconfirmed EOF retires locally through shared close");
+            }
+            if let Some((entered, release)) = close_barrier {
+                let close_host = Arc::clone(&member_host);
+                let close_authority = Arc::clone(&authority);
+                let close_channel = channel_id.clone();
+                let receipt = opened.pending_receipt().to_string();
+                let mut observer = tokio::spawn(async move {
+                    close_host
+                        .close_experimental_live_pending_channel(
+                            close_authority.as_ref(),
+                            &close_channel,
+                            &receipt,
+                        )
+                        .await
+                });
+                tokio::select! {
+                    outcome = &mut observer => panic!("close returned before blocked host commit: {outcome:?}"),
+                    entered = entered => entered.expect("generated close reaches blocked host commit"),
+                    () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                        let physical_retired = adapter.drain.lock().expect("drain").as_ref().expect("bound")
+                            .physically_retired.load(Ordering::Acquire);
+                        let active = runtime.live_session_for_active_channel(&channel_id).await.is_some();
+                        panic!("close did not reach host commit: physical_retired={physical_retired} active={active}");
+                    }
+                }
+                assert!(
+                    runtime
+                        .live_session_for_active_channel(&channel_id)
+                        .await
+                        .is_none(),
+                    "cancel at the exact generated-close/host-commit gap"
+                );
+                observer.abort();
+                assert!(
+                    observer
+                        .await
+                        .expect_err("close observer cancelled")
+                        .is_cancelled()
+                );
+                release
+                    .send(())
+                    .expect("owned commit continues after observer cancellation");
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if matches!(live_adapter_host.channel_status_observation(&channel_id).await,
+                            Ok(observation) if observation.status() == &LiveAdapterStatus::Closed)
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("owned close handoff commits despite observer cancellation");
+            }
+            if matches!(
+                exit,
+                ExitKind::BrokerErrorReportRetry | ExitKind::BrokerErrorReportReceiptLost
+            ) {
+                let error = member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &channel_id,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .expect_err("fault reporting failure must remain visible");
+                assert!(matches!(
+                    error,
+                    crate::surface::ExperimentalLiveChannelCloseError::TerminalProjection(_)
+                ));
+                assert!(
+                    runtime
+                        .live_session_for_active_channel(&channel_id)
+                        .await
+                        .is_none()
+                );
+                assert!(
+                    authority
+                        .transport
+                        .registered_by_channel
+                        .lock()
+                        .await
+                        .contains_key(&channel_id),
+                    "generated close cannot discard an unreported terminal fault"
+                );
+                assert!(
+                    authority
+                        .transport
+                        .active_by_session
+                        .lock()
+                        .await
+                        .is_empty(),
+                    "failed fault publication must not keep a dead transport selectable"
+                );
+                live_adapter_host
+                    .__expire_closed_projection_for_test(&channel_id)
+                    .await
+                    .expect("expire closed projection");
+                assert_eq!(
+                    live_adapter_host
+                        .channel_status_observation(&channel_id)
+                        .await
+                        .expect("pending report pins projection past TTL")
+                        .status(),
+                    &LiveAdapterStatus::Closed
+                );
             }
             let completed = tokio::time::timeout(std::time::Duration::from_secs(2), completion)
                 .await
@@ -9845,7 +13182,143 @@ mod tests {
                 .err()
                 .map(ToString::to_string)
                 .unwrap_or_default();
-            if matches!(exit, ExitKind::BrokerError | ExitKind::PublicationRejected) {
+            if matches!(
+                exit,
+                ExitKind::BrokerError
+                    | ExitKind::UnconfirmedEof
+                    | ExitKind::UnconfirmedEofDuringClose
+                    | ExitKind::BrokerErrorCloseRejected
+                    | ExitKind::BrokerErrorDuringPendingClose
+                    | ExitKind::BrokerErrorReportRetry
+                    | ExitKind::BrokerErrorReportReceiptLost
+                    | ExitKind::BrokerErrorCloseObserverCancelled
+            ) {
+                use futures::{FutureExt as _, StreamExt as _};
+                assert_eq!(
+                    member_host
+                        .close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &channel_id,
+                            opened.pending_receipt(),
+                        )
+                        .await
+                        .expect("terminal provider failure must allow exact local cleanup"),
+                    meerkat_contracts::LiveCloseStatus::Closed,
+                );
+                assert!(
+                    provider_loss_started.elapsed() < std::time::Duration::from_secs(5),
+                    "terminal provider cleanup must confirm within the browser's five-second close bound"
+                );
+                let custody = member_host
+                    .validate_experimental_live_channel_custody(
+                        &channel_id,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .expect("terminal custody survives physical retirement");
+                assert!(matches!(
+                    custody.phase(),
+                    crate::surface::ExperimentalLiveChannelPhaseStatus::Closed
+                ));
+                assert_eq!(
+                    member_host
+                        .close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &channel_id,
+                            opened.pending_receipt(),
+                        )
+                        .await
+                        .expect("exact close receipt replays after provider loss"),
+                    meerkat_contracts::LiveCloseStatus::Closed,
+                );
+                assert!(
+                    member_host
+                        .close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &channel_id,
+                            "wrong-receipt",
+                        )
+                        .await
+                        .is_err()
+                );
+                let mut faults = 0;
+                while let Some(Some(envelope)) = terminal_events.next().now_or_never() {
+                    match envelope.payload {
+                        meerkat_core::AgentEvent::RunFailed { .. } => faults += 1,
+                        meerkat_core::AgentEvent::TurnCompleted { .. }
+                        | meerkat_core::AgentEvent::TextComplete { .. } => {
+                            panic!("provider failure cannot fabricate turn completion")
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(
+                    faults, 1,
+                    "retained terminal fault must publish exactly once"
+                );
+                let before = service
+                    .load_authoritative_session(&session_id)
+                    .await
+                    .expect("session read")
+                    .expect("session");
+                let reopened = member_host
+                    .open_with_execution_identity(
+                        authority.as_ref(),
+                        &session_id,
+                        &execution_identity,
+                        None,
+                        None,
+                        Some(LiveOpenTransport::Webrtc),
+                    )
+                    .await
+                    .expect("failed provider no longer poisons source reopen");
+                assert_ne!(reopened.channel_id(), &channel_id);
+                drop(adapter);
+                live_adapter_host
+                    .__expire_closed_projection_for_test(&channel_id)
+                    .await
+                    .expect("expire completed projection");
+                assert!(
+                    live_adapter_host
+                        .channel_status_observation(&channel_id)
+                        .await
+                        .is_err(),
+                    "completed close replay must not rely on retained host cache"
+                );
+                member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &channel_id,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .expect("old exact close replays after new open");
+                assert_eq!(
+                    runtime
+                        .live_session_for_active_channel(reopened.channel_id())
+                        .await,
+                    Some(session_id.clone())
+                );
+                let after = service
+                    .load_authoritative_session(&session_id)
+                    .await
+                    .expect("session read")
+                    .expect("session");
+                assert_eq!(
+                    before.messages(),
+                    after.messages(),
+                    "retirement/replay/reopen never rewrites background conversation"
+                );
+                member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        reopened.channel_id(),
+                        reopened.pending_receipt(),
+                    )
+                    .await
+                    .expect("close newly opened channel");
+            }
+            if matches!(exit, ExitKind::PublicationRejected) {
                 assert!(
                     member_host
                         .close_live_channel(Some(authority.as_ref()), &channel_id)
@@ -9979,8 +13452,419 @@ mod tests {
     ))]
     #[tokio::test]
     async fn ambiguous_context_and_result_physically_replace_and_atomically_rebind_exact_seed() {
+        run_context_and_result_recovery_with_summary(None).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[derive(Clone, Copy)]
+    enum SummaryTestCase {
+        Normal,
+        Changed,
+        Failed,
+        BlockRecovery,
+        BlockRegistration,
+        Concurrent,
+        ConcurrentFailed,
+        ConcurrentCancelled,
+        ConcurrentAckRace,
+        ConcurrentRejected,
+        ConcurrentReplacement,
+        ConcurrentControlReady,
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    struct RecoverySummaryProducer {
+        service: Arc<crate::PersistentSessionService<crate::FactoryAgentBuilder>>,
+        case: SummaryTestCase,
+        calls: AtomicUsize,
+        require_unmeasured_history: bool,
+        recovery_entered: tokio::sync::Notify,
+        recovery_release: tokio::sync::Notify,
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[async_trait]
+    impl crate::session_runtime::live_summary::LiveContextSummarizer for RecoverySummaryProducer {
+        async fn summarize(
+            &self,
+            snapshot: crate::session_runtime::live_summary::LiveContextSummarySnapshot<'_>,
+        ) -> Result<String, crate::session_runtime::live_summary::LiveContextSummaryError> {
+            use crate::session_runtime::live_summary::LiveContextSummaryError;
+            let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            assert_eq!(
+                snapshot.llm_identity().model,
+                "gpt-realtime-2",
+                "summary sees background identity, never voice override"
+            );
+            match self.case {
+                SummaryTestCase::ConcurrentControlReady => {
+                    self.recovery_entered.notify_one();
+                }
+                SummaryTestCase::Concurrent
+                | SummaryTestCase::ConcurrentFailed
+                | SummaryTestCase::ConcurrentCancelled
+                | SummaryTestCase::ConcurrentAckRace
+                | SummaryTestCase::ConcurrentRejected
+                | SummaryTestCase::ConcurrentReplacement => {
+                    self.recovery_entered.notify_one();
+                    self.recovery_release.notified().await;
+                    if matches!(self.case, SummaryTestCase::ConcurrentFailed) {
+                        return Err(LiveContextSummaryError::Producer(
+                            "controlled failure".into(),
+                        ));
+                    }
+                }
+                SummaryTestCase::Changed => {
+                    self.service
+                        .append_external_user_content(
+                            snapshot.session_id(),
+                            meerkat_core::ContentInput::Text("text arrived during summary".into()),
+                        )
+                        .await?;
+                }
+                SummaryTestCase::Failed => {
+                    return Err(LiveContextSummaryError::Producer(
+                        "summary service failed".into(),
+                    ));
+                }
+                SummaryTestCase::BlockRecovery if call == 1 => {
+                    self.recovery_entered.notify_one();
+                    self.recovery_release.notified().await;
+                }
+                SummaryTestCase::Normal
+                | SummaryTestCase::BlockRecovery
+                | SummaryTestCase::BlockRegistration => {}
+            }
+            let mut summary = format!(
+                "Factual context summary covering {} canonical rows.",
+                snapshot.canonical_message_cursor()
+            );
+            if self.require_unmeasured_history && call > 0 {
+                let observation = snapshot
+                    .messages()
+                    .iter()
+                    .find_map(|message| {
+                        if let meerkat_core::Message::BlockAssistant(assistant) = message {
+                            assistant.blocks.iter().find_map(|block| match block {
+                                meerkat_core::AssistantBlock::Transcript {
+                                    text,
+                                    source: meerkat_core::types::TranscriptSource::SpokenUnmeasured,
+                                    ..
+                                } => Some(text.as_str()),
+                                _ => None,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .expect("replacement summarizer sees typed observation context");
+                assert!(observation.contains("prior unmeasured voice dialogue"));
+                summary.push_str("\nObserved assistant speech (playback UNMEASURED): ");
+                summary.push_str(observation);
+            }
+            Ok(summary)
+        }
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn fast_concurrent_summary_waits_for_exact_control_handoff() {
+        run_context_and_result_recovery_with_summary(Some(SummaryTestCase::ConcurrentControlReady))
+            .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn concurrent_summary_replacement_activates_before_its_new_summary() {
+        run_context_and_result_recovery_with_summary(Some(SummaryTestCase::ConcurrentReplacement))
+            .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn concurrent_summary_preserves_exact_ack_before_ambiguous_send_return() {
+        run_context_and_result_recovery_with_summary(Some(SummaryTestCase::ConcurrentAckRace))
+            .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn concurrent_summary_provider_rejection_is_not_cancellation() {
+        run_context_and_result_recovery_with_summary(Some(SummaryTestCase::ConcurrentRejected))
+            .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn concurrent_summary_close_cancels_old_job_without_poisoning_reopen() {
+        run_context_and_result_recovery_with_summary(Some(SummaryTestCase::ConcurrentCancelled))
+            .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn concurrent_summary_keeps_exact_media_active_and_orders_history_before_tail() {
+        run_context_and_result_recovery_with_summary(Some(SummaryTestCase::Concurrent)).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn concurrent_summary_failure_is_typed_without_closing_active_media() {
+        run_context_and_result_recovery_with_summary(Some(SummaryTestCase::ConcurrentFailed)).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn summary_policy_reapplies_on_context_and_result_replacement_without_mutating_source() {
+        run_context_and_result_recovery_with_summary(Some(SummaryTestCase::Normal)).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn summary_open_rejects_stale_snapshot_before_channel_or_provider_effects() {
+        run_context_and_result_recovery_with_summary(Some(SummaryTestCase::Changed)).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn summary_open_producer_failure_has_no_raw_history_fallback_or_channel_leak() {
+        run_context_and_result_recovery_with_summary(Some(SummaryTestCase::Failed)).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    async fn run_context_and_result_recovery_with_summary(summary_case: Option<SummaryTestCase>) {
+        run_context_and_result_recovery_with_history(summary_case, false).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn unmeasured_voice_dialogue_survives_canonical_text_and_result_replacements() {
+        run_context_and_result_recovery_with_history(None, true).await;
+        run_context_and_result_recovery_with_history(Some(SummaryTestCase::Normal), true).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    async fn run_context_and_result_recovery_with_history(
+        summary_case: Option<SummaryTestCase>,
+        retain_voice: bool,
+    ) {
+        run_context_and_result_recovery_case(summary_case, retain_voice, false).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn closed_pending_replacement_does_not_poison_reopened_source_or_new_replacement() {
+        run_context_and_result_recovery_case(None, false, true).await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn explicit_close_during_recovery_summary_cannot_resurrect_old_lineage() {
+        run_context_and_result_recovery_case(Some(SummaryTestCase::BlockRecovery), false, false)
+            .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn explicit_close_before_recovery_registration_retires_late_provider_custody() {
+        run_context_and_result_recovery_case(
+            Some(SummaryTestCase::BlockRegistration),
+            false,
+            false,
+        )
+        .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn raw_close_before_recovery_registration_retires_late_provider_custody() {
+        run_context_and_result_recovery_close_case(
+            Some(SummaryTestCase::BlockRegistration),
+            false,
+            false,
+            Some(RecoveryCloseCase::RawDuringRegistration),
+        )
+        .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn cancelled_raw_close_refuses_public_recovery_return_before_semantic_close() {
+        run_context_and_result_recovery_close_case(
+            Some(SummaryTestCase::BlockRegistration),
+            false,
+            false,
+            Some(RecoveryCloseCase::CancelledRawDuringRegistration),
+        )
+        .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn activated_context_replacement_raw_close_fences_delayed_source_read() {
+        run_context_and_result_recovery_close_case(
+            None,
+            false,
+            false,
+            Some(RecoveryCloseCase::ActivatedContext),
+        )
+        .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn activated_result_replacement_raw_close_fences_delayed_source_read() {
+        run_context_and_result_recovery_close_case(
+            None,
+            false,
+            false,
+            Some(RecoveryCloseCase::ActivatedResult),
+        )
+        .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[derive(Clone, Copy)]
+    enum RecoveryCloseCase {
+        ActivatedContext,
+        ActivatedResult,
+        RawDuringRegistration,
+        CancelledRawDuringRegistration,
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    async fn run_context_and_result_recovery_case(
+        summary_case: Option<SummaryTestCase>,
+        retain_voice: bool,
+        close_pending_replacement: bool,
+    ) {
+        run_context_and_result_recovery_close_case(
+            summary_case,
+            retain_voice,
+            close_pending_replacement,
+            None,
+        )
+        .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    async fn run_context_and_result_recovery_close_case(
+        summary_case: Option<SummaryTestCase>,
+        retain_voice: bool,
+        close_pending_replacement: bool,
+        close_case: Option<RecoveryCloseCase>,
+    ) {
         use meerkat_contracts::{LiveOpenTransport, WireLiveTransportBootstrap};
         use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
+
+        // These cases share the production one-open memory reservation when
+        // run in one cargo-test process. Nextest isolates them by process.
+        static OPEN_RESERVATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _reservation = OPEN_RESERVATION.lock().await;
 
         let session_store: Arc<dyn crate::SessionStore> = Arc::new(crate::MemoryStore::new());
         let persistence = crate::PersistenceBundle::new(
@@ -10057,11 +13941,35 @@ mod tests {
         .await
         .expect("materialize recovery fixture session");
 
+        let concurrent = matches!(
+            summary_case,
+            Some(
+                SummaryTestCase::Concurrent
+                    | SummaryTestCase::ConcurrentFailed
+                    | SummaryTestCase::ConcurrentCancelled
+                    | SummaryTestCase::ConcurrentAckRace
+                    | SummaryTestCase::ConcurrentRejected
+                    | SummaryTestCase::ConcurrentReplacement
+                    | SummaryTestCase::ConcurrentControlReady
+            )
+        );
+        if concurrent {
+            service
+                .append_external_user_content(
+                    &session_id,
+                    meerkat_core::ContentInput::Text("Historical code: Violet.".into()),
+                )
+                .await
+                .expect("committed historical source");
+        }
+
         #[cfg(feature = "comms")]
         {
             let comms: Arc<dyn meerkat_core::agent::CommsRuntime> = Arc::new(
-                meerkat_comms::CommsRuntime::inproc_only("gpt-live-recovery-test")
-                    .expect("inproc comms runtime"),
+                meerkat_comms::CommsRuntime::inproc_only(&format!(
+                    "gpt-live-recovery-{session_id}"
+                ))
+                .expect("inproc comms runtime"),
             );
             runtime
                 .maybe_spawn_mob_comms_drain(
@@ -10077,35 +13985,70 @@ mod tests {
 
         let fallback_factory: Arc<crate::test_fixtures::realtime::ScriptedRealtimeSessionFactory> =
             Arc::new(crate::test_fixtures::realtime::ScriptedRealtimeSessionFactory::new());
-        let member_host = Arc::new(
-            crate::surface::ServiceMemberLiveHost::new(
-                crate::surface::ServiceMemberLiveHostConfig {
-                    service: Arc::clone(&service),
-                    runtime_adapter: Arc::clone(&runtime),
-                    host: Arc::clone(&live_adapter_host),
-                    ws_state: Some(ws_state),
-                    base_url: Some("wss://recovery.test".to_string()),
-                    session_factory: fallback_factory as Arc<dyn RealtimeSessionFactory>,
-                    realm_id: None,
-                    instance_id: None,
-                    backend: None,
-                },
-            )
-            .with_webrtc_cleanup_state(webrtc_state),
-        );
-        let identity = meerkat_core::SessionLlmIdentity {
-            model: "gpt-live-1".to_string(),
-            provider: Provider::OpenAI,
-            self_hosted_server_id: None,
-            provider_params: None,
-            auth_binding: None,
-        };
-        let authority = Arc::new(ScriptedStrictOpenAuthority::new(identity).with_client_context());
+        let summary_producer = summary_case.map(|case| {
+            Arc::new(RecoverySummaryProducer {
+                service: Arc::clone(&service),
+                case,
+                calls: AtomicUsize::new(0),
+                require_unmeasured_history: retain_voice,
+                recovery_entered: tokio::sync::Notify::new(),
+                recovery_release: tokio::sync::Notify::new(),
+            })
+        });
+        let member_host = crate::surface::ServiceMemberLiveHost::new(
+            crate::surface::ServiceMemberLiveHostConfig {
+                service: Arc::clone(&service),
+                runtime_adapter: Arc::clone(&runtime),
+                host: Arc::clone(&live_adapter_host),
+                ws_state: Some(ws_state),
+                base_url: Some("wss://recovery.test".to_string()),
+                session_factory: fallback_factory as Arc<dyn RealtimeSessionFactory>,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+            },
+        )
+        .with_webrtc_cleanup_state(webrtc_state);
+        let member_host = Arc::new(match &summary_producer {
+            Some(producer) => member_host.with_context_summary_policy(
+                crate::session_runtime::live_summary::LiveContextSummaryPolicy::new(
+                    producer.clone(),
+                    64 * 1024,
+                    1024,
+                    std::time::Duration::from_secs(5),
+                )
+                .expect("bounded host summary policy")
+                .with_bootstrap_mode(if concurrent {
+                    crate::session_runtime::live_summary::LiveContextBootstrapMode::Concurrent
+                } else {
+                    crate::session_runtime::live_summary::LiveContextBootstrapMode::BeforeOpen
+                }),
+            ),
+            None => member_host,
+        });
+        let readiness_realm = meerkat_core::RealmId::parse("active-readiness").unwrap();
+        let readiness_binding = public_live_binding(&readiness_realm);
+        let identity = public_live_identity(readiness_binding.clone());
+        let mut authority = ScriptedStrictOpenAuthority::new(identity).with_client_context();
+        if retain_voice || concurrent {
+            authority.snapshot_cuts = true;
+            authority.playback_policy = PublicGptLivePlaybackPolicy::ProviderManagedUnmeasured;
+        }
+        let authority = Arc::new(authority);
+        let registration_barrier = Arc::new(RecoveryRegistrationBarrier::default());
+        if matches!(summary_case, Some(SummaryTestCase::BlockRegistration)) {
+            *authority.recovery_registration_barrier.lock().await =
+                Some(Arc::clone(&registration_barrier));
+        }
         let authority_trait: Arc<dyn ExperimentalLiveOpenAuthorityProvider> = authority.clone();
+        let control_barrier = matches!(summary_case, Some(SummaryTestCase::ConcurrentControlReady))
+            .then(|| Arc::new(RecoveryRegistrationBarrier::default()));
         let downstream: Arc<dyn ExperimentalLiveBoundChannelActivator> =
             Arc::new(SerializedLifecycleTestActivator {
                 runtime: Arc::clone(&runtime),
                 rejected_appends: Arc::new(AtomicUsize::new(0)),
+                control_release: None,
+                preparation_barrier: control_barrier.clone(),
             });
         let mirror_host = crate::surface::ExperimentalGptLiveContextMirrorHost::new(
             Arc::clone(&runtime),
@@ -10118,7 +14061,11 @@ mod tests {
             profile_id: GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID.to_string(),
         };
 
-        let opened = member_host
+        let before = service
+            .export_realtime_refresh_session_snapshot(&session_id)
+            .await
+            .unwrap();
+        let opening = member_host
             .open_with_execution_identity(
                 authority.as_ref(),
                 &session_id,
@@ -10127,9 +14074,117 @@ mod tests {
                 None,
                 Some(LiveOpenTransport::Webrtc),
             )
-            .await
-            .expect("strict initial experimental open");
-        let old_channel = opened.channel_id().clone();
+            .await;
+        if let Some(case @ (SummaryTestCase::Changed | SummaryTestCase::Failed)) = summary_case {
+            use crate::session_runtime::live_orchestration::{
+                ExperimentalLiveChannelOpenError, RealtimeSessionOpenProjectionError,
+            };
+            use crate::session_runtime::live_summary::LiveContextSummaryError;
+            let error = opening.expect_err("summary failure must refuse strict open");
+            match case {
+                SummaryTestCase::Changed => assert!(
+                    matches!(
+                        error,
+                        ExperimentalLiveChannelOpenError::Projection(
+                            RealtimeSessionOpenProjectionError::Summary(
+                                LiveContextSummaryError::StaleSnapshot
+                            )
+                        )
+                    ),
+                    "{error:?}"
+                ),
+                SummaryTestCase::Failed => assert!(
+                    matches!(
+                        error,
+                        ExperimentalLiveChannelOpenError::Projection(
+                            RealtimeSessionOpenProjectionError::Summary(
+                                LiveContextSummaryError::Producer(_)
+                            )
+                        )
+                    ),
+                    "{error:?}"
+                ),
+                SummaryTestCase::Normal
+                | SummaryTestCase::BlockRecovery
+                | SummaryTestCase::BlockRegistration
+                | SummaryTestCase::Concurrent
+                | SummaryTestCase::ConcurrentFailed
+                | SummaryTestCase::ConcurrentCancelled
+                | SummaryTestCase::ConcurrentAckRace
+                | SummaryTestCase::ConcurrentRejected
+                | SummaryTestCase::ConcurrentReplacement
+                | SummaryTestCase::ConcurrentControlReady => unreachable!(),
+            }
+            assert!(
+                runtime
+                    .live_active_channel_for_session(&session_id)
+                    .await
+                    .is_none()
+            );
+            assert!(
+                authority
+                    .transport
+                    .registered_by_channel
+                    .lock()
+                    .await
+                    .is_empty()
+            );
+            assert!(
+                authority
+                    .transport
+                    .active_by_session
+                    .lock()
+                    .await
+                    .is_empty()
+            );
+            assert_eq!(
+                summary_producer
+                    .as_ref()
+                    .unwrap()
+                    .calls
+                    .load(AtomicOrdering::SeqCst),
+                1
+            );
+            return;
+        }
+        let opened = opening.expect("strict initial experimental open");
+        if summary_producer.is_some() && !concurrent {
+            let after = service
+                .export_realtime_refresh_session_snapshot(&session_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                before.messages(),
+                after.messages(),
+                "voice summary does not mutate the transcript"
+            );
+            assert_eq!(
+                opened.open().continuity,
+                meerkat_contracts::WireLiveContinuityMode::Degraded
+            );
+            let provenance = authority
+                .transport
+                .bound_context_summary(opened.channel_id(), &session_id)
+                .await
+                .expect("summary provenance follows the exact channel");
+            assert_eq!(
+                provenance.source_revision(),
+                &before.canonical_context_revision().unwrap()
+            );
+            assert_eq!(
+                provenance.canonical_message_cursor(),
+                before.messages().len() as u64
+            );
+            assert!(provenance.text().starts_with("Factual context summary"));
+            assert!(
+                authority
+                    .transport
+                    .bound_context_summary(opened.channel_id(), &meerkat_core::SessionId::new(),)
+                    .await
+                    .is_none()
+            );
+        }
+        let mut old_channel = opened.channel_id().clone();
         let old_token = match &opened.open().transport {
             WireLiveTransportBootstrap::Webrtc { token, .. } => token.clone(),
             other => panic!("expected WebRTC bootstrap, got {other:?}"),
@@ -10157,16 +14212,680 @@ mod tests {
             )
             .await
             .expect("initial answer binds exact experimental execution");
+        if let Some(barrier) = control_barrier {
+            use crate::surface::{LiveContextPreparationStage, LiveContextPreparationStatus};
+            let sideband = authority.latest_sideband.lock().await.clone().unwrap();
+            sideband.acknowledge_context.store(true, Ordering::Release);
+            let delivery = initial_answer.delivery_custody.delivered();
+            tokio::pin!(delivery);
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::select! {
+                    () = barrier.entered.notified() => {}
+                    result = &mut delivery => panic!("control preparation was not held: {result:?}"),
+                }
+            }).await.expect("semantic activation reaches held control handoff");
+            let producer = summary_producer.as_ref().unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                producer.recovery_entered.notified(),
+            )
+            .await
+            .expect("fast producer completed before provider control");
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut delivery)
+                    .await
+                    .is_err(),
+                "answer still owns its pending control handoff"
+            );
+            let custody = member_host
+                .validate_experimental_live_channel_custody(&old_channel, opened.pending_receipt())
+                .await
+                .unwrap();
+            assert!(matches!(
+                custody.phase(),
+                crate::surface::ExperimentalLiveChannelPhaseStatus::Active { .. }
+            ));
+            assert_eq!(
+                *custody.context_preparation(),
+                LiveContextPreparationStatus::Preparing(LiveContextPreparationStage::Generating)
+            );
+            assert!(sideband.context_commands.lock().await.is_empty());
+            barrier.release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut delivery)
+                .await
+                .unwrap()
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    let status = member_host
+                        .validate_experimental_live_channel_custody(
+                            &old_channel,
+                            opened.pending_receipt(),
+                        )
+                        .await
+                        .unwrap();
+                    if *status.context_preparation()
+                        == LiveContextPreparationStatus::ProviderAcknowledged
+                    {
+                        break;
+                    }
+                    assert!(!matches!(
+                        status.context_preparation(),
+                        LiveContextPreparationStatus::Failed(_)
+                    ));
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("ready control receives the completed summary");
+            assert_eq!(producer.calls.load(AtomicOrdering::SeqCst), 1);
+            member_host
+                .close_experimental_live_pending_channel(
+                    authority.as_ref(),
+                    &old_channel,
+                    opened.pending_receipt(),
+                )
+                .await
+                .unwrap();
+            return;
+        }
         initial_answer
             .delivery_custody
             .delivered()
             .await
             .expect("publish initial answer");
-        let stale_old_binding = authority
+        let mut stale_old_binding = authority
             .transport
             .active_binding(&session_id)
             .await
             .expect("old provider binding is physically active");
+        let custody = member_host
+            .validate_experimental_live_channel_custody(&old_channel, opened.pending_receipt())
+            .await
+            .expect("actual active source custody");
+        assert!(matches!(
+            custody.phase(),
+            crate::surface::ExperimentalLiveChannelPhaseStatus::Active { .. }
+        ));
+        let initial_activation_receipt = custody
+            .phase()
+            .activation_receipt()
+            .expect("initial real answer has active custody")
+            .to_string();
+        if concurrent {
+            use crate::surface::{
+                LiveContextPreparationFailure, LiveContextPreparationStage,
+                LiveContextPreparationStatus,
+            };
+            let producer = summary_producer.as_ref().unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                producer.recovery_entered.notified(),
+            )
+            .await
+            .expect("summary starts without blocking media");
+            assert_eq!(
+                *custody.context_preparation(),
+                LiveContextPreparationStatus::Preparing(LiveContextPreparationStage::Generating)
+            );
+            assert_eq!(producer.calls.load(AtomicOrdering::SeqCst), 1);
+            if matches!(summary_case, Some(SummaryTestCase::ConcurrentCancelled)) {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    member_host.close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &old_channel,
+                        opened.pending_receipt(),
+                    ),
+                )
+                .await
+                .expect("close never waits for the held producer")
+                .expect("exact close");
+                let closed = member_host
+                    .validate_experimental_live_channel_custody(
+                        &old_channel,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    closed.phase(),
+                    crate::surface::ExperimentalLiveChannelPhaseStatus::Closed
+                ));
+                assert_eq!(
+                    *closed.context_preparation(),
+                    LiveContextPreparationStatus::Failed(LiveContextPreparationFailure::Cancelled)
+                );
+                let reopened = member_host
+                    .open_with_execution_identity(
+                        authority.as_ref(),
+                        &session_id,
+                        &execution_identity,
+                        None,
+                        None,
+                        Some(LiveOpenTransport::Webrtc),
+                    )
+                    .await
+                    .expect("new channel can prepare while old source was held");
+                assert_ne!(reopened.channel_id(), &old_channel);
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    producer.recovery_entered.notified(),
+                )
+                .await
+                .expect("independent replacement generation begins");
+                let current = member_host
+                    .validate_experimental_live_channel_custody(
+                        reopened.channel_id(),
+                        reopened.pending_receipt(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    current.phase(),
+                    crate::surface::ExperimentalLiveChannelPhaseStatus::Pending
+                ));
+                assert_eq!(
+                    *current.context_preparation(),
+                    LiveContextPreparationStatus::Preparing(
+                        LiveContextPreparationStage::Generating
+                    )
+                );
+                member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        reopened.channel_id(),
+                        reopened.pending_receipt(),
+                    )
+                    .await
+                    .expect("close new never-activated preparation");
+                producer.recovery_release.notify_waiters();
+                assert_eq!(producer.calls.load(AtomicOrdering::SeqCst), 2);
+                assert!(
+                    authority
+                        .transport
+                        .bound_context_summary(&old_channel, &session_id)
+                        .await
+                        .is_none()
+                );
+                assert!(
+                    authority
+                        .transport
+                        .bound_context_summary(reopened.channel_id(), &session_id)
+                        .await
+                        .is_none()
+                );
+                return;
+            }
+            let sideband = authority.latest_sideband.lock().await.clone().unwrap();
+            sideband.acknowledge_context.store(true, Ordering::Release);
+            if matches!(summary_case, Some(SummaryTestCase::ConcurrentAckRace)) {
+                *sideband.acknowledge_before_ambiguous_return.lock().await =
+                    Some(Arc::clone(&authority.transport.pending_deliveries));
+            }
+            if matches!(summary_case, Some(SummaryTestCase::ConcurrentRejected)) {
+                sideband.reject_context.store(true, Ordering::Release);
+            }
+            service
+                .append_external_user_content(
+                    &session_id,
+                    meerkat_core::ContentInput::Text("Newer code: Amber.".into()),
+                )
+                .await
+                .expect("append while summary is held");
+            runtime.notify_committed_live_context(&session_id);
+            runtime
+                .drain_live_context_outbox(&session_id)
+                .await
+                .expect("queue without waiting for generation");
+            if matches!(
+                summary_case,
+                Some(
+                    SummaryTestCase::Concurrent
+                        | SummaryTestCase::ConcurrentAckRace
+                        | SummaryTestCase::ConcurrentReplacement
+                )
+            ) {
+                let turn = LiveSidebandTurnRef::__from_provider_observation(
+                    &old_channel,
+                    "pending-correction".into(),
+                    "provider-correction".into(),
+                )
+                .unwrap();
+                sideband.push(LiveSidebandObservation::new(
+                    stale_old_binding.clone(),
+                    LiveSidebandObservationKind::TurnStarted {
+                        turn: turn.clone(),
+                        role: LiveSidebandTurnRole::User,
+                    },
+                ));
+                sideband.push(LiveSidebandObservation::new(
+                    stale_old_binding.clone(),
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn,
+                        role: LiveSidebandTurnRole::User,
+                        transcript: "Spoken code: Cyan.".into(),
+                    },
+                ));
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        let (current, _) = service
+                            .export_live_context_summary_snapshot(&session_id)
+                            .await
+                            .unwrap();
+                        if current.messages().iter().any(|message| {
+                            matches!(message,
+                                meerkat_core::Message::User(user)
+                                if user.text_content() == "Spoken code: Cyan."
+                                    && user.identity.realtime_origin.is_some()
+                            )
+                        }) {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("live correction commits while summary is held");
+                let assistant = LiveSidebandTurnRef::__from_provider_observation(
+                    &old_channel,
+                    "pending-assistant".into(),
+                    "provider-pending-assistant".into(),
+                )
+                .unwrap();
+                for kind in [
+                    LiveSidebandObservationKind::TurnStarted {
+                        turn: assistant.clone(),
+                        role: LiveSidebandTurnRole::Assistant,
+                    },
+                    LiveSidebandObservationKind::TurnSnapshotDelta {
+                        turn: assistant,
+                        delta: "earlier unmeasured assistant observation".into(),
+                    },
+                ] {
+                    sideband.push(LiveSidebandObservation::new(
+                        stale_old_binding.clone(),
+                        kind,
+                    ));
+                }
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        let (current, _) = service.export_live_context_summary_snapshot(&session_id)
+                            .await.unwrap();
+                        if current.messages().iter().any(|message| matches!(message,
+                            meerkat_core::Message::BlockAssistant(assistant)
+                                if assistant.blocks.iter().any(|block| matches!(block,
+                                    meerkat_core::AssistantBlock::Transcript { text, source: meerkat_core::types::TranscriptSource::SpokenUnmeasured, .. }
+                                        if text == "earlier unmeasured assistant observation"
+                                ))
+                        )) { break; }
+                        tokio::task::yield_now().await;
+                    }
+                }).await.expect("unmeasured assistant observation commits while summary is held");
+                runtime.notify_committed_live_context(&session_id);
+                runtime
+                    .drain_live_context_outbox(&session_id)
+                    .await
+                    .unwrap();
+            }
+            assert!(sideband.context_commands.lock().await.is_empty());
+            let rows_before_delivery = service
+                .export_live_context_summary_snapshot(&session_id)
+                .await
+                .unwrap()
+                .0
+                .messages()
+                .len();
+            producer.recovery_release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    let status = member_host
+                        .validate_experimental_live_channel_custody(
+                            &old_channel,
+                            opened.pending_receipt(),
+                        )
+                        .await
+                        .unwrap();
+                    assert!(matches!(
+                        status.phase(),
+                        crate::surface::ExperimentalLiveChannelPhaseStatus::Active { .. }
+                    ));
+                    match status.context_preparation() {
+                        LiveContextPreparationStatus::ProviderAcknowledged => {
+                            assert!(matches!(
+                                summary_case,
+                                Some(
+                                    SummaryTestCase::Concurrent
+                                        | SummaryTestCase::ConcurrentAckRace
+                                        | SummaryTestCase::ConcurrentReplacement
+                                )
+                            ));
+                            break;
+                        }
+                        LiveContextPreparationStatus::Failed(reason) => {
+                            let expected = match summary_case {
+                                Some(SummaryTestCase::ConcurrentFailed) => {
+                                    LiveContextPreparationFailure::Generation
+                                }
+                                Some(SummaryTestCase::ConcurrentRejected) => {
+                                    LiveContextPreparationFailure::DeliveryAmbiguous
+                                }
+                                _ => panic!("unexpected preparation failure: {reason:?}"),
+                            };
+                            assert_eq!(*reason, expected);
+                            break;
+                        }
+                        _ => tokio::task::yield_now().await,
+                    }
+                }
+            })
+            .await
+            .expect("preparation reaches exact terminal status");
+            runtime
+                .drain_live_context_outbox(&session_id)
+                .await
+                .expect("ordered tail drain");
+            let commands = sideband.context_commands.lock().await;
+            if matches!(
+                summary_case,
+                Some(
+                    SummaryTestCase::Concurrent
+                        | SummaryTestCase::ConcurrentAckRace
+                        | SummaryTestCase::ConcurrentReplacement
+                )
+            ) {
+                assert!(
+                    matches!(commands.first(), Some(LiveSidebandProviderCommand::AppendInstructionsContext { text, .. })
+                    if text.starts_with(LIVE_CONTEXT_BOOTSTRAP_FRAMING)
+                        && text.contains("Factual context summary")),
+                    "the historical summary travels first, on the instructions lane, behind its precedence framing"
+                );
+                assert!(commands.iter().skip(1).any(|command| matches!(
+                    command, LiveSidebandProviderCommand::AppendSessionContext { text, .. }
+                    | LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                    if text.contains("Newer code: Amber.")
+                )));
+                assert!(
+                    commands.iter().skip(1).any(|command| matches!(
+                        command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                        if text.contains("Spoken code: Cyan.")
+                    )),
+                    "heard live correction is reasserted quietly after the historical prefix"
+                );
+                let typed = commands
+                    .iter()
+                    .position(|command| {
+                        matches!(
+                            command, LiveSidebandProviderCommand::AppendSessionContext { text, .. }
+                            | LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                            if text.contains("Newer code: Amber.")
+                        )
+                    })
+                    .unwrap();
+                let spoken = commands
+                    .iter()
+                    .position(|command| {
+                        matches!(
+                            command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                            if text.contains("Spoken code: Cyan.")
+                        )
+                    })
+                    .unwrap();
+                assert!(
+                    typed < spoken,
+                    "the newer spoken fact must follow the older typed fact"
+                );
+                assert!(
+                    commands.iter().any(|command| matches!(
+                        command, LiveSidebandProviderCommand::AppendThinkingContext { text, .. }
+                            if text.contains("earlier unmeasured assistant observation")
+                                && text.contains("spoken_unmeasured")
+                    )),
+                    "assistant observations retain unmeasured provenance through quiet reconciliation"
+                );
+            } else if matches!(summary_case, Some(SummaryTestCase::ConcurrentRejected)) {
+                assert_eq!(commands.len(), 1, "rejected bootstrap is never replayed");
+            } else {
+                assert!(
+                    commands.is_empty(),
+                    "failed preparation cannot fall back to raw history"
+                );
+            }
+            drop(commands);
+            assert_eq!(
+                service
+                    .export_live_context_summary_snapshot(&session_id)
+                    .await
+                    .unwrap()
+                    .0
+                    .messages()
+                    .len(),
+                rows_before_delivery,
+                "quiet bootstrap and causal reassertion do not fabricate canonical turns"
+            );
+            assert_eq!(producer.calls.load(AtomicOrdering::SeqCst), 1);
+            assert_eq!(
+                service
+                    .live_session_llm_identity(&session_id)
+                    .await
+                    .unwrap()
+                    .model,
+                "gpt-realtime-2"
+            );
+            if matches!(summary_case, Some(SummaryTestCase::ConcurrentReplacement)) {
+                sideband.acknowledge_context.store(false, Ordering::Release);
+                service
+                    .append_external_user_content(
+                        &session_id,
+                        meerkat_core::ContentInput::Text(
+                            "Trigger an ambiguous context append.".into(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                runtime.notify_committed_live_context(&session_id);
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    runtime.drain_live_context_outbox(&session_id),
+                )
+                .await
+                .expect("replacement does not wait for summary")
+                .unwrap();
+                let replacement = mirror_host
+                    .pending_replacement_required(&session_id)
+                    .await
+                    .expect("exact generated replacement bootstrap");
+                let channel = meerkat_live::LiveChannelId::new(&replacement.open().channel_id);
+                assert_ne!(channel, old_channel);
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    producer.recovery_entered.notified(),
+                )
+                .await
+                .expect("replacement summary starts independently");
+                authority
+                    .latest_sideband
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .acknowledge_context
+                    .store(true, Ordering::Release);
+                let readiness = member_host
+                    .register_experimental_live_playback_owner(
+                        &channel,
+                        replacement.pending_receipt(),
+                    )
+                    .await
+                    .unwrap();
+                let WireLiveTransportBootstrap::Webrtc { token, .. } =
+                    &replacement.open().transport
+                else {
+                    panic!("expected replacement WebRTC token");
+                };
+                let binder = authority
+                    .bound_ready_binder_for(
+                        mirror_host.clone(),
+                        live_adapter_host.clone(),
+                        Arc::new(NoopPublicObservationPublisher),
+                    )
+                    .unwrap();
+                let answer = member_host
+                    .answer_experimental_live_webrtc_offer(
+                        authority.transport.clone(),
+                        binder,
+                        channel.clone(),
+                        replacement.pending_receipt(),
+                        readiness.readiness_receipt(),
+                        token.clone(),
+                        "replacement-offer-sdp".into(),
+                    )
+                    .await
+                    .expect("empty provider seed binds alongside reserved historical prefix");
+                answer.delivery_custody.delivered().await.unwrap();
+                let active = member_host
+                    .validate_experimental_live_channel_custody(
+                        &channel,
+                        replacement.pending_receipt(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    active.phase(),
+                    crate::surface::ExperimentalLiveChannelPhaseStatus::Active { .. }
+                ));
+                assert_eq!(
+                    *active.context_preparation(),
+                    LiveContextPreparationStatus::Preparing(
+                        LiveContextPreparationStage::Generating
+                    )
+                );
+                producer.recovery_release.notify_one();
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    loop {
+                        let status = member_host
+                            .validate_experimental_live_channel_custody(
+                                &channel,
+                                replacement.pending_receipt(),
+                            )
+                            .await
+                            .unwrap();
+                        if *status.context_preparation()
+                            == LiveContextPreparationStatus::ProviderAcknowledged
+                        {
+                            break;
+                        }
+                        assert!(!matches!(
+                            status.context_preparation(),
+                            LiveContextPreparationStatus::Failed(_)
+                        ));
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("replacement acknowledges its own summary");
+                assert_eq!(producer.calls.load(AtomicOrdering::SeqCst), 2);
+                member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &channel,
+                        replacement.pending_receipt(),
+                    )
+                    .await
+                    .unwrap();
+                return;
+            }
+            member_host
+                .close_experimental_live_pending_channel(
+                    authority.as_ref(),
+                    &old_channel,
+                    opened.pending_receipt(),
+                )
+                .await
+                .expect("exact original custody closes active concurrent channel");
+            let expected_failure = match summary_case {
+                Some(SummaryTestCase::ConcurrentFailed) => {
+                    Some(LiveContextPreparationFailure::Generation)
+                }
+                Some(SummaryTestCase::ConcurrentRejected) => {
+                    Some(LiveContextPreparationFailure::DeliveryAmbiguous)
+                }
+                _ => None,
+            };
+            if let Some(reason) = expected_failure {
+                let closed = member_host
+                    .validate_experimental_live_channel_custody(
+                        &old_channel,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    *closed.context_preparation(),
+                    LiveContextPreparationStatus::Failed(reason),
+                    "close retains the original preparation failure"
+                );
+            }
+            return;
+        }
+        let summary_calls = summary_producer
+            .as_ref()
+            .map(|producer| producer.calls.load(AtomicOrdering::SeqCst));
+        let readiness_auth = Arc::new(RevocableBindingAuthority {
+            inner: ExactAllowBindingAuthority {
+                session_id: session_id.clone(),
+                expected: readiness_binding.clone(),
+                calls: Arc::new(AtomicUsize::new(0)),
+                auth_lease: runtime.generated_auth_lease_handle(),
+                events: Arc::new(std::sync::Mutex::new(Vec::new())),
+            },
+            allowed: AtomicBool::new(true),
+            attempts: AtomicUsize::new(0),
+        });
+        let config_reads = Arc::new(AtomicUsize::new(0));
+        let readiness_authority =
+            ExperimentalGptLiveOpenAuthority::new_public(public_live_authority_config(
+                &readiness_realm,
+                "marin",
+                public_live_identity(readiness_binding),
+                Arc::new(CountingConfigSource {
+                    reads: Arc::clone(&config_reads),
+                    config: public_live_realm_config(&readiness_realm),
+                }),
+                readiness_auth.clone(),
+                Arc::clone(&authority.transport),
+            ))
+            .unwrap();
+        for _ in 0..2 {
+            readiness_authority
+                .probe_execution_readiness(&session_id, &public_profile_override())
+                .await
+                .expect("active voice does not consume per-target readiness");
+        }
+        readiness_auth.allowed.store(false, Ordering::Release);
+        assert!(matches!(
+            readiness_authority
+                .probe_execution_readiness(&session_id, &public_profile_override(),)
+                .await,
+            Err(ExperimentalLiveOpenAuthorityError::BindingUseDenied)
+        ));
+        assert_eq!(readiness_auth.attempts.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(config_reads.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(
+            authority.transport.active_binding(&session_id).await,
+            Some(stale_old_binding.clone())
+        );
+        assert_eq!(
+            authority.transport.registered_by_channel.lock().await.len(),
+            1
+        );
+        assert_eq!(
+            summary_producer
+                .as_ref()
+                .map(|producer| producer.calls.load(AtomicOrdering::SeqCst)),
+            summary_calls,
+            "readiness never starts a summary or second channel"
+        );
         let first_channel_a_turn = LiveSidebandTurnRef::__from_provider_observation(
             &old_channel,
             "turn:1".to_string(),
@@ -10195,6 +14914,367 @@ mod tests {
             .await
             .expect("channel A first provider turn completes before replacement");
 
+        if retain_voice {
+            let sideband = authority
+                .latest_sideband
+                .lock()
+                .await
+                .clone()
+                .expect("voice sideband");
+            let assistant = LiveSidebandTurnRef::__from_provider_observation(
+                &old_channel,
+                "prior-voice-assistant".to_string(),
+                "private-voice-assistant".to_string(),
+            )
+            .expect("assistant grouping");
+            let assistant_key = assistant.adapter_key().to_string();
+            for kind in [
+                LiveSidebandObservationKind::TurnStarted {
+                    turn: assistant.clone(),
+                    role: LiveSidebandTurnRole::Assistant,
+                },
+                LiveSidebandObservationKind::TurnSnapshotDelta {
+                    turn: assistant,
+                    delta: "prior unmeasured voice dialogue".to_string(),
+                },
+            ] {
+                sideband.push(LiveSidebandObservation::new(
+                    stale_old_binding.clone(),
+                    kind,
+                ));
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    let snapshot = service
+                        .export_realtime_refresh_session_snapshot(&session_id)
+                        .await
+                        .expect("authoritative voice observation");
+                    if unmeasured_fragments(&snapshot).count() == 1
+                        && runtime
+                            .live_assistant_output_handle_for_turn(
+                                &session_id,
+                                &old_channel,
+                                &assistant_key,
+                            )
+                            .is_some_and(|handle| handle.__playback_segment() == 1)
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("unmeasured voice observation is retained without playback completion");
+            assert!(
+                mirror_host
+                    .pending_replacement_required(&session_id)
+                    .await
+                    .is_none(),
+                "canonical observed voice must advance live coverage without echo or replacement"
+            );
+            assert_eq!(
+                authority.transport.active_binding(&session_id).await,
+                Some(stale_old_binding.clone())
+            );
+        }
+
+        let preparation_closed_origin = if matches!(
+            summary_case,
+            Some(SummaryTestCase::BlockRecovery | SummaryTestCase::BlockRegistration)
+        ) {
+            let producer = summary_producer.as_ref().unwrap();
+            let public_probe = matches!(
+                close_case,
+                Some(RecoveryCloseCase::CancelledRawDuringRegistration)
+            )
+            .then(|| {
+                Arc::new(PublicRecoveryReturnProbe {
+                    inner: Arc::clone(&mirror_host),
+                    member_host: Arc::clone(&member_host),
+                    authority: Arc::clone(&authority),
+                    replacement: Mutex::new(None),
+                    returned: Mutex::new(None),
+                })
+            });
+            if let Some(probe) = &public_probe {
+                runtime.set_live_context_mirror_host(probe.clone());
+            }
+            service
+                .append_external_user_content(
+                    &session_id,
+                    meerkat_core::ContentInput::Text("text preceding cancelled recovery".into()),
+                )
+                .await
+                .expect("commit text triggering blocked recovery");
+            let (committed, store_authority) = service
+                .export_live_context_committed_boundary(&session_id)
+                .await
+                .expect("exact boundary for blocked recovery");
+            let recovery_runtime = Arc::clone(&runtime);
+            let recovery_session = session_id.clone();
+            let recovery_channel = stale_old_binding.channel_id().clone();
+            let recovery_task = tokio::spawn(async move {
+                let rows = recovery_runtime
+                    .enqueue_committed_parent_session_boundary(
+                        &recovery_session,
+                        &committed,
+                        &store_authority,
+                    )
+                    .await?;
+                recovery_runtime
+                    .drain_live_context_outbox_for_channel(&recovery_session, &recovery_channel)
+                    .await?;
+                Ok::<_, meerkat_runtime::RuntimeDriverError>(rows)
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                if matches!(summary_case, Some(SummaryTestCase::BlockRegistration)) {
+                    registration_barrier.entered.notified().await;
+                } else {
+                    producer.recovery_entered.notified().await;
+                }
+            })
+            .await
+            .expect("recovery blocks after old transport close");
+            assert!(
+                authority
+                    .transport
+                    .active_binding(&session_id)
+                    .await
+                    .is_none()
+            );
+            assert!(
+                mirror_host
+                    .pending_replacement_required(&session_id)
+                    .await
+                    .is_none()
+            );
+            let origin = (old_channel.clone(), opened.pending_receipt().to_string());
+            let prepares_before_close = authority.prepare_sequence.load(AtomicOrdering::SeqCst);
+            if let Some(probe) = &public_probe {
+                let replacement = probe
+                    .replacement
+                    .lock()
+                    .await
+                    .clone()
+                    .expect("real generated recovery names its descendant");
+                assert!(
+                    authority
+                        .transport
+                        .registered_by_channel
+                        .lock()
+                        .await
+                        .is_empty(),
+                    "blocked registration has no physical binding to close"
+                );
+                let physical_gate = Arc::new(RecoveryRegistrationBarrier::default());
+                *authority.physical_close_barrier.lock().await = Some(Arc::clone(&physical_gate));
+                let closing_host = Arc::clone(&member_host);
+                let closing_authority = Arc::clone(&authority);
+                let closing_origin = origin.0.clone();
+                let closing = tokio::spawn(async move {
+                    closing_host
+                        .close_live_channel(Some(closing_authority.as_ref()), &closing_origin)
+                        .await
+                });
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    physical_gate.entered.notified(),
+                )
+                .await
+                .expect("raw close pauses after physical NotBound, before semantic close");
+                closing.abort();
+                assert!(
+                    closing
+                        .await
+                        .expect_err("close observer was cancelled")
+                        .is_cancelled(),
+                    "cancellation must not be reported as a successful close"
+                );
+                assert_eq!(
+                    runtime
+                        .live_execution_channel_phase(&session_id, &replacement)
+                        .await
+                        .unwrap(),
+                    Some(meerkat_core::LiveExecutionChannelPhase::Revoked),
+                );
+                assert_eq!(
+                    runtime.live_session_for_active_channel(&replacement).await,
+                    Some(session_id.clone()),
+                    "cancelled observer leaves revoked pending custody, not Closed"
+                );
+            } else if matches!(close_case, Some(RecoveryCloseCase::RawDuringRegistration)) {
+                assert_eq!(
+                    member_host
+                        .close_live_channel(Some(authority.as_ref()), &origin.0)
+                        .await
+                        .expect("raw origin close revokes its unregistered recovery descendant"),
+                    meerkat_contracts::LiveCloseStatus::Closed,
+                );
+            } else {
+                member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &origin.0,
+                        &origin.1,
+                    )
+                    .await
+                    .expect("explicit exact close cancels recovery despite already-closed origin");
+            }
+            if matches!(summary_case, Some(SummaryTestCase::BlockRegistration)) {
+                registration_barrier.release.notify_one();
+            } else {
+                producer.recovery_release.notify_one();
+            }
+            assert!(
+                recovery_task.await.expect("join blocked recovery").is_err(),
+                "late preparation is refused even while no fresh channel occupies the source"
+            );
+            if let Some(probe) = &public_probe {
+                let returned = probe
+                    .returned
+                    .lock()
+                    .await
+                    .take()
+                    .expect("public recovery returned");
+                assert!(
+                    matches!(
+                        returned,
+                        Err(crate::surface::ExperimentalLiveContextRecoveryError::ClosedBeforePublication)
+                    ),
+                    "public return must reject Revoked before publication, got {returned:?}"
+                );
+                let replacement = probe.replacement.lock().await.clone().unwrap();
+                assert_eq!(
+                    runtime
+                        .live_execution_channel_phase(&session_id, &replacement)
+                        .await
+                        .unwrap(),
+                    Some(meerkat_core::LiveExecutionChannelPhase::Revoked),
+                    "failed public return unbinds mechanics without fabricating semantic close"
+                );
+                assert!(
+                    authority
+                        .transport
+                        .registered_by_channel
+                        .lock()
+                        .await
+                        .is_empty()
+                );
+                assert!(authority.pending_context_recovery.lock().await.is_empty());
+                assert!(
+                    mirror_host
+                        .pending_replacement_required(&session_id)
+                        .await
+                        .is_none()
+                );
+                assert_eq!(
+                    member_host
+                        .close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &origin.0,
+                            &origin.1,
+                        )
+                        .await
+                        .expect("exact retry finishes the revoked descendant"),
+                    meerkat_contracts::LiveCloseStatus::Closed,
+                );
+                runtime.set_live_context_mirror_host(mirror_host.clone());
+            }
+            assert!(
+                mirror_host
+                    .pending_replacement_required(&session_id)
+                    .await
+                    .is_none()
+            );
+            assert!(
+                runtime
+                    .live_active_channel_for_session(&session_id)
+                    .await
+                    .is_none()
+            );
+            assert!(
+                authority
+                    .transport
+                    .registered_by_channel
+                    .lock()
+                    .await
+                    .is_empty()
+            );
+            assert!(authority.pending_context_recovery.lock().await.is_empty());
+            assert!(authority.pending_result_recovery.lock().await.is_empty());
+            assert_eq!(
+                authority.prepare_sequence.load(AtomicOrdering::SeqCst),
+                prepares_before_close,
+                "late provider registration cannot mint another bootstrap after explicit close"
+            );
+            let fresh = member_host
+                .open_with_execution_identity(
+                    authority.as_ref(),
+                    &session_id,
+                    &execution_identity,
+                    None,
+                    None,
+                    Some(LiveOpenTransport::Webrtc),
+                )
+                .await
+                .expect("independent same-source open remains healthy after cancelled summary");
+            old_channel = fresh.channel_id().clone();
+            let token = match &fresh.open().transport {
+                WireLiveTransportBootstrap::Webrtc { token, .. } => token.clone(),
+                other => panic!("expected fresh WebRTC bootstrap, got {other:?}"),
+            };
+            let binder = authority
+                .bound_ready_binder_for(
+                    Arc::clone(&mirror_host) as Arc<dyn ExperimentalLiveBoundChannelActivator>,
+                    Arc::clone(&live_adapter_host),
+                    Arc::new(NoopPublicObservationPublisher),
+                )
+                .expect("fresh binder");
+            let readiness = member_host
+                .register_experimental_live_playback_owner(&old_channel, fresh.pending_receipt())
+                .await
+                .expect("fresh playback owner");
+            member_host
+                .answer_experimental_live_webrtc_offer(
+                    Arc::clone(&authority.transport) as Arc<dyn LiveWebrtcAnswerTransport>,
+                    binder,
+                    old_channel.clone(),
+                    fresh.pending_receipt(),
+                    readiness.readiness_receipt(),
+                    token,
+                    "fresh-after-cancel-offer".into(),
+                )
+                .await
+                .expect("fresh answer")
+                .delivery_custody
+                .delivered()
+                .await
+                .expect("fresh activation");
+            stale_old_binding = authority
+                .transport
+                .active_binding(&session_id)
+                .await
+                .unwrap();
+            assert!(
+                mirror_host
+                    .pending_replacement_required(&session_id)
+                    .await
+                    .is_none()
+            );
+            assert_eq!(
+                authority.transport.active_binding(&session_id).await,
+                Some(stale_old_binding.clone()),
+                "late old recovery cannot close the independently opened healthy channel"
+            );
+            assert_eq!(
+                authority.transport.registered_by_channel.lock().await.len(),
+                1
+            );
+            Some(origin)
+        } else {
+            None
+        };
+
         service
             .append_external_user_content(
                 &session_id,
@@ -10217,6 +15297,10 @@ mod tests {
                 .expect("ambiguous append realizes replacement"),
             1
         );
+        runtime
+            .drain_live_context_outbox_for_channel(&session_id, stale_old_binding.channel_id())
+            .await
+            .expect("owned ambiguous append publishes its replacement");
 
         let replacement = mirror_host
             .pending_replacement_required(&session_id)
@@ -10228,14 +15312,106 @@ mod tests {
             "a lost pull response must return the identical pending bootstrap"
         );
         let crate::surface::ExperimentalLiveReplacementRequired::CanonicalContext {
-            open: replacement_open,
+            open: mut replacement_open,
             canonical_seed_cursor: replacement_seed_cursor,
-            pending_receipt: replacement_pending_receipt,
+            pending_receipt: mut replacement_pending_receipt,
         } = replacement
         else {
             panic!("context ambiguity must publish the canonical-context reason")
         };
-        let replacement_channel = meerkat_live::LiveChannelId::new(&replacement_open.channel_id);
+        let mut replacement_channel =
+            meerkat_live::LiveChannelId::new(&replacement_open.channel_id);
+        let closed_replacement = if close_pending_replacement {
+            let stale = (
+                replacement_channel.clone(),
+                replacement_pending_receipt.clone(),
+            );
+            assert!(
+                member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &replacement_channel,
+                        opened.pending_receipt(),
+                    )
+                    .await
+                    .is_err(),
+                "another channel's receipt cannot retire the pending replacement"
+            );
+            assert!(
+                mirror_host
+                    .pending_replacement_required(&session_id)
+                    .await
+                    .is_some()
+            );
+            member_host
+                .close_experimental_live_pending_channel(
+                    authority.as_ref(),
+                    &replacement_channel,
+                    &replacement_pending_receipt,
+                )
+                .await
+                .expect("close replacement before any activation");
+            assert_eq!(
+                mirror_host.pending_replacement_required(&session_id).await,
+                None,
+                "generated pending close retires its retained bootstrap without activation"
+            );
+            let reopened = member_host
+                .open_with_execution_identity(
+                    authority.as_ref(),
+                    &session_id,
+                    &execution_identity,
+                    None,
+                    None,
+                    Some(LiveOpenTransport::Webrtc),
+                )
+                .await
+                .expect("same existing source reopens normally after pending replacement close");
+            assert_ne!(reopened.channel_id(), &stale.0);
+            assert_eq!(
+                mirror_host.pending_replacement_required(&session_id).await,
+                None,
+                "a healthy new open cannot expose the old closed replacement"
+            );
+            replacement_channel = reopened.channel_id().clone();
+            replacement_open = reopened.open().clone();
+            replacement_pending_receipt = reopened.pending_receipt().to_string();
+            Some(stale)
+        } else {
+            None
+        };
+        if retain_voice {
+            let retained = authority
+                .latest_initial_seed
+                .lock()
+                .await
+                .clone()
+                .and_then(|seed| seed.upgrade())
+                .expect("replacement seed");
+            let retained = retained.lock().await;
+            let retained = retained
+                .as_ref()
+                .expect("replacement owns the exact retained context");
+            let rendered = match &retained.context {
+                GptLiveSeedContext::Canonical(messages) => {
+                    serde_json::to_string(messages).expect("seed")
+                }
+                GptLiveSeedContext::Summary(summary) => summary.text().to_string(),
+                _ => panic!("replacement has not been sent yet"),
+            };
+            assert!(rendered.contains("prior unmeasured voice dialogue"));
+            assert!(rendered.contains("spoken_unmeasured") || rendered.contains("UNMEASURED"));
+            assert_eq!(
+                unmeasured_fragments(
+                    &service
+                        .export_realtime_refresh_session_snapshot(&session_id)
+                        .await
+                        .expect("retained observation")
+                )
+                .count(),
+                1
+            );
+        }
         assert!(replacement_seed_cursor > 0);
         assert_ne!(replacement_channel, old_channel);
         assert_eq!(
@@ -10331,8 +15507,42 @@ mod tests {
             recovered_binding.generation(),
             recovered_provider_binding.runtime_generation().get()
         );
-        assert_eq!(authority.prepare_sequence.load(AtomicOrdering::SeqCst), 2);
+        let extra_opens = usize::from(close_pending_replacement)
+            + 2 * usize::from(preparation_closed_origin.is_some());
+        assert_eq!(
+            authority.prepare_sequence.load(AtomicOrdering::SeqCst),
+            2 + extra_opens
+        );
+        if let Some(producer) = &summary_producer {
+            assert_eq!(
+                producer.calls.load(AtomicOrdering::SeqCst),
+                2 + extra_opens,
+                "context replacement regenerates the summary"
+            );
+        }
         assert!(authority.pending_context_recovery.lock().await.is_empty());
+        let context_activation_receipt = assert_activated_replacement_custody(
+            member_host.as_ref(),
+            authority.as_ref(),
+            &replacement_channel,
+            &replacement_pending_receipt,
+            opened.pending_receipt(),
+            &initial_activation_receipt,
+        )
+        .await;
+        if matches!(close_case, Some(RecoveryCloseCase::ActivatedContext)) {
+            assert_channel_close_fences_delayed_canonical_read(
+                &service,
+                &runtime,
+                &member_host,
+                &authority,
+                &mirror_host,
+                &session_id,
+                &replacement_channel,
+            )
+            .await;
+            return;
+        }
 
         // Exercise the distinct result-delivery ambiguity authority through
         // the same physical replacement choreography without manufacturing a
@@ -10383,7 +15593,8 @@ mod tests {
             .await
             .expect("admit exact result-recovery delegation");
         let final_transcript = service
-            .commit_live_user_transcript_final(
+            .commit_live_user_transcript_final_with_machine(
+                &runtime,
                 &session_id,
                 provisional.clone(),
                 Some(meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
@@ -10499,6 +15710,31 @@ mod tests {
             .pending_replacement_required(&session_id)
             .await
             .expect("result ambiguity publishes distinct replacement bootstrap");
+        for (closed_channel, closed_receipt) in closed_replacement
+            .iter()
+            .chain(preparation_closed_origin.iter())
+        {
+            member_host
+                .close_experimental_live_pending_channel(
+                    authority.as_ref(),
+                    closed_channel,
+                    closed_receipt,
+                )
+                .await
+                .expect("delayed old close remains idempotent");
+            assert_eq!(
+                mirror_host.pending_replacement_required(&session_id).await,
+                Some(result_replacement.clone()),
+                "delayed close cannot clear a newer replacement for the same source"
+            );
+        }
+        if let Some(producer) = &summary_producer {
+            assert_eq!(
+                producer.calls.load(AtomicOrdering::SeqCst),
+                3 + extra_opens,
+                "result replacement regenerates the summary"
+            );
+        }
         assert_eq!(
             mirror_host.pending_replacement_required(&session_id).await,
             Some(result_replacement.clone()),
@@ -10604,8 +15840,33 @@ mod tests {
             result_recovered_binding.generation(),
             result_recovered_provider_binding.runtime_generation().get()
         );
-        assert_eq!(authority.prepare_sequence.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(
+            authority.prepare_sequence.load(AtomicOrdering::SeqCst),
+            3 + extra_opens
+        );
         assert!(authority.pending_result_recovery.lock().await.is_empty());
+        assert_activated_replacement_custody(
+            member_host.as_ref(),
+            authority.as_ref(),
+            &result_replacement_channel,
+            &result_pending_receipt,
+            &replacement_pending_receipt,
+            &context_activation_receipt,
+        )
+        .await;
+        if matches!(close_case, Some(RecoveryCloseCase::ActivatedResult)) {
+            assert_channel_close_fences_delayed_canonical_read(
+                &service,
+                &runtime,
+                &member_host,
+                &authority,
+                &mirror_host,
+                &session_id,
+                &result_replacement_channel,
+            )
+            .await;
+            return;
+        }
 
         member_host
             .close_live_channel(Some(authority.as_ref()), &result_replacement_channel)
@@ -10630,5 +15891,931 @@ mod tests {
                 .is_none(),
             "the production already-closed branch must not recreate provider custody"
         );
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        not(target_arch = "wasm32")
+    ))]
+    mod promoted_turn_context_regression {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use async_trait::async_trait;
+        use futures::StreamExt;
+        use meerkat_client::types::LlmStream;
+        use meerkat_client::{LlmClient, LlmError, LlmRequest, TestClient};
+        use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+        use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
+        use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
+        use meerkat_core::{Message, SessionId};
+        use meerkat_runtime::input_state::{InputStatePersistenceRecord, StoredInputState};
+        use meerkat_runtime::live_context_mirror::LiveContextMirrorHost;
+        use meerkat_runtime::live_execution::{
+            LiveContextAmbiguityRecoveryAuthority, LiveContextAppendAuthority,
+            LiveDelegationResultAmbiguityRecoveryAuthority,
+        };
+        use meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot;
+        use meerkat_runtime::store::{
+            CommittedWholeBlobProvisionalTail, FencedMachineLifecycleCasOutcome,
+            InputStateBatchCasImplementationProfile, InputStateBatchCasOutcome, InputStateRow,
+            MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
+            MachineLifecycleObservation, PreparedRecoveryInputSnapshot,
+            PreparedRuntimeSessionCommit, PreparedRuntimeSessionCommitKind,
+            PreparedRuntimeSessionCommitResult, PreparedWholeBlobRewriteStoreParts,
+            RecoveryInputSetRevision, RecoveryInputStateMutation, RuntimeSessionAuthorityOps,
+            RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError,
+            RuntimeStoreWriteFence, SerializedSessionSnapshot, UnregisterFinalizationCommit,
+            WholeBlobStoreAuthority,
+        };
+        use meerkat_runtime::{InMemoryRuntimeStore, LogicalRuntimeId};
+        use tokio::sync::{Mutex, Notify, Semaphore};
+
+        const PROMPT: &str = "Remember the delayed typed fact: the launch code is amber-713.";
+        const REPLY: &str = "Recorded: the launch code is amber-713.";
+        const DEADLINE: Duration = Duration::from_secs(5);
+
+        struct DelayedStreamClient {
+            inner: TestClient,
+            entered: Notify,
+            release: Notify,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl LlmClient for DelayedStreamClient {
+            fn project_replay_messages(
+                &self,
+                messages: &[Message],
+            ) -> Result<Vec<Message>, LlmError> {
+                self.inner.project_replay_messages(messages)
+            }
+
+            fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(
+                    futures::stream::once(async move {
+                        self.entered.notify_one();
+                        self.release.notified().await;
+                        self.inner.stream(request)
+                    })
+                    .flatten(),
+                )
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                self.inner.provider()
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                self.inner.health_check().await
+            }
+        }
+
+        struct PromotionEvidence {
+            candidate: CommittedWholeBlobProvisionalTail,
+            receipt: RunBoundaryReceipt,
+            kind: PreparedRuntimeSessionCommitKind,
+        }
+
+        /// Observe the real store boundary without manufacturing a checkpoint or
+        /// replacing any store write. The retained candidate and final exact
+        /// bytes distinguish a body-free promotion from receipt-only success.
+        struct PromotionRecordingStore {
+            inner: InMemoryRuntimeStore,
+            promotion: Mutex<Option<PromotionEvidence>>,
+            entered: Notify,
+            release: Notify,
+        }
+
+        #[async_trait]
+        impl RuntimeStore for PromotionRecordingStore {
+            fn session_authority_ops(&self) -> &dyn RuntimeSessionAuthorityOps {
+                &self.inner
+            }
+
+            async fn commit_prepared_session_boundary(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                request: PreparedRuntimeSessionCommit,
+            ) -> Result<PreparedRuntimeSessionCommitResult, RuntimeStoreError> {
+                let kind = request.kind();
+                if matches!(
+                    kind,
+                    PreparedRuntimeSessionCommitKind::ServiceTurnTerminal
+                        | PreparedRuntimeSessionCommitKind::Success
+                ) {
+                    assert!(
+                        request.session().is_none(),
+                        "the streamed turn must promote, not rewrite an inline session body"
+                    );
+                    let candidate =
+                        RuntimeStore::load_whole_blob_provisional_tail(&self.inner, runtime_id)
+                            .await?
+                            .expect(
+                                "actual agent checkpointer left a store-issued provisional tail",
+                            );
+                    let receipt = request
+                        .receipt()
+                        .expect("terminal boundary receipt")
+                        .clone();
+                    assert_eq!(candidate.authority().run_id(), &receipt.run_id);
+                    assert!(candidate.authority().candidate_sequence() > 0);
+                    assert!(
+                        self.promotion
+                            .lock()
+                            .await
+                            .replace(PromotionEvidence {
+                                candidate,
+                                receipt,
+                                kind
+                            })
+                            .is_none(),
+                        "exactly one normal turn promotion"
+                    );
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                self.inner
+                    .commit_prepared_session_boundary(runtime_id, request)
+                    .await
+            }
+
+            async fn commit_session_snapshot(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                session_delta: SerializedSessionSnapshot,
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner
+                    .commit_session_snapshot(runtime_id, session_delta)
+                    .await
+            }
+
+            async fn commit_prepared_whole_blob_rewrite_boundary(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                boundary: PreparedWholeBlobRewriteStoreParts,
+            ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError> {
+                self.inner
+                    .commit_prepared_whole_blob_rewrite_boundary(runtime_id, boundary)
+                    .await
+            }
+
+            async fn atomic_apply(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                session_delta: Option<SerializedSessionSnapshot>,
+                receipt: RunBoundaryReceipt,
+                input_updates: Vec<InputStatePersistenceRecord>,
+                session_store_key: Option<SessionId>,
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner
+                    .atomic_apply(
+                        runtime_id,
+                        session_delta,
+                        receipt,
+                        input_updates,
+                        session_store_key,
+                    )
+                    .await
+            }
+
+            async fn load_input_states(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<Vec<InputStateRow>, RuntimeStoreError> {
+                self.inner.load_input_states(runtime_id).await
+            }
+
+            async fn load_input_states_with_versions(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<PreparedRecoveryInputSnapshot, RuntimeStoreError> {
+                self.inner.load_input_states_with_versions(runtime_id).await
+            }
+
+            fn input_state_batch_cas_implementation_profile(
+                &self,
+            ) -> InputStateBatchCasImplementationProfile {
+                self.inner.input_state_batch_cas_implementation_profile()
+            }
+
+            async fn compare_and_swap_recovery_input_states_atomically(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                expected_revision: RecoveryInputSetRevision,
+                mutations: &[RecoveryInputStateMutation],
+            ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
+                self.inner
+                    .compare_and_swap_recovery_input_states_atomically(
+                        runtime_id,
+                        expected_revision,
+                        mutations,
+                    )
+                    .await
+            }
+
+            async fn load_pending_terminal_owner_ids_page(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                after: Option<&InputId>,
+                limit: usize,
+            ) -> Result<Vec<InputId>, RuntimeStoreError> {
+                self.inner
+                    .load_pending_terminal_owner_ids_page(runtime_id, after, limit)
+                    .await
+            }
+
+            async fn load_input_states_by_ids(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                input_ids: &[InputId],
+            ) -> Result<Vec<Option<StoredInputState>>, RuntimeStoreError> {
+                self.inner
+                    .load_input_states_by_ids(runtime_id, input_ids)
+                    .await
+            }
+
+            async fn load_boundary_receipt(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                run_id: &RunId,
+                sequence: u64,
+            ) -> Result<Option<RunBoundaryReceipt>, RuntimeStoreError> {
+                self.inner
+                    .load_boundary_receipt(runtime_id, run_id, sequence)
+                    .await
+            }
+
+            async fn load_session_snapshot(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<Option<Arc<Vec<u8>>>, RuntimeStoreError> {
+                self.inner.load_session_snapshot(runtime_id).await
+            }
+
+            async fn clear_session_snapshot(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner.clear_session_snapshot(runtime_id).await
+            }
+
+            async fn replace_session_snapshot_if_current(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                expected_current: &[u8],
+                replacement: Vec<u8>,
+            ) -> Result<bool, RuntimeStoreError> {
+                self.inner
+                    .replace_session_snapshot_if_current(runtime_id, expected_current, replacement)
+                    .await
+            }
+
+            async fn clear_session_snapshot_if_current(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                expected_current: &[u8],
+            ) -> Result<bool, RuntimeStoreError> {
+                self.inner
+                    .clear_session_snapshot_if_current(runtime_id, expected_current)
+                    .await
+            }
+
+            async fn persist_input_state(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                state: &InputStatePersistenceRecord,
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner.persist_input_state(runtime_id, state).await
+            }
+
+            async fn persist_input_states_atomically(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                states: &[InputStatePersistenceRecord],
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner
+                    .persist_input_states_atomically(runtime_id, states)
+                    .await
+            }
+
+            async fn compare_and_swap_input_states_atomically(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                expected: &[StoredInputState],
+                replacements: &[InputStatePersistenceRecord],
+            ) -> Result<InputStateBatchCasOutcome, RuntimeStoreError> {
+                self.inner
+                    .compare_and_swap_input_states_atomically(runtime_id, expected, replacements)
+                    .await
+            }
+
+            async fn load_input_state(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                input_id: &InputId,
+            ) -> Result<Option<StoredInputState>, RuntimeStoreError> {
+                self.inner.load_input_state(runtime_id, input_id).await
+            }
+
+            async fn load_machine_lifecycle_record(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+                self.inner.load_machine_lifecycle_record(runtime_id).await
+            }
+
+            async fn commit_machine_lifecycle(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                commit: MachineLifecycleCommit,
+                input_states: &[InputStatePersistenceRecord],
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner
+                    .commit_machine_lifecycle(runtime_id, commit, input_states)
+                    .await
+            }
+
+            async fn observe_machine_lifecycle(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<MachineLifecycleObservation, RuntimeStoreError> {
+                self.inner.observe_machine_lifecycle(runtime_id).await
+            }
+
+            async fn compare_and_swap_machine_lifecycle(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                expected: MachineLifecycleExpectedVersion,
+                replacement: MachineLifecycleCommit,
+            ) -> Result<MachineLifecycleCasOutcome, RuntimeStoreError> {
+                self.inner
+                    .compare_and_swap_machine_lifecycle(runtime_id, expected, replacement)
+                    .await
+            }
+
+            async fn compare_and_swap_machine_lifecycle_with_fence(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                expected: MachineLifecycleExpectedVersion,
+                replacement: MachineLifecycleCommit,
+                write_fence: Arc<dyn RuntimeStoreWriteFence>,
+            ) -> Result<FencedMachineLifecycleCasOutcome, RuntimeStoreError> {
+                self.inner
+                    .compare_and_swap_machine_lifecycle_with_fence(
+                        runtime_id,
+                        expected,
+                        replacement,
+                        write_fence,
+                    )
+                    .await
+            }
+
+            async fn initialize_ops_lifecycle_if_absent(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                candidate: &PersistedOpsSnapshot,
+            ) -> Result<PersistedOpsSnapshot, RuntimeStoreError> {
+                self.inner
+                    .initialize_ops_lifecycle_if_absent(runtime_id, candidate)
+                    .await
+            }
+
+            async fn persist_ops_lifecycle(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                snapshot: &PersistedOpsSnapshot,
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+            }
+
+            async fn load_ops_lifecycle(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<Option<PersistedOpsSnapshot>, RuntimeStoreError> {
+                self.inner.load_ops_lifecycle(runtime_id).await
+            }
+
+            async fn commit_unregister_finalization(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+                finalization: UnregisterFinalizationCommit,
+            ) -> Result<(), RuntimeStoreError> {
+                self.inner
+                    .commit_unregister_finalization(runtime_id, finalization)
+                    .await
+            }
+
+            async fn load_pending_compaction_projections(
+                &self,
+                runtime_id: &LogicalRuntimeId,
+            ) -> Result<Vec<meerkat_core::CompactionProjectionIntent>, RuntimeStoreError>
+            {
+                self.inner
+                    .load_pending_compaction_projections(runtime_id)
+                    .await
+            }
+        }
+
+        #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+        struct MirroredText {
+            role: String,
+            text: String,
+        }
+
+        fn persisted_text(message: &Message) -> MirroredText {
+            match message {
+                Message::User(user) => MirroredText {
+                    role: "user".to_string(),
+                    text: user.text_content(),
+                },
+                Message::BlockAssistant(assistant) => MirroredText {
+                    role: "assistant".to_string(),
+                    text: assistant
+                        .blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            meerkat_core::AssistantBlock::Text { text, .. } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect(),
+                },
+                other => panic!("unexpected non-text canonical row: {other:?}"),
+            }
+        }
+
+        struct RecordingLiveContextMirrorHost {
+            store: Arc<PromotionRecordingStore>,
+            exported_boundaries: Mutex<Vec<WholeBlobStoreAuthority>>,
+            appends: Mutex<
+                Vec<(
+                    LiveContextAppendAuthority,
+                    MirroredText,
+                    WholeBlobStoreAuthority,
+                )>,
+            >,
+            entered: Notify,
+            acknowledgements: Semaphore,
+        }
+
+        #[async_trait]
+        impl LiveContextMirrorHost for RecordingLiveContextMirrorHost {
+            async fn committed_boundary(
+                &self,
+                session_id: &SessionId,
+            ) -> Result<(BoundSessionCommit, String), String> {
+                let persisted = self
+                    .store
+                    .load_committed_whole_blob_snapshot(&LogicalRuntimeId::for_session(session_id))
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "committed runtime boundary is absent".to_string())?;
+                assert_eq!(persisted.session().id(), session_id);
+                let boundary = BoundSessionCommit::sealed(persisted.session_arc())
+                    .map_err(|error| error.to_string())?;
+                self.exported_boundaries
+                    .lock()
+                    .await
+                    .push(persisted.authority().clone());
+                Ok((boundary, persisted.authority().blob_sha256().to_string()))
+            }
+
+            async fn append_context(
+                &self,
+                authority: LiveContextAppendAuthority,
+                context: String,
+            ) -> Result<
+                (
+                    LiveContextAppendAuthority,
+                    meerkat_core::LiveAppendDeliveryOutcome,
+                ),
+                String,
+            > {
+                let persisted = self
+                    .store
+                    .load_committed_whole_blob_snapshot(&LogicalRuntimeId::for_session(
+                        authority.session_id(),
+                    ))
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .expect("LIVE delivery observes a physically committed boundary");
+                let text: MirroredText =
+                    serde_json::from_str(&context).map_err(|error| error.to_string())?;
+                let row =
+                    usize::try_from(authority.next_cursor() - 1).expect("bounded test cursor");
+                assert_eq!(&text, &persisted_text(&persisted.session().messages()[row]));
+                self.appends.lock().await.push((
+                    authority.clone(),
+                    text,
+                    persisted.authority().clone(),
+                ));
+                self.entered.notify_one();
+                self.acknowledgements
+                    .acquire()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .forget();
+                Ok((
+                    authority,
+                    meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
+                ))
+            }
+
+            async fn recover_ambiguous_append(
+                &self,
+                _authority: LiveContextAmbiguityRecoveryAuthority,
+            ) -> Result<(), String> {
+                Err("acknowledged fixture must not recover ambiguous context".to_string())
+            }
+
+            async fn recover_ambiguous_delegation_result(
+                &self,
+                _authority: LiveDelegationResultAmbiguityRecoveryAuthority,
+            ) -> Result<(), String> {
+                Err("ordinary typed turn must not enter delegation recovery".to_string())
+            }
+        }
+
+        #[tokio::test]
+        async fn streamed_persistent_turn_promotes_exact_tail_into_live_context_once() {
+            run_promoted_turn_context_regression(PromotionTurnPath::DirectService).await;
+        }
+
+        #[tokio::test]
+        async fn runtime_loop_streamed_turn_promotes_exact_tail_into_live_context_once() {
+            run_promoted_turn_context_regression(PromotionTurnPath::RuntimeLoop).await;
+        }
+
+        #[derive(Clone, Copy)]
+        enum PromotionTurnPath {
+            DirectService,
+            RuntimeLoop,
+        }
+
+        async fn run_promoted_turn_context_regression(path: PromotionTurnPath) {
+            let store = Arc::new(PromotionRecordingStore {
+                inner: InMemoryRuntimeStore::new(),
+                promotion: Mutex::new(None),
+                entered: Notify::new(),
+                release: Notify::new(),
+            });
+            assert_eq!(
+                store.session_persistence_profile(),
+                RuntimeSessionPersistenceProfile::WholeBlobV1
+            );
+            let persistence = crate::PersistenceBundle::new(
+                Arc::new(crate::MemoryStore::new()),
+                store.clone(),
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            );
+            let client = Arc::new(DelayedStreamClient {
+                inner: TestClient::new(vec![
+                    meerkat_client::LlmEvent::TextDelta {
+                        delta: REPLY.to_string(),
+                        meta: None,
+                    },
+                    meerkat_client::LlmEvent::Done {
+                        outcome: meerkat_client::LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::EndTurn,
+                        },
+                    },
+                ]),
+                entered: Notify::new(),
+                release: Notify::new(),
+                calls: AtomicUsize::new(0),
+            });
+            let factory = crate::AgentFactory::new(std::path::PathBuf::from(
+                ".rkat/promoted-turn-live-regression/sessions",
+            ))
+            .builtins(false);
+            let mut config = crate::Config::default();
+            config.realm.insert(
+                "default".to_string(),
+                meerkat_core::RealmConfigSection::from_inline_api_keys(&[(
+                    "openai",
+                    "test-openai-key",
+                )]),
+            );
+            let mut builder = crate::FactoryAgentBuilder::new(factory, config);
+            builder.default_llm_client = Some(client.clone());
+            let (service, runtime) =
+                crate::surface::build_runtime_backed_service(builder, 4, persistence);
+            let service = Arc::new(service);
+            let session = crate::Session::new();
+            let session_id = session.id().clone();
+            let executor_service = service.clone();
+            let executor_runtime = runtime.clone();
+            Box::pin(crate::surface::materialize_session(
+                &service,
+                &runtime,
+                session,
+                crate::CreateSessionRequest {
+                    injected_context: Vec::new(),
+                    model: "gpt-realtime-2".to_string(),
+                    prompt: meerkat_core::ContentInput::Text(String::new()),
+                    system_prompt: crate::SystemPromptOverride::Disable,
+                    max_tokens: None,
+                    event_tx: None,
+                    initial_turn: InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                    build: Some(SessionBuildOptions::default()),
+                    labels: None,
+                },
+                move |id| {
+                    crate::surface::default_persistent_executor(
+                        executor_service,
+                        executor_runtime,
+                        id,
+                    )
+                },
+            ))
+            .await
+            .expect("materialize a real persistent factory agent");
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            let before = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .expect("initial store-sealed boundary");
+            let baseline_count = before.session().messages().len();
+            let baseline_cursor = u64::try_from(baseline_count).expect("bounded baseline cursor");
+            assert!(
+                before
+                    .session()
+                    .messages()
+                    .iter()
+                    .all(|message| matches!(message, Message::System(_))),
+                "factory baseline contains instructions, not prior conversational text"
+            );
+            // This fixture seeds cursor zero. Generated no-send coverage must
+            // advance over the persisted Systems before the two text appends.
+            let binding = runtime
+                .__test_open_live_context_channel(&session_id, 0)
+                .await
+                .expect("generated live execution binding with no provider connection");
+            let mirror = Arc::new(RecordingLiveContextMirrorHost {
+                store: store.clone(),
+                exported_boundaries: Mutex::new(Vec::new()),
+                appends: Mutex::new(Vec::new()),
+                entered: Notify::new(),
+                acknowledgements: Semaphore::new(0),
+            });
+            runtime.set_live_context_mirror_host(mirror.clone());
+
+            let turn_service = service.clone();
+            let turn_runtime = runtime.clone();
+            let turn_session = session_id.clone();
+            let runtime_input = matches!(path, PromotionTurnPath::RuntimeLoop).then(|| {
+                meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
+                    meerkat_core::ContentInput::Text(PROMPT.to_string()),
+                    Some(
+                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                            execution_kind: Some(
+                                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                            ),
+                            ..Default::default()
+                        },
+                    ),
+                ))
+            });
+            let input_id = runtime_input.as_ref().map(|input| input.id().clone());
+            let mut turn = tokio::spawn(async move {
+                if let Some(input) = runtime_input {
+                    let (outcome, completion) = turn_runtime
+                        .accept_input_with_completion(&turn_session, input)
+                        .await
+                        .expect("runtime admits the ordinary durable operator prompt");
+                    assert!(
+                        matches!(outcome, meerkat_runtime::AcceptOutcome::Accepted { .. }),
+                        "runtime input was not accepted: {outcome:?}"
+                    );
+                    return match completion
+                        .expect("accepted prompt has a completion witness")
+                        .wait()
+                        .await
+                        .expect("RuntimeLoop completion witness settles")
+                    {
+                        meerkat_runtime::CompletionOutcome::Completed(result) => Ok(*result),
+                        other => panic!("RuntimeLoop did not commit a normal turn: {other:?}"),
+                    };
+                }
+                let admission = turn_service
+                    .reserve_runtime_turn_admission(&turn_session)
+                    .await
+                    .unwrap();
+                turn_service
+                    .run_machine_committed_live_turn(
+                        crate::MachineServiceTurnCommitProtocol::from_machine(&turn_runtime),
+                        &turn_session,
+                        crate::StartTurnRequest {
+                            prompt: meerkat_core::ContentInput::Text(PROMPT.to_string()),
+                            injected_context: Vec::new(),
+                            system_prompt: None,
+                            event_tx: None,
+                            runtime: meerkat_core::service::StartTurnRuntimeSemantics {
+                                turn_metadata: Some(meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                                    execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                        },
+                        admission,
+                    )
+                    .await
+                    .map_err(|(error, _)| error)
+            });
+            tokio::select! {
+                () = client.entered.notified() => {}
+                result = &mut turn => panic!("service turn ended before LLM stream: {result:?}"),
+                () = tokio::time::sleep(DEADLINE) => panic!("service turn did not enter LLM stream"),
+            }
+            assert!(mirror.appends.lock().await.is_empty());
+            client.release.notify_one();
+            tokio::time::timeout(DEADLINE, store.entered.notified())
+                .await
+                .expect("real provisional promotion reached");
+            assert!(!turn.is_finished());
+            assert!(
+                mirror.appends.lock().await.is_empty(),
+                "uncommitted candidate is not LIVE context"
+            );
+            assert!(
+                mirror.exported_boundaries.lock().await.is_empty(),
+                "runtime ACK must not request projection before canonical commit"
+            );
+            let still_committed = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(still_committed.bytes(), before.bytes());
+            assert_eq!(still_committed.authority(), before.authority());
+            store.release.notify_one();
+
+            let result = tokio::time::timeout(DEADLINE, turn)
+                .await
+                .expect("source commit must not wait for provider ACK")
+                .expect("turn task")
+                .expect("normal streamed persistent turn");
+            assert_eq!(result.session_id, session_id);
+            assert_eq!(result.text, REPLY);
+            assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+            tokio::time::timeout(DEADLINE, mirror.entered.notified())
+                .await
+                .expect("promoted boundary must reach LIVE even without another turn or refresh");
+            let committed = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(committed.session().id(), &session_id);
+            assert_eq!(committed.session().messages().len(), baseline_count + 2);
+            assert_eq!(
+                &committed.session().messages()[..baseline_count],
+                before.session().messages(),
+                "promotion preserves the exact factory baseline"
+            );
+            let promotion = store.promotion.lock().await;
+            let evidence = promotion.as_ref().expect("observed actual store promotion");
+            assert_eq!(
+                evidence.kind,
+                match path {
+                    PromotionTurnPath::DirectService => {
+                        PreparedRuntimeSessionCommitKind::ServiceTurnTerminal
+                    }
+                    PromotionTurnPath::RuntimeLoop => PreparedRuntimeSessionCommitKind::Success,
+                },
+                "the runtime case must use the executor boundary, not the direct-service path"
+            );
+            if let Some(input_id) = &input_id {
+                assert_eq!(
+                    &evidence.receipt.contributing_input_ids,
+                    std::slice::from_ref(input_id)
+                );
+                let exports = mirror.exported_boundaries.lock().await;
+                assert!(
+                    !exports.is_empty(),
+                    "executor ACK wakes the canonical store exporter"
+                );
+                assert!(
+                    exports
+                        .iter()
+                        .all(|authority| authority == committed.authority()),
+                    "wake-driven exports carry only the actual promoted authority"
+                );
+            }
+            assert_eq!(committed.bytes(), evidence.candidate.candidate_bytes());
+            assert_eq!(
+                committed.authority().blob_sha256(),
+                evidence.candidate.authority().candidate_blob_sha256()
+            );
+            assert_eq!(
+                committed.authority().store_revision(),
+                evidence.candidate.authority().base_store_revision() + 1
+            );
+            assert_eq!(evidence.candidate.authority().session_id(), &session_id);
+            let receipt = evidence.receipt.clone();
+            drop(promotion);
+            assert!(
+                store
+                    .load_whole_blob_provisional_tail(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                store
+                    .load_committed_boundary_receipts(&runtime_id, &receipt.run_id)
+                    .await
+                    .unwrap(),
+                vec![receipt.clone()]
+            );
+            assert_eq!(
+                mirror.appends.lock().await.len(),
+                1,
+                "first ACK is deliberately withheld"
+            );
+
+            let mut observer = Box::pin(runtime.drain_live_context_outbox(&session_id));
+            assert!(
+                futures::poll!(observer.as_mut()).is_pending(),
+                "delivery observer waits for the withheld provider ACK"
+            );
+            drop(observer);
+            mirror.acknowledgements.add_permits(2);
+            tokio::time::timeout(DEADLINE, runtime.drain_live_context_outbox(&session_id))
+                .await
+                .expect("owned delivery settles")
+                .expect("both context appends acknowledged");
+            {
+                let appends = mirror.appends.lock().await;
+                assert_eq!(
+                    appends.len(),
+                    2,
+                    "typed user and assistant rows each arrive exactly once"
+                );
+                for (index, (authority, text, observed_store_authority)) in
+                    appends.iter().enumerate()
+                {
+                    assert_eq!(authority.session_id(), &session_id);
+                    assert_eq!(authority.channel_id(), binding.channel_id());
+                    assert_eq!(authority.previous_cursor(), baseline_cursor + index as u64);
+                    assert_eq!(authority.next_cursor(), baseline_cursor + index as u64 + 1);
+                    assert_eq!(
+                        text,
+                        &persisted_text(&committed.session().messages()[baseline_count + index])
+                    );
+                    assert_eq!(observed_store_authority, committed.authority());
+                }
+                assert_eq!(appends[0].1.text, PROMPT);
+                assert_eq!(appends[1].1.text, REPLY);
+            }
+
+            // Replay only the exact store-returned session and its actual
+            // commit token, never a synthesized transcript or authority.
+            let replay = BoundSessionCommit::sealed(committed.session_arc())
+                .expect("seal persisted boundary for replay");
+            assert_eq!(
+                runtime
+                    .enqueue_committed_parent_session_boundary(
+                        &session_id,
+                        &replay,
+                        committed.authority().blob_sha256(),
+                    )
+                    .await
+                    .expect("replay exact canonical boundary"),
+                0
+            );
+            tokio::time::timeout(DEADLINE, runtime.drain_live_context_outbox(&session_id))
+                .await
+                .expect("replay drain settles")
+                .expect("replay is already covered");
+            assert_eq!(mirror.appends.lock().await.len(), 2);
+            let after_replay = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after_replay.bytes(), committed.bytes());
+            assert_eq!(after_replay.authority(), committed.authority());
+            assert_eq!(
+                store
+                    .load_committed_boundary_receipts(&runtime_id, &receipt.run_id)
+                    .await
+                    .unwrap(),
+                vec![receipt]
+            );
+            assert_eq!(
+                runtime
+                    .live_active_channel_for_session(&session_id)
+                    .await
+                    .as_ref(),
+                Some(binding.channel_id())
+            );
+        }
     }
 }

@@ -1790,8 +1790,11 @@ impl TryFrom<RealtimeTranscriptEvent> for WireRealtimeTranscriptEvent {
                 Err(WireConversionError::InternalRealtimeUserContent)
             }
             RealtimeTranscriptEvent::AssistantPlaybackTargetAdmitted { .. }
+            | RealtimeTranscriptEvent::WithContextObservation { .. }
+            | RealtimeTranscriptEvent::ContextObservationBound { .. }
             | RealtimeTranscriptEvent::AssistantPlaybackTerminalObserved { .. }
             | RealtimeTranscriptEvent::AssistantPlaybackSnapshotCommitted { .. }
+            | RealtimeTranscriptEvent::AssistantUnmeasuredSnapshotCommitted { .. }
             | RealtimeTranscriptEvent::AssistantPlaybackTerminalSettled { .. }
             | RealtimeTranscriptEvent::AssistantPlaybackTargetResolved { .. } => {
                 Err(WireConversionError::InternalRealtimePlaybackAuthority)
@@ -2055,6 +2058,10 @@ pub enum WireLiveAdapterObservation {
 impl From<LiveAdapterObservation> for WireLiveAdapterObservation {
     fn from(value: LiveAdapterObservation) -> Self {
         match value {
+            // Runtime-only provenance never crosses the wire; the payload does.
+            LiveAdapterObservation::WithContextObservation { observation, .. } => {
+                Self::from(*observation)
+            }
             LiveAdapterObservation::Ready => Self::Ready,
             LiveAdapterObservation::UserTranscriptFinal {
                 provider_item_id,

@@ -2980,11 +2980,17 @@ fn attach_head_metadata_projection(
         return Err(SessionStoreError::Corrupted(head.id.clone()));
     }
 
-    let physical =
-        metadata_owner_ref_in_txn(tx, &head.id, HeadMetadataProjectionOwner::PhysicalHead)?
-            .ok_or_else(|| SessionStoreError::Corrupted(head.id.clone()))?;
-    let mut state_id = physical.state_id;
-    let mut cells = current_metadata_cells_in_txn(tx, &head.id)?;
+    let (mut state_id, mut cells) =
+        match metadata_owner_ref_in_txn(tx, &head.id, HeadMetadataProjectionOwner::PhysicalHead)? {
+            Some(physical) => (
+                physical.state_id,
+                current_metadata_cells_in_txn(tx, &head.id)?,
+            ),
+            None => (
+                target_state_id.clone(),
+                materialize_standalone_metadata_state_in_txn(tx, &head.id, &target_state_id)?,
+            ),
+        };
     let mut visited = BTreeSet::new();
     while state_id != target_state_id {
         if !visited.insert(state_id.clone()) {
@@ -5399,6 +5405,22 @@ pub fn materialize_physical_head_metadata_for_runtime_in_txn(
         HeadMetadataProjectionOwner::PhysicalHead,
     )?;
     Ok(materialized)
+}
+
+/// Read the authenticated runtime-boundary metadata without transcript rows.
+/// The caller holds the exact runtime authority check in this transaction.
+#[doc(hidden)]
+pub fn materialize_runtime_boundary_metadata_in_txn(
+    tx: &Transaction<'_>,
+    head: &SessionHead,
+) -> Result<serde_json::Map<String, serde_json::Value>, SessionStoreError> {
+    let mut materialized = head.clone();
+    attach_head_metadata_projection(
+        tx,
+        &mut materialized,
+        HeadMetadataProjectionOwner::RuntimeBoundary,
+    )?;
+    materialized.materialized_metadata()
 }
 
 /// Materialize one exact retained head inside a co-tenant recovery

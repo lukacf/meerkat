@@ -4,7 +4,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 \* Generated composition model for adaptive_mob_bundle.
 
 \* RustU64Max is the TLA boundary for Expr::U64Max; production generated Rust renders u64::MAX.
-CONSTANTS AdaptiveDecisionKindValues, AdaptiveLayerAdmissionKindValues, AdaptiveLayerDispositionKindValues, AdaptiveLayerIdValues, AdaptiveLayerPhaseValues, AdaptiveLayerSetupFaultKindValues, AdaptiveRunIdValues, AdaptiveRunPhaseValues, AdaptiveStopReasonValues, AgentIdentityValues, AgentRuntimeIdValues, AutonomousShutdownMemberActionKindValues, BooleanValues, BranchIdValues, CancelAllWorkRejectReasonKindValues, CollectionPolicyKindValues, ControlScopeValues, CoordinationResourceRefValues, DependencyModeValues, EventSubscriptionRejectReasonKindValues, ExternalMemberRebindCapabilityValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, FenceTokenValues, FlowFrameReducerCommandKindValues, FlowNodeFailurePolicyValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunPublicResultClassKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FlowStepDispatchKindValues, FrameIdValues, FrameScopeValues, FrameStatusValues, GenerationValues, HostBindPhaseValues, HostBindingGenerationTombstoneValues, HostIdValues, IdentityAuthorityConditionValues, IdentityExternalCeremonyConditionValues, IdentityExternalTrustConditionValues, IdentityInitialDeliveryConditionValues, IdentityLeaseConditionValues, IdentityReceiptConditionValues, IdentityReconcileDecisionValues, IdentityReplacementConditionValues, IdentityResourceConditionValues, IdentitySessionConditionValues, InputIdValues, KickoffIntentValues, KickoffPhaseValues, LiveWsEndpointUrlValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, MemberAdmissionVerdictKindValues, MemberHealthClassValues, MemberLifecycleKindValues, MemberLiveMaterializationObservationKindValues, MemberOperatorRejectKindValues, MemberPeerEndpointValues, MemberProgressEventKindValues, MemberRevivalVerdictKindValues, MemberSessionDisposalValues, MemberWaitClassificationKindValues, MobBridgeRejectionCauseValues, MobBridgeRejectionRecoveryValues, MobCoordinationEventKindValues, MobCoordinationResourceClaimKindValues, MobCoordinationResourceClaimStatusValues, MobCoordinationWorkIntentStatusValues, MobCreateMobAdmissionKindValues, MobCurrentMobAdmissionKindValues, MobFlowDelegationEdgeAdmissionKindValues, MobFlowDelegationEdgeModeKindValues, MobFlowDelegationEdgeRuleVerdictKindValues, MobFrameSeedDispositionValues, MobIdValues, MobLifecycleJournalKindValues, MobMemberOperationEligibilityKindValues, MobMemberStateValues, MobPendingSupervisorAcceptanceKindValues, MobProfileMutationAdmissionKindValues, MobRemoteMemberRuntimeObservedStateValues, MobRemoteMemberRuntimeTerminalityValues, MobSpawnManyFailureCauseKindValues, MobSpawnManyFailureObservationKindValues, MobSpawnMemberAdmissionKindValues, MobSpawnToolAdmissionKindValues, MobToolCallerProvenanceValues, NatValues, NodeRunStatusValues, OpaquePrincipalTokenValues, PeerAddressValues, PeerIdValues, PeerSigningKeyValues, PlacedCarrierCleanupObligationValues, PlacedCompletionLifecycleIntentKindValues, PlacedCompletionObligationValues, PlacedKickoffClosureKindValues, PlacedKickoffObligationValues, PlacedKickoffOutcomeKindValues, PlacedSpawnIdValues, PolicyDecisionValues, PrincipalIdValues, RemoteTurnObligationValues, ResourceClaimIdValues, RespawnTopologyPeerIdValues, RespawnTopologyRestoreResultKindValues, ResumeAttemptIdValues, ResumeMemberBindingValues, ResumeMemberOutcomeDispositionValues, RouteInstallObligationValues, RunIdValues, SessionIdValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfControlScopeValues, SetOfCoordinationResourceRefValues, SetOfExternalPeerEdgeValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfHostBindingGenerationTombstoneValues, SetOfHostIdValues, SetOfLoopInstanceIdValues, SetOfMemberPeerEndpointValues, SetOfPeerIdValues, SetOfPlacedCarrierCleanupObligationValues, SetOfPlacedCompletionObligationValues, SetOfPlacedKickoffObligationValues, SetOfRemoteTurnObligationValues, SetOfRouteInstallObligationValues, SetOfStepIdValues, SetOfStringValues, SetOfWiringEdgeValues, SpawnExecPhaseValues, SpawnPolicyRuntimeModeValues, StepFaultDispositionKindValues, StepIdValues, StepOutputFaultKindValues, StepRunStatusValues, StringValues, SubmitWorkRejectReasonKindValues, SupervisorEscalationFailureCauseValues, SupervisorProtocolVersionValues, TurnTimeoutDispositionValues, U32Values, WiringEdgeValues, WiringLifecycleKindValues, WorkIdValues, WorkIntentIdValues, WorkOriginValues, RustU64Max
+CONSTANTS AdaptiveDecisionKindValues, AdaptiveLayerAdmissionKindValues, AdaptiveLayerDispositionKindValues, AdaptiveLayerIdValues, AdaptiveLayerPhaseValues, AdaptiveLayerSetupFaultKindValues, AdaptiveRunIdValues, AdaptiveRunPhaseValues, AdaptiveStopReasonValues, AgentIdentityValues, AgentRuntimeIdValues, AutonomousShutdownMemberActionKindValues, BooleanValues, BranchIdValues, CancelAllWorkRejectReasonKindValues, CollectionPolicyKindValues, ControlScopeValues, CoordinationResourceRefValues, DependencyModeValues, EventSubscriptionRejectReasonKindValues, ExternalMemberRebindCapabilityValues, ExternalPeerEdgeValues, ExternalPeerKeyValues, FenceTokenValues, FlowFrameReducerCommandKindValues, FlowNodeFailurePolicyValues, FlowNodeIdValues, FlowNodeKindValues, FlowRunPublicResultClassKindValues, FlowRunReducerCommandKindValues, FlowRunStatusValues, FlowStepDispatchKindValues, FrameIdValues, FrameScopeValues, FrameStatusValues, GenerationValues, HostBindPhaseValues, HostBindingGenerationTombstoneValues, HostIdValues, IdentityAuthorityConditionValues, IdentityExternalCeremonyConditionValues, IdentityExternalTrustConditionValues, IdentityInitialDeliveryConditionValues, IdentityLeaseConditionValues, IdentityReceiptConditionValues, IdentityReconcileDecisionValues, IdentityReplacementConditionValues, IdentityResourceConditionValues, IdentitySessionConditionValues, InputIdValues, KickoffIntentValues, KickoffPhaseValues, LiveWsEndpointUrlValues, LoopIdValues, LoopInstanceIdValues, LoopIterationReducerCommandKindValues, LoopIterationStageValues, LoopStatusValues, MemberAdmissionVerdictKindValues, MemberHealthClassValues, MemberLifecycleKindValues, MemberLiveMaterializationObservationKindValues, MemberOperatorRejectKindValues, MemberPeerEndpointValues, MemberProgressEventKindValues, MemberRevivalVerdictKindValues, MemberSessionDisposalValues, MemberWaitClassificationKindValues, MobBridgeRejectionCauseValues, MobBridgeRejectionRecoveryValues, MobCoordinationEventKindValues, MobCoordinationResourceClaimKindValues, MobCoordinationResourceClaimStatusValues, MobCoordinationWorkIntentStatusValues, MobCreateMobAdmissionKindValues, MobCurrentMobAdmissionKindValues, MobFlowDelegationEdgeAdmissionKindValues, MobFlowDelegationEdgeModeKindValues, MobFlowDelegationEdgeRuleVerdictKindValues, MobFrameSeedDispositionValues, MobIdValues, MobLifecycleJournalKindValues, MobMemberOperationEligibilityKindValues, MobMemberStateValues, MobPendingSupervisorAcceptanceKindValues, MobProfileMutationAdmissionKindValues, MobRemoteMemberRuntimeObservedStateValues, MobRemoteMemberRuntimeTerminalityValues, MobSpawnManyFailureCauseKindValues, MobSpawnManyFailureObservationKindValues, MobSpawnMemberAdmissionKindValues, MobSpawnToolAdmissionKindValues, MobToolCallerProvenanceValues, NatValues, NodeRunStatusValues, OpaquePrincipalTokenValues, PeerAddressValues, PeerIdValues, PeerSigningKeyValues, PlacedCarrierCleanupObligationValues, PlacedCompletionLifecycleIntentKindValues, PlacedCompletionObligationValues, PlacedKickoffClosureKindValues, PlacedKickoffObligationValues, PlacedKickoffOutcomeKindValues, PlacedSpawnIdValues, PolicyDecisionValues, PrincipalIdValues, RemoteTurnObligationValues, ResourceClaimIdValues, RespawnTopologyPeerIdValues, RespawnTopologyRestoreResultKindValues, ResumeAttemptIdValues, ResumeMemberBindingValues, ResumeMemberOutcomeDispositionValues, RouteInstallObligationValues, RunIdValues, SessionIdValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfControlScopeValues, SetOfCoordinationResourceRefValues, SetOfExternalPeerEdgeValues, SetOfFlowNodeIdValues, SetOfFrameIdValues, SetOfHostBindingGenerationTombstoneValues, SetOfHostIdValues, SetOfLoopInstanceIdValues, SetOfMemberPeerEndpointValues, SetOfPeerIdValues, SetOfPlacedCarrierCleanupObligationValues, SetOfPlacedCompletionObligationValues, SetOfPlacedKickoffObligationValues, SetOfRemoteTurnObligationValues, SetOfRouteInstallObligationValues, SetOfStepIdValues, SetOfStringValues, SetOfWiringEdgeValues, SpawnExecPhaseValues, SpawnPolicyRuntimeModeValues, StepFaultDispositionKindValues, StepIdValues, StepOutputFaultKindValues, StepRunStatusValues, StringValues, SubmitWorkRejectReasonKindValues, SupervisorEscalationFailureCauseValues, SupervisorProtocolVersionValues, TurnTimeoutDispositionValues, U32Values, WiringEdgeValues, WiringLifecycleKindValues, WorkContentAttributionValues, WorkIdValues, WorkIntentIdValues, WorkOriginValues, RustU64Max
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -17794,7 +17794,7 @@ control_mob_ClassifyTurnTimeoutDispositionCanceledDestroyed(arg_timed_out_run_id
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin) ==
+control_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "SubmitWork"
@@ -17803,6 +17803,7 @@ control_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, 
        /\ packet.payload.fence_token = arg_fence_token
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
+       /\ packet.payload.content_attribution = arg_content_attribution
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ (control_mob_placed_completion_lifecycle_quiescing = FALSE)
@@ -17822,13 +17823,13 @@ control_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, 
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "RequestRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, session_id |-> (IF "value" \in DOMAIN (IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) THEN (IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None)["value"] ELSE None), work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningExternal"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "RequestRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, content_attribution |-> packet.payload.content_attribution, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, session_id |-> (IF "value" \in DOMAIN (IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) THEN (IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None)["value"] ELSE None), work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningExternal"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "SubmitWorkRunningExternal", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin) ==
+control_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "SubmitWork"
@@ -17837,6 +17838,7 @@ control_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runt
        /\ packet.payload.fence_token = arg_fence_token
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
+       /\ packet.payload.content_attribution = arg_content_attribution
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ (control_mob_placed_completion_lifecycle_quiescing = FALSE)
@@ -17856,13 +17858,13 @@ control_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runt
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "RequestPeerRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningExternalPeerOnly"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "RequestPeerRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, content_attribution |-> packet.payload.content_attribution, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningExternalPeerOnly"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "SubmitWorkRunningExternalPeerOnly", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin) ==
+control_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "SubmitWork"
@@ -17871,6 +17873,7 @@ control_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, 
        /\ packet.payload.fence_token = arg_fence_token
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
+       /\ packet.payload.content_attribution = arg_content_attribution
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ (control_mob_placed_completion_lifecycle_quiescing = FALSE)
@@ -17889,13 +17892,13 @@ control_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, 
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "RequestRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, session_id |-> (IF "value" \in DOMAIN (IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) THEN (IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None)["value"] ELSE None), work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningInternal"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "RequestRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, content_attribution |-> packet.payload.content_attribution, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, session_id |-> (IF "value" \in DOMAIN (IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) THEN (IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None)["value"] ELSE None), work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningInternal"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "SubmitWorkRunningInternal", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin) ==
+control_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "SubmitWork"
@@ -17904,6 +17907,7 @@ control_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runt
        /\ packet.payload.fence_token = arg_fence_token
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
+       /\ packet.payload.content_attribution = arg_content_attribution
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ (control_mob_placed_completion_lifecycle_quiescing = FALSE)
@@ -17922,7 +17926,7 @@ control_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runt
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "RequestPeerRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningInternalPeerOnly"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "RequestPeerRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, content_attribution |-> packet.payload.content_attribution, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningInternalPeerOnly"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "SubmitWorkRunningInternalPeerOnly", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
@@ -53037,7 +53041,7 @@ layer_mob_ClassifyTurnTimeoutDispositionCanceledDestroyed(arg_timed_out_run_id, 
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin) ==
+layer_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "SubmitWork"
@@ -53046,6 +53050,7 @@ layer_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, ar
        /\ packet.payload.fence_token = arg_fence_token
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
+       /\ packet.payload.content_attribution = arg_content_attribution
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ (layer_mob_placed_completion_lifecycle_quiescing = FALSE)
@@ -53065,13 +53070,13 @@ layer_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, ar
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "RequestRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, session_id |-> (IF "value" \in DOMAIN (IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) THEN (IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None)["value"] ELSE None), work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningExternal"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "RequestRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, content_attribution |-> packet.payload.content_attribution, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, session_id |-> (IF "value" \in DOMAIN (IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) THEN (IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None)["value"] ELSE None), work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningExternal"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "SubmitWorkRunningExternal", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin) ==
+layer_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "SubmitWork"
@@ -53080,6 +53085,7 @@ layer_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtim
        /\ packet.payload.fence_token = arg_fence_token
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
+       /\ packet.payload.content_attribution = arg_content_attribution
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ (layer_mob_placed_completion_lifecycle_quiescing = FALSE)
@@ -53099,13 +53105,13 @@ layer_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtim
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "RequestPeerRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningExternalPeerOnly"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "RequestPeerRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, content_attribution |-> packet.payload.content_attribution, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningExternalPeerOnly"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "SubmitWorkRunningExternalPeerOnly", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin) ==
+layer_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "SubmitWork"
@@ -53114,6 +53120,7 @@ layer_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, ar
        /\ packet.payload.fence_token = arg_fence_token
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
+       /\ packet.payload.content_attribution = arg_content_attribution
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ (layer_mob_placed_completion_lifecycle_quiescing = FALSE)
@@ -53132,13 +53139,13 @@ layer_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, ar
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "RequestRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, session_id |-> (IF "value" \in DOMAIN (IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) THEN (IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None)["value"] ELSE None), work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningInternal"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "RequestRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, content_attribution |-> packet.payload.content_attribution, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, session_id |-> (IF "value" \in DOMAIN (IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) THEN (IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None)["value"] ELSE None), work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningInternal"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "SubmitWorkRunningInternal", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin) ==
+layer_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "SubmitWork"
@@ -53147,6 +53154,7 @@ layer_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtim
        /\ packet.payload.fence_token = arg_fence_token
        /\ packet.payload.work_id = arg_work_id
        /\ packet.payload.origin = arg_origin
+       /\ packet.payload.content_attribution = arg_content_attribution
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ (layer_mob_placed_completion_lifecycle_quiescing = FALSE)
@@ -53165,7 +53173,7 @@ layer_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtim
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "RequestPeerRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningInternalPeerOnly"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "RequestPeerRuntimeIngress", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, content_attribution |-> packet.payload.content_attribution, fence_token |-> packet.payload.fence_token, generation |-> (IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None), origin |-> packet.payload.origin, work_id |-> packet.payload.work_id], effect_id |-> (model_step_count + 1), source_transition |-> "SubmitWorkRunningInternalPeerOnly"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "SubmitWorkRunningInternalPeerOnly", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_5c73fa0d7ecc522a
        /\ model_step_count' = model_step_count + 1
@@ -75667,10 +75675,10 @@ CoreNext ==
     \/ \E arg_timed_out_run_id \in RunIdValues : control_mob_ClassifyTurnTimeoutDispositionCanceledStopped(arg_timed_out_run_id, FALSE)
     \/ \E arg_timed_out_run_id \in RunIdValues : control_mob_ClassifyTurnTimeoutDispositionCanceledCompleted(arg_timed_out_run_id, FALSE)
     \/ \E arg_timed_out_run_id \in RunIdValues : control_mob_ClassifyTurnTimeoutDispositionCanceledDestroyed(arg_timed_out_run_id, FALSE)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : control_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : control_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : control_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : control_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : control_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : control_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : control_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : control_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionStopped(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionCompleted(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : control_mob_ResolveSubmitWorkRejectionDestroyed(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
@@ -76966,10 +76974,10 @@ CoreNext ==
     \/ \E arg_timed_out_run_id \in RunIdValues : layer_mob_ClassifyTurnTimeoutDispositionCanceledStopped(arg_timed_out_run_id, FALSE)
     \/ \E arg_timed_out_run_id \in RunIdValues : layer_mob_ClassifyTurnTimeoutDispositionCanceledCompleted(arg_timed_out_run_id, FALSE)
     \/ \E arg_timed_out_run_id \in RunIdValues : layer_mob_ClassifyTurnTimeoutDispositionCanceledDestroyed(arg_timed_out_run_id, FALSE)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : layer_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : layer_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : layer_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : layer_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : layer_mob_SubmitWorkRunningExternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : layer_mob_SubmitWorkRunningExternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : layer_mob_SubmitWorkRunningInternal(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in WorkOriginValues : \E arg_content_attribution \in WorkContentAttributionValues : layer_mob_SubmitWorkRunningInternalPeerOnly(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin, arg_content_attribution)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionStopped(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionCompleted(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_origin \in WorkOriginValues : layer_mob_ResolveSubmitWorkRejectionDestroyed(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_origin)

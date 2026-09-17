@@ -1238,6 +1238,7 @@ enum SessionCommand {
     },
     AppendRealtimeTranscriptEvent {
         event: RealtimeTranscriptEvent,
+        channel_id: Option<meerkat_core::LiveChannelId>,
         reply_tx: oneshot::Sender<
             Result<RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError>,
         >,
@@ -1248,6 +1249,7 @@ enum SessionCommand {
         response_id: String,
         item_id: String,
         content_index: u32,
+        context_observation_id: Option<meerkat_core::LiveContextObservationId>,
         reply_tx: oneshot::Sender<
             Result<meerkat_core::LiveAssistantPlaybackTarget, meerkat_core::error::AgentError>,
         >,
@@ -2295,6 +2297,17 @@ pub trait SessionAgent: Send {
         ))
     }
 
+    fn append_realtime_transcript_event_for_channel(
+        &mut self,
+        _event: RealtimeTranscriptEvent,
+        _channel_id: meerkat_core::LiveChannelId,
+    ) -> Result<RealtimeTranscriptApplyOutcome, meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "channel-scoped realtime transcript append is not supported by this session agent"
+                .to_string(),
+        ))
+    }
+
     /// Observe one exact unmaterialized spoken segment before generated
     /// playback-prefix authority decides whether canonical truncation is legal.
     fn staged_realtime_assistant_segment_text(
@@ -2328,6 +2341,30 @@ pub trait SessionAgent: Send {
             "live assistant playback target admission is not supported by this session agent"
                 .to_string(),
         ))
+    }
+
+    fn admit_live_assistant_playback_target_with_context_observation(
+        &mut self,
+        channel_id: &meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: &str,
+        item_id: &str,
+        content_index: u32,
+        observation_id: Option<meerkat_core::LiveContextObservationId>,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, meerkat_core::error::AgentError> {
+        if observation_id.is_some() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "atomic assistant context observation is not supported by this session agent"
+                    .into(),
+            ));
+        }
+        self.admit_live_assistant_playback_target(
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+        )
     }
 
     /// Resolve the exact durable target for a terminal playback report.
@@ -3934,6 +3971,26 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         event: RealtimeTranscriptEvent,
     ) -> Result<RealtimeTranscriptApplyOutcome, SessionError> {
+        self.append_realtime_transcript_event_with_origin(id, event, None)
+            .await
+    }
+
+    pub async fn append_realtime_transcript_event_for_channel(
+        &self,
+        id: &SessionId,
+        event: RealtimeTranscriptEvent,
+        channel_id: meerkat_core::LiveChannelId,
+    ) -> Result<RealtimeTranscriptApplyOutcome, SessionError> {
+        self.append_realtime_transcript_event_with_origin(id, event, Some(channel_id))
+            .await
+    }
+
+    async fn append_realtime_transcript_event_with_origin(
+        &self,
+        id: &SessionId,
+        event: RealtimeTranscriptEvent,
+        channel_id: Option<meerkat_core::LiveChannelId>,
+    ) -> Result<RealtimeTranscriptApplyOutcome, SessionError> {
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(id)
@@ -3941,7 +3998,11 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let (reply_tx, reply_rx) = oneshot::channel();
         handle
             .command_tx
-            .send(SessionCommand::AppendRealtimeTranscriptEvent { event, reply_tx })
+            .send(SessionCommand::AppendRealtimeTranscriptEvent {
+                event,
+                channel_id,
+                reply_tx,
+            })
             .await
             .map_err(|_| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -3970,6 +4031,29 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         item_id: String,
         content_index: u32,
     ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, SessionError> {
+        self.admit_live_assistant_playback_target_with_context_observation(
+            id,
+            channel_id,
+            interaction_id,
+            response_id,
+            item_id,
+            content_index,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn admit_live_assistant_playback_target_with_context_observation(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        interaction_id: meerkat_core::InteractionId,
+        response_id: String,
+        item_id: String,
+        content_index: u32,
+        context_observation_id: Option<meerkat_core::LiveContextObservationId>,
+    ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, SessionError> {
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(id)
@@ -3983,6 +4067,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 response_id,
                 item_id,
                 content_index,
+                context_observation_id,
                 reply_tx,
             })
             .await
@@ -7576,8 +7661,17 @@ async fn session_task<A: SessionAgent>(
                 }
                 let _ = reply_tx.send(result);
             }
-            SessionCommand::AppendRealtimeTranscriptEvent { event, reply_tx } => {
-                let result = agent.append_realtime_transcript_event(event);
+            SessionCommand::AppendRealtimeTranscriptEvent {
+                event,
+                channel_id,
+                reply_tx,
+            } => {
+                let result = match channel_id {
+                    Some(channel) => {
+                        agent.append_realtime_transcript_event_for_channel(event, channel)
+                    }
+                    None => agent.append_realtime_transcript_event(event),
+                };
                 if let Ok(outcome) = &result {
                     let snap = agent.snapshot();
                     control.publish_summary(SessionSummaryCache {
@@ -7590,7 +7684,7 @@ async fn session_task<A: SessionAgent>(
                     for materialized in &outcome.materialized_messages {
                         if let RealtimeTranscriptMaterializedMessage::Assistant {
                             text,
-                            stop_reason,
+                            stop_reason: Some(stop_reason),
                             usage,
                             ..
                         } = materialized
@@ -7625,9 +7719,10 @@ async fn session_task<A: SessionAgent>(
                 response_id,
                 item_id,
                 content_index,
+                context_observation_id,
                 reply_tx,
             } => {
-                let result = crate::live_transcript_authority::admit_live_assistant_playback_target(
+                let result = crate::live_transcript_authority::admit_live_assistant_playback_target_with_context_observation(
                     &mut agent,
                     &session_id,
                     channel_id,
@@ -7635,6 +7730,7 @@ async fn session_task<A: SessionAgent>(
                     response_id,
                     item_id,
                     content_index,
+                    context_observation_id,
                 );
                 let _ = reply_tx.send(result);
             }
@@ -7765,7 +7861,7 @@ async fn session_task<A: SessionAgent>(
                     usage,
                 );
                 if matches!(&result, Ok(crate::LiveAssistantPlaybackObservationResult::Resolved(receipt))
-                    if receipt.disposition() == meerkat_core::LiveAssistantPlaybackTruncationDisposition::CommittedSnapshot)
+                    if receipt.continues_provider_group())
                 {
                     let snap = agent.snapshot();
                     control.publish_summary(SessionSummaryCache {

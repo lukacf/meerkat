@@ -41,6 +41,8 @@ use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
 use std::num::NonZeroUsize;
 
 use crate::session_runtime::errors::LiveOpenPrecheckError;
+#[cfg(feature = "openai-live")]
+use crate::session_runtime::live_summary;
 
 /// Apply the B19 (realtime-capability) gate to a resolved LLM identity.
 /// Shared between the staged-session and live-session branches of
@@ -361,6 +363,11 @@ impl LiveSeedWindow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveSeedProjectionStatus {
     Complete,
+    /// A bounded generated factual summary, not a lossless transcript replay.
+    Summarized,
+    /// Media opens with no historical seed; a separate owner obligation
+    /// retains the source prefix until quiet provider acknowledgement.
+    ContextPending,
     Windowed {
         dropped_messages: usize,
         included_compaction_summary: bool,
@@ -370,7 +377,10 @@ pub enum LiveSeedProjectionStatus {
 impl LiveSeedProjectionStatus {
     #[must_use]
     pub fn has_known_gaps(self) -> bool {
-        matches!(self, Self::Windowed { .. })
+        matches!(
+            self,
+            Self::Windowed { .. } | Self::Summarized | Self::ContextPending
+        )
     }
 }
 
@@ -403,9 +413,16 @@ pub struct RealtimeSessionOpenProjection {
     pub open_config: RealtimeSessionOpenConfig,
     pub seed_status: LiveSeedProjectionStatus,
     owner_session_id: SessionId,
+    #[cfg(feature = "openai-live")]
+    summary: Option<super::live_summary::LiveContextSummary>,
 }
 
 impl RealtimeSessionOpenProjection {
+    #[cfg(feature = "openai-live")]
+    pub(crate) fn context_summary(&self) -> Option<&super::live_summary::LiveContextSummary> {
+        self.summary.as_ref()
+    }
+
     /// Apply a legacy per-open System overlay while retaining the durable
     /// session's canonical drift witness and projection-owner seal.
     #[doc(hidden)]
@@ -425,6 +442,9 @@ pub enum RealtimeSessionOpenProjectionError {
     Seed(#[from] LiveSeedProjectionError),
     #[error(transparent)]
     Llm(#[from] meerkat_llm_core::LlmError),
+    #[cfg(feature = "openai-live")]
+    #[error(transparent)]
+    Summary(#[from] super::live_summary::LiveContextSummaryError),
     #[error(
         "live open projection belongs to session {projection_session_id}, not requested session {requested_session_id}"
     )]
@@ -444,6 +464,8 @@ pub enum ExperimentalLiveChannelOpenError {
     Authority(#[from] crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError),
     #[error(transparent)]
     Projection(#[from] RealtimeSessionOpenProjectionError),
+    #[error(transparent)]
+    Summary(#[from] super::live_summary::LiveContextSummaryError),
     #[error(transparent)]
     Open(#[from] crate::session_runtime::errors::LiveOpenError),
     #[error("experimental live execution profile admission failed: {0}")]
@@ -771,6 +793,14 @@ mod orchestrator {
     use meerkat_runtime::meerkat_machine::dsl::{
         LiveChannelRequestPublicKind, LiveCommandPublicKind, LiveOpenAdmissionRejection,
     };
+
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+    #[derive(Clone, Copy)]
+    enum ExperimentalLiveClosePurpose {
+        Explicit,
+        ContextRecovery,
+        ResultRecovery,
+    }
 
     /// Surface-agnostic live-channel orchestrator.
     ///
@@ -1205,7 +1235,136 @@ mod orchestrator {
                 open_config,
                 seed_status: seed_projection.status,
                 owner_session_id: session_id.clone(),
+                #[cfg(feature = "openai-live")]
+                summary: None,
             })
+        }
+
+        /// Project a factual summary of the entire current model window. Media
+        /// references remain typed references: summary production does not
+        /// replay or hydrate images into the audio-only provider.
+        #[cfg(feature = "openai-live")]
+        pub(crate) async fn live_open_summary_projection_for_session(
+            &self,
+            session_id: &SessionId,
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+            policy: &super::live_summary::LiveContextSummaryPolicy,
+        ) -> Result<RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError> {
+            let lease = RealtimeOpenProjectionAdmission::global()
+                .try_acquire()
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(error.to_string()))
+                })?;
+            Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+            let session = self
+                .service
+                .export_realtime_refresh_session_snapshot(session_id)
+                .await?;
+            let identity = self.service.live_session_llm_identity(session_id).await?;
+            let tools = self.service.live_visible_tool_defs(session_id).await?;
+            let generation = session
+                .transcript_rewrite_generation()
+                .map_err(super::live_summary::LiveContextSummaryError::from)?;
+            let config = RealtimeSessionOpenConfig::for_open_from_messages(
+                turning_mode,
+                identity,
+                tools,
+                session.messages_for_model_boundary(),
+                session.messages(),
+            )?
+            .with_open_projection_lease(lease)
+            .with_user_content_identities(session.realtime_user_content_identities())
+            .with_user_content_tombstones(session.realtime_user_content_tombstones())
+            .with_transcript_rewrite_generation(generation);
+            let summary = policy
+                .summarize(
+                    session,
+                    &config,
+                    Arc::new(super::live_summary::ServiceLiveSummarySource(Arc::clone(
+                        self.service,
+                    ))),
+                )
+                .await?;
+            self.validate_live_summary_current(&summary).await?;
+            Ok(RealtimeSessionOpenProjection {
+                open_config: config,
+                seed_status: LiveSeedProjectionStatus::Summarized,
+                owner_session_id: session_id.clone(),
+                summary: Some(summary),
+            })
+        }
+
+        #[cfg(feature = "openai-live")]
+        pub(crate) async fn live_open_concurrent_summary_projection_for_session(
+            &self,
+            session_id: &SessionId,
+            turning_mode: meerkat_contracts::RealtimeTurningMode,
+            policy: &super::live_summary::LiveContextSummaryPolicy,
+        ) -> Result<
+            (
+                RealtimeSessionOpenProjection,
+                super::live_summary::LiveContextSummaryCapture,
+            ),
+            RealtimeSessionOpenProjectionError,
+        > {
+            Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+            let (session, identity) = self
+                .service
+                .export_live_context_summary_snapshot(session_id)
+                .await?;
+            let generation = session
+                .transcript_rewrite_generation()
+                .map_err(super::live_summary::LiveContextSummaryError::from)?;
+            let source_config = RealtimeSessionOpenConfig::for_open_from_messages(
+                turning_mode,
+                identity.clone(),
+                Vec::new(),
+                session.messages_for_model_boundary(),
+                session.messages(),
+            )?
+            .with_transcript_rewrite_generation(generation);
+            let capture = policy.capture(
+                session,
+                &source_config,
+                Arc::new(super::live_summary::ConcurrentServiceLiveSummarySource(
+                    Arc::clone(self.service),
+                )),
+            )?;
+            let lease = RealtimeOpenProjectionAdmission::global()
+                .try_acquire()
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(error.to_string()))
+                })?;
+            let config =
+                RealtimeSessionOpenConfig::new(turning_mode, identity, Vec::new(), Vec::new())?
+                    .with_open_projection_lease(lease)
+                    .with_transcript_rewrite_generation(generation);
+            Ok((
+                RealtimeSessionOpenProjection {
+                    open_config: config,
+                    seed_status: LiveSeedProjectionStatus::ContextPending,
+                    owner_session_id: session_id.clone(),
+                    summary: None,
+                },
+                capture,
+            ))
+        }
+
+        #[cfg(feature = "openai-live")]
+        async fn validate_live_summary_current(
+            &self,
+            summary: &super::live_summary::LiveContextSummary,
+        ) -> Result<(), RealtimeSessionOpenProjectionError> {
+            let current = self
+                .service
+                .export_realtime_refresh_session_snapshot(summary.session_id())
+                .await?;
+            let identity = self
+                .service
+                .live_session_llm_identity(summary.session_id())
+                .await?;
+            summary.validate_current(&current, &identity)?;
+            Ok(())
         }
 
         /// Compatibility wrapper retaining the pre-window full-history config.
@@ -1948,18 +2107,100 @@ mod orchestrator {
             requested_transport: Option<LiveOpenTransport>,
         ) -> Result<super::ExperimentalLivePendingChannel, super::ExperimentalLiveChannelOpenError>
         {
+            self.open_live_channel_with_execution_identity_seed_policy(
+                host,
+                transport_ctx,
+                authority,
+                session_id,
+                execution_identity,
+                turning_mode,
+                seed_window,
+                None,
+                requested_transport,
+            )
+            .await
+        }
+
+        #[cfg(feature = "openai-live")]
+        #[allow(clippy::too_many_arguments)]
+        pub async fn open_live_channel_with_execution_identity_and_summary(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            session_id: &SessionId,
+            execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
+            turning_mode: Option<RealtimeTurningMode>,
+            summary: &super::live_summary::LiveContextSummaryPolicy,
+            requested_transport: Option<LiveOpenTransport>,
+        ) -> Result<super::ExperimentalLivePendingChannel, super::ExperimentalLiveChannelOpenError>
+        {
+            self.open_live_channel_with_execution_identity_seed_policy(
+                host,
+                transport_ctx,
+                authority,
+                session_id,
+                execution_identity,
+                turning_mode,
+                None,
+                Some(summary),
+                requested_transport,
+            )
+            .await
+        }
+
+        #[cfg(feature = "openai-live")]
+        #[allow(clippy::too_many_arguments)]
+        async fn open_live_channel_with_execution_identity_seed_policy(
+            &self,
+            host: &LiveAdapterHost,
+            transport_ctx: LiveTransportContext<'_>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            session_id: &SessionId,
+            execution_identity: &meerkat_contracts::WireLiveExecutionIdentityOverrideV1,
+            turning_mode: Option<RealtimeTurningMode>,
+            seed_window: Option<LiveSeedWindow>,
+            summary: Option<&super::live_summary::LiveContextSummaryPolicy>,
+            requested_transport: Option<LiveOpenTransport>,
+        ) -> Result<super::ExperimentalLivePendingChannel, super::ExperimentalLiveChannelOpenError>
+        {
             if requested_transport != Some(LiveOpenTransport::Webrtc) {
                 return Err(super::ExperimentalLiveChannelOpenError::InvalidTransport);
             }
-            let pending = authority
+            let mut pending = authority
                 .prepare_open(session_id, execution_identity)
                 .await
                 .map_err(super::ExperimentalLiveChannelOpenError::Authority)?;
             let turning_mode = turning_mode.unwrap_or(RealtimeTurningMode::ProviderManaged);
-            let mut projection = self
-                .live_open_projection_for_session(session_id, turning_mode, seed_window)
-                .await
-                .map_err(super::ExperimentalLiveChannelOpenError::Projection)?;
+            let (mut projection, capture) = match summary {
+                Some(policy)
+                    if policy.bootstrap_mode()
+                        == super::live_summary::LiveContextBootstrapMode::Concurrent =>
+                {
+                    pending.enable_concurrent_context()?;
+                    let (projection, capture) = self
+                        .live_open_concurrent_summary_projection_for_session(
+                            session_id,
+                            turning_mode,
+                            policy,
+                        )
+                        .await?;
+                    (projection, Some(capture))
+                }
+                Some(policy) => (
+                    self.live_open_summary_projection_for_session(session_id, turning_mode, policy)
+                        .await?,
+                    None,
+                ),
+                None => (
+                    self.live_open_projection_for_session(session_id, turning_mode, seed_window)
+                        .await?,
+                    None,
+                ),
+            };
+            if let Some(summary) = projection.summary.as_ref() {
+                pending.set_context_summary(summary.clone())?;
+            }
             pending.apply_execution_identity(&mut projection);
             let canonical_seed_cursor = projection.open_config.canonical_message_cursor();
             let result = self
@@ -1999,11 +2240,27 @@ mod orchestrator {
                     error.to_string(),
                 ));
             }
-            let stage_authority = match self
-                .runtime_adapter
-                .stage_experimental_live_execution(session_id, &channel_id, canonical_seed_cursor)
-                .await
-            {
+            let staged = match capture.as_ref() {
+                Some(capture) => self
+                    .runtime_adapter
+                    .stage_experimental_live_execution_with_preparation(
+                        session_id,
+                        &channel_id,
+                        capture.canonical_message_cursor(),
+                    )
+                    .await
+                    .map(|(stage, lease)| (stage, Some(lease))),
+                None => self
+                    .runtime_adapter
+                    .stage_experimental_live_execution(
+                        session_id,
+                        &channel_id,
+                        canonical_seed_cursor,
+                    )
+                    .await
+                    .map(|stage| (stage, None)),
+            };
+            let (stage_authority, preparation_lease) = match staged {
                 Ok(authority) => authority,
                 Err(_) => {
                     let binding = crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError::ChannelBindingFailed;
@@ -2020,6 +2277,23 @@ mod orchestrator {
                     return Err(super::ExperimentalLiveChannelOpenError::Authority(binding));
                 }
             };
+            if let (Some(capture), Some(lease)) = (capture, preparation_lease)
+                && let Err(error) = self
+                    .start_live_context_preparation(pending.as_mut(), lease, capture)
+                    .await
+            {
+                authority.unbind_channel(&channel_id, session_id).await;
+                if let Err(cleanup) = self
+                    .close_live_channel(host, &channel_id, Some(session_id))
+                    .await
+                {
+                    return Err(super::ExperimentalLiveChannelOpenError::BindingCleanup {
+                        binding: crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityError::ChannelBindingFailed,
+                        cleanup: cleanup.to_string(),
+                    });
+                }
+                return Err(error);
+            }
             if let Err(binding) = pending.bind_opened(&result).await {
                 authority.unbind_channel(&channel_id, session_id).await;
                 if let Err(cleanup) = self
@@ -2040,6 +2314,34 @@ mod orchestrator {
                 pending_receipt: stage_authority.pending_receipt().to_string(),
                 execution_mode: execution_profile.mode(),
             })
+        }
+
+        #[cfg(feature = "openai-live")]
+        pub(crate) async fn start_live_context_preparation(
+            &self,
+            pending: &mut dyn crate::experimental_gpt_live::ExperimentalLivePendingOpen,
+            lease: meerkat_runtime::live_execution::LiveContextPreparationLease,
+            capture: super::live_summary::LiveContextSummaryCapture,
+        ) -> Result<(), super::ExperimentalLiveChannelOpenError> {
+            if lease.reserved_cursor() != capture.canonical_message_cursor() {
+                return Err(
+                    super::live_summary::LiveContextSummaryError::ConflictingProjection.into(),
+                );
+            }
+            self.runtime_adapter
+                .mark_live_context_preparation_generating(&lease)
+                .await
+                .map_err(|error| {
+                    super::ExperimentalLiveChannelOpenError::ExecutionProfile(error.to_string())
+                })?;
+            pending.retain_context_preparation_job(
+                super::live_summary::LiveContextSummaryJob::spawn(
+                    capture,
+                    lease,
+                    Arc::clone(self.runtime_adapter),
+                ),
+            )?;
+            Ok(())
         }
 
         /// Retire a bound experimental channel that cannot be published by
@@ -2258,6 +2560,16 @@ mod orchestrator {
                         projection_session_id: prepared_projection.owner_session_id,
                     },
                 ));
+            }
+            #[cfg(feature = "openai-live")]
+            if let Some(summary) = prepared_projection.summary.as_ref() {
+                summary
+                    .validate_projection(session_id, &prepared_projection.open_config)
+                    .map_err(RealtimeSessionOpenProjectionError::from)
+                    .map_err(LiveOpenError::OpenConfig)?;
+                self.validate_live_summary_current(summary)
+                    .await
+                    .map_err(LiveOpenError::OpenConfig)?;
             }
             let seed_status = prepared_projection.seed_status;
             let prepared_open_config = prepared_projection.open_config;
@@ -2827,6 +3139,215 @@ mod orchestrator {
 
         // --- channel verbs -------------------------------------------------
 
+        /// Revoke generated append/recovery custody before retiring transport,
+        /// then commit close and acknowledge retained terminal-fault publication.
+        /// `None` leaves an ordinary transport to its existing coordinator.
+        #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+        pub async fn close_experimental_live_channel(
+            &self,
+            host: &Arc<LiveAdapterHost>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            channel: &LiveChannelId,
+        ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
+        {
+            self.close_experimental_live_channel_inner(
+                host,
+                authority,
+                channel,
+                ExperimentalLiveClosePurpose::Explicit,
+            )
+            .await
+        }
+
+        /// The sealed recovery proves its append already resolved ambiguous.
+        /// Its drain worker is realizing this close and cannot join itself.
+        #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+        pub async fn close_experimental_live_channel_for_context_recovery(
+            &self,
+            host: &Arc<LiveAdapterHost>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            recovery: &meerkat_runtime::live_execution::LiveContextAmbiguityRecoveryAuthority,
+        ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
+        {
+            let binding = self
+                .runtime_adapter
+                .live_delegation_runtime_binding(
+                    recovery.session_id(),
+                    recovery.closing_channel_id(),
+                )
+                .await
+                .map_err(|error| {
+                    crate::surface::ExperimentalLiveChannelCloseError::LifecycleAuthority(
+                        error.to_string(),
+                    )
+                })?;
+            if binding.runtime_id() != recovery.runtime_id()
+                || binding.fence_token() != recovery.fence_token()
+                || binding.generation() != recovery.generation()
+            {
+                return Err(crate::surface::ExperimentalLiveChannelCloseError::BindingMismatch);
+            }
+            self.close_experimental_live_channel_inner(
+                host,
+                authority,
+                recovery.closing_channel_id(),
+                ExperimentalLiveClosePurpose::ContextRecovery,
+            )
+            .await
+        }
+
+        #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+        pub async fn close_experimental_live_channel_for_result_recovery(
+            &self,
+            host: &Arc<LiveAdapterHost>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            recovery: &meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
+        ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
+        {
+            let binding = self
+                .runtime_adapter
+                .live_delegation_runtime_binding(
+                    recovery.session_id(),
+                    recovery.closing_channel_id(),
+                )
+                .await
+                .map_err(|error| {
+                    crate::surface::ExperimentalLiveChannelCloseError::LifecycleAuthority(
+                        error.to_string(),
+                    )
+                })?;
+            if binding.runtime_id() != recovery.runtime_id()
+                || binding.fence_token() != recovery.fence_token()
+                || binding.generation() != recovery.generation()
+            {
+                return Err(crate::surface::ExperimentalLiveChannelCloseError::BindingMismatch);
+            }
+            self.close_experimental_live_channel_inner(
+                host,
+                authority,
+                recovery.closing_channel_id(),
+                ExperimentalLiveClosePurpose::ResultRecovery,
+            )
+            .await
+        }
+
+        #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+        async fn close_experimental_live_channel_inner(
+            &self,
+            host: &Arc<LiveAdapterHost>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            channel: &LiveChannelId,
+            purpose: ExperimentalLiveClosePurpose,
+        ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
+        {
+            use crate::experimental_gpt_live::ExperimentalLivePhysicalClose;
+            use crate::surface::ExperimentalLiveChannelCloseError;
+
+            let session = self
+                .runtime_adapter
+                .live_session_for_status_channel(channel)
+                .await
+                .ok_or(ExperimentalLiveChannelCloseError::BindingMismatch)?;
+            let close_custody = if matches!(purpose, ExperimentalLiveClosePurpose::Explicit) {
+                self.runtime_adapter
+                    .revoke_bound_live_channel_close_custody(&session, channel)
+                    .await
+                    .map_err(|error| {
+                        ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
+                    })?
+            } else {
+                None
+            };
+            if let Some(custody) = close_custody.as_ref() {
+                for recovery_channel in custody.recovery_channel_ids() {
+                    if self
+                        .runtime_adapter
+                        .live_session_for_active_channel(recovery_channel)
+                        .await
+                        .as_ref()
+                        == Some(&session)
+                    {
+                        let closed = Box::pin(self.close_experimental_live_channel_inner(
+                            host,
+                            authority,
+                            recovery_channel,
+                            ExperimentalLiveClosePurpose::Explicit,
+                        ))
+                        .await?;
+                        if closed.is_none() {
+                            self.close_live_channel(host, recovery_channel, Some(&session))
+                                .await?;
+                        }
+                    }
+                }
+            }
+            let physical = authority
+                .close_physical_if_bound(channel, &session)
+                .await
+                .map_err(ExperimentalLiveChannelCloseError::PhysicalAuthority)?;
+            if matches!(physical, ExperimentalLivePhysicalClose::NotBound) {
+                if close_custody
+                    .as_ref()
+                    .is_some_and(|custody| custody.already_closed())
+                {
+                    self.runtime_adapter
+                        .retire_live_assistant_output_handles(&session, channel);
+                    authority.unbind_channel(channel, &session).await;
+                    return Ok(Some(LiveCloseResult {
+                        status: meerkat_contracts::LiveCloseStatus::Closed,
+                    }));
+                }
+                return Ok(None);
+            }
+            if !matches!(purpose, ExperimentalLiveClosePurpose::ContextRecovery)
+                && let meerkat_runtime::live_context_mirror::LiveContextDrainCompletion::Failed(
+                    error,
+                ) = self
+                    .runtime_adapter
+                    .quiesce_live_context_outbox_for_channel(&session, channel)
+                    .await
+            {
+                tracing::warn!(%error, %channel, "closing with retained post-commit context delivery failure");
+            }
+            // Output publication drains before taking the terminal lease.
+            let _lease = self
+                .runtime_adapter
+                .acquire_live_open_lifecycle_lease(&session)
+                .await
+                .map_err(|error| {
+                    ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
+                })?;
+            let result = if self
+                .runtime_adapter
+                .live_session_for_active_channel(channel)
+                .await
+                .as_ref()
+                == Some(&session)
+            {
+                self.close_live_channel(host, channel, Some(&session))
+                    .await?
+            } else {
+                if self
+                    .live_channel_status(host, channel, Some(&session))
+                    .await?
+                    != meerkat_contracts::WireLiveAdapterStatus::Closed
+                {
+                    return Err(ExperimentalLiveChannelCloseError::BindingMismatch);
+                }
+                LiveCloseResult {
+                    status: meerkat_contracts::LiveCloseStatus::Closed,
+                }
+            };
+            physical
+                .report_terminal(host, &session, channel)
+                .await
+                .map_err(ExperimentalLiveChannelCloseError::TerminalProjection)?;
+            self.runtime_adapter
+                .retire_live_assistant_output_handles(&session, channel);
+            authority.unbind_channel(channel, &session).await;
+            Ok(Some(result))
+        }
+
         /// `live/close`: reserve → generated close authority → host commit.
         pub async fn close_live_channel(
             &self,
@@ -2878,29 +3399,48 @@ mod orchestrator {
                         ),
                     },
                 })?;
-            let authority = self
-                .runtime_adapter
-                .resolve_live_close_result(&session_id, &observation)
-                .await
-                .map_err(|error| LiveChannelVerbError::ResultAuthority {
-                    message: format!("live close authority rejected result: {error}"),
-                })?;
-            let Some(close_commit_authority) = authority.channel_close_commit_authority() else {
-                return Err(LiveChannelVerbError::CommitOmitted);
-            };
-            host.commit_channel_close_observation(&observation, close_commit_authority)
+            let target = host
+                .channel_close_commit_target(&observation)
                 .await
                 .map_err(|error| LiveChannelVerbError::HostCommit {
                     message: error.to_string(),
                 })?;
-            host.fail_playback_waiters_for_channel(
-                channel_id,
-                "live channel closed before playback terminal settlement",
-            )
-            .await;
-            self.runtime_adapter
-                .retire_live_assistant_output_handles(&session_id, channel_id);
-            Ok(live_close_result_from_machine_authority(&authority))
+            let runtime = Arc::clone(self.runtime_adapter);
+            let channel = channel_id.clone();
+            // The generated commit and its host realization share one owned
+            // task. Cancelling an RPC observer cannot drop the accepted handoff.
+            let commit = tokio::spawn(async move {
+                let result = async {
+                    let authority = runtime
+                        .resolve_live_close_result(&session_id, &observation)
+                        .await
+                        .map_err(|error| LiveChannelVerbError::ResultAuthority {
+                            message: format!("live close authority rejected result: {error}"),
+                        })?;
+                    let Some(close_commit_authority) = authority.channel_close_commit_authority()
+                    else {
+                        return Err(LiveChannelVerbError::CommitOmitted);
+                    };
+                    target
+                        .commit(close_commit_authority)
+                        .await
+                        .map_err(|error| LiveChannelVerbError::HostCommit {
+                            message: error.to_string(),
+                        })?;
+                    runtime.retire_live_assistant_output_handles(&session_id, &channel);
+                    Ok(live_close_result_from_machine_authority(&authority))
+                }
+                .await;
+                if let Err(error) = &result {
+                    tracing::warn!(%error, %channel, "live close realization remains incomplete");
+                }
+                result
+            });
+            commit
+                .await
+                .map_err(|error| LiveChannelVerbError::HostCommit {
+                    message: format!("live close realization task failed: {error}"),
+                })?
         }
 
         /// `live/status`: read-only point read over generated status

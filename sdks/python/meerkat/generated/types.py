@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.8.39
+Contract version: 0.8.40
 """
 
 from dataclasses import dataclass, field
@@ -11,7 +11,7 @@ from typing import Any, Literal, NotRequired, Optional, Required, TypedDict
 from .errors import MeerkatError
 
 
-CONTRACT_VERSION = "0.8.39"
+CONTRACT_VERSION = "0.8.40"
 
 
 Value = Any
@@ -6872,11 +6872,14 @@ WireProviderMeta = WireProviderMetaAnthropic | WireProviderMetaAnthropicRedacted
 class WireTranscriptSourceSpoken(TypedDict, total=False):
     kind: Required[Literal['spoken']]
 
+class WireTranscriptSourceSpokenUnmeasured(TypedDict, total=False):
+    kind: Required[Literal['spoken_unmeasured']]
+
 class WireTranscriptSourceUnknown(TypedDict, total=False):
     debug: Required[str]
     kind: Required[Literal['unknown']]
 
-WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceUnknown
+WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceSpokenUnmeasured | WireTranscriptSourceUnknown
 
 # Transcript block inside a block-assistant message.
 #
@@ -7294,7 +7297,7 @@ class TranscriptRewriteMessageBlockAssistant(TypedDict, total=False):
     blocks: Required[list[WireAssistantBlock]]
     created_at: NotRequired[Optional[str]]
     role: Required[Literal['block_assistant']]
-    stop_reason: NotRequired[WireStopReason]
+    stop_reason: NotRequired[Optional[WireStopReason]]
 
 class TranscriptRewriteMessageToolResults(TypedDict, total=False):
     created_at: NotRequired[Optional[str]]
@@ -8292,7 +8295,7 @@ class WireSessionMessageBlockAssistant(TypedDict, total=False):
     interaction_id: NotRequired[Optional[str]]
     role: Required[Literal['block_assistant']]
     run_id: NotRequired[Optional[RunId]]
-    stop_reason: Required[WireStopReason]
+    stop_reason: NotRequired[Optional[WireStopReason]]
 
 class WireSessionMessageToolResults(TypedDict, total=False):
     created_at: Required[str]

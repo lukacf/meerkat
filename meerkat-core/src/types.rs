@@ -38,11 +38,103 @@ pub struct TranscriptMessageIdentity {
     /// causally-related turn chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective_id: Option<crate::interaction::ObjectiveId>,
+    /// Session-owned provenance; not accepted by transcript rewrite wire inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime_origin: Option<RealtimeMessageOrigin>,
+}
+
+/// Opaque provenance identifier. Its namespace is data, not admission or
+/// temporal authority; only the runtime's generated registry grants a claim.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveContextObservationId {
+    namespace: String,
+    channel_id: crate::LiveChannelId,
+    nonce: uuid::Uuid,
+}
+
+impl LiveContextObservationId {
+    #[must_use]
+    pub fn new(namespace: impl Into<String>, channel_id: crate::LiveChannelId) -> Self {
+        Self {
+            namespace: namespace.into(),
+            channel_id,
+            nonce: uuid::Uuid::new_v4(),
+        }
+    }
+
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+    #[must_use]
+    pub fn channel_id(&self) -> &crate::LiveChannelId {
+        &self.channel_id
+    }
+}
+
+impl std::fmt::Display for LiveContextObservationId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}:{}:{}",
+            self.namespace, self.channel_id, self.nonce
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealtimeMessageOrigin {
+    session_id: crate::types::SessionId,
+    channel_id: crate::LiveChannelId,
+    canonical_row_sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_observation_id: Option<LiveContextObservationId>,
+}
+
+impl RealtimeMessageOrigin {
+    pub(crate) fn new(
+        session_id: crate::types::SessionId,
+        channel_id: crate::LiveChannelId,
+        canonical_row_sequence: u64,
+    ) -> Self {
+        Self {
+            session_id,
+            channel_id,
+            canonical_row_sequence,
+            context_observation_id: None,
+        }
+    }
+
+    pub(crate) fn with_context_observation(mut self, id: LiveContextObservationId) -> Self {
+        self.context_observation_id = Some(id);
+        self
+    }
+
+    #[must_use]
+    pub fn context_observation_id(&self) -> Option<&LiveContextObservationId> {
+        self.context_observation_id.as_ref()
+    }
+
+    #[must_use]
+    pub fn matches(
+        &self,
+        session_id: &crate::types::SessionId,
+        channel_id: &crate::LiveChannelId,
+        canonical_row_sequence: u64,
+    ) -> bool {
+        &self.session_id == session_id
+            && &self.channel_id == channel_id
+            && self.canonical_row_sequence == canonical_row_sequence
+    }
 }
 
 impl TranscriptMessageIdentity {
     pub fn is_empty(&self) -> bool {
-        self.interaction_id.is_none() && self.run_id.is_none() && self.objective_id.is_none()
+        self.interaction_id.is_none()
+            && self.run_id.is_none()
+            && self.objective_id.is_none()
+            && self.realtime_origin.is_none()
     }
 
     pub fn with_run_id(&self, run_id: crate::lifecycle::RunId) -> Self {
@@ -50,6 +142,7 @@ impl TranscriptMessageIdentity {
             interaction_id: self.interaction_id,
             run_id: Some(run_id),
             objective_id: self.objective_id,
+            realtime_origin: self.realtime_origin.clone(),
         }
     }
 }
@@ -731,6 +824,27 @@ where
 pub enum TranscriptSource {
     /// Spoken-audio transcript (provider audio output → text).
     Spoken,
+    /// Observed assistant speech without measured playback or hearing
+    /// evidence. Provider termination is independent: the enclosing message's
+    /// optional stop reason is absent for nonterminal snapshots.
+    SpokenUnmeasured,
+}
+
+impl TranscriptSource {
+    /// Preserve transcript provenance when a text-only model protocol cannot
+    /// carry the typed source field. Ordinary speech is unchanged.
+    pub fn text_for_model<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        if text.is_empty() {
+            return std::borrow::Cow::Borrowed(text);
+        }
+        match self {
+            Self::Spoken => std::borrow::Cow::Borrowed(text),
+            Self::SpokenUnmeasured => std::borrow::Cow::Owned(format!(
+                "[Observed assistant speech; playback UNMEASURED. Not proof of \
+                 played/heard text or a provider-final utterance.]\n{text}"
+            )),
+        }
+    }
 }
 
 /// Typed semantic kind of a provider-executed (server-side) tool.
@@ -833,7 +947,7 @@ pub enum AssistantBlock {
     /// same human-readable text stream.
     Transcript {
         text: String,
-        /// Origin lane (today: `Spoken`).
+        /// Origin lane, including explicitly unmeasured speech observations.
         source: TranscriptSource,
         /// Provider continuity metadata, if any.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -2763,13 +2877,15 @@ impl UserMessage {
 /// Assistant message with ordered blocks - no billing metadata.
 ///
 /// The canonical transcript representation for assistant output: an ordered
-/// sequence of typed [`AssistantBlock`]s plus the stop reason.
+/// sequence of typed [`AssistantBlock`]s plus any observed stop reason.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlockAssistantMessage {
     /// Ordered sequence of content blocks
     pub blocks: Vec<AssistantBlock>,
-    /// How the turn ended
-    pub stop_reason: StopReason,
+    /// How the provider turn ended, when that boundary was observed. A
+    /// canonical transcript snapshot may have content without stop evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
     #[serde(default, skip_serializing_if = "TranscriptMessageIdentity::is_empty")]
     pub identity: TranscriptMessageIdentity,
     /// When this assistant message was committed to the transcript.
@@ -2785,7 +2901,17 @@ impl BlockAssistantMessage {
     pub fn new(blocks: Vec<AssistantBlock>, stop_reason: StopReason) -> Self {
         Self {
             blocks,
-            stop_reason,
+            stop_reason: Some(stop_reason),
+            identity: TranscriptMessageIdentity::default(),
+            created_at: message_timestamp_now(),
+        }
+    }
+
+    /// Commit observed content without manufacturing provider terminality.
+    pub fn snapshot(blocks: Vec<AssistantBlock>) -> Self {
+        Self {
+            blocks,
+            stop_reason: None,
             identity: TranscriptMessageIdentity::default(),
             created_at: message_timestamp_now(),
         }

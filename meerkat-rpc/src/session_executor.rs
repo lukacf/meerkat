@@ -855,7 +855,12 @@ impl CoreExecutor for SessionRuntimeExecutor {
                 session_snapshot,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "openai-live")]
+        self.runtime
+            .runtime_adapter()
+            .notify_committed_live_context(&self.session_id);
+        Ok(())
     }
 
     async fn acknowledge_committed_session_boundary(
@@ -869,7 +874,12 @@ impl CoreExecutor for SessionRuntimeExecutor {
                 authority,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "openai-live")]
+        self.runtime
+            .runtime_adapter()
+            .notify_committed_live_context(&self.session_id);
+        Ok(())
     }
 
     async fn publish_interaction_terminals(
@@ -1173,7 +1183,14 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 session_snapshot,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "openai-live")]
+        if let Some(runtime) = &self.runtime {
+            runtime
+                .runtime_adapter()
+                .notify_committed_live_context(&self.session_id);
+        }
+        Ok(())
     }
 
     async fn acknowledge_committed_session_boundary(
@@ -1186,7 +1203,14 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 authority,
             )
             .await
-            .map_err(CoreExecutorError::apply_failed_from_session_error)
+            .map_err(CoreExecutorError::apply_failed_from_session_error)?;
+        #[cfg(feature = "openai-live")]
+        if let Some(runtime) = &self.runtime {
+            runtime
+                .runtime_adapter()
+                .notify_committed_live_context(&self.session_id);
+        }
+        Ok(())
     }
 
     async fn publish_interaction_terminals(
@@ -1511,6 +1535,20 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     impl MobSessionService for BoundaryCancelSessionService {
+        #[cfg(feature = "openai-live")]
+        async fn commit_live_delegation_final_transcript(
+            &self,
+            _machine: &meerkat_runtime::MeerkatMachine,
+            _session_id: &SessionId,
+            _provisional: meerkat_core::ProvisionalLiveHandoff,
+            _final_event: meerkat_core::RealtimeTranscriptEvent,
+        ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+            Err(SessionError::Unsupported(
+                "boundary-cancel test service does not support live delegation canonical projection"
+                    .into(),
+            ))
+        }
+
         async fn materialize_session_resume_verdict(
             &self,
             session_id: &SessionId,

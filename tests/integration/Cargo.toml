@@ -52,7 +52,10 @@ uuid = { workspace = true, features = ["v4"] }
 
 [features]
 integration-real-tests = []
+# Path-included mob fixtures use their owning crate's feature name.
+openai-live = ["meerkat-mob/openai-live"]
 openai-live-e2e = [
+    "openai-live",
     "meerkat/openai-live",
     "meerkat-mob-mcp/openai-live",
     "meerkat-rpc/openai-live",

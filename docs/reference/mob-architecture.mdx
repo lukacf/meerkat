@@ -103,6 +103,57 @@ not carry the rejected secret fields. Host capability admission also checks
 autonomous members, durable sessions, tracked input cancel, bridge protocol
 v4, memory store, and MCP when the resolved member requires them.
 
+## Host-designated conversational input
+
+Trusted Rust hosts can submit authenticated human input with
+`MobHandle::submit_host_human_input_bounded(runtime_id, fence_token, spec,
+handling_mode, delivery_identity, deadline)`. It returns `WorkDeliveryReceipt`
+after runtime admission, not after an LLM response.
+`start_host_human_input_bounded` takes the same arguments and returns a
+`WorkTurnHandle` for separate runtime-owned completion observation.
+`submit_host_human_input_for_identity_bounded` resolves an identity once before
+the same fenced admission. A host already holding a delivery lease should pass
+its exact runtime and fence instead of resolving a replacement.
+
+This is a Rust-only designation, not a serializable `WorkSpec` role or an
+agent-tool flag. The host must authenticate the human before opting in.
+`WorkOrigin` still governs addressability. Existing generic work APIs retain
+their behavior, including autonomous `SystemNotice::ExternalEvent` delivery.
+Only the explicit human seam delivers the work content as canonical
+conversational `Message::User`. System and injected-context slots keep their
+own roles. Installed shared Live context receives conversational input and
+assistant text from the normal store-sealed commit path; platform notices
+are not promoted.
+
+| Local runtime-backed member input | Queue | Steer |
+| --- | --- | --- |
+| Human text or multimodal content | Supported | Supported through runtime boundary admission |
+| `WorkSpec.injected_context` | Supported in its separate role | `InjectedContextUndeliverable` |
+| `WorkSpec.transient_turn_context` | `UnsupportedForMode` | `UnsupportedForMode` |
+| `WorkSpec.system_prompt` | Supported as System | `UnsupportedForMode` |
+| Unresolved kickoff requiring a mode change | Ordinary Queue admission | `UnsupportedForMode`, never silently Queue |
+| Remote or peer-only member | `UnsupportedForMode` | `UnsupportedForMode` |
+
+Use `MobDeliveryIdentity::new(stable_key, interaction_uuid.to_string())`, retain
+both values across retries, and keep any `WorkSpec.interaction_id` identical to
+that UUID. The deadline is `meerkat_core::time_compat::Instant`
+(`std::time::Instant` on native hosts).
+`ActorCommandTimedOut` reports unknown execution fate: an already-started
+admission may finish after the observation deadline. Retry only with the same
+delivery identity. Dropping a completion handle does not cancel work.
+On replay, the receipt refers to the original admission, even if that work
+already terminalized. Completion-bearing replay reads the original runtime
+terminal result; an unavailable result is an explicit
+`WorkInputCompletionUnavailable`, never synthesized success.
+
+Human admission requests exact prompt replay from the runtime owner. A compact
+prompt witness is persisted atomically with the input row and survives terminal
+payload retirement. A repeated strict request must match the original prompt,
+typed context slots, handling mode, and correlation; a prior external event,
+changed body, or legacy row without a provable prompt witness returns
+`WorkInputIdempotencyConflict`. Generic callers keep their existing key-only
+deduplication contract. Stale runtime/fence pairs remain machine-refused.
+
 ## Multi-Host Authority
 
 Realms are not distributed. The controlling host and each member host retain

@@ -2793,14 +2793,23 @@ where
                         // `transcript_messages_digest(self.session.messages())`
                         // and binds the compaction authority to the exact
                         // pre-compaction transcript.
-                        let outcome = match self.session.transcript_content_digest() {
-                            Ok(parent_revision) => {
+                        let compaction_source = self.session.transcript_content_digest().and_then(
+                            |revision| {
+                                crate::agent::compact::CompactionObservationSource::from_session(
+                                    &self.session,
+                                )
+                                .map(|observations| (revision, observations))
+                            },
+                        );
+                        let outcome = match compaction_source {
+                            Ok((parent_revision, observation_source)) => {
                                 crate::agent::compact::run_compaction(
                                     self.client.as_ref(),
                                     &compactor,
                                     self.compaction_curator.as_ref(),
                                     crate::agent::compact::CompactionInvocation {
                                         model_messages: &model_messages,
+                                        observation_source,
                                         window: crate::compact::CompactionWindow {
                                             messages: self.session.messages(),
                                             last_input_tokens: self.last_input_tokens,

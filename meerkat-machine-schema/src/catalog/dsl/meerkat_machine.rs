@@ -1607,7 +1607,53 @@ pub enum LiveContextRowDisposition {
     #[default]
     MirrorParentText,
     AlreadyPresentInLiveChannel,
+    AssistantObservation,
     ExcludedFromLiveContext,
+    ReassertCausalTail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveContextPayloadAvailability {
+    #[default]
+    NoPayload,
+    Materializable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveContextPreparationPhase {
+    #[default]
+    Capturing,
+    Generating,
+    Delivering,
+    ProviderAcknowledged,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveContextPreparationFailure {
+    #[default]
+    Capture,
+    Generation,
+    TimedOut,
+    InputTooLarge,
+    OutputTooLarge,
+    Empty,
+    StaleSnapshot,
+    Unsupported,
+    SourceRead,
+    ProducerPanicked,
+    DeliveryRejected,
+    DeliveryAmbiguous,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveContextDeliveryReadiness {
+    #[default]
+    Ready,
+    Pending,
+    Failed,
+    Revoked,
 }
 
 /// Where an admitted delegation result may be delivered. The live model is
@@ -1657,6 +1703,14 @@ pub enum LiveDelegationWorkerPhase {
     Failed,
 }
 
+/// Whether delegation owns the member lifecycle or only one admitted turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveDelegationWorkerOwnership {
+    #[default]
+    OwnedMember,
+    ExistingMember,
+}
+
 /// Machine-derived reason for cancelling one exact live delegation worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveDelegationCancellationReason {
@@ -1692,6 +1746,14 @@ pub enum LiveExecutionChannelPhase {
     Pending,
     Active,
     Revoked,
+}
+
+/// Attribution of observed assistant output, not proof of its causal prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveAssistantTurnOrigin {
+    #[default]
+    ForegroundCorrelated,
+    ProviderInitiated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -3656,6 +3718,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_execution_generation_by_channel: Map<String, Generation>,
             live_execution_phase_by_channel: Map<String, Enum<LiveExecutionChannelPhase>>,
             live_revoked_execution_channels: Set<String>,
+            live_cancelled_recovery_channels: Set<String>,
             live_execution_profile_by_channel: Map<String, String>,
             live_execution_mode_by_channel: Map<String, Enum<LiveExecutionMode>>,
             live_function_bridge_capable_channels: Set<String>,
@@ -3678,6 +3741,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_provider_turn_channel_by_ref: Map<String, String>,
             live_awaiting_assistant_interaction_by_channel: Map<String, String>,
             live_assistant_interaction_by_turn: Map<String, String>,
+            live_assistant_origin_by_turn: Map<String, Enum<LiveAssistantTurnOrigin>>,
             live_assistant_turn_channel_by_ref: Map<String, String>,
             live_assistant_playback_segment_by_turn: Map<String, u64>,
             live_abandoned_interactions: Set<String>,
@@ -3692,6 +3756,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_delegation_provider_turn_by_operation: Map<OperationId, String>,
             live_delegation_reconciliation_by_operation: Map<OperationId, Enum<LiveDelegationReconciliation>>,
             live_delegation_worker_identity_by_operation: Map<OperationId, String>,
+            live_delegation_existing_member_operations: Set<OperationId>,
             live_delegation_worker_phase_by_operation: Map<OperationId, Enum<LiveDelegationWorkerPhase>>,
             live_delegation_cancellation_reason_by_operation: Map<OperationId, Enum<LiveDelegationCancellationReason>>,
             live_delegation_worker_terminal_by_operation: Map<OperationId, Enum<LiveDelegationWorkerTerminalKind>>,
@@ -3754,6 +3819,23 @@ macro_rules! meerkat_catalog_machine_dsl {
             // delivery is fenced forever by its locally minted append id and
             // is never retried blindly.
             live_context_cursor_by_channel: Map<String, u64>,
+            live_context_preparation_phase_by_channel: Map<String, Enum<LiveContextPreparationPhase>>,
+            live_context_preparation_failure_by_channel: Map<String, Enum<LiveContextPreparationFailure>>,
+            live_context_preparation_lease_by_channel: Map<String, String>,
+            live_context_preparation_runtime_by_channel: Map<String, AgentRuntimeId>,
+            live_context_preparation_fence_by_channel: Map<String, FenceToken>,
+            live_context_preparation_generation_by_channel: Map<String, Generation>,
+            live_context_observation_counter_by_channel: Map<String, u64>,
+            live_context_ack_cut_by_channel: Map<String, u64>,
+            live_context_observation_channel_by_id: Map<String, String>,
+            live_context_observation_lease_by_id: Map<String, String>,
+            live_context_observation_runtime_by_id: Map<String, AgentRuntimeId>,
+            live_context_observation_fence_by_id: Map<String, FenceToken>,
+            live_context_observation_generation_by_id: Map<String, Generation>,
+            live_context_observation_ordinal_by_id: Map<String, u64>,
+            live_context_reserved_cursor_by_channel: Map<String, u64>,
+            live_context_bootstrap_append_by_channel: Map<String, String>,
+            live_context_bootstrap_digest_by_channel: Map<String, String>,
             // Canonical committed rows enter this generated outbox even when
             // a provider turn is active. They are session-scoped rather than
             // channel-scoped so an ambiguity recovery can continue draining
@@ -4234,6 +4316,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_execution_generation_by_channel = EmptyMap,
             live_execution_phase_by_channel = EmptyMap,
             live_revoked_execution_channels = EmptySet,
+            live_cancelled_recovery_channels = EmptySet,
             live_execution_profile_by_channel = EmptyMap,
             live_execution_mode_by_channel = EmptyMap,
             live_function_bridge_capable_channels = EmptySet,
@@ -4256,6 +4339,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_provider_turn_channel_by_ref = EmptyMap,
             live_awaiting_assistant_interaction_by_channel = EmptyMap,
             live_assistant_interaction_by_turn = EmptyMap,
+            live_assistant_origin_by_turn = EmptyMap,
             live_assistant_playback_segment_by_turn = EmptyMap,
             live_assistant_turn_channel_by_ref = EmptyMap,
             live_abandoned_interactions = EmptySet,
@@ -4266,6 +4350,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_delegation_provider_turn_by_operation = EmptyMap,
             live_delegation_reconciliation_by_operation = EmptyMap,
             live_delegation_worker_identity_by_operation = EmptyMap,
+            live_delegation_existing_member_operations = EmptySet,
             live_delegation_worker_phase_by_operation = EmptyMap,
             live_delegation_cancellation_reason_by_operation = EmptyMap,
             live_delegation_worker_terminal_by_operation = EmptyMap,
@@ -4316,6 +4401,23 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_bridge_submission_digest_by_operation = EmptyMap,
             live_bridge_submission_state_by_operation = EmptyMap,
             live_context_cursor_by_channel = EmptyMap,
+            live_context_preparation_phase_by_channel = EmptyMap,
+            live_context_preparation_failure_by_channel = EmptyMap,
+            live_context_preparation_lease_by_channel = EmptyMap,
+            live_context_preparation_runtime_by_channel = EmptyMap,
+            live_context_preparation_fence_by_channel = EmptyMap,
+            live_context_preparation_generation_by_channel = EmptyMap,
+            live_context_observation_counter_by_channel = EmptyMap,
+            live_context_ack_cut_by_channel = EmptyMap,
+            live_context_observation_channel_by_id = EmptyMap,
+            live_context_observation_lease_by_id = EmptyMap,
+            live_context_observation_runtime_by_id = EmptyMap,
+            live_context_observation_fence_by_id = EmptyMap,
+            live_context_observation_generation_by_id = EmptyMap,
+            live_context_observation_ordinal_by_id = EmptyMap,
+            live_context_reserved_cursor_by_channel = EmptyMap,
+            live_context_bootstrap_append_by_channel = EmptyMap,
+            live_context_bootstrap_digest_by_channel = EmptyMap,
             live_context_queued_session_by_append = EmptyMap,
             live_context_queued_cursor_by_append = EmptyMap,
             live_context_queued_digest_by_append = EmptyMap,
@@ -5162,7 +5264,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             SteerAccepted { input_id: String },
             ChangeLane { input_id: String, new_lane: Enum<InputLane> },
             PrioritizeInput { input_id: String },
-            DeferInputBehindBacklog { input_id: String },
+            DeferInputBehindBacklog { input_id: String, cancelled_run_id: Option<RunId> },
             StageForRun { input_id: String, run_id: RunId },
             IncrementAttemptCount { input_id: String },
             RollbackStaged { input_id: String, lane: Enum<InputLane> },
@@ -5405,6 +5507,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 fence_token: FenceToken,
                 generation: Generation,
                 assistant_turn_ref: String,
+                candidate_interaction_id: String,
             },
             AdvanceLiveAssistantPlaybackSegment {
                 channel_id: String,
@@ -5468,6 +5571,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 provider_turn_correlation: String,
                 worker_identity: String,
+                worker_ownership: Enum<LiveDelegationWorkerOwnership>,
             },
             ResolveLiveDelegationWorkerStart {
                 channel_id: String,
@@ -5600,9 +5704,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 result_digest: String,
                 replacement_channel_id: String,
+                canonical_seed_cursor: u64,
                 observation: Enum<LiveDelegationResultDeliveryObservation>,
             },
             BindLiveDelegationResultRecoveryChannel {
+                activation_receipt: String,
                 session_id: String,
                 closing_channel_id: String,
                 replacement_channel_id: String,
@@ -5753,6 +5859,45 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observation: Enum<LiveBridgeSubmissionObservation>,
             },
             RecoverLiveBridgeSubmission { operation_id: OperationId },
+            BeginLiveContextPreparation {
+                session_id: String, channel_id: String, lease_id: String, reserved_cursor: u64,
+                runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation,
+            },
+            RecordLiveContextObservation {
+                session_id: String, channel_id: String, lease_id: String,
+                runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation,
+                observation_id: String, observation_namespace: String, observation_channel_id: String,
+            },
+            RecordLiveContextBootstrapAckCut {
+                session_id: String, channel_id: String, lease_id: String,
+                runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation,
+                append_id: String, content_digest: String, reserved_cursor: u64,
+            },
+            ObserveLiveContextDeliveryReadiness {
+                session_id: String, channel_id: String,
+            },
+            GenerateLiveContextPreparation {
+                session_id: String, channel_id: String, lease_id: String,
+            },
+            AuthorizeLiveContextBootstrapAppend {
+                session_id: String, channel_id: String, lease_id: String,
+                append_id: String, content_digest: String, reserved_cursor: u64,
+            },
+            ResolveLiveContextBootstrapAppend {
+                session_id: String, channel_id: String, lease_id: String,
+                append_id: String, content_digest: String, reserved_cursor: u64,
+                observation: Enum<LiveContextAppendObservation>,
+                retained_sessions: Map<String, String>,
+                retained_cursors: Map<String, u64>,
+                retained_digests: Map<String, String>,
+                retained_commits: Map<String, String>,
+                retained_dispositions: Map<String, Enum<LiveContextRowDisposition>>,
+                retained_append_by_cursor: Map<u64, String>,
+            },
+            FailLiveContextPreparation {
+                session_id: String, channel_id: String, lease_id: String,
+                reason: Enum<LiveContextPreparationFailure>,
+            },
             AuthorizeLiveContextAppend {
                 channel_id: String,
                 runtime_id: AgentRuntimeId,
@@ -5772,6 +5917,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 content_digest: String,
                 commit_authority_token: String,
                 disposition: Enum<LiveContextRowDisposition>,
+                payload_availability: Enum<LiveContextPayloadAvailability>,
+                observation_id: Option<String>,
             },
             AdvanceLiveContextCanonicalCoverage {
                 channel_id: String,
@@ -5792,9 +5939,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 previous_cursor: u64,
                 next_cursor: u64,
                 replacement_channel_id: String,
+                canonical_seed_cursor: u64,
                 observation: Enum<LiveContextAppendObservation>,
             },
             BindLiveContextRecoveryChannel {
+                activation_receipt: String,
                 session_id: String,
                 closing_channel_id: String,
                 replacement_channel_id: String,
@@ -6801,6 +6950,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 channel_id: String,
                 phase: Enum<LiveExecutionChannelPhase>,
                 already_closed: bool,
+                context_recovery_channel_id: Option<String>,
+                result_recovery_channel_id: Option<String>,
             },
             LiveInteractionAdmitted {
                 session_id: String,
@@ -6832,6 +6983,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interaction_id: String,
                 operation_id: OperationId,
                 worker_identity: String,
+                worker_ownership: Enum<LiveDelegationWorkerOwnership>,
             },
             LiveDelegationWorkerStartResolved {
                 channel_id: String,
@@ -6908,6 +7060,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 channel_id: String,
                 interaction_id: String,
                 assistant_turn_ref: String,
+                origin: Enum<LiveAssistantTurnOrigin>,
             },
             LiveAssistantPlaybackSegmentAdvanced {
                 channel_id: String,
@@ -6967,6 +7120,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 generation: Generation,
             },
             LiveDelegationResultRecoveryChannelBound {
+                activation_receipt: String,
                 session_id: String,
                 closing_channel_id: String,
                 replacement_channel_id: String,
@@ -7103,7 +7257,40 @@ macro_rules! meerkat_catalog_machine_dsl {
                 state: Enum<LiveBridgeSubmissionState>,
                 retry_allowed: bool,
             },
+            LiveContextPreparationChanged {
+                session_id: String, channel_id: String, lease_id: String,
+                phase: Enum<LiveContextPreparationPhase>,
+            },
+            LiveContextObservationRecorded {
+                session_id: String, channel_id: String, lease_id: String,
+                runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation,
+                observation_id: String, ordinal: u64,
+            },
+            LiveContextBootstrapAckCutRecorded {
+                session_id: String, channel_id: String, lease_id: String,
+                append_id: String, cut: u64,
+            },
+            LiveContextDeliveryReadinessObserved {
+                session_id: String, channel_id: String,
+                readiness: Enum<LiveContextDeliveryReadiness>,
+            },
+            LiveContextBootstrapAppendAuthorized {
+                session_id: String, channel_id: String, lease_id: String,
+                append_id: String, content_digest: String, reserved_cursor: u64,
+            },
             LiveContextAppendAuthorized {
+                channel_id: String,
+                append_id: String,
+                previous_cursor: u64,
+                next_cursor: u64,
+            },
+            LiveContextAppendDeferred {
+                channel_id: String,
+                append_id: String,
+                previous_cursor: u64,
+                next_cursor: u64,
+            },
+            LiveContextAppendAlreadyCovered {
                 channel_id: String,
                 append_id: String,
                 previous_cursor: u64,
@@ -7142,6 +7329,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 generation: Generation,
             },
             LiveContextRecoveryChannelBound {
+                activation_receipt: String,
                 session_id: String,
                 closing_channel_id: String,
                 replacement_channel_id: String,
@@ -7618,7 +7806,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveBridgeSubmissionLocalWriteRecorded => local seam OwnerRealizationOnly,
         disposition LiveBridgeSubmissionResolved => local seam OwnerRealizationOnly,
         disposition LiveBridgeSubmissionRecoveredAmbiguous => external seam OwnerRealizationOnly,
+        disposition LiveContextPreparationChanged => local seam OwnerRealizationOnly,
+        disposition LiveContextObservationRecorded => local seam OwnerRealizationOnly,
+        disposition LiveContextBootstrapAckCutRecorded => local seam OwnerRealizationOnly,
+        disposition LiveContextDeliveryReadinessObserved => local seam OwnerRealizationOnly,
+        disposition LiveContextBootstrapAppendAuthorized => external seam OwnerRealizationOnly,
         disposition LiveContextAppendAuthorized => external seam OwnerRealizationOnly,
+        disposition LiveContextAppendDeferred => local seam OwnerRealizationOnly,
+        disposition LiveContextAppendAlreadyCovered => local seam OwnerRealizationOnly,
         disposition LiveContextRowQueued => local seam OwnerRealizationOnly,
         disposition LiveContextCanonicalCoverageAdvanced => local seam OwnerRealizationOnly,
         disposition LiveContextAppendResolved => external seam OwnerRealizationOnly,
@@ -8375,9 +8570,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                     == self.live_provider_turn_channel_by_ref.get_cloned(provider_turn_ref))
         }
 
-        invariant live_assistant_turn_is_frozen_to_exact_foreground_interaction {
+        invariant live_assistant_turn_has_frozen_typed_attribution {
             self.live_assistant_interaction_by_turn.keys()
                 == self.live_assistant_turn_channel_by_ref.keys()
+            && self.live_assistant_interaction_by_turn.keys()
+                == self.live_assistant_origin_by_turn.keys()
             && for_all(channel_id in self.live_awaiting_assistant_interaction_by_channel.keys(),
                 self.live_interaction_channel_by_id.get_cloned(
                     self.live_awaiting_assistant_interaction_by_channel.get_cloned(channel_id).get("value"))
@@ -8427,6 +8624,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_delegation_interaction_by_operation.contains_key(operation_id)
                 && self.live_delegation_reconciliation_by_operation.get_copied(operation_id)
                     == Some(LiveDelegationReconciliation::Confirmed))
+        }
+
+        invariant live_delegation_existing_member_has_worker_binding {
+            for_all(operation_id in self.live_delegation_existing_member_operations,
+                self.live_delegation_worker_identity_by_operation.contains_key(operation_id))
         }
 
         invariant live_delegation_terminal_is_worker_bound {
@@ -8552,6 +8754,57 @@ macro_rules! meerkat_catalog_machine_dsl {
         // One MeerkatMachine instance is durable state for one session, so
         // canonical cursor keys below are session-scoped even though the map
         // key itself is the row sequence.
+        invariant live_context_bootstrap_reservation_is_not_delivery {
+            self.live_context_preparation_lease_by_channel.keys()
+                == self.live_context_reserved_cursor_by_channel.keys()
+            && self.live_context_preparation_lease_by_channel.keys()
+                == self.live_context_preparation_phase_by_channel.keys()
+            && self.live_context_bootstrap_append_by_channel.keys()
+                == self.live_context_bootstrap_digest_by_channel.keys()
+            && for_all(channel_id in self.live_context_preparation_phase_by_channel.keys(),
+                (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                    || !self.live_context_cursor_by_channel.contains_key(channel_id)
+                    || self.live_context_cursor_by_channel.get_copied(channel_id) == Some(0))
+                && (self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::Failed)
+                    || self.live_context_preparation_failure_by_channel.contains_key(channel_id)))
+        }
+
+        invariant live_context_observation_order_is_exact_and_scoped {
+            self.live_context_preparation_lease_by_channel.keys() == self.live_context_preparation_runtime_by_channel.keys()
+            && self.live_context_preparation_lease_by_channel.keys() == self.live_context_preparation_fence_by_channel.keys()
+            && self.live_context_preparation_lease_by_channel.keys() == self.live_context_preparation_generation_by_channel.keys()
+            && self.live_context_preparation_lease_by_channel.keys() == self.live_context_observation_counter_by_channel.keys()
+            && self.live_context_observation_ordinal_by_id.keys() == self.live_context_observation_channel_by_id.keys()
+            && self.live_context_observation_ordinal_by_id.keys() == self.live_context_observation_lease_by_id.keys()
+            && self.live_context_observation_ordinal_by_id.keys() == self.live_context_observation_runtime_by_id.keys()
+            && self.live_context_observation_ordinal_by_id.keys() == self.live_context_observation_fence_by_id.keys()
+            && self.live_context_observation_ordinal_by_id.keys() == self.live_context_observation_generation_by_id.keys()
+            && for_all(source in self.live_context_observation_ordinal_by_id.keys(),
+                self.live_context_observation_ordinal_by_id.get_copied(source).get("value") > 0
+                && self.live_context_observation_ordinal_by_id.get_copied(source).get("value")
+                    <= self.live_context_observation_counter_by_channel.get_copied(
+                        self.live_context_observation_channel_by_id.get_cloned(source).get("value")).get("value")
+                && self.live_context_observation_lease_by_id.get_cloned(source)
+                    == self.live_context_preparation_lease_by_channel.get_cloned(
+                        self.live_context_observation_channel_by_id.get_cloned(source).get("value"))
+                && self.live_context_observation_runtime_by_id.get_cloned(source)
+                    == self.live_context_preparation_runtime_by_channel.get_cloned(
+                        self.live_context_observation_channel_by_id.get_cloned(source).get("value"))
+                && self.live_context_observation_fence_by_id.get_copied(source)
+                    == self.live_context_preparation_fence_by_channel.get_copied(
+                        self.live_context_observation_channel_by_id.get_cloned(source).get("value"))
+                && self.live_context_observation_generation_by_id.get_copied(source)
+                    == self.live_context_preparation_generation_by_channel.get_copied(
+                        self.live_context_observation_channel_by_id.get_cloned(source).get("value")))
+            && for_all(channel in self.live_context_ack_cut_by_channel.keys(),
+                self.live_context_bootstrap_append_by_channel.contains_key(channel)
+                && self.live_context_ack_cut_by_channel.get_copied(channel).get("value")
+                    <= self.live_context_observation_counter_by_channel.get_copied(channel).get("value"))
+            && for_all(channel in self.live_context_preparation_phase_by_channel.keys(),
+                self.live_context_preparation_phase_by_channel.get_copied(channel) != Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                || self.live_context_ack_cut_by_channel.contains_key(channel))
+        }
+
         invariant live_context_outbox_is_exact_and_session_scoped {
             self.live_context_queued_session_by_append.keys()
                 == self.live_context_queued_cursor_by_append.keys()
@@ -8561,6 +8814,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 == self.live_context_queued_commit_token_by_append.keys()
             && self.live_context_queued_session_by_append.keys()
                 == self.live_context_queued_disposition_by_append.keys()
+            && for_all(append_id in self.live_context_queued_disposition_by_append.keys(),
+                self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    != Some(LiveContextRowDisposition::AssistantObservation))
             && for_all(append_id in self.live_context_queued_session_by_append.keys(),
                 self.live_context_queued_append_by_cursor.get_cloned(
                     self.live_context_queued_cursor_by_append.get_copied(append_id).get("value"))
@@ -20885,7 +21141,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // before retrying the failed batch.
         transition DeferInputBehindBacklog {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input DeferInputBehindBacklog { input_id }
+            on input DeferInputBehindBacklog { input_id, cancelled_run_id }
             guard "input_queued" { self.input_lane.contains_key(input_id) }
             update {
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
@@ -20909,11 +21165,32 @@ macro_rules! meerkat_catalog_machine_dsl {
         // corruption, not a resolved member.
         transition DeferInputBehindBacklogAlreadyResolved {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input DeferInputBehindBacklog { input_id }
+            on input DeferInputBehindBacklog { input_id, cancelled_run_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             guard "input_not_in_lane" { !self.input_lane.contains_key(input_id) }
             guard "input_resolved_past_queued" {
                 self.input_phases.get(input_id).get("value") != InputPhase::Queued
+            }
+            update {}
+            to Idle
+        }
+
+        // Terminal publication may archive the completed input before the
+        // post-cancellation backlog sweep. Absence is an idempotent no-op,
+        // never permission to stop unrelated queued work.
+        transition DeferInputBehindBacklogAlreadyArchived {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DeferInputBehindBacklog { input_id, cancelled_run_id }
+            guard "exact_cancelled_batch" {
+                cancelled_run_id != None
+                && self.turn_terminal_run_id == cancelled_run_id
+                && self.terminal_outcome == Some(TurnTerminalOutcome::Cancelled)
+            }
+            guard "input_not_live" {
+                !self.input_phases.contains_key(input_id)
+                && !self.input_lane.contains_key(input_id)
+                && !self.input_recovery_lanes.contains_key(input_id)
+                && !self.input_run_associations.contains_key(input_id)
             }
             update {}
             to Idle
@@ -22969,7 +23246,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "runtime_not_stopping" { self.runtime_stop_deferred == false }
             guard "session_not_active" { !self.live_active_channel_by_session.contains_key(session_id) }
             guard "channel_not_bound" { !self.live_channel_session_by_channel.contains_key(channel_id) }
-            guard "channel_id_not_revoked" { !self.live_revoked_execution_channels.contains(channel_id) }
+            guard "channel_id_not_revoked" {
+                !self.live_revoked_execution_channels.contains(channel_id)
+                && !self.live_cancelled_recovery_channels.contains(channel_id)
+            }
             update {
                 self.live_open_admission_sequence += 1;
                 self.live_active_channel_by_session.insert(session_id, channel_id);
@@ -23047,7 +23327,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "runtime_not_stopping" { self.runtime_stop_deferred == false }
             guard "session_not_active" { !self.live_active_channel_by_session.contains_key(session_id) }
             guard "channel_not_bound" { !self.live_channel_session_by_channel.contains_key(channel_id) }
-            guard "channel_id_revoked" { self.live_revoked_execution_channels.contains(channel_id) }
+            guard "channel_id_revoked" {
+                self.live_revoked_execution_channels.contains(channel_id)
+                || self.live_cancelled_recovery_channels.contains(channel_id)
+            }
             update {
                 self.live_open_admission_sequence += 1;
             }
@@ -23169,6 +23452,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                     LiveExecutionChannelPhase::Revoked
                 );
                 self.live_revoked_execution_channels.insert(channel_id);
+                if self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                    && self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                    && self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::Failed) {
+                    self.live_context_preparation_phase_by_channel.insert(channel_id, LiveContextPreparationPhase::Failed);
+                    self.live_context_preparation_failure_by_channel.insert(channel_id, LiveContextPreparationFailure::Cancelled);
+                }
                 self.live_execution_profile_by_channel.remove(channel_id);
                 self.live_execution_mode_by_channel.remove(channel_id);
                 self.live_function_bridge_capable_channels.remove(channel_id);
@@ -23311,6 +23600,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 canonical_seed_cursor, pending_receipt
             }
             guard "pending_receipt_present" { pending_receipt != "" }
+            guard "recovery_not_cancelled" { !self.live_cancelled_recovery_channels.contains(channel_id) }
             guard "channel_binding_matches" {
                 self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
                 && self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
@@ -23488,6 +23778,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                     LiveExecutionChannelPhase::Revoked
                 );
                 self.live_revoked_execution_channels.insert(channel_id);
+                if self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                    && self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                    && self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::Failed) {
+                    self.live_context_preparation_phase_by_channel.insert(channel_id, LiveContextPreparationPhase::Failed);
+                    self.live_context_preparation_failure_by_channel.insert(channel_id, LiveContextPreparationFailure::Cancelled);
+                }
                 self.live_experimental_staged_runtime_by_channel.remove(channel_id);
                 self.live_experimental_staged_fence_by_channel.remove(channel_id);
                 self.live_experimental_staged_generation_by_channel.remove(channel_id);
@@ -23574,11 +23870,27 @@ macro_rules! meerkat_catalog_machine_dsl {
                         == Some(LiveExecutionChannelPhase::Revoked))
             }
             update {
+                if self.live_context_recovery_replacement_by_channel.contains_key(channel_id) {
+                    self.live_cancelled_recovery_channels.insert(
+                        self.live_context_recovery_replacement_by_channel.get_cloned(channel_id).get("value")
+                    );
+                }
+                if self.live_result_recovery_replacement_by_channel.contains_key(channel_id) {
+                    self.live_cancelled_recovery_channels.insert(
+                        self.live_result_recovery_replacement_by_channel.get_cloned(channel_id).get("value")
+                    );
+                }
                 self.live_execution_phase_by_channel.insert(
                     channel_id,
                     LiveExecutionChannelPhase::Revoked
                 );
                 self.live_revoked_execution_channels.insert(channel_id);
+                if self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                    && self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                    && self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::Failed) {
+                    self.live_context_preparation_phase_by_channel.insert(channel_id, LiveContextPreparationPhase::Failed);
+                    self.live_context_preparation_failure_by_channel.insert(channel_id, LiveContextPreparationFailure::Cancelled);
+                }
                 self.live_playback_owner_by_channel.remove(channel_id);
                 self.live_playback_readiness_by_channel.remove(channel_id);
                 self.live_experimental_staged_runtime_by_channel.remove(channel_id);
@@ -23635,12 +23947,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id: session_id,
                 channel_id: channel_id,
                 phase: LiveExecutionChannelPhase::Revoked,
-                already_closed: false
+                already_closed: false,
+                context_recovery_channel_id: self.live_context_recovery_replacement_by_channel.get_cloned(channel_id),
+                result_recovery_channel_id: self.live_result_recovery_replacement_by_channel.get_cloned(channel_id)
             }
         }
 
         // A lost close response is replay-safe from the retained opaque
-        // tombstone and generated closed status. No provider effect is minted.
+        // tombstone and generated closed status. Explicit close also cancels
+        // a still-preparing recovery, unlike its internal close handoff.
         transition RevokeLiveChannelCloseCustodyClosedReplay {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RevokeLiveChannelCloseCustody {
@@ -23660,12 +23975,26 @@ macro_rules! meerkat_catalog_machine_dsl {
                         && self.live_activation_receipt_by_channel.get_cloned(channel_id)
                             == Some(activation_receipt.get("value"))))
             }
+            update {
+                if self.live_context_recovery_replacement_by_channel.contains_key(channel_id) {
+                    self.live_cancelled_recovery_channels.insert(
+                        self.live_context_recovery_replacement_by_channel.get_cloned(channel_id).get("value")
+                    );
+                }
+                if self.live_result_recovery_replacement_by_channel.contains_key(channel_id) {
+                    self.live_cancelled_recovery_channels.insert(
+                        self.live_result_recovery_replacement_by_channel.get_cloned(channel_id).get("value")
+                    );
+                }
+            }
             to Idle
             emit LiveChannelCloseCustodyRevoked {
                 session_id: session_id,
                 channel_id: channel_id,
                 phase: LiveExecutionChannelPhase::Revoked,
-                already_closed: true
+                already_closed: true,
+                context_recovery_channel_id: self.live_context_recovery_replacement_by_channel.get_cloned(channel_id),
+                result_recovery_channel_id: self.live_result_recovery_replacement_by_channel.get_cloned(channel_id)
             }
         }
 
@@ -23775,15 +24104,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // Freeze an assistant output to the exact foreground InteractionId
-        // placed in the one-response awaiting slot by typed user TurnFinished.
-        // A new user start clears an unconsumed slot, and a later user turn
-        // cannot rewrite an already frozen assistant-turn correlation.
+        // Prefer an exact awaiting foreground interaction. Without one, typed
+        // provider output owns a fresh assistant-only interaction; neither a
+        // user turn nor causal context-consumption evidence is invented.
         transition ObserveLiveAssistantTurnStarted {
             per_phase [Idle, Attached, Running]
             on input ObserveLiveAssistantTurnStarted {
                 channel_id, runtime_id, fence_token, generation,
-                assistant_turn_ref
+                assistant_turn_ref, candidate_interaction_id
             }
             guard "identity_present" { assistant_turn_ref != "" }
             guard "runtime_binding_matches" {
@@ -23795,19 +24123,40 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
             }
-            guard "foreground_interaction_exists" {
+            guard "assistant_attribution_available" {
                 self.live_awaiting_assistant_interaction_by_channel.contains_key(channel_id)
+                || (!self.live_provider_turn_by_channel.contains_key(channel_id)
+                    && !self.live_active_interaction_by_channel.contains_key(channel_id)
+                    && candidate_interaction_id != ""
+                    && !self.live_interaction_channel_by_id.contains_key(candidate_interaction_id)
+                    && !self.live_abandoned_interactions.contains(candidate_interaction_id))
             }
             guard "assistant_turn_is_new" {
                 !self.live_assistant_interaction_by_turn.contains_key(assistant_turn_ref)
                 && !self.live_assistant_turn_channel_by_ref.contains_key(assistant_turn_ref)
             }
             update {
-                self.live_assistant_interaction_by_turn.insert(
-                    assistant_turn_ref,
-                    self.live_awaiting_assistant_interaction_by_channel
-                        .get_cloned(channel_id).get("value")
-                );
+                if self.live_awaiting_assistant_interaction_by_channel.contains_key(channel_id) {
+                    self.live_assistant_interaction_by_turn.insert(
+                        assistant_turn_ref,
+                        self.live_awaiting_assistant_interaction_by_channel
+                            .get_cloned(channel_id).get("value")
+                    );
+                    self.live_assistant_origin_by_turn.insert(
+                        assistant_turn_ref,
+                        LiveAssistantTurnOrigin::ForegroundCorrelated
+                    );
+                } else {
+                    self.live_interaction_channel_by_id.insert(candidate_interaction_id, channel_id);
+                    self.live_assistant_interaction_by_turn.insert(
+                        assistant_turn_ref,
+                        candidate_interaction_id
+                    );
+                    self.live_assistant_origin_by_turn.insert(
+                        assistant_turn_ref,
+                        LiveAssistantTurnOrigin::ProviderInitiated
+                    );
+                }
                 self.live_assistant_turn_channel_by_ref.insert(assistant_turn_ref, channel_id);
                 self.live_assistant_playback_segment_by_turn.insert(assistant_turn_ref, 0);
                 self.live_awaiting_assistant_interaction_by_channel.remove(channel_id);
@@ -23817,7 +24166,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 channel_id: channel_id,
                 interaction_id: self.live_assistant_interaction_by_turn
                     .get_cloned(assistant_turn_ref).get("value"),
-                assistant_turn_ref: assistant_turn_ref
+                assistant_turn_ref: assistant_turn_ref,
+                origin: self.live_assistant_origin_by_turn
+                    .get_copied(assistant_turn_ref).get("value")
             }
         }
 
@@ -24022,7 +24373,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running]
             on input AuthorizeLiveDelegationWorkerStart {
                 channel_id, runtime_id, fence_token, generation, interaction_id,
-                operation_id, provider_turn_correlation, worker_identity
+                operation_id, provider_turn_correlation, worker_identity, worker_ownership
             }
             guard "worker_identity_present" { worker_identity != "" }
             guard "runtime_binding_matches" {
@@ -24049,6 +24400,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.live_delegation_worker_identity_by_operation.insert(operation_id, worker_identity);
+                if worker_ownership == LiveDelegationWorkerOwnership::ExistingMember {
+                    self.live_delegation_existing_member_operations.insert(operation_id);
+                }
                 self.live_delegation_worker_phase_by_operation.insert(
                     operation_id,
                     LiveDelegationWorkerPhase::StartAuthorized
@@ -24059,7 +24413,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 channel_id: channel_id,
                 interaction_id: interaction_id,
                 operation_id: operation_id,
-                worker_identity: worker_identity
+                worker_identity: worker_identity,
+                worker_ownership: worker_ownership
             }
         }
 
@@ -24743,9 +25098,12 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // A host restart loses process-local executor and provider custody.
-        // The caller first observes the exact durable Mob terminal and retires
-        // that child. This edge then converges only operation-indexed generated
-        // truth after the original channel is revoked. It cannot authorize a
+        // The caller first observes the exact durable Mob terminal and releases
+        // executor custody (retiring an owned child, retaining a borrowed member).
+        // This edge then converges only operation-indexed generated truth after
+        // all original live binding atoms are gone, including cold recovery.
+        // Revocation is recorded here rather than fabricated by the store.
+        // It cannot authorize a
         // retry or make the result eligible for provider delivery.
         transition ReconcileRevokedLiveDelegationWorkerAfterRestartFresh {
             per_phase [Idle, Attached, Running, Retired, Stopped]
@@ -24753,9 +25111,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id, channel_id, interaction_id, operation_id,
                 worker_identity, terminal
             }
-            guard "original_channel_is_revoked_and_noncurrent" {
-                self.live_revoked_execution_channels.contains(channel_id)
-                && self.live_active_channel_by_session.get_cloned(session_id) != Some(channel_id)
+            guard "original_channel_is_unbound_and_noncurrent" {
+                self.live_active_channel_by_session.get_cloned(session_id) != Some(channel_id)
                 && !self.live_channel_session_by_channel.contains_key(channel_id)
                 && !self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                 && !self.live_execution_fence_by_channel.contains_key(channel_id)
@@ -24779,6 +25136,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                         == Some(LiveDelegationWorkerPhase::CancelAuthorized))
             }
             update {
+                self.live_revoked_execution_channels.insert(channel_id);
+                self.live_execution_phase_by_channel.insert(channel_id, LiveExecutionChannelPhase::Revoked);
                 self.live_delegation_worker_terminal_by_operation.insert(operation_id, terminal);
                 self.live_delegation_worker_phase_by_operation.insert(
                     operation_id,
@@ -24807,9 +25166,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id, channel_id, interaction_id, operation_id,
                 worker_identity, terminal
             }
-            guard "original_channel_is_revoked_and_noncurrent" {
-                self.live_revoked_execution_channels.contains(channel_id)
-                && self.live_active_channel_by_session.get_cloned(session_id) != Some(channel_id)
+            guard "original_channel_is_unbound_and_noncurrent" {
+                self.live_active_channel_by_session.get_cloned(session_id) != Some(channel_id)
                 && !self.live_channel_session_by_channel.contains_key(channel_id)
                 && !self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                 && !self.live_execution_fence_by_channel.contains_key(channel_id)
@@ -24836,6 +25194,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.live_delegation_result_eligible_operations.contains(operation_id)
             }
             update {
+                self.live_revoked_execution_channels.insert(channel_id);
+                self.live_execution_phase_by_channel.insert(channel_id, LiveExecutionChannelPhase::Revoked);
                 self.live_delegation_worker_phase_by_operation.insert(
                     operation_id,
                     LiveDelegationWorkerPhase::Retired
@@ -25094,6 +25454,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 disposition
             }
             guard "result_digest_present" { result_digest != "" }
+            guard "bootstrap_and_causal_tail_are_delivered" {
+                !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                || (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                    && self.live_context_queued_append_by_cursor.len() == 0
+                    && !self.live_context_pending_append_by_channel.contains_key(channel_id))
+            }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
             }
@@ -25146,7 +25512,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running]
             on input ResolveLiveDelegationResultDelivery {
                 channel_id, runtime_id, fence_token, generation, operation_id,
-                result_digest, replacement_channel_id, observation
+                result_digest, replacement_channel_id, canonical_seed_cursor, observation
             }
             guard "observation_without_replacement" {
                 observation != LiveDelegationResultDeliveryObservation::Ambiguous
@@ -25209,7 +25575,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running]
             on input ResolveLiveDelegationResultDelivery {
                 channel_id, runtime_id, fence_token, generation, operation_id,
-                result_digest, replacement_channel_id, observation
+                result_digest, replacement_channel_id, canonical_seed_cursor, observation
             }
             guard "ambiguous_observation_and_fresh_replacement" {
                 observation == LiveDelegationResultDeliveryObservation::Ambiguous
@@ -25238,6 +25604,18 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_cursor_by_channel.contains_key(channel_id)
                 && !self.live_result_recovery_replacement_by_channel.contains_key(channel_id)
             }
+            guard "seed_is_exact_known_canonical_high_watermark" {
+                canonical_seed_cursor >= self.live_context_cursor_by_channel.get_copied(channel_id).get("value")
+                && for_all(cursor in self.live_context_queued_append_by_cursor.keys(), cursor <= canonical_seed_cursor)
+                && for_all(pending in self.live_context_pending_next_cursor_by_append.keys(),
+                    self.live_context_pending_channel_by_append.get_cloned(pending) != Some(channel_id)
+                    || self.live_context_pending_next_cursor_by_append.get_copied(pending).get("value") <= canonical_seed_cursor)
+                && (canonical_seed_cursor == self.live_context_cursor_by_channel.get_copied(channel_id).get("value")
+                    || self.live_context_queued_append_by_cursor.contains_key(canonical_seed_cursor)
+                    || exists(pending in self.live_context_pending_next_cursor_by_append.keys(),
+                        self.live_context_pending_channel_by_append.get_cloned(pending) == Some(channel_id)
+                        && self.live_context_pending_next_cursor_by_append.get_copied(pending) == Some(canonical_seed_cursor)))
+            }
             update {
                 self.live_result_delivery_channel_by_operation.remove(operation_id);
                 self.live_result_delivery_operation_by_channel.remove(channel_id);
@@ -25253,7 +25631,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_result_recovery_digest_by_channel.insert(channel_id, result_digest);
                 self.live_result_recovery_seed_cursor_by_channel.insert(
                     channel_id,
-                    self.live_context_cursor_by_channel.get_copied(channel_id).get("value")
+                    canonical_seed_cursor
                 );
                 self.live_result_recovery_identity_by_channel.insert(
                     channel_id,
@@ -25273,7 +25651,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 provider_turn_correlation: self.live_delegation_provider_turn_by_operation.get_cloned(operation_id).get("value"),
                 result_digest: result_digest,
                 disposition: self.live_result_release_disposition_by_operation.get_copied(operation_id).get("value"),
-                canonical_seed_cursor: self.live_context_cursor_by_channel.get_copied(channel_id).get("value"),
+                canonical_seed_cursor: canonical_seed_cursor,
                 llm_identity: self.live_channel_identity_by_channel.get_cloned(channel_id).get("value"),
                 runtime_id: runtime_id,
                 fence_token: fence_token,
@@ -25282,15 +25660,17 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // Replacement answer truth and execution binding are one atomic
-        // commit after SessionReady and exact canonical seed acknowledgement.
+        // commit after SessionReady and actual provider seed acknowledgement.
+        // A concurrent reservation proves the pinned source, not delivery.
         transition BindLiveDelegationResultRecoveryChannel {
             per_phase [Idle, Attached, Running]
             on input BindLiveDelegationResultRecoveryChannel {
                 session_id, closing_channel_id, replacement_channel_id,
                 answer_observation_sequence, runtime_id, fence_token,
-                generation, operation_id, result_digest, canonical_seed_cursor
+                generation, operation_id, result_digest, canonical_seed_cursor, activation_receipt
             }
             guard "answer_observation_sequence_present" { answer_observation_sequence > 0 }
+            guard "recovery_not_cancelled" { !self.live_cancelled_recovery_channels.contains(replacement_channel_id) }
             guard "recovery_obligation_matches" {
                 self.live_result_recovery_replacement_by_channel.get_cloned(closing_channel_id)
                     == Some(replacement_channel_id)
@@ -25303,7 +25683,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_result_recovery_digest_by_channel.get_cloned(closing_channel_id)
                     == Some(result_digest)
                 && self.live_result_recovery_seed_cursor_by_channel.get_copied(closing_channel_id)
-                    == Some(canonical_seed_cursor)
+                    == Some(if self.live_context_reserved_cursor_by_channel.contains_key(replacement_channel_id) {
+                        self.live_context_reserved_cursor_by_channel.get_copied(replacement_channel_id).get("value")
+                    } else { canonical_seed_cursor })
                 && self.live_result_recovery_runtime_id_by_channel.get_cloned(closing_channel_id)
                     == Some(runtime_id)
                 && self.live_result_recovery_fence_by_channel.get_copied(closing_channel_id)
@@ -25327,6 +25709,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && !self.live_context_cursor_by_channel.contains_key(replacement_channel_id)
             }
             guard "replacement_experimental_stage_matches" {
+                activation_receipt != ""
+                && self.live_execution_phase_by_channel.get_copied(replacement_channel_id) == Some(LiveExecutionChannelPhase::Pending)
+                && self.live_playback_owner_by_channel.contains_key(replacement_channel_id)
+                && self.live_playback_readiness_by_channel.contains_key(replacement_channel_id)
+                && !self.live_activation_receipt_by_channel.contains_key(replacement_channel_id)
+                && !self.live_revoked_execution_channels.contains(replacement_channel_id)
+                &&
                 self.live_experimental_staged_runtime_by_channel.get_cloned(replacement_channel_id)
                     == Some(runtime_id)
                 && self.live_experimental_staged_fence_by_channel.get_copied(replacement_channel_id)
@@ -25335,6 +25724,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                     == Some(generation)
                 && self.live_experimental_staged_seed_cursor_by_channel.get_copied(replacement_channel_id)
                     == Some(canonical_seed_cursor)
+            }
+            guard "concurrent_replacement_has_no_delivered_prefix" {
+                !self.live_context_reserved_cursor_by_channel.contains_key(replacement_channel_id)
+                || canonical_seed_cursor == 0
             }
             guard "answer_observation_sequence_advances" {
                 !self.live_webrtc_answer_observation_sequence_by_channel.contains_key(replacement_channel_id)
@@ -25353,11 +25746,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                     replacement_channel_id,
                     LiveExecutionChannelPhase::Active
                 );
+                self.live_activation_receipt_by_channel.insert(replacement_channel_id, activation_receipt);
                 self.live_experimental_staged_runtime_by_channel.remove(replacement_channel_id);
                 self.live_experimental_staged_fence_by_channel.remove(replacement_channel_id);
                 self.live_experimental_staged_generation_by_channel.remove(replacement_channel_id);
                 self.live_experimental_staged_seed_cursor_by_channel.remove(replacement_channel_id);
-                self.live_experimental_pending_receipt_by_channel.remove(replacement_channel_id);
                 self.live_result_recovery_replacement_by_channel.remove(closing_channel_id);
                 self.live_result_recovery_source_by_replacement.remove(replacement_channel_id);
                 self.live_result_recovery_session_by_channel.remove(closing_channel_id);
@@ -25371,6 +25764,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit LiveDelegationResultRecoveryChannelBound {
+                activation_receipt: activation_receipt,
                 session_id: session_id,
                 closing_channel_id: closing_channel_id,
                 replacement_channel_id: replacement_channel_id,
@@ -25545,6 +25939,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.live_execution_phase_by_channel.insert(channel_id, LiveExecutionChannelPhase::Revoked);
                 self.live_revoked_execution_channels.insert(channel_id);
+                if self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                    && self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                    && self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::Failed) {
+                    self.live_context_preparation_phase_by_channel.insert(channel_id, LiveContextPreparationPhase::Failed);
+                    self.live_context_preparation_failure_by_channel.insert(channel_id, LiveContextPreparationFailure::Cancelled);
+                }
                 self.live_bridge_cancellation_reason_by_operation.insert(
                     self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value"),
                     LiveBridgeCancellationReason::ProtocolDrift
@@ -26292,6 +26692,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id, provider_call_ref, output_kind, output_digest
             }
             guard "output_digest_present" { output_digest != "" }
+            guard "bootstrap_and_causal_tail_are_delivered" {
+                !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                || (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                    && self.live_context_queued_append_by_cursor.len() == 0
+                    && !self.live_context_pending_append_by_channel.contains_key(channel_id))
+            }
             guard "active_binding_matches" {
                 self.live_execution_phase_by_channel.get_copied(channel_id)
                     == Some(LiveExecutionChannelPhase::Active)
@@ -26565,12 +26971,319 @@ macro_rules! meerkat_catalog_machine_dsl {
         // provider-side send is attempted. The sealed runtime bridge accepts
         // only SessionDocument/store commit authority, so surfaces cannot
         // manufacture an append obligation or infer provenance from content.
+        transition ObserveLiveContextDeliveryReadiness {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ObserveLiveContextDeliveryReadiness { session_id, channel_id }
+            guard "exact_channel" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+            }
+            to Idle
+            emit LiveContextDeliveryReadinessObserved {
+                session_id: session_id, channel_id: channel_id,
+                readiness:
+                    if self.live_revoked_execution_channels.contains(channel_id) { LiveContextDeliveryReadiness::Revoked }
+                    else { if self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::Failed) { LiveContextDeliveryReadiness::Failed }
+                    else { if !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                        || (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                            && self.live_context_queued_append_by_cursor.len() == 0
+                            && !self.live_context_pending_append_by_channel.contains_key(channel_id))
+                    { LiveContextDeliveryReadiness::Ready }
+                    else { LiveContextDeliveryReadiness::Pending } } }
+            }
+        }
+
+        transition BeginLiveContextPreparation {
+            per_phase [Idle, Attached, Running]
+            on input BeginLiveContextPreparation {
+                session_id, channel_id, lease_id, reserved_cursor, runtime_id, fence_token, generation
+            }
+            guard "exact_staged_empty_channel" {
+                lease_id != ""
+                && self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+                && self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+                && self.live_experimental_staged_seed_cursor_by_channel.get_copied(channel_id) == Some(0)
+                && !self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                && !self.live_revoked_execution_channels.contains(channel_id)
+                && !self.live_context_preparation_lease_by_channel.contains_key(channel_id)
+            }
+            guard "preparation_incarnation_matches" {
+                self.active_runtime_id == Some(runtime_id)
+                && self.active_fence_token == Some(fence_token)
+                && self.active_runtime_generation == Some(generation)
+                && self.live_experimental_staged_runtime_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_experimental_staged_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_experimental_staged_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "reserved_source_matches_recovery_pin" {
+                (!self.live_context_recovery_source_by_replacement.contains_key(channel_id)
+                    || self.live_context_recovery_seed_cursor_by_channel.get_copied(
+                        self.live_context_recovery_source_by_replacement.get_cloned(channel_id).get("value"))
+                        == Some(reserved_cursor))
+                && (!self.live_result_recovery_source_by_replacement.contains_key(channel_id)
+                    || self.live_result_recovery_seed_cursor_by_channel.get_copied(
+                        self.live_result_recovery_source_by_replacement.get_cloned(channel_id).get("value"))
+                        == Some(reserved_cursor))
+            }
+            update {
+                self.live_context_preparation_lease_by_channel.insert(channel_id, lease_id);
+                self.live_context_preparation_runtime_by_channel.insert(channel_id, runtime_id);
+                self.live_context_preparation_fence_by_channel.insert(channel_id, fence_token);
+                self.live_context_preparation_generation_by_channel.insert(channel_id, generation);
+                self.live_context_observation_counter_by_channel.insert(channel_id, 0);
+                self.live_context_reserved_cursor_by_channel.insert(channel_id, reserved_cursor);
+                self.live_context_preparation_phase_by_channel.insert(channel_id, LiveContextPreparationPhase::Capturing);
+            }
+            to Idle
+            emit LiveContextPreparationChanged {
+                session_id: session_id, channel_id: channel_id, lease_id: lease_id,
+                phase: LiveContextPreparationPhase::Capturing
+            }
+        }
+
+        transition RecordLiveContextObservation {
+            per_phase [Idle, Attached, Running]
+            on input RecordLiveContextObservation {
+                session_id, channel_id, lease_id, runtime_id, fence_token, generation,
+                observation_id, observation_namespace, observation_channel_id
+            }
+            guard "exact_observation_scope" {
+                observation_id != "" && observation_namespace == lease_id && observation_channel_id == channel_id
+                && self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+                && self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+                && self.live_context_preparation_lease_by_channel.get_cloned(channel_id) == Some(lease_id)
+                && self.live_context_preparation_runtime_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_context_preparation_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_context_preparation_generation_by_channel.get_copied(channel_id) == Some(generation)
+                && self.active_runtime_id == Some(runtime_id)
+                && self.active_fence_token == Some(fence_token)
+                && self.active_runtime_generation == Some(generation)
+                && !self.live_revoked_execution_channels.contains(channel_id)
+            }
+            guard "fresh_or_exact_observation_replay" {
+                !self.live_context_observation_ordinal_by_id.contains_key(observation_id)
+                || (self.live_context_observation_channel_by_id.get_cloned(observation_id) == Some(channel_id)
+                    && self.live_context_observation_lease_by_id.get_cloned(observation_id) == Some(lease_id)
+                    && self.live_context_observation_runtime_by_id.get_cloned(observation_id) == Some(runtime_id)
+                    && self.live_context_observation_fence_by_id.get_copied(observation_id) == Some(fence_token)
+                    && self.live_context_observation_generation_by_id.get_copied(observation_id) == Some(generation))
+            }
+            guard "observation_counter_available" {
+                self.live_context_observation_ordinal_by_id.contains_key(observation_id)
+                || self.live_context_observation_counter_by_channel.get_copied(channel_id).get("value") < 18446744073709551615
+            }
+            update {
+                if !self.live_context_observation_ordinal_by_id.contains_key(observation_id) {
+                    self.live_context_observation_counter_by_channel.increment(channel_id, 1);
+                    self.live_context_observation_channel_by_id.insert(observation_id, channel_id);
+                    self.live_context_observation_lease_by_id.insert(observation_id, lease_id);
+                    self.live_context_observation_runtime_by_id.insert(observation_id, runtime_id);
+                    self.live_context_observation_fence_by_id.insert(observation_id, fence_token);
+                    self.live_context_observation_generation_by_id.insert(observation_id, generation);
+                    self.live_context_observation_ordinal_by_id.insert(observation_id,
+                        self.live_context_observation_counter_by_channel.get_copied(channel_id).get("value"));
+                }
+            }
+            to Idle
+            emit LiveContextObservationRecorded {
+                session_id: session_id, channel_id: channel_id, lease_id: lease_id,
+                runtime_id: runtime_id, fence_token: fence_token, generation: generation,
+                observation_id: observation_id,
+                ordinal: self.live_context_observation_ordinal_by_id.get_copied(observation_id).get("value")
+            }
+        }
+
+        transition RecordLiveContextBootstrapAckCut {
+            per_phase [Idle, Attached, Running]
+            on input RecordLiveContextBootstrapAckCut {
+                session_id, channel_id, lease_id, runtime_id, fence_token, generation,
+                append_id, content_digest, reserved_cursor
+            }
+            guard "exact_authorized_bootstrap_ack" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+                && self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+                && self.live_context_preparation_lease_by_channel.get_cloned(channel_id) == Some(lease_id)
+                && self.live_context_preparation_runtime_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_context_preparation_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_context_preparation_generation_by_channel.get_copied(channel_id) == Some(generation)
+                && self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                && self.active_runtime_id == Some(runtime_id)
+                && self.active_fence_token == Some(fence_token)
+                && self.active_runtime_generation == Some(generation)
+                && self.live_context_reserved_cursor_by_channel.get_copied(channel_id) == Some(reserved_cursor)
+                && self.live_context_bootstrap_append_by_channel.get_cloned(channel_id) == Some(append_id)
+                && self.live_context_bootstrap_digest_by_channel.get_cloned(channel_id) == Some(content_digest)
+                && !self.live_revoked_execution_channels.contains(channel_id)
+                && (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::Delivering)
+                    || (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                        && self.live_context_ack_cut_by_channel.contains_key(channel_id)))
+            }
+            update {
+                if !self.live_context_ack_cut_by_channel.contains_key(channel_id) {
+                    self.live_context_ack_cut_by_channel.insert(channel_id,
+                        self.live_context_observation_counter_by_channel.get_copied(channel_id).get("value"));
+                }
+            }
+            to Idle
+            emit LiveContextBootstrapAckCutRecorded {
+                session_id: session_id, channel_id: channel_id, lease_id: lease_id,
+                append_id: append_id, cut: self.live_context_ack_cut_by_channel.get_copied(channel_id).get("value")
+            }
+        }
+
+        transition GenerateLiveContextPreparation {
+            per_phase [Idle, Attached, Running]
+            on input GenerateLiveContextPreparation { session_id, channel_id, lease_id }
+            guard "exact_preparation_capture" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+                && self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+                && self.live_context_preparation_lease_by_channel.get_cloned(channel_id) == Some(lease_id)
+                && self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::Capturing)
+                && !self.live_revoked_execution_channels.contains(channel_id)
+            }
+            update {
+                self.live_context_preparation_phase_by_channel.insert(channel_id, LiveContextPreparationPhase::Generating);
+            }
+            to Idle
+            emit LiveContextPreparationChanged {
+                session_id: session_id, channel_id: channel_id, lease_id: lease_id,
+                phase: LiveContextPreparationPhase::Generating
+            }
+        }
+
+        transition AuthorizeLiveContextBootstrapAppend {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextBootstrapAppend {
+                session_id, channel_id, lease_id, append_id, content_digest, reserved_cursor
+            }
+            guard "exact_preparation_delivery" {
+                append_id != "" && content_digest != ""
+                && self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+                && self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+                && self.live_context_preparation_lease_by_channel.get_cloned(channel_id) == Some(lease_id)
+                && self.live_context_reserved_cursor_by_channel.get_copied(channel_id) == Some(reserved_cursor)
+                && self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::Generating)
+                && self.live_context_cursor_by_channel.get_copied(channel_id) == Some(0)
+                && self.live_experimental_execution_channels.contains(channel_id)
+                && !self.live_revoked_execution_channels.contains(channel_id)
+                && !self.live_context_pending_append_by_channel.contains_key(channel_id)
+            }
+            update {
+                self.live_context_bootstrap_append_by_channel.insert(channel_id, append_id);
+                self.live_context_bootstrap_digest_by_channel.insert(channel_id, content_digest);
+                self.live_context_preparation_phase_by_channel.insert(channel_id, LiveContextPreparationPhase::Delivering);
+            }
+            to Idle
+            emit LiveContextBootstrapAppendAuthorized {
+                session_id: session_id, channel_id: channel_id, lease_id: lease_id,
+                append_id: append_id, content_digest: content_digest, reserved_cursor: reserved_cursor
+            }
+        }
+
+        transition ResolveLiveContextBootstrapAppend {
+            per_phase [Idle, Attached, Running]
+            on input ResolveLiveContextBootstrapAppend {
+                session_id, channel_id, lease_id, append_id, content_digest, reserved_cursor, observation,
+                retained_sessions, retained_cursors, retained_digests, retained_commits,
+                retained_dispositions, retained_append_by_cursor
+            }
+            guard "exact_preparation_receipt" {
+                self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+                && self.live_active_channel_by_session.get_cloned(session_id) == Some(channel_id)
+                && self.live_context_preparation_lease_by_channel.get_cloned(channel_id) == Some(lease_id)
+                && self.live_context_reserved_cursor_by_channel.get_copied(channel_id) == Some(reserved_cursor)
+                && self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::Delivering)
+                && self.live_context_bootstrap_append_by_channel.get_cloned(channel_id) == Some(append_id)
+                && self.live_context_bootstrap_digest_by_channel.get_cloned(channel_id) == Some(content_digest)
+                && self.live_context_cursor_by_channel.get_copied(channel_id) == Some(0)
+                && !self.live_revoked_execution_channels.contains(channel_id)
+            }
+            guard "acknowledged_resolution_has_observation_cut" {
+                observation != LiveContextAppendObservation::Delivered
+                || self.live_context_ack_cut_by_channel.contains_key(channel_id)
+            }
+            guard "retained_outbox_is_exact_acknowledged_complement" {
+                for_all(queued in self.live_context_queued_cursor_by_append.keys(),
+                    if observation == LiveContextAppendObservation::Delivered
+                        && self.live_context_queued_session_by_append.get_cloned(queued) == Some(session_id)
+                        && self.live_context_queued_cursor_by_append.get_copied(queued).get("value") <= reserved_cursor
+                    { !retained_cursors.contains_key(queued) }
+                    else { retained_cursors.get_copied(queued)
+                        == self.live_context_queued_cursor_by_append.get_copied(queued) })
+                && for_all(queued in retained_cursors.keys(),
+                    self.live_context_queued_cursor_by_append.contains_key(queued))
+                && retained_sessions.keys() == retained_cursors.keys()
+                && retained_digests.keys() == retained_cursors.keys()
+                && retained_commits.keys() == retained_cursors.keys()
+                && retained_dispositions.keys() == retained_cursors.keys()
+                && for_all(queued in retained_cursors.keys(),
+                    retained_sessions.get_cloned(queued)
+                        == self.live_context_queued_session_by_append.get_cloned(queued)
+                    && retained_digests.get_cloned(queued)
+                        == self.live_context_queued_digest_by_append.get_cloned(queued)
+                    && retained_commits.get_cloned(queued)
+                        == self.live_context_queued_commit_token_by_append.get_cloned(queued)
+                    && retained_dispositions.get_copied(queued)
+                        == self.live_context_queued_disposition_by_append.get_copied(queued)
+                    && retained_append_by_cursor.get_cloned(retained_cursors.get_copied(queued).get("value"))
+                        == Some(queued))
+                && for_all(cursor in retained_append_by_cursor.keys(),
+                    retained_cursors.get_copied(retained_append_by_cursor.get_cloned(cursor).get("value"))
+                        == Some(cursor))
+            }
+            update {
+                if observation == LiveContextAppendObservation::Delivered {
+                    self.live_context_queued_session_by_append = retained_sessions;
+                    self.live_context_queued_cursor_by_append = retained_cursors;
+                    self.live_context_queued_digest_by_append = retained_digests;
+                    self.live_context_queued_commit_token_by_append = retained_commits;
+                    self.live_context_queued_disposition_by_append = retained_dispositions;
+                    self.live_context_queued_append_by_cursor = retained_append_by_cursor;
+                    self.live_context_cursor_by_channel.insert(channel_id, reserved_cursor);
+                    self.live_context_preparation_phase_by_channel.insert(channel_id, LiveContextPreparationPhase::ProviderAcknowledged);
+                } else {
+                    self.live_context_preparation_phase_by_channel.insert(channel_id, LiveContextPreparationPhase::Failed);
+                    self.live_context_preparation_failure_by_channel.insert(channel_id,
+                        if observation == LiveContextAppendObservation::Ambiguous { LiveContextPreparationFailure::DeliveryAmbiguous }
+                        else { if observation == LiveContextAppendObservation::InterruptedByClose { LiveContextPreparationFailure::Cancelled }
+                        else { LiveContextPreparationFailure::DeliveryRejected } });
+                }
+            }
+            to Idle
+            emit LiveContextPreparationChanged {
+                session_id: session_id, channel_id: channel_id, lease_id: lease_id,
+                phase: if observation == LiveContextAppendObservation::Delivered { LiveContextPreparationPhase::ProviderAcknowledged } else { LiveContextPreparationPhase::Failed }
+            }
+        }
+
+        transition FailLiveContextPreparation {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input FailLiveContextPreparation { session_id, channel_id, lease_id, reason }
+            guard "exact_unfinished_preparation" {
+                self.live_context_preparation_lease_by_channel.get_cloned(channel_id) == Some(lease_id)
+                && self.live_channel_session_by_channel.get_cloned(channel_id) == Some(session_id)
+                && (self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::Capturing)
+                    || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::Generating)
+                    || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::Delivering))
+            }
+            update {
+                self.live_context_preparation_phase_by_channel.insert(channel_id, LiveContextPreparationPhase::Failed);
+                self.live_context_preparation_failure_by_channel.insert(channel_id, reason);
+            }
+            to Idle
+            emit LiveContextPreparationChanged {
+                session_id: session_id, channel_id: channel_id, lease_id: lease_id,
+                phase: LiveContextPreparationPhase::Failed
+            }
+        }
+
         transition EnqueueLiveContextRow {
             per_phase [Idle, Attached, Running]
             on input EnqueueLiveContextRow {
                 channel_id, runtime_id, fence_token, generation, append_id,
                 canonical_cursor, content_digest, commit_authority_token,
-                disposition
+                disposition, payload_availability, observation_id
             }
             guard "append_present" { append_id != "" }
             guard "commit_evidence_present" {
@@ -26604,6 +27317,26 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && self.live_experimental_staged_seed_cursor_by_channel.get_copied(channel_id).get("value")
                         < canonical_cursor)
             }
+            guard "canonical_cursor_is_after_reserved_prefix" {
+                !self.live_context_reserved_cursor_by_channel.contains_key(channel_id)
+                || self.live_context_reserved_cursor_by_channel.get_copied(channel_id).get("value") < canonical_cursor
+            }
+            guard "source_disposition_is_not_runtime_minted" {
+                disposition != LiveContextRowDisposition::ReassertCausalTail
+            }
+            guard "ordinary_mirror_has_materializable_payload" {
+                disposition != LiveContextRowDisposition::MirrorParentText
+                || payload_availability == LiveContextPayloadAvailability::Materializable
+            }
+            guard "source_observation_claim_matches_exact_custody" {
+                observation_id == None
+                || (self.live_context_observation_channel_by_id.get_cloned(observation_id.get("value")) == Some(channel_id)
+                    && self.live_context_observation_lease_by_id.get_cloned(observation_id.get("value"))
+                        == self.live_context_preparation_lease_by_channel.get_cloned(channel_id)
+                    && self.live_context_observation_runtime_by_id.get_cloned(observation_id.get("value")) == Some(runtime_id)
+                    && self.live_context_observation_fence_by_id.get_copied(observation_id.get("value")) == Some(fence_token)
+                    && self.live_context_observation_generation_by_id.get_copied(observation_id.get("value")) == Some(generation))
+            }
             guard "canonical_cursor_is_unique" {
                 !self.live_context_queued_append_by_cursor.contains_key(canonical_cursor)
             }
@@ -26621,7 +27354,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_context_queued_cursor_by_append.insert(append_id, canonical_cursor);
                 self.live_context_queued_digest_by_append.insert(append_id, content_digest);
                 self.live_context_queued_commit_token_by_append.insert(append_id, commit_authority_token);
-                self.live_context_queued_disposition_by_append.insert(append_id, disposition);
+                self.live_context_queued_disposition_by_append.insert(append_id,
+                    if (disposition == LiveContextRowDisposition::AlreadyPresentInLiveChannel
+                            || disposition == LiveContextRowDisposition::AssistantObservation)
+                        && payload_availability == LiveContextPayloadAvailability::Materializable
+                        && self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                        && self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::Failed)
+                        && observation_id != None
+                        && (!self.live_context_ack_cut_by_channel.contains_key(channel_id)
+                            || self.live_context_observation_ordinal_by_id.get_copied(observation_id.get("value")).get("value")
+                                <= self.live_context_ack_cut_by_channel.get_copied(channel_id).get("value"))
+                    { LiveContextRowDisposition::ReassertCausalTail }
+                    else { if disposition == LiveContextRowDisposition::AssistantObservation {
+                        LiveContextRowDisposition::ExcludedFromLiveContext
+                    } else { disposition } });
                 self.live_context_queued_append_by_cursor.insert(canonical_cursor, append_id);
             }
             to Idle
@@ -26630,7 +27376,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 channel_id: channel_id,
                 append_id: append_id,
                 canonical_cursor: canonical_cursor,
-                disposition: disposition
+                disposition: self.live_context_queued_disposition_by_append.get_copied(append_id).get("value")
             }
         }
 
@@ -26646,6 +27392,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "bootstrap_is_acknowledged" {
+                !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
@@ -26695,6 +27445,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 previous_cursor, next_cursor
             }
             guard "append_present" { append_id != "" }
+            guard "bootstrap_is_acknowledged" {
+                !self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                || self.live_context_preparation_phase_by_channel.get_copied(channel_id) == Some(LiveContextPreparationPhase::ProviderAcknowledged)
+            }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
             }
@@ -26715,17 +27469,23 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_queued_append_by_cursor.get_cloned(next_cursor) == Some(append_id)
                 && self.live_context_queued_digest_by_append.contains_key(append_id)
                 && self.live_context_queued_commit_token_by_append.contains_key(append_id)
-                && self.live_context_queued_disposition_by_append.get_copied(append_id)
+                && (self.live_context_queued_disposition_by_append.get_copied(append_id)
                     == Some(LiveContextRowDisposition::MirrorParentText)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertCausalTail))
             }
             guard "channel_has_no_pending_append" {
                 !self.live_context_pending_append_by_channel.contains_key(channel_id)
+            }
+            guard "channel_accepts_context_delivery" {
+                !self.live_revoked_execution_channels.contains(channel_id)
             }
             guard "safe_provider_turn_boundary" {
                 !self.live_provider_turn_by_channel.contains_key(channel_id)
             }
             guard "channel_has_no_recovery_obligation" {
                 !self.live_context_recovery_replacement_by_channel.contains_key(channel_id)
+                && !self.live_result_recovery_replacement_by_channel.contains_key(channel_id)
             }
             guard "append_identity_is_fresh" {
                 !self.live_context_pending_channel_by_append.contains_key(append_id)
@@ -26753,11 +27513,174 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        transition AuthorizeLiveContextAppendPendingReplay {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextAppend {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor
+            }
+            guard "exact_binding" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "same_pending_edge" {
+                self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
+                && next_cursor == previous_cursor + 1
+                && self.live_context_pending_append_by_channel.get_cloned(channel_id) == Some(append_id)
+                && self.live_context_pending_channel_by_append.get_cloned(append_id) == Some(channel_id)
+                && self.live_context_pending_previous_cursor_by_append.get_copied(append_id) == Some(previous_cursor)
+                && self.live_context_pending_next_cursor_by_append.get_copied(append_id) == Some(next_cursor)
+            }
+            to Idle
+            emit LiveContextAppendDeferred {
+                channel_id: channel_id, append_id: append_id,
+                previous_cursor: previous_cursor, next_cursor: next_cursor
+            }
+        }
+
+        transition AuthorizeLiveContextAppendDeferredByTurn {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextAppend {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor
+            }
+            guard "exact_binding" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_queued_edge" {
+                self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
+                && next_cursor == previous_cursor + 1
+                && self.live_context_queued_session_by_append.get_cloned(append_id)
+                    == self.live_channel_session_by_channel.get_cloned(channel_id)
+                && self.live_context_queued_cursor_by_append.get_copied(append_id) == Some(next_cursor)
+                && self.live_context_queued_append_by_cursor.get_cloned(next_cursor) == Some(append_id)
+                && self.live_context_queued_digest_by_append.contains_key(append_id)
+                && self.live_context_queued_commit_token_by_append.contains_key(append_id)
+                && (self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::MirrorParentText)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertCausalTail))
+                && !self.live_context_pending_append_by_channel.contains_key(channel_id)
+            }
+            guard "provider_turn_owns_boundary" {
+                self.live_provider_turn_by_channel.contains_key(channel_id)
+                && !self.live_context_recovery_replacement_by_channel.contains_key(channel_id)
+                && !self.live_result_recovery_replacement_by_channel.contains_key(channel_id)
+                && !self.live_revoked_execution_channels.contains(channel_id)
+            }
+            to Idle
+            emit LiveContextAppendDeferred {
+                channel_id: channel_id, append_id: append_id,
+                previous_cursor: previous_cursor, next_cursor: next_cursor
+            }
+        }
+
+        transition AuthorizeLiveContextAppendDeferredByClose {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextAppend {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor
+            }
+            guard "exact_binding" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_queued_edge" {
+                self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
+                && next_cursor == previous_cursor + 1
+                && self.live_context_queued_session_by_append.get_cloned(append_id)
+                    == self.live_channel_session_by_channel.get_cloned(channel_id)
+                && self.live_context_queued_cursor_by_append.get_copied(append_id) == Some(next_cursor)
+                && self.live_context_queued_append_by_cursor.get_cloned(next_cursor) == Some(append_id)
+                && self.live_context_queued_digest_by_append.contains_key(append_id)
+                && self.live_context_queued_commit_token_by_append.contains_key(append_id)
+                && (self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::MirrorParentText)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertCausalTail))
+                && !self.live_context_pending_append_by_channel.contains_key(channel_id)
+            }
+            guard "close_revoked_delivery" { self.live_revoked_execution_channels.contains(channel_id) }
+            to Idle
+            emit LiveContextAppendDeferred {
+                channel_id: channel_id, append_id: append_id,
+                previous_cursor: previous_cursor, next_cursor: next_cursor
+            }
+        }
+
+        transition AuthorizeLiveContextAppendDeferredByRecovery {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextAppend {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor
+            }
+            guard "exact_binding" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_queued_edge" {
+                self.live_context_cursor_by_channel.get_copied(channel_id) == Some(previous_cursor)
+                && next_cursor == previous_cursor + 1
+                && self.live_context_queued_session_by_append.get_cloned(append_id)
+                    == self.live_channel_session_by_channel.get_cloned(channel_id)
+                && self.live_context_queued_cursor_by_append.get_copied(append_id) == Some(next_cursor)
+                && self.live_context_queued_append_by_cursor.get_cloned(next_cursor) == Some(append_id)
+                && self.live_context_queued_digest_by_append.contains_key(append_id)
+                && self.live_context_queued_commit_token_by_append.contains_key(append_id)
+                && (self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::MirrorParentText)
+                    || self.live_context_queued_disposition_by_append.get_copied(append_id)
+                    == Some(LiveContextRowDisposition::ReassertCausalTail))
+                && !self.live_context_pending_append_by_channel.contains_key(channel_id)
+            }
+            guard "recovery_owns_replacement" {
+                !self.live_revoked_execution_channels.contains(channel_id)
+                && (self.live_context_recovery_replacement_by_channel.contains_key(channel_id)
+                    || self.live_result_recovery_replacement_by_channel.contains_key(channel_id))
+            }
+            to Idle
+            emit LiveContextAppendDeferred {
+                channel_id: channel_id, append_id: append_id,
+                previous_cursor: previous_cursor, next_cursor: next_cursor
+            }
+        }
+
+        transition AuthorizeLiveContextAppendDeliveredReplay {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveContextAppend {
+                channel_id, runtime_id, fence_token, generation, append_id,
+                previous_cursor, next_cursor
+            }
+            guard "exact_binding" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "delivered_edge_is_covered" {
+                next_cursor == previous_cursor + 1
+                && self.live_context_delivered_append_ids.contains(append_id)
+                && self.live_context_cursor_by_channel.get_copied(channel_id).get("value") >= next_cursor
+                && !self.live_context_queued_session_by_append.contains_key(append_id)
+                && !self.live_context_pending_channel_by_append.contains_key(append_id)
+                && !self.live_context_ambiguous_no_retry.contains(append_id)
+            }
+            to Idle
+            emit LiveContextAppendAlreadyCovered {
+                channel_id: channel_id, append_id: append_id,
+                previous_cursor: previous_cursor, next_cursor: next_cursor
+            }
+        }
+
         transition ResolveLiveContextAppendDelivered {
             per_phase [Idle, Attached, Running]
             on input ResolveLiveContextAppend {
                 channel_id, runtime_id, fence_token, generation, append_id,
-                previous_cursor, next_cursor, replacement_channel_id, observation
+                previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation
             }
             guard "append_present" { append_id != "" }
             guard "delivery_observed" { observation == LiveContextAppendObservation::Delivered }
@@ -26809,7 +27732,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running]
             on input ResolveLiveContextAppend {
                 channel_id, runtime_id, fence_token, generation, append_id,
-                previous_cursor, next_cursor, replacement_channel_id, observation
+                previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation
             }
             guard "append_present" { append_id != "" }
             guard "ambiguity_observed" { observation == LiveContextAppendObservation::Ambiguous }
@@ -26843,6 +27766,18 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "ambiguity_not_recorded" { !self.live_context_ambiguous_no_retry.contains(append_id) }
             guard "append_not_already_delivered" { !self.live_context_delivered_append_ids.contains(append_id) }
+            guard "seed_is_exact_known_canonical_high_watermark" {
+                canonical_seed_cursor >= next_cursor
+                && for_all(cursor in self.live_context_queued_append_by_cursor.keys(), cursor <= canonical_seed_cursor)
+                && for_all(pending in self.live_context_pending_next_cursor_by_append.keys(),
+                    self.live_context_pending_channel_by_append.get_cloned(pending) != Some(channel_id)
+                    || self.live_context_pending_next_cursor_by_append.get_copied(pending).get("value") <= canonical_seed_cursor)
+                && (canonical_seed_cursor == next_cursor
+                    || self.live_context_queued_append_by_cursor.contains_key(canonical_seed_cursor)
+                    || exists(pending in self.live_context_pending_next_cursor_by_append.keys(),
+                        self.live_context_pending_channel_by_append.get_cloned(pending) == Some(channel_id)
+                        && self.live_context_pending_next_cursor_by_append.get_copied(pending) == Some(canonical_seed_cursor)))
+            }
             update {
                 self.live_context_ambiguous_no_retry.insert(append_id);
                 self.live_context_recovery_replacement_by_channel.insert(channel_id, replacement_channel_id);
@@ -26852,7 +27787,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                     self.live_channel_session_by_channel.get_cloned(channel_id).get("value")
                 );
                 self.live_context_recovery_append_by_channel.insert(channel_id, append_id);
-                self.live_context_recovery_seed_cursor_by_channel.insert(channel_id, next_cursor);
+                self.live_context_recovery_seed_cursor_by_channel.insert(channel_id, canonical_seed_cursor);
                 self.live_context_recovery_identity_by_channel.insert(
                     channel_id,
                     self.live_channel_identity_by_channel.get_cloned(channel_id).get("value")
@@ -26871,7 +27806,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 closing_channel_id: channel_id,
                 replacement_channel_id: replacement_channel_id,
                 append_id: append_id,
-                canonical_seed_cursor: next_cursor,
+                canonical_seed_cursor: canonical_seed_cursor,
                 llm_identity: self.live_channel_identity_by_channel.get_cloned(channel_id).get("value"),
                 runtime_id: runtime_id,
                 fence_token: fence_token,
@@ -26890,9 +27825,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id, closing_channel_id, replacement_channel_id,
                 answer_observation_sequence, runtime_id, fence_token,
                 generation, append_id,
-                canonical_seed_cursor
+                canonical_seed_cursor, activation_receipt
             }
             guard "answer_observation_sequence_present" { answer_observation_sequence > 0 }
+            guard "recovery_not_cancelled" { !self.live_cancelled_recovery_channels.contains(replacement_channel_id) }
             guard "recovery_obligation_matches" {
                 self.live_context_recovery_replacement_by_channel.get_cloned(closing_channel_id)
                     == Some(replacement_channel_id)
@@ -26903,7 +27839,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_context_recovery_append_by_channel.get_cloned(closing_channel_id)
                     == Some(append_id)
                 && self.live_context_recovery_seed_cursor_by_channel.get_copied(closing_channel_id)
-                    == Some(canonical_seed_cursor)
+                    == Some(if self.live_context_reserved_cursor_by_channel.contains_key(replacement_channel_id) {
+                        self.live_context_reserved_cursor_by_channel.get_copied(replacement_channel_id).get("value")
+                    } else { canonical_seed_cursor })
                 && self.live_context_recovery_runtime_id_by_channel.get_cloned(closing_channel_id)
                     == Some(runtime_id)
                 && self.live_context_recovery_fence_by_channel.get_copied(closing_channel_id)
@@ -26927,6 +27865,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && !self.live_context_cursor_by_channel.contains_key(replacement_channel_id)
             }
             guard "replacement_experimental_stage_matches" {
+                activation_receipt != ""
+                && self.live_execution_phase_by_channel.get_copied(replacement_channel_id) == Some(LiveExecutionChannelPhase::Pending)
+                && self.live_playback_owner_by_channel.contains_key(replacement_channel_id)
+                && self.live_playback_readiness_by_channel.contains_key(replacement_channel_id)
+                && !self.live_activation_receipt_by_channel.contains_key(replacement_channel_id)
+                && !self.live_revoked_execution_channels.contains(replacement_channel_id)
+                &&
                 self.live_experimental_staged_runtime_by_channel.get_cloned(replacement_channel_id)
                     == Some(runtime_id)
                 && self.live_experimental_staged_fence_by_channel.get_copied(replacement_channel_id)
@@ -26935,6 +27880,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                     == Some(generation)
                 && self.live_experimental_staged_seed_cursor_by_channel.get_copied(replacement_channel_id)
                     == Some(canonical_seed_cursor)
+            }
+            guard "concurrent_replacement_has_no_delivered_prefix" {
+                !self.live_context_reserved_cursor_by_channel.contains_key(replacement_channel_id)
+                || canonical_seed_cursor == 0
             }
             guard "answer_observation_sequence_advances" {
                 !self.live_webrtc_answer_observation_sequence_by_channel.contains_key(replacement_channel_id)
@@ -26959,11 +27908,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                     replacement_channel_id,
                     LiveExecutionChannelPhase::Active
                 );
+                self.live_activation_receipt_by_channel.insert(replacement_channel_id, activation_receipt);
                 self.live_experimental_staged_runtime_by_channel.remove(replacement_channel_id);
                 self.live_experimental_staged_fence_by_channel.remove(replacement_channel_id);
                 self.live_experimental_staged_generation_by_channel.remove(replacement_channel_id);
                 self.live_experimental_staged_seed_cursor_by_channel.remove(replacement_channel_id);
-                self.live_experimental_pending_receipt_by_channel.remove(replacement_channel_id);
                 self.live_context_recovery_replacement_by_channel.remove(closing_channel_id);
                 self.live_context_recovery_source_by_replacement.remove(replacement_channel_id);
                 self.live_context_recovery_session_by_channel.remove(closing_channel_id);
@@ -26976,6 +27925,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit LiveContextRecoveryChannelBound {
+                activation_receipt: activation_receipt,
                 session_id: session_id,
                 closing_channel_id: closing_channel_id,
                 replacement_channel_id: replacement_channel_id,
@@ -26997,7 +27947,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running]
             on input ResolveLiveContextAppend {
                 channel_id, runtime_id, fence_token, generation, append_id,
-                previous_cursor, next_cursor, replacement_channel_id, observation
+                previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation
             }
             guard {
                 append_id != ""
@@ -27035,7 +27985,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running]
             on input ResolveLiveContextAppend {
                 channel_id, runtime_id, fence_token, generation, append_id,
-                previous_cursor, next_cursor, replacement_channel_id, observation
+                previous_cursor, next_cursor, replacement_channel_id, canonical_seed_cursor, observation
             }
             guard "append_present" { append_id != "" }
             guard "rejection_observed" { observation == LiveContextAppendObservation::Rejected }
@@ -27146,6 +28096,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                     LiveExecutionChannelPhase::Revoked
                 );
                 self.live_revoked_execution_channels.insert(channel_id);
+                if self.live_context_preparation_phase_by_channel.contains_key(channel_id)
+                    && self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::ProviderAcknowledged)
+                    && self.live_context_preparation_phase_by_channel.get_copied(channel_id) != Some(LiveContextPreparationPhase::Failed) {
+                    self.live_context_preparation_phase_by_channel.insert(channel_id, LiveContextPreparationPhase::Failed);
+                    self.live_context_preparation_failure_by_channel.insert(channel_id, LiveContextPreparationFailure::Cancelled);
+                }
                 self.live_active_channel_by_session.remove(session_id);
                 self.live_channel_session_by_channel.remove(channel_id);
                 self.live_channel_identity_by_channel.remove(channel_id);

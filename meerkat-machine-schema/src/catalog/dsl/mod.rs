@@ -721,10 +721,18 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
             // Realtime-transcript region typed vocabulary (folded from the
             // retired SessionRealtimeTranscriptAuthorityMachine).
             NamedTypeBinding::string_enum("RealtimeTranscriptRoleKind", &["User", "Assistant"]),
-            NamedTypeBinding::string_enum("RealtimeTranscriptLaneKind", &["Display", "Spoken"]),
+            NamedTypeBinding::string_enum(
+                "RealtimeTranscriptLaneKind",
+                &["Display", "Spoken", "SpokenUnmeasured"],
+            ),
             NamedTypeBinding::string_enum(
                 "LiveContextCommittedRowKind",
-                &["UserText", "AssistantText", "NonText"],
+                &[
+                    "UserText",
+                    "AssistantText",
+                    "AssistantTranscript",
+                    "NonText",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "LiveContextCommittedTextProvenance",
@@ -739,6 +747,7 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                 &[
                     "MirrorParentText",
                     "AlreadyPresentInLiveChannel",
+                    "AssistantObservation",
                     "ExcludedFromLiveContext",
                 ],
             ),
@@ -1162,8 +1171,46 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &[
                     "MirrorParentText",
                     "AlreadyPresentInLiveChannel",
+                    "AssistantObservation",
                     "ExcludedFromLiveContext",
+                    "ReassertCausalTail",
                 ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveContextPayloadAvailability",
+                &["NoPayload", "Materializable"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveContextPreparationPhase",
+                &[
+                    "Capturing",
+                    "Generating",
+                    "Delivering",
+                    "ProviderAcknowledged",
+                    "Failed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveContextPreparationFailure",
+                &[
+                    "Capture",
+                    "Generation",
+                    "TimedOut",
+                    "InputTooLarge",
+                    "OutputTooLarge",
+                    "Empty",
+                    "StaleSnapshot",
+                    "Unsupported",
+                    "SourceRead",
+                    "ProducerPanicked",
+                    "DeliveryRejected",
+                    "DeliveryAmbiguous",
+                    "Cancelled",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveContextDeliveryReadiness",
+                &["Ready", "Pending", "Failed", "Revoked"],
             ),
             NamedTypeBinding::string_enum(
                 "LiveDelegationResultDisposition",
@@ -1195,6 +1242,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "LiveDelegationWorkerOwnership",
+                &["OwnedMember", "ExistingMember"],
+            ),
+            NamedTypeBinding::string_enum(
                 "LiveDelegationCancellationReason",
                 &[
                     "Abandoned",
@@ -1214,6 +1265,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "LiveExecutionChannelPhase",
                 &["Pending", "Active", "Revoked"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveAssistantTurnOrigin",
+                &["ForegroundCorrelated", "ProviderInitiated"],
             ),
             NamedTypeBinding::string_enum(
                 "LiveExecutionMode",
@@ -2981,6 +3036,14 @@ runtime_internal_inputs!(
         RecordLiveBridgeSubmissionLocalWrite,
         ResolveLiveBridgeSubmission,
         RecoverLiveBridgeSubmission,
+        BeginLiveContextPreparation,
+        RecordLiveContextObservation,
+        RecordLiveContextBootstrapAckCut,
+        GenerateLiveContextPreparation,
+        AuthorizeLiveContextBootstrapAppend,
+        ResolveLiveContextBootstrapAppend,
+        FailLiveContextPreparation,
+        ObserveLiveContextDeliveryReadiness,
         AuthorizeLiveContextAppend,
         EnqueueLiveContextRow,
         AdvanceLiveContextCanonicalCoverage,
@@ -3825,6 +3888,10 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("WiringLifecycleKind", &["Wired", "Unwired"]),
             NamedTypeBinding::string("WorkId"),
             NamedTypeBinding::string_enum("WorkOrigin", &["External", "Internal", "Ingest"]),
+            NamedTypeBinding::string_enum(
+                "WorkContentAttribution",
+                &["Conversational", "InjectedExecutionContext", "HostHuman"],
+            ),
             NamedTypeBinding::type_path(
                 "PeerAddress",
                 "crate::catalog::dsl::mob_machine::PeerAddress",

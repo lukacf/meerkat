@@ -13,6 +13,7 @@ const fixtureRoot = path.resolve(here, '..', 'fixtures', 'gpt_live_client');
 //   the answer SDP; it never sends `session.start` on the data channel.
 const PROTOCOLS = new Set(['experimental', 'public']);
 const protocol = parseProtocol(process.argv.slice(2));
+const captureEvidence = process.argv.includes('--capture-evidence');
 let browser;
 let page;
 
@@ -35,19 +36,48 @@ async function prepare() {
     args: ['--autoplay-policy=no-user-gesture-required', '--use-fake-ui-for-media-stream'],
   });
   page = await browser.newPage();
+  if (captureEvidence) {
+    await page.exposeFunction('__gptLiveEvidence', (record) => {
+      if (process.stdout.writableLength > 262144) throw new Error('evidence stdout queue bound');
+      process.stdout.write(`${JSON.stringify({ evidence: record })}\n`);
+    });
+  }
   await page.goto('data:text/html,<title>Meerkat GPT Live E2E peer</title>');
   const fixtures = {
     greeting: audioDataUrl('no-delegation-greeting.wav'),
     delegation: audioDataUrl('delegate-working-directory.wav'),
     remember: audioDataUrl('remember-code-word.wav'),
     recall: audioDataUrl('recall-code-word.wav'),
+    // Synthetic speech (macOS say, Samantha, 155 wpm; PCM16 mono 24 kHz).
+    // history: "What was my historical vault phrase from the earlier text
+    // conversation? If that history is not available yet, say I don't know
+    // yet. Don't guess and don't ask a delegate."
+    history: audioDataUrl('historical-vault-query.wav'),
+    // recall_history (OpenAI gpt-4o-mini-tts, alloy; PCM16 mono 24 kHz): "Now
+    // tell me my historical vault phrase from the earlier text conversation.
+    // Say the exact phrase, word for word. Do not guess and do not ask a
+    // delegate." Used after the summary is acknowledged: unlike `history` it
+    // offers no honest-unknown escape, so only real recall matches.
+    recall_history: audioDataUrl('recall-vault-phrase.wav'),
+    // correction: "Correction: the current code word is Cobalt, replacing
+    // every older code word. Please acknowledge Cobalt briefly. Do not delegate."
+    correction: audioDataUrl('correct-code-word.wav'),
+    // current: "What are the current code word and my current favorite flower,
+    // according to the newest updates? Say both briefly, without delegating."
+    current: audioDataUrl('current-context-query.wav'),
   };
-  const offerSdp = await page.evaluate(async ({ fixtures, protocol }) => {
+  const offerSdp = await page.evaluate(async ({ fixtures, protocol, captureEvidence }) => {
     const audioContext = new AudioContext({ sampleRate: 24_000 });
     const fixtureBuffers = {};
     for (const [name, fixture] of Object.entries(fixtures)) {
       const response = await fetch(fixture);
-      fixtureBuffers[name] = await audioContext.decodeAudioData(await response.arrayBuffer());
+      const buffer = await audioContext.decodeAudioData(await response.arrayBuffer());
+      const samples = buffer.getChannelData(0);
+      const nonSilentSamples = samples.reduce((count, sample) => count + (Math.abs(sample) >= 0.002 ? 1 : 0), 0);
+      if (buffer.duration < 0.1 || nonSilentSamples < buffer.sampleRate * 0.1) {
+        throw new Error(`speech fixture ${name} is empty, silent, or too short`);
+      }
+      fixtureBuffers[name] = buffer;
     }
     const destination = audioContext.createMediaStreamDestination();
     const oscillator = audioContext.createOscillator();
@@ -61,6 +91,7 @@ async function prepare() {
     const remoteAudio = {
       decodedFrames: 0,
       decodedNonSilentFrames: 0,
+      decodedNonSilentSeconds: 0,
       maxDecodedRms: 0,
       processorErrors: 0,
       processorSupported: typeof MediaStreamTrackProcessor === 'function',
@@ -110,7 +141,10 @@ async function prepare() {
                 const rms = Math.sqrt(squareSum / Math.max(samples.length, 1));
                 remoteAudio.decodedFrames += audioData.numberOfFrames;
                 remoteAudio.maxDecodedRms = Math.max(remoteAudio.maxDecodedRms, rms);
-                if (rms >= 0.002) remoteAudio.decodedNonSilentFrames += audioData.numberOfFrames;
+                if (rms >= 0.002) {
+                  remoteAudio.decodedNonSilentFrames += audioData.numberOfFrames;
+                  remoteAudio.decodedNonSilentSeconds += audioData.numberOfFrames / audioData.sampleRate;
+                }
               } finally {
                 audioData.close();
               }
@@ -130,10 +164,67 @@ async function prepare() {
       events: [],
       eventTransport: { rawMessages: 0, parseFailures: 0 },
       fixtureBuffers,
+      // Keep an active zero-PCM source between WAVs. Ending the last source
+      // can stall outbound RTP and prevent the provider's context ACK.
+      continuousInput: { oscillator, gain, track: destination.stream.getAudioTracks()[0] },
       bargeIn: { armedFixture: null, failures: 0, starts: [] },
       peer,
       remoteAudio,
+      evidence: { enabled: captureEvidence, pending: 0, count: 0, failed: false, chain: Promise.resolve(), timer: null },
     };
+    const evidenceState = globalThis.__gptLivePeer;
+    evidenceState.captureAudio = async () => {
+      const audio = {
+        decoded_non_silent_frames: remoteAudio.decodedNonSilentFrames,
+        decoded_non_silent_seconds: remoteAudio.decodedNonSilentSeconds,
+        non_silent_frames: remoteAudio.nonSilentFrames,
+        total_audio_energy: null, total_samples_received: null, total_samples_duration: null,
+        bytes_received: 0, packets_received: 0,
+      };
+      for (const report of (await peer.getStats()).values()) {
+        if (report.type !== 'inbound-rtp' || (report.kind !== 'audio' && report.mediaType !== 'audio')) continue;
+        audio.bytes_received += Number(report.bytesReceived || 0);
+        audio.packets_received += Number(report.packetsReceived || 0);
+        for (const [key, value] of [
+          ['total_audio_energy', report.totalAudioEnergy],
+          ['total_samples_received', report.totalSamplesReceived],
+          ['total_samples_duration', report.totalSamplesDuration],
+        ]) {
+          if (typeof value === 'number' && Number.isFinite(value)) audio[key] = (audio[key] ?? 0) + value;
+        }
+      }
+      return audio;
+    };
+    evidenceState.recordEvidence = (record) => {
+      const evidence = evidenceState.evidence;
+      if (!evidence.enabled || evidence.failed) return;
+      const fault = evidence.pending >= 128 || evidence.count >= 20000
+        ? 'queue_limit'
+        : typeof record.delta === 'string' && new TextEncoder().encode(record.delta).length > 16384
+          ? 'string_limit' : null;
+      if (fault) {
+        evidence.failed = true;
+        evidence.chain = evidence.chain.then(() => globalThis.__gptLiveEvidence({ kind: 'fault', fault }));
+        return;
+      }
+      evidence.pending += 1;
+      evidence.count += 1;
+      // Sample media immediately at this transcript/timer observation. The
+      // ordered evidence chain is never awaited by provider event handling.
+      const audio = evidenceState.captureAudio();
+      evidence.chain = evidence.chain.then(async () => {
+        await globalThis.__gptLiveEvidence({ ...record, audio: await audio });
+        evidence.pending -= 1;
+      }).catch(() => {
+        evidence.failed = true;
+        return globalThis.__gptLiveEvidence({ kind: 'fault', fault: 'capture_failure' });
+      });
+    };
+    if (captureEvidence) {
+      evidenceState.evidence.timer = setInterval(() => {
+        evidenceState.recordEvidence({ kind: 'audio', browser_ms: performance.now() });
+      }, 250);
+    }
     globalThis.__gptLivePeer.startFixture = (fixtureName, waitForEnd) => {
       const state = globalThis.__gptLivePeer;
       const buffer = state.fixtureBuffers[fixtureName];
@@ -161,6 +252,25 @@ async function prepare() {
         return;
       }
       state.events.push(parsed);
+      if (captureEvidence && (parsed?.type === 'session.input_transcript.delta'
+        || parsed?.type === 'session.output_transcript.delta')) {
+        const delta = typeof parsed.delta === 'string' ? parsed.delta
+          : typeof parsed.text === 'string' ? parsed.text : null;
+        if (delta === null && state.evidence.enabled && !state.evidence.failed) {
+          state.evidence.failed = true;
+          state.evidence.chain = state.evidence.chain.then(() =>
+            globalThis.__gptLiveEvidence({ kind: 'fault', fault: 'capture_failure' }));
+        } else if (delta !== null) {
+          state.recordEvidence({
+            kind: 'transcript',
+            direction: parsed.type === 'session.input_transcript.delta' ? 'input' : 'output',
+            delta,
+            event_index: state.events.length - 1,
+            browser_ms: performance.now(),
+            provider_start_ms: typeof parsed.start_ms === 'number' ? parsed.start_ms : null,
+          });
+        }
+      }
       // Assistant-start boundary used to fire an armed barge-in. The private
       // protocol announces assistant turns; the public Live API has no turn
       // identifiers, so the first assistant output delta is the boundary.
@@ -194,7 +304,7 @@ async function prepare() {
       ]);
     }
     return peer.localDescription?.sdp;
-  }, { fixtures, protocol });
+  }, { fixtures, protocol, captureEvidence });
   return { offer_sdp: offerSdp, protocol };
 }
 
@@ -209,11 +319,29 @@ async function answer(sdp) {
 }
 
 async function play(name) {
-  await page.evaluate(
-    async (fixtureName) => globalThis.__gptLivePeer.startFixture(fixtureName, true),
+  const input = await page.evaluate(
+    async (fixtureName) => {
+      const state = globalThis.__gptLivePeer;
+      if (state.peer.connectionState !== 'connected') throw new Error('speech requires connected WebRTC');
+      const sentBytes = async () => {
+        let bytes = 0;
+        for (const report of (await state.peer.getStats()).values()) {
+          if (report.type === 'outbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio')) {
+            bytes += Number(report.bytesSent || 0);
+          }
+        }
+        return bytes;
+      };
+      const before = await sentBytes();
+      await state.startFixture(fixtureName, true);
+      const bytesSent = (await sentBytes()) - before;
+      if (bytesSent <= 0) throw new Error('speech fixture produced no outbound WebRTC audio');
+      const buffer = state.fixtureBuffers[fixtureName];
+      return { duration_seconds: buffer.duration, samples: buffer.length, bytes_sent: bytesSent };
+    },
     name,
   );
-  return { played: name };
+  return { played: name, input };
 }
 
 async function armBargeIn(name) {
@@ -232,22 +360,36 @@ async function snapshot() {
     const inboundAudio = {
       bytes_received: 0,
       packets_received: 0,
-      total_audio_energy: 0,
-      total_samples_received: 0,
+      total_audio_energy: null,
+      total_samples_received: null,
+      total_samples_duration: null,
     };
+    const outboundAudio = { bytes_sent: 0, packets_sent: 0 };
     for (const report of (await state.peer.getStats()).values()) {
+      if (report.type === 'outbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio')) {
+        outboundAudio.bytes_sent += Number(report.bytesSent || 0);
+        outboundAudio.packets_sent += Number(report.packetsSent || 0);
+      }
       if (report.type !== 'inbound-rtp' || (report.kind !== 'audio' && report.mediaType !== 'audio')) {
         continue;
       }
       inboundAudio.bytes_received += Number(report.bytesReceived || 0);
       inboundAudio.packets_received += Number(report.packetsReceived || 0);
-      inboundAudio.total_audio_energy += Number(report.totalAudioEnergy || 0);
-      inboundAudio.total_samples_received += Number(report.totalSamplesReceived || 0);
+      for (const [key, value] of [
+        ['total_audio_energy', report.totalAudioEnergy],
+        ['total_samples_received', report.totalSamplesReceived],
+        ['total_samples_duration', report.totalSamplesDuration],
+      ]) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          inboundAudio[key] = (inboundAudio[key] ?? 0) + value;
+        }
+      }
     }
     return {
       audio: {
         decoded_frames: state.remoteAudio.decodedFrames,
         decoded_non_silent_frames: state.remoteAudio.decodedNonSilentFrames,
+        decoded_non_silent_seconds: state.remoteAudio.decodedNonSilentSeconds,
         max_decoded_rms: state.remoteAudio.maxDecodedRms,
         processor_errors: state.remoteAudio.processorErrors,
         processor_supported: state.remoteAudio.processorSupported,
@@ -257,6 +399,13 @@ async function snapshot() {
         ...inboundAudio,
       },
       event_transport: state.eventTransport,
+      connection: {
+        state: state.peer.connectionState,
+        data_channel: state.channel.readyState,
+        audio_context: state.audioContext.state,
+        input_track: state.continuousInput.track.readyState,
+        ...outboundAudio,
+      },
       events: state.events,
       barge_in: state.bargeIn,
     };
@@ -270,6 +419,17 @@ async function close() {
   return { closed: true };
 }
 
+async function stopEvidence() {
+  if (!page || !captureEvidence) return { evidence_stopped: true };
+  await page.evaluate(async () => {
+    const evidence = globalThis.__gptLivePeer.evidence;
+    evidence.enabled = false;
+    clearInterval(evidence.timer);
+    await evidence.chain;
+  });
+  return { evidence_stopped: true };
+}
+
 async function handle(command) {
   switch (command.type) {
     case 'prepare': return prepare();
@@ -277,6 +437,7 @@ async function handle(command) {
     case 'arm_barge_in': return armBargeIn(command.name);
     case 'play': return play(command.name);
     case 'snapshot': return snapshot();
+    case 'stop_evidence': return stopEvidence();
     case 'close': return close();
     default: throw new Error(`unsupported peer command: ${command.type}`);
   }

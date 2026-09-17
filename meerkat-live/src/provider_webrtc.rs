@@ -682,13 +682,25 @@ impl LiveSidebandReleaseAuthority {
 
 #[derive(PartialEq, Eq)]
 enum LiveSidebandCommandKind {
-    AppendSessionContext {
+    AppendThinking {
         binding: ProviderWebrtcBinding,
         attempt: LiveSidebandAppendAttempt,
         cursor: u64,
         text: String,
     },
-    ReleaseDelegationContext {
+    AppendInstructions {
+        binding: ProviderWebrtcBinding,
+        attempt: LiveSidebandAppendAttempt,
+        cursor: u64,
+        text: String,
+    },
+    AppendSession {
+        binding: ProviderWebrtcBinding,
+        attempt: LiveSidebandAppendAttempt,
+        cursor: u64,
+        text: String,
+    },
+    ReleaseDelegation {
         binding: ProviderWebrtcBinding,
         attempt: LiveSidebandAppendAttempt,
         delegation: LiveSidebandDelegationRef,
@@ -710,6 +722,18 @@ pub struct LiveSidebandCommand {
 /// authorized command can produce it for provider lowering.
 #[doc(hidden)]
 pub enum LiveSidebandProviderCommand {
+    AppendThinkingContext {
+        binding: ProviderWebrtcBinding,
+        attempt: LiveSidebandAppendAttempt,
+        cursor: u64,
+        text: String,
+    },
+    AppendInstructionsContext {
+        binding: ProviderWebrtcBinding,
+        attempt: LiveSidebandAppendAttempt,
+        cursor: u64,
+        text: String,
+    },
     AppendSessionContext {
         binding: ProviderWebrtcBinding,
         attempt: LiveSidebandAppendAttempt,
@@ -728,10 +752,10 @@ pub enum LiveSidebandProviderCommand {
 impl fmt::Debug for LiveSidebandCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match &self.kind {
-            LiveSidebandCommandKind::AppendSessionContext { .. } => "append_session_context",
-            LiveSidebandCommandKind::ReleaseDelegationContext { .. } => {
-                "release_delegation_context"
-            }
+            LiveSidebandCommandKind::AppendThinking { .. } => "append_thinking_context",
+            LiveSidebandCommandKind::AppendInstructions { .. } => "append_instructions_context",
+            LiveSidebandCommandKind::AppendSession { .. } => "append_session_context",
+            LiveSidebandCommandKind::ReleaseDelegation { .. } => "release_delegation_context",
         };
         formatter
             .debug_struct("LiveSidebandCommand")
@@ -742,6 +766,41 @@ impl fmt::Debug for LiveSidebandCommand {
 }
 
 impl LiveSidebandCommand {
+    /// Quiet factual context, never speakable commentary or trusted instructions.
+    pub fn append_thinking_context(
+        authority: LiveSidebandAppendAuthority,
+        text: impl Into<String>,
+    ) -> Result<Self, LiveSidebandCommandError> {
+        let text = require_sideband_text(text)?;
+        authority.consume_once()?;
+        Ok(Self {
+            kind: LiveSidebandCommandKind::AppendThinking {
+                binding: authority.binding,
+                attempt: authority.attempt,
+                cursor: authority.cursor,
+                text,
+            },
+        })
+    }
+
+    /// Trusted knowledge for the provider's instructions lane (the historical
+    /// bootstrap summary). Consumes the same generated append authority.
+    pub fn append_instructions_context(
+        authority: LiveSidebandAppendAuthority,
+        text: impl Into<String>,
+    ) -> Result<Self, LiveSidebandCommandError> {
+        let text = require_sideband_text(text)?;
+        authority.consume_once()?;
+        Ok(Self {
+            kind: LiveSidebandCommandKind::AppendInstructions {
+                binding: authority.binding,
+                attempt: authority.attempt,
+                cursor: authority.cursor,
+                text,
+            },
+        })
+    }
+
     pub fn append_session_context(
         authority: LiveSidebandAppendAuthority,
         text: impl Into<String>,
@@ -749,7 +808,7 @@ impl LiveSidebandCommand {
         let text = require_sideband_text(text)?;
         authority.consume_once()?;
         Ok(Self {
-            kind: LiveSidebandCommandKind::AppendSessionContext {
+            kind: LiveSidebandCommandKind::AppendSession {
                 binding: authority.binding,
                 attempt: authority.attempt,
                 cursor: authority.cursor,
@@ -773,7 +832,7 @@ impl LiveSidebandCommand {
             consumed: _,
         } = authority;
         Ok(Self {
-            kind: LiveSidebandCommandKind::ReleaseDelegationContext {
+            kind: LiveSidebandCommandKind::ReleaseDelegation {
                 binding,
                 attempt,
                 delegation,
@@ -783,19 +842,34 @@ impl LiveSidebandCommand {
         })
     }
 
+    /// Commentary and delegation results are spoken aloud by the provider;
+    /// thinking and instructions appends are quiet.
+    #[must_use]
+    pub fn is_spoken(&self) -> bool {
+        matches!(
+            self.kind,
+            LiveSidebandCommandKind::AppendSession { .. }
+                | LiveSidebandCommandKind::ReleaseDelegation { .. }
+        )
+    }
+
     #[must_use]
     pub fn binding(&self) -> &ProviderWebrtcBinding {
         match &self.kind {
-            LiveSidebandCommandKind::AppendSessionContext { binding, .. }
-            | LiveSidebandCommandKind::ReleaseDelegationContext { binding, .. } => binding,
+            LiveSidebandCommandKind::AppendThinking { binding, .. }
+            | LiveSidebandCommandKind::AppendInstructions { binding, .. }
+            | LiveSidebandCommandKind::AppendSession { binding, .. }
+            | LiveSidebandCommandKind::ReleaseDelegation { binding, .. } => binding,
         }
     }
 
     #[must_use]
     pub fn attempt(&self) -> LiveSidebandAppendAttempt {
         match &self.kind {
-            LiveSidebandCommandKind::AppendSessionContext { attempt, .. }
-            | LiveSidebandCommandKind::ReleaseDelegationContext { attempt, .. } => attempt.clone(),
+            LiveSidebandCommandKind::AppendThinking { attempt, .. }
+            | LiveSidebandCommandKind::AppendInstructions { attempt, .. }
+            | LiveSidebandCommandKind::AppendSession { attempt, .. }
+            | LiveSidebandCommandKind::ReleaseDelegation { attempt, .. } => attempt.clone(),
         }
     }
 
@@ -806,7 +880,29 @@ impl LiveSidebandCommand {
     #[must_use]
     pub fn __into_provider_command(self) -> LiveSidebandProviderCommand {
         match self.kind {
-            LiveSidebandCommandKind::AppendSessionContext {
+            LiveSidebandCommandKind::AppendThinking {
+                binding,
+                attempt,
+                cursor,
+                text,
+            } => LiveSidebandProviderCommand::AppendThinkingContext {
+                binding,
+                attempt,
+                cursor,
+                text,
+            },
+            LiveSidebandCommandKind::AppendInstructions {
+                binding,
+                attempt,
+                cursor,
+                text,
+            } => LiveSidebandProviderCommand::AppendInstructionsContext {
+                binding,
+                attempt,
+                cursor,
+                text,
+            },
+            LiveSidebandCommandKind::AppendSession {
                 binding,
                 attempt,
                 cursor,
@@ -817,7 +913,7 @@ impl LiveSidebandCommand {
                 cursor,
                 text,
             },
-            LiveSidebandCommandKind::ReleaseDelegationContext {
+            LiveSidebandCommandKind::ReleaseDelegation {
                 binding,
                 attempt,
                 delegation,
@@ -987,6 +1083,15 @@ impl fmt::Debug for LiveSidebandObservation {
     }
 }
 
+/// Provider-owned evidence attached to sideband EOF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderWebrtcEofEvidence {
+    /// The provider owner observed an explicit protocol closure receipt.
+    ProviderConfirmed,
+    /// Stream absence alone does not prove a provider-confirmed close.
+    Unconfirmed,
+}
+
 /// Opaque provider sideband session. The answer strategy is its sole physical
 /// owner; semantic callers interact only through authorized commands and
 /// sanitized observations.
@@ -1001,9 +1106,24 @@ pub trait ProviderWebrtcSidebandSession: Send + Sync {
         &self,
     ) -> Result<Option<LiveSidebandObservation>, ProviderWebrtcBrokerError>;
 
+    /// Evidence for the most recently returned EOF, never for a close request
+    /// or a transport error. Implementations without a receipt fail closed.
+    fn eof_evidence(&self) -> ProviderWebrtcEofEvidence {
+        ProviderWebrtcEofEvidence::Unconfirmed
+    }
+
     /// Mechanical cleanup invoked by the answer strategy. This is not a
     /// semantic context release and therefore carries no release authority.
     async fn close(&self) -> Result<(), ProviderWebrtcBrokerError>;
+
+    /// Whether an owner append on a quiet lane (thinking) is still awaiting
+    /// the provider's acknowledgement. Measured against gpt-live-1, such an
+    /// append is injected only at an input frame stall and the provider
+    /// withholds `session.closed` until then, so a close issued in this
+    /// state cannot settle while media flows.
+    async fn quiet_append_pending(&self) -> bool {
+        false
+    }
 }
 
 /// Mechanical result of provider answer construction.
@@ -1244,6 +1364,32 @@ mod tests {
         assert_ne!(turn_a.adapter_key(), turn_b.adapter_key());
         assert!(!format!("{turn_a:?}").contains("private-provider-turn-a"));
         assert!(!format!("{turn_a:?}").contains(channel_a.as_str()));
+    }
+
+    #[test]
+    fn thinking_context_is_quiet_typed_and_consumes_exact_append_authority_once() {
+        let expected = binding();
+        let authority = LiveSidebandAppendAuthority {
+            binding: expected.clone(),
+            attempt: LiveSidebandAppendAttempt("historical-prefix".to_string()),
+            cursor: 29,
+            consumed: Arc::new(AtomicBool::new(false)),
+        };
+        let duplicate = authority.clone();
+        let command =
+            LiveSidebandCommand::append_thinking_context(authority, "private historical fact")
+                .expect("one quiet context delivery");
+        assert_eq!(command.binding(), &expected);
+        assert!(!format!("{command:?}").contains("private historical fact"));
+        assert!(matches!(
+            command.__into_provider_command(),
+            LiveSidebandProviderCommand::AppendThinkingContext { cursor: 29, text, .. }
+                if text == "private historical fact"
+        ));
+        assert_eq!(
+            LiveSidebandCommand::append_session_context(duplicate, "cannot switch the lane"),
+            Err(LiveSidebandCommandError::AuthorityAlreadyConsumed),
+        );
     }
 
     #[test]

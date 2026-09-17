@@ -3645,6 +3645,23 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MobSessionService for BoundarySessionService {
+        #[cfg(feature = "openai-live")]
+        async fn commit_live_delegation_final_transcript(
+            &self,
+            _machine: &meerkat_runtime::MeerkatMachine,
+            _session_id: &SessionId,
+            _provisional: meerkat_core::ProvisionalLiveHandoff,
+            _final_event: meerkat_core::RealtimeTranscriptEvent,
+        ) -> Result<
+            meerkat_core::FinalLiveUserTranscriptCommitEvidence,
+            meerkat_core::service::SessionError,
+        > {
+            Err(meerkat_core::service::SessionError::Unsupported(
+                "boundary-observation test service does not support live delegation canonical projection"
+                    .into(),
+            ))
+        }
+
         async fn materialize_session_resume_verdict(
             &self,
             session_id: &meerkat_core::SessionId,

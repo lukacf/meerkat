@@ -466,7 +466,20 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
                 previous_item_id: identity.previous_item_id.map(|s| s.to_string()),
                 content_index: identity.content_index.unwrap_or(0),
                 text: text.to_string(),
-            };
+            }
+            .with_context_observation(identity.context_observation_id.cloned());
+            if let Some(channel_id) = identity.channel_id {
+                return self
+                    .runtime
+                    .append_realtime_transcript_event_from_channel(
+                        session_id,
+                        event,
+                        channel_id.clone(),
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| session_error_to_projection(error, session_id));
+            }
             return self
                 .runtime
                 .append_realtime_transcript_event(session_id, event)
@@ -475,6 +488,11 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
                 .map_err(|err| session_error_to_projection(err, session_id));
         }
 
+        if identity.context_observation_id.is_some() {
+            return Err(LiveProjectionError::Rejected(
+                "sequenced user transcript requires a stable item identity".into(),
+            ));
+        }
         // Legacy fallback: providers that emit `InputTranscriptFinal` without
         // a stable item id cannot be deduplicated by the realtime layer, so
         // commit directly into canonical history. This path is shrinking as
@@ -498,7 +516,8 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         // T6: this lane is **display text** (`AssistantBlock::Text`); the
         // spoken-transcript lane is `append_assistant_transcript_delta`.
         let event = build_assistant_text_delta_event(delta, identity)
-            .map_err(identity_error_to_projection)?;
+            .map_err(identity_error_to_projection)?
+            .with_context_observation(identity.context_observation_id.cloned());
         self.runtime
             .append_realtime_transcript_event(session_id, event)
             .await
@@ -522,7 +541,8 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         // where transcript deltas were collapsing onto the display-text
         // staging path.
         let event = build_assistant_transcript_delta_event(delta, identity)
-            .map_err(identity_error_to_projection)?;
+            .map_err(identity_error_to_projection)?
+            .with_context_observation(identity.context_observation_id.cloned());
         self.runtime
             .append_realtime_transcript_event(session_id, event)
             .await
@@ -534,11 +554,17 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         &self,
         session_id: &SessionId,
         text: &str,
-        _identity: LiveTranscriptIdentity<'_>,
+        identity: LiveTranscriptIdentity<'_>,
         _stop_reason: StopReason,
         _usage: Usage,
         response_id: Option<&str>,
     ) -> Result<(), LiveProjectionError> {
+        if identity.context_observation_id.is_some() {
+            return Err(LiveProjectionError::Rejected(
+                "sequenced display-text final requires the identity-bearing realtime event seam"
+                    .into(),
+            ));
+        }
         // P1#1 + T6: buffer display-text final on the per-(session,
         // response_id) slot. `signal_turn_completed` drains and flushes as
         // `AssistantBlock::Text`. The display-text lane is preserved across
@@ -601,7 +627,8 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
                 .unwrap_or_default(),
             content_index: identity.content_index.unwrap_or(0),
             text: text.to_string(),
-        };
+        }
+        .with_context_observation(identity.context_observation_id.cloned());
         self.runtime
             .append_realtime_transcript_event(session_id, event)
             .await
@@ -673,14 +700,37 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         provider_item_id: &str,
         content_index: u32,
     ) -> Result<LiveAssistantOutputAddress, LiveProjectionError> {
+        self.admit_assistant_playback_target_with_context_observation(
+            session_id,
+            channel_id,
+            provider_turn_ref,
+            response_id,
+            provider_item_id,
+            content_index,
+            None,
+        )
+        .await
+    }
+
+    async fn admit_assistant_playback_target_with_context_observation(
+        &self,
+        session_id: &SessionId,
+        channel_id: &LiveChannelId,
+        provider_turn_ref: &str,
+        response_id: &str,
+        provider_item_id: &str,
+        content_index: u32,
+        observation_id: Option<&meerkat_core::LiveContextObservationId>,
+    ) -> Result<LiveAssistantOutputAddress, LiveProjectionError> {
         self.runtime
-            .admit_live_assistant_playback_target(
+            .admit_live_assistant_playback_target_with_context_observation(
                 session_id,
                 channel_id.clone(),
                 provider_turn_ref.to_string(),
                 response_id.to_string(),
                 provider_item_id.to_string(),
                 content_index,
+                observation_id.cloned(),
             )
             .await
             .map_err(|err| session_error_to_projection(err, session_id))
@@ -2687,6 +2737,8 @@ mod tests {
     #[test]
     fn t10_assistant_text_delta_helper_builds_text_delta_event() {
         let identity = LiveTranscriptIdentity {
+            channel_id: None,
+            context_observation_id: None,
             provider_item_id: Some("item_text"),
             previous_item_id: Some("item_prev"),
             content_index: Some(2),
@@ -2722,6 +2774,8 @@ mod tests {
     fn missing_delta_identity_fails_closed_typed() {
         // Missing response_id.
         let identity = LiveTranscriptIdentity {
+            channel_id: None,
+            context_observation_id: None,
             provider_item_id: Some("item"),
             previous_item_id: None,
             content_index: Some(0),
@@ -2735,6 +2789,8 @@ mod tests {
 
         // Missing delta_id.
         let identity = LiveTranscriptIdentity {
+            channel_id: None,
+            context_observation_id: None,
             provider_item_id: Some("item"),
             previous_item_id: None,
             content_index: Some(0),
@@ -2748,6 +2804,8 @@ mod tests {
 
         // Missing item_id.
         let identity = LiveTranscriptIdentity {
+            channel_id: None,
+            context_observation_id: None,
             provider_item_id: None,
             previous_item_id: None,
             content_index: Some(0),
@@ -2767,6 +2825,8 @@ mod tests {
         // `AssistantTranscriptDelta` variant so the materializer routes
         // it to `AssistantBlock::Transcript`.
         let identity = LiveTranscriptIdentity {
+            channel_id: None,
+            context_observation_id: None,
             provider_item_id: Some("item_tx"),
             previous_item_id: Some("item_prev"),
             content_index: Some(0),

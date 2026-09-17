@@ -10300,6 +10300,27 @@ impl meerkat_core::service::SessionServiceHistoryExt for RunMobSessionService {
 #[async_trait::async_trait]
 #[cfg(feature = "mob")]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
+    #[cfg(feature = "openai-live")]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<
+        meerkat_core::FinalLiveUserTranscriptCommitEvidence,
+        meerkat_core::service::SessionError,
+    > {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_final_transcript(
+            &self.inner,
+            machine,
+            session_id,
+            provisional,
+            final_event,
+        )
+        .await
+    }
+
     async fn observe_session_resume_authority(
         &self,
         session_id: &SessionId,
@@ -13341,6 +13362,27 @@ impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl meerkat_mob::MobSessionService for MobCliSessionService {
+    #[cfg(feature = "openai-live")]
+    async fn commit_live_delegation_final_transcript(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+    ) -> Result<
+        meerkat_core::FinalLiveUserTranscriptCommitEvidence,
+        meerkat_core::service::SessionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_final_transcript(
+            &self.inner,
+            machine,
+            session_id,
+            provisional,
+            final_event,
+        )
+        .await
+    }
+
     async fn observe_session_resume_authority(
         &self,
         session_id: &SessionId,
@@ -21211,6 +21253,19 @@ default_model = "gemma"
     #[cfg(feature = "mob")]
     #[async_trait]
     impl meerkat_mob::MobSessionService for TestMobSessionService {
+        #[cfg(feature = "openai-live")]
+        async fn commit_live_delegation_final_transcript(
+            &self,
+            _machine: &meerkat_runtime::MeerkatMachine,
+            _session_id: &SessionId,
+            _provisional: meerkat_core::ProvisionalLiveHandoff,
+            _final_event: meerkat_core::RealtimeTranscriptEvent,
+        ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+            Err(SessionError::Unsupported(
+                "CLI test service does not support live delegation canonical projection".into(),
+            ))
+        }
+
         async fn materialize_session_resume_verdict(
             &self,
             session_id: &SessionId,

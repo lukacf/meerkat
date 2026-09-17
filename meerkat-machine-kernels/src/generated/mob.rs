@@ -6344,6 +6344,60 @@ impl std::fmt::Display for WiringLifecycleKind {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WorkContentAttribution {
+    #[default]
+    #[serde(rename = "Conversational")]
+    Conversational,
+    #[serde(rename = "InjectedExecutionContext")]
+    InjectedExecutionContext,
+    #[serde(rename = "HostHuman")]
+    HostHuman,
+}
+impl WorkContentAttribution {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Conversational => "Conversational",
+            Self::InjectedExecutionContext => "InjectedExecutionContext",
+            Self::HostHuman => "HostHuman",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkContentAttribution {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Conversational" => Ok(Self::Conversational),
+            "InjectedExecutionContext" => Ok(Self::InjectedExecutionContext),
+            "HostHuman" => Ok(Self::HostHuman),
+            other => Err(format!("invalid WorkContentAttribution value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkContentAttribution {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkContentAttribution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -7617,6 +7671,7 @@ pub mod inputs {
         pub fence_token: FenceToken,
         pub work_id: WorkId,
         pub origin: WorkOrigin,
+        pub content_attribution: WorkContentAttribution,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveSubmitWorkRejection {
@@ -9610,6 +9665,7 @@ pub mod effects {
         pub session_id: SessionId,
         pub work_id: WorkId,
         pub origin: WorkOrigin,
+        pub content_attribution: WorkContentAttribution,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RequestPeerRuntimeIngress {
@@ -9618,6 +9674,7 @@ pub mod effects {
         pub generation: Option<Generation>,
         pub work_id: WorkId,
         pub origin: WorkOrigin,
+        pub content_attribution: WorkContentAttribution,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SubmitWorkRejected {

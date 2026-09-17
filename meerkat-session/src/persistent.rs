@@ -6202,29 +6202,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 
     #[cfg(feature = "live")]
-    pub async fn bind_realtime_context_observation_with_machine(
-        &self,
-        machine: &MeerkatMachine,
-        id: &SessionId,
-        channel_id: meerkat_core::LiveChannelId,
-        item_id: String,
-        observation_id: meerkat_core::LiveContextObservationId,
-    ) -> Result<(), SessionError> {
-        self.append_realtime_transcript_event_from_channel_with_machine(
-            machine,
-            id,
-            meerkat_core::RealtimeTranscriptEvent::ContextObservationBound {
-                channel_id: channel_id.clone(),
-                item_id,
-                observation_id,
-            },
-            channel_id,
-        )
-        .await
-        .map(|_| ())
-    }
-
-    #[cfg(feature = "live")]
     async fn append_realtime_transcript_event_with_machine_origin(
         &self,
         machine: &MeerkatMachine,

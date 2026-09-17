@@ -231,6 +231,7 @@ impl LiveAssistantPlaybackObservationResult {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn admit_live_assistant_playback_target(
     agent: &mut dyn SessionAgent,
     session_id: &SessionId,

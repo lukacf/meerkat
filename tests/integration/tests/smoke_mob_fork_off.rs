@@ -517,11 +517,19 @@ async fn e2e_smoke_s96_mob_fork_off_vertical() {
         "fork child must answer from the inherited ledger: {child_text:?}"
     );
     let first_len = history_messages(&session_history(&router, &fork_session).await).len();
-    assert_eq!(
-        first_len,
-        prefix_after_ledger + 2,
-        "a fork from the running turn must carry the parent's committed transcript (the ledger \
-         exchange, not the in-flight fork turn) plus its own exchange"
+    // Ordinarily exactly the ledger exchange plus the child's own exchange. A
+    // compaction checkpoint inside the parent's fork turn may advance the
+    // committed snapshot, so the branch is bounded below, never above, by the
+    // committed prefix.
+    assert!(
+        first_len >= prefix_after_ledger + 2,
+        "a fork from the running turn must carry at least the parent's committed transcript \
+         (the ledger exchange) plus its own exchange, got {first_len} rows"
+    );
+    assert!(
+        first_len <= prefix_after_ledger + 2 + 2,
+        "a fork from the running turn must not carry the parent's in-flight fork turn beyond a \
+         compaction checkpoint boundary, got {first_len} rows"
     );
     assert!(
         handle

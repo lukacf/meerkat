@@ -3916,6 +3916,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         session: &Session,
         replay: &TranscriptRewriteReplay,
     ) -> Result<(), SessionError> {
+        let missing = Self::transcript_rewrite_commits_missing_receipts(session, replay)?;
+        if missing.is_empty() {
+            return Ok(());
+        }
+        append_transcript_rewrite_receipt_for_commits(
+            self.event_store.as_ref(),
+            self.projector.as_ref(),
+            session,
+            &missing,
+        )
+        .await
+    }
+
+    /// Read-only half of [`Self::verify_transcript_rewrite_audit_events_locked`]:
+    /// validate the transcript history and report which rewrite commits still
+    /// lack an audit receipt, without appending anything to the event log.
+    fn transcript_rewrite_commits_missing_receipts(
+        session: &Session,
+        replay: &TranscriptRewriteReplay,
+    ) -> Result<Vec<meerkat_core::TranscriptRewriteCommit>, SessionError> {
         session
             .validate_transcript_history_state()
             .map_err(|error| {
@@ -3926,7 +3946,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )
             })?;
         let Some(audit) = replay.audit.as_ref() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let Some(state) = session
             .already_validated_transcript_history_state()
@@ -3938,24 +3958,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )
             })?
         else {
-            return Ok(());
+            return Ok(Vec::new());
         };
-        let missing = match audit {
-            TranscriptRewriteAuditCoverage::AuthorizedTail => return Ok(()),
+        match audit {
+            TranscriptRewriteAuditCoverage::AuthorizedTail => Ok(Vec::new()),
             TranscriptRewriteAuditCoverage::FullReconciliation { logged_commits } => {
-                Self::commits_missing_from_full_audit(session.id(), &state, logged_commits)?
+                Self::commits_missing_from_full_audit(session.id(), &state, logged_commits)
             }
-        };
-        if missing.is_empty() {
-            return Ok(());
         }
-        append_transcript_rewrite_receipt_for_commits(
-            self.event_store.as_ref(),
-            self.projector.as_ref(),
-            session,
-            &missing,
-        )
-        .await
     }
 
     async fn apply_transcript_rewrite_replay(
@@ -4687,8 +4697,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await?;
         let session = match replay.session.take() {
             Some(session) => {
-                self.verify_transcript_rewrite_audit_events_locked(&session, &replay)
-                    .await?;
+                // The caller's turn is appending to this session's event log
+                // right now, so audit receipts are verified but never
+                // repaired here: an append from this path could interleave
+                // with the running turn's rows. A guarded transcript edit
+                // repairs them later; until then the fork fails closed.
+                let missing = Self::transcript_rewrite_commits_missing_receipts(&session, &replay)?;
+                if !missing.is_empty() {
+                    return Err(SessionError::Agent(AgentError::InternalError(format!(
+                        "session {id} has {} transcript rewrite commit(s) without an audit \
+                         receipt; a fork from the running turn cannot repair the audit log",
+                        missing.len()
+                    ))));
+                }
                 session
             }
             None => match self.export_session_with_labels(id).await {

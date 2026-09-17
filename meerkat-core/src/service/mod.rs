@@ -2426,15 +2426,21 @@ pub enum DurableForkSourceAdmission {
     /// The request originates from the source session's own active turn, for
     /// example the `fork_off` tool call the source's agent is executing.
     ///
-    /// The owner still serializes against turn finalization and recovery,
-    /// but does not refuse the active admission: the running turn cannot
-    /// finalize while one of its tool calls is executing, so the committed
-    /// transcript is stable for the duration of the fork. The branch is cut
-    /// at the source's last committed transcript boundary. The running turn's
-    /// own input and in-flight output are not committed yet, so they are not
-    /// part of the child; the caller carries the task in the child's first
-    /// message instead. An explicit `message_count` keeps its ordinary
-    /// meaning and is still refused when it splits a tool-use group.
+    /// The owner takes no lock and does not refuse the active admission: the
+    /// caller's turn already holds the turn-finalization and recovery
+    /// boundaries and cannot finalize while one of its tool calls is
+    /// executing, so the committed transcript is stable for the duration of
+    /// the fork. The owner also never writes to the source from this path
+    /// (no replayed-projection persist, no audit receipt repair; a missing
+    /// receipt fails the fork closed). The branch is cut at the source's last
+    /// committed snapshot: ordinarily the previous turn end, so the running
+    /// turn's own input and in-flight output are not part of the child and
+    /// the caller carries the task in the child's first message instead. A
+    /// compaction checkpoint inside the running turn can advance that
+    /// snapshot to a later complete round boundary, in which case the child
+    /// carries those committed rows too. An explicit `message_count` keeps
+    /// its ordinary meaning and is still refused when it splits a tool-use
+    /// group.
     CallerTurn,
 }
 

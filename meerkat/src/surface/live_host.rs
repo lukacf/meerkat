@@ -934,6 +934,7 @@ impl<B: SessionAgentBuilder + 'static> ExperimentalGptLiveContextMirrorHost<B> {
         if matches!(
             custody.state(),
             meerkat_runtime::meerkat_machine::LiveChannelCustodyState::Closed
+                | meerkat_runtime::meerkat_machine::LiveChannelCustodyState::Revoked
         ) {
             drop(replacements);
             self.open_authority
@@ -1891,6 +1892,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         if matches!(
             custody.state(),
             meerkat_runtime::meerkat_machine::LiveChannelCustodyState::Closed
+                | meerkat_runtime::meerkat_machine::LiveChannelCustodyState::Revoked
         ) {
             // Registration may have completed after the exact close observed
             // no provider custody. Retire only these newly arrived mechanics.
@@ -2044,8 +2046,10 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         let profile_id = authority
             .bound_execution_profile_id(recovery.closing_channel_id(), recovery.session_id())
             .await?;
-        self.close_live_channel(Some(authority), recovery.closing_channel_id())
-            .await?;
+        self.orchestrator()
+            .close_experimental_live_channel_for_result_recovery(&self.host, authority, &recovery)
+            .await?
+            .ok_or(ExperimentalLiveChannelCloseError::BindingMismatch)?;
 
         let execution_identity = WireLiveExecutionIdentityOverrideV1 {
             version: WireLiveExecutionIdentityVersion::V1,

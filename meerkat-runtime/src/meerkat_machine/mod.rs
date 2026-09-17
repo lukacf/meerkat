@@ -7468,20 +7468,6 @@ impl std::fmt::Debug for LiveWebrtcAnswerExecutionBindingAuthority {
 
 #[cfg(feature = "live")]
 impl LiveWebrtcAnswerExecutionBindingAuthority {
-    pub(crate) fn new(
-        answer: LiveWebrtcAnswerResultAuthority,
-        binding: crate::live_execution::LiveDelegationRuntimeBinding,
-    ) -> Self {
-        Self {
-            rollback: LiveWebrtcAnswerExecutionRollbackAuthority {
-                binding: binding.clone(),
-            },
-            answer,
-            binding,
-            activation: None,
-        }
-    }
-
     pub(crate) fn new_active(
         answer: LiveWebrtcAnswerResultAuthority,
         binding: crate::live_execution::LiveDelegationRuntimeBinding,

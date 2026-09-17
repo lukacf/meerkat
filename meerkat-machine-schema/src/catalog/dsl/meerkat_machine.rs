@@ -5617,6 +5617,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observation: Enum<LiveDelegationResultDeliveryObservation>,
             },
             BindLiveDelegationResultRecoveryChannel {
+                activation_receipt: String,
                 session_id: String,
                 closing_channel_id: String,
                 replacement_channel_id: String,
@@ -5810,6 +5811,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 observation: Enum<LiveContextAppendObservation>,
             },
             BindLiveContextRecoveryChannel {
+                activation_receipt: String,
                 session_id: String,
                 closing_channel_id: String,
                 replacement_channel_id: String,
@@ -6985,6 +6987,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 generation: Generation,
             },
             LiveDelegationResultRecoveryChannelBound {
+                activation_receipt: String,
                 session_id: String,
                 closing_channel_id: String,
                 replacement_channel_id: String,
@@ -7172,6 +7175,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 generation: Generation,
             },
             LiveContextRecoveryChannelBound {
+                activation_receipt: String,
                 session_id: String,
                 closing_channel_id: String,
                 replacement_channel_id: String,
@@ -25401,7 +25405,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input BindLiveDelegationResultRecoveryChannel {
                 session_id, closing_channel_id, replacement_channel_id,
                 answer_observation_sequence, runtime_id, fence_token,
-                generation, operation_id, result_digest, canonical_seed_cursor
+                generation, operation_id, result_digest, canonical_seed_cursor, activation_receipt
             }
             guard "answer_observation_sequence_present" { answer_observation_sequence > 0 }
             guard "recovery_not_cancelled" { !self.live_cancelled_recovery_channels.contains(replacement_channel_id) }
@@ -25441,6 +25445,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && !self.live_context_cursor_by_channel.contains_key(replacement_channel_id)
             }
             guard "replacement_experimental_stage_matches" {
+                activation_receipt != ""
+                && self.live_execution_phase_by_channel.get_copied(replacement_channel_id) == Some(LiveExecutionChannelPhase::Pending)
+                && self.live_playback_owner_by_channel.contains_key(replacement_channel_id)
+                && self.live_playback_readiness_by_channel.contains_key(replacement_channel_id)
+                && !self.live_activation_receipt_by_channel.contains_key(replacement_channel_id)
+                && !self.live_revoked_execution_channels.contains(replacement_channel_id)
+                &&
                 self.live_experimental_staged_runtime_by_channel.get_cloned(replacement_channel_id)
                     == Some(runtime_id)
                 && self.live_experimental_staged_fence_by_channel.get_copied(replacement_channel_id)
@@ -25467,11 +25478,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                     replacement_channel_id,
                     LiveExecutionChannelPhase::Active
                 );
+                self.live_activation_receipt_by_channel.insert(replacement_channel_id, activation_receipt);
                 self.live_experimental_staged_runtime_by_channel.remove(replacement_channel_id);
                 self.live_experimental_staged_fence_by_channel.remove(replacement_channel_id);
                 self.live_experimental_staged_generation_by_channel.remove(replacement_channel_id);
                 self.live_experimental_staged_seed_cursor_by_channel.remove(replacement_channel_id);
-                self.live_experimental_pending_receipt_by_channel.remove(replacement_channel_id);
                 self.live_result_recovery_replacement_by_channel.remove(closing_channel_id);
                 self.live_result_recovery_source_by_replacement.remove(replacement_channel_id);
                 self.live_result_recovery_session_by_channel.remove(closing_channel_id);
@@ -25485,6 +25496,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit LiveDelegationResultRecoveryChannelBound {
+                activation_receipt: activation_receipt,
                 session_id: session_id,
                 closing_channel_id: closing_channel_id,
                 replacement_channel_id: replacement_channel_id,
@@ -27177,7 +27189,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 session_id, closing_channel_id, replacement_channel_id,
                 answer_observation_sequence, runtime_id, fence_token,
                 generation, append_id,
-                canonical_seed_cursor
+                canonical_seed_cursor, activation_receipt
             }
             guard "answer_observation_sequence_present" { answer_observation_sequence > 0 }
             guard "recovery_not_cancelled" { !self.live_cancelled_recovery_channels.contains(replacement_channel_id) }
@@ -27215,6 +27227,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && !self.live_context_cursor_by_channel.contains_key(replacement_channel_id)
             }
             guard "replacement_experimental_stage_matches" {
+                activation_receipt != ""
+                && self.live_execution_phase_by_channel.get_copied(replacement_channel_id) == Some(LiveExecutionChannelPhase::Pending)
+                && self.live_playback_owner_by_channel.contains_key(replacement_channel_id)
+                && self.live_playback_readiness_by_channel.contains_key(replacement_channel_id)
+                && !self.live_activation_receipt_by_channel.contains_key(replacement_channel_id)
+                && !self.live_revoked_execution_channels.contains(replacement_channel_id)
+                &&
                 self.live_experimental_staged_runtime_by_channel.get_cloned(replacement_channel_id)
                     == Some(runtime_id)
                 && self.live_experimental_staged_fence_by_channel.get_copied(replacement_channel_id)
@@ -27247,11 +27266,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                     replacement_channel_id,
                     LiveExecutionChannelPhase::Active
                 );
+                self.live_activation_receipt_by_channel.insert(replacement_channel_id, activation_receipt);
                 self.live_experimental_staged_runtime_by_channel.remove(replacement_channel_id);
                 self.live_experimental_staged_fence_by_channel.remove(replacement_channel_id);
                 self.live_experimental_staged_generation_by_channel.remove(replacement_channel_id);
                 self.live_experimental_staged_seed_cursor_by_channel.remove(replacement_channel_id);
-                self.live_experimental_pending_receipt_by_channel.remove(replacement_channel_id);
                 self.live_context_recovery_replacement_by_channel.remove(closing_channel_id);
                 self.live_context_recovery_source_by_replacement.remove(replacement_channel_id);
                 self.live_context_recovery_session_by_channel.remove(closing_channel_id);
@@ -27264,6 +27283,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit LiveContextRecoveryChannelBound {
+                activation_receipt: activation_receipt,
                 session_id: session_id,
                 closing_channel_id: closing_channel_id,
                 replacement_channel_id: replacement_channel_id,

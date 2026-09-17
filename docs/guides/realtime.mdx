@@ -829,6 +829,16 @@ new readers verify both schemas 1 and 2, while older readers reject schema 2.
 This domain provenance is used with the store witness and generated channel
 binding, not as a standalone transport authorization token.
 
+Both channel-addressed RPC close and exact-receipt host close revoke generated
+append and recovery custody before physical retirement. A delayed committed
+source read therefore cannot turn an explicit close into a fresh replacement
+channel. Context and result recovery use separate sealed close paths that
+preserve their own replacement authority; they are not ordinary explicit closes.
+Both recovery activations require playback-owner readiness, retain the original
+pending receipt, and mint a fresh activation receipt in the generated answer
+commit. An activated replacement remains exactly closeable. Revoked or closed
+replacements cannot be published by a late registration callback.
+
 Provider ingress routes append receipts before the control consumer, so a
 control task committing its final user transcript cannot wait on its own
 receive loop. Duplicate high-volume transcript notifications stay on the

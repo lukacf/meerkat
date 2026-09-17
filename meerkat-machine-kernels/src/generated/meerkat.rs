@@ -14642,6 +14642,7 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BindLiveDelegationResultRecoveryChannel {
+        pub activation_receipt: String,
         pub session_id: String,
         pub closing_channel_id: String,
         pub replacement_channel_id: String,
@@ -14859,6 +14860,7 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BindLiveContextRecoveryChannel {
+        pub activation_receipt: String,
         pub session_id: String,
         pub closing_channel_id: String,
         pub replacement_channel_id: String,
@@ -17680,6 +17682,7 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveDelegationResultRecoveryChannelBound {
+        pub activation_receipt: String,
         pub session_id: String,
         pub closing_channel_id: String,
         pub replacement_channel_id: String,
@@ -17892,6 +17895,7 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveContextRecoveryChannelBound {
+        pub activation_receipt: String,
         pub session_id: String,
         pub closing_channel_id: String,
         pub replacement_channel_id: String,

@@ -1449,9 +1449,44 @@ fn confirmed_delegation_mints_distinct_effect_and_deferred_result_authorities() 
         },
     )
     .expect("result-recovery replacement stages the exact carried seed");
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::BindLiveDelegationResultRecoveryChannel {
+                activation_receipt: "unready-result-activation".to_string(),
+                session_id: SESSION.to_string(),
+                closing_channel_id: CHANNEL.to_string(),
+                replacement_channel_id: "channel-result-recovery".to_string(),
+                answer_observation_sequence: 12,
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                operation_id: operation_id(),
+                result_digest: "bounded-result-digest".to_string(),
+                canonical_seed_cursor: 0,
+            }
+        )
+        .is_err(),
+        "result recovery cannot activate before playback readiness"
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RegisterLivePlaybackOwner {
+            session_id: SESSION.to_string(),
+            channel_id: "channel-result-recovery".to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            owner_id: "result-recovery-owner".to_string(),
+            readiness_id: "result-recovery-readiness".to_string(),
+            pending_receipt: "result-recovery-pending".to_string(),
+        },
+    )
+    .expect("result replacement playback readiness");
     let rebound = apply(
         &mut authority,
         mm::MeerkatMachineInput::BindLiveDelegationResultRecoveryChannel {
+            activation_receipt: "result-recovery-activation".to_string(),
             session_id: SESSION.to_string(),
             closing_channel_id: CHANNEL.to_string(),
             replacement_channel_id: "channel-result-recovery".to_string(),
@@ -1474,6 +1509,32 @@ fn confirmed_delegation_mints_distinct_effect_and_deferred_result_authorities() 
             ..
         } if replacement_channel_id == "channel-result-recovery"
     )));
+    assert_eq!(
+        authority
+            .state()
+            .live_experimental_pending_receipt_by_channel
+            .get("channel-result-recovery")
+            .map(String::as_str),
+        Some("result-recovery-pending")
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_activation_receipt_by_channel
+            .get("channel-result-recovery")
+            .map(String::as_str),
+        Some("result-recovery-activation")
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RevokeLiveChannelCloseCustody {
+            session_id: SESSION.to_string(),
+            channel_id: "channel-result-recovery".to_string(),
+            pending_receipt: Some("result-recovery-pending".to_string()),
+            activation_receipt: None,
+        },
+    )
+    .expect("original pending receipt still revokes an activated result replacement");
 }
 
 #[test]
@@ -2177,10 +2238,44 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
         },
     )
     .expect("exact recovery replacement is staged before provider answer");
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::BindLiveContextRecoveryChannel {
+                activation_receipt: "unready-context-activation".to_string(),
+                session_id: SESSION.to_string(),
+                closing_channel_id: CHANNEL.to_string(),
+                replacement_channel_id: REPLACEMENT.to_string(),
+                answer_observation_sequence: 9,
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                append_id: "context-recovery-atomic".to_string(),
+                canonical_seed_cursor: 1,
+            }
+        )
+        .is_err(),
+        "context recovery cannot activate before playback readiness"
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RegisterLivePlaybackOwner {
+            session_id: SESSION.to_string(),
+            channel_id: REPLACEMENT.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            owner_id: "context-recovery-owner".to_string(),
+            readiness_id: "context-recovery-readiness".to_string(),
+            pending_receipt: "context-recovery-pending".to_string(),
+        },
+    )
+    .expect("context replacement playback readiness");
 
     let transition = apply(
         &mut authority,
         mm::MeerkatMachineInput::BindLiveContextRecoveryChannel {
+            activation_receipt: "context-recovery-activation".to_string(),
             session_id: SESSION.to_string(),
             closing_channel_id: CHANNEL.to_string(),
             replacement_channel_id: REPLACEMENT.to_string(),
@@ -2219,6 +2314,32 @@ fn ambiguity_recovery_answer_and_seed_binding_commit_atomically() {
             .get(REPLACEMENT),
         Some(&mm::LiveWebrtcAnswerPublicStatus::Answered)
     );
+    assert_eq!(
+        authority
+            .state()
+            .live_experimental_pending_receipt_by_channel
+            .get(REPLACEMENT)
+            .map(String::as_str),
+        Some("context-recovery-pending")
+    );
+    assert_eq!(
+        authority
+            .state()
+            .live_activation_receipt_by_channel
+            .get(REPLACEMENT)
+            .map(String::as_str),
+        Some("context-recovery-activation")
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RevokeLiveChannelCloseCustody {
+            session_id: SESSION.to_string(),
+            channel_id: REPLACEMENT.to_string(),
+            pending_receipt: Some("context-recovery-pending".to_string()),
+            activation_receipt: None,
+        },
+    )
+    .expect("original pending receipt still revokes an activated context replacement");
 }
 
 #[test]

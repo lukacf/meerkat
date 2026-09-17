@@ -6752,6 +6752,7 @@ mod tests {
         snapshot_cuts: bool,
         playback_policy: PublicGptLivePlaybackPolicy,
         recovery_registration_barrier: Mutex<Option<Arc<RecoveryRegistrationBarrier>>>,
+        physical_close_barrier: Mutex<Option<Arc<RecoveryRegistrationBarrier>>>,
         execution_profile: meerkat_runtime::live_execution::LiveExecutionProfileSelection,
         pending_context_recovery: Arc<
             Mutex<
@@ -6783,6 +6784,7 @@ mod tests {
                 snapshot_cuts: false,
                 playback_policy: PublicGptLivePlaybackPolicy::default(),
                 recovery_registration_barrier: Mutex::new(None),
+                physical_close_barrier: Mutex::new(None),
                 execution_profile:
                     meerkat_runtime::live_execution::LiveExecutionProfileSelection::__test_new(
                         crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID,
@@ -6882,10 +6884,17 @@ mod tests {
             channel_id: &meerkat_live::LiveChannelId,
             canonical_session_id: &meerkat_core::SessionId,
         ) -> Result<ExperimentalLivePhysicalClose, ExperimentalLiveOpenAuthorityError> {
-            self.transport
+            let physical = self
+                .transport
                 .close_physical_if_bound(channel_id, canonical_session_id)
                 .await
-                .map_err(|_| ExperimentalLiveOpenAuthorityError::ChannelBindingFailed)
+                .map_err(|_| ExperimentalLiveOpenAuthorityError::ChannelBindingFailed)?;
+            let barrier = self.physical_close_barrier.lock().await.take();
+            if let Some(barrier) = barrier {
+                barrier.entered.notify_one();
+                barrier.release.notified().await;
+            }
+            Ok(physical)
         }
 
         async fn register_context_recovery_for_answer(
@@ -9747,6 +9756,396 @@ mod tests {
         feature = "test-realtime-fixtures",
         not(target_arch = "wasm32")
     ))]
+    use meerkat_runtime::live_context_mirror::LiveContextMirrorHost;
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    struct DelayedSourceMirror {
+        inner: Arc<crate::surface::ExperimentalGptLiveContextMirrorHost>,
+        first_read: Mutex<Option<Arc<RecoveryRegistrationBarrier>>>,
+        recoveries: AtomicUsize,
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    #[async_trait]
+    impl LiveContextMirrorHost for DelayedSourceMirror {
+        async fn committed_boundary(
+            &self,
+            session: &meerkat_core::SessionId,
+        ) -> Result<
+            (
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+                String,
+            ),
+            String,
+        > {
+            let barrier = self.first_read.lock().await.take();
+            if let Some(barrier) = barrier {
+                barrier.entered.notify_one();
+                barrier.release.notified().await;
+            }
+            self.inner.committed_boundary(session).await
+        }
+
+        async fn append_context(
+            &self,
+            authority: meerkat_runtime::live_execution::LiveContextAppendAuthority,
+            context: String,
+        ) -> Result<
+            (
+                meerkat_runtime::live_execution::LiveContextAppendAuthority,
+                meerkat_core::LiveAppendDeliveryOutcome,
+            ),
+            String,
+        > {
+            self.inner.append_context(authority, context).await
+        }
+
+        async fn recover_ambiguous_append(
+            &self,
+            authority: meerkat_runtime::live_execution::LiveContextAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            self.recoveries.fetch_add(1, Ordering::SeqCst);
+            self.inner.recover_ambiguous_append(authority).await
+        }
+
+        async fn recover_ambiguous_delegation_result(
+            &self,
+            authority: meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            self.recoveries.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .recover_ambiguous_delegation_result(authority)
+                .await
+        }
+
+        async fn retire_closed_channel(
+            &self,
+            session: &meerkat_core::SessionId,
+            authority: &meerkat_live::LiveChannelCloseCommitAuthority,
+        ) {
+            self.inner.retire_closed_channel(session, authority).await;
+        }
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    async fn assert_channel_close_fences_delayed_canonical_read(
+        service: &Arc<crate::PersistentSessionService<crate::FactoryAgentBuilder>>,
+        runtime: &Arc<meerkat_runtime::MeerkatMachine>,
+        member_host: &Arc<crate::surface::ServiceMemberLiveHost>,
+        authority: &Arc<ScriptedStrictOpenAuthority>,
+        mirror_host: &Arc<crate::surface::ExperimentalGptLiveContextMirrorHost>,
+        session_id: &meerkat_core::SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) {
+        let prepares_before_close = authority.prepare_sequence.load(Ordering::SeqCst);
+        assert!(
+            mirror_host
+                .pending_replacement_required(session_id)
+                .await
+                .is_none(),
+            "race starts only after exact replacement activation"
+        );
+        service
+            .append_external_user_content(
+                session_id,
+                meerkat_core::ContentInput::Text("delayed ordinary background fact".to_string()),
+            )
+            .await
+            .expect("commit real background context");
+        let committed_before_close = service
+            .export_realtime_refresh_session_snapshot(session_id)
+            .await
+            .expect("retain exact canonical source before close");
+        let source_gate = Arc::new(RecoveryRegistrationBarrier::default());
+        let physical_gate = Arc::new(RecoveryRegistrationBarrier::default());
+        let delayed = Arc::new(DelayedSourceMirror {
+            inner: Arc::clone(mirror_host),
+            first_read: Mutex::new(Some(Arc::clone(&source_gate))),
+            recoveries: AtomicUsize::new(0),
+        });
+        runtime.set_live_context_mirror_host(delayed.clone());
+        runtime.notify_committed_live_context(session_id);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            source_gate.entered.notified(),
+        )
+        .await
+        .expect("canonical source read is held");
+        *authority.physical_close_barrier.lock().await = Some(Arc::clone(&physical_gate));
+        let closing_host = Arc::clone(member_host);
+        let closing_authority = Arc::clone(authority);
+        let closing_channel = channel_id.clone();
+        let closing = tokio::spawn(async move {
+            // Ordinary RPC uses channel-addressed close, not a receipt wrapper.
+            closing_host
+                .close_live_channel(Some(closing_authority.as_ref()), &closing_channel)
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            physical_gate.entered.notified(),
+        )
+        .await
+        .expect("physical close must not join an unrelated source read");
+        assert!(
+            authority
+                .transport
+                .active_binding(session_id)
+                .await
+                .is_none(),
+            "barrier is after actual provider retirement, not a fabricated close observation"
+        );
+        source_gate.release.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            runtime.drain_live_context_outbox(session_id),
+        )
+        .await
+        .expect("late committed read settles without replacement")
+        .expect("revoked context remains canonical without sending");
+        physical_gate.release.notify_one();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), closing)
+                .await
+                .expect("channel close finishes")
+                .expect("close task")
+                .expect("channel close"),
+            meerkat_contracts::LiveCloseStatus::Closed,
+        );
+        assert_eq!(
+            delayed.recoveries.load(Ordering::SeqCst),
+            0,
+            "explicit close must never mint a new context or result recovery"
+        );
+        assert_eq!(
+            authority.prepare_sequence.load(Ordering::SeqCst),
+            prepares_before_close,
+            "successful explicit close must not leave a fresh bootstrap"
+        );
+        assert!(
+            runtime
+                .live_active_channel_for_session(session_id)
+                .await
+                .is_none()
+        );
+        assert!(
+            mirror_host
+                .pending_replacement_required(session_id)
+                .await
+                .is_none()
+        );
+        assert!(authority.pending_context_recovery.lock().await.is_empty());
+        assert!(authority.pending_result_recovery.lock().await.is_empty());
+        assert!(
+            authority
+                .transport
+                .active_binding(session_id)
+                .await
+                .is_none()
+        );
+        assert!(
+            authority
+                .transport
+                .registered_by_channel
+                .lock()
+                .await
+                .is_empty()
+        );
+        let committed_after_close = service
+            .export_realtime_refresh_session_snapshot(session_id)
+            .await
+            .expect("closed voice channel leaves source session readable");
+        assert_eq!(committed_after_close.id(), session_id);
+        assert_eq!(
+            committed_after_close.messages(),
+            committed_before_close.messages()
+        );
+        runtime.set_live_context_mirror_host(mirror_host.clone());
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    async fn assert_activated_replacement_custody(
+        member_host: &crate::surface::ServiceMemberLiveHost,
+        authority: &ScriptedStrictOpenAuthority,
+        channel_id: &meerkat_live::LiveChannelId,
+        pending_receipt: &str,
+        old_pending_receipt: &str,
+        old_activation_receipt: &str,
+    ) -> String {
+        let custody = member_host
+            .validate_experimental_live_channel_custody(channel_id, pending_receipt)
+            .await
+            .expect("activated replacement retains its original pending receipt");
+        let activation_receipt = custody
+            .phase()
+            .activation_receipt()
+            .expect("real replacement answer mints active custody")
+            .to_string();
+        assert_ne!(activation_receipt, old_activation_receipt);
+        assert!(
+            member_host
+                .validate_experimental_live_channel_custody_by_activation(
+                    channel_id,
+                    &activation_receipt,
+                )
+                .await
+                .expect("replacement activation receipt validates")
+                .phase()
+                .activation_receipt()
+                .is_some()
+        );
+        assert!(
+            member_host
+                .close_experimental_live_pending_channel(
+                    authority,
+                    channel_id,
+                    old_pending_receipt,
+                )
+                .await
+                .is_err(),
+            "predecessor pending receipt cannot close the activated replacement"
+        );
+        assert!(
+            member_host
+                .close_experimental_live_active_channel(
+                    authority,
+                    channel_id,
+                    old_activation_receipt,
+                )
+                .await
+                .is_err(),
+            "predecessor activation receipt cannot close the activated replacement"
+        );
+        let still_active = member_host
+            .validate_experimental_live_channel_custody_by_activation(
+                channel_id,
+                &activation_receipt,
+            )
+            .await
+            .expect("rejected predecessor receipts leave replacement active");
+        assert_eq!(
+            still_active.phase().activation_receipt(),
+            Some(activation_receipt.as_str()),
+        );
+        activation_receipt
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    struct PublicRecoveryReturnProbe {
+        inner: Arc<crate::surface::ExperimentalGptLiveContextMirrorHost>,
+        member_host: Arc<crate::surface::ServiceMemberLiveHost>,
+        authority: Arc<ScriptedStrictOpenAuthority>,
+        replacement: Mutex<Option<meerkat_live::LiveChannelId>>,
+        returned: Mutex<
+            Option<
+                Result<
+                    crate::surface::ExperimentalLiveReplacementRequired,
+                    crate::surface::ExperimentalLiveContextRecoveryError,
+                >,
+            >,
+        >,
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[async_trait]
+    impl LiveContextMirrorHost for PublicRecoveryReturnProbe {
+        async fn committed_boundary(
+            &self,
+            session: &meerkat_core::SessionId,
+        ) -> Result<
+            (
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit,
+                String,
+            ),
+            String,
+        > {
+            self.inner.committed_boundary(session).await
+        }
+
+        async fn append_context(
+            &self,
+            authority: meerkat_runtime::live_execution::LiveContextAppendAuthority,
+            context: String,
+        ) -> Result<
+            (
+                meerkat_runtime::live_execution::LiveContextAppendAuthority,
+                meerkat_core::LiveAppendDeliveryOutcome,
+            ),
+            String,
+        > {
+            self.inner.append_context(authority, context).await
+        }
+
+        async fn recover_ambiguous_append(
+            &self,
+            recovery: meerkat_runtime::live_execution::LiveContextAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            *self.replacement.lock().await = Some(recovery.replacement_channel_id().clone());
+            // Observe the public owner's return before publish_replacement can
+            // mask an erroneous successful bootstrap with its separate guard.
+            let returned = self
+                .member_host
+                .open_live_context_replacement(self.authority.as_ref(), recovery)
+                .await;
+            let error = match &returned {
+                Ok(_) => "public recovery wrongly returned a revoked bootstrap".to_string(),
+                Err(error) => error.to_string(),
+            };
+            *self.returned.lock().await = Some(returned);
+            Err(error)
+        }
+
+        async fn recover_ambiguous_delegation_result(
+            &self,
+            recovery: meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
+        ) -> Result<(), String> {
+            self.inner
+                .recover_ambiguous_delegation_result(recovery)
+                .await
+        }
+
+        async fn retire_closed_channel(
+            &self,
+            session: &meerkat_core::SessionId,
+            authority: &meerkat_live::LiveChannelCloseCommitAuthority,
+        ) {
+            self.inner.retire_closed_channel(session, authority).await;
+        }
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
     #[tokio::test]
     async fn shipping_close_matrix_preserves_history_or_retains_failed_custody() {
         use meerkat_contracts::{LiveOpenTransport, WireLiveTransportBootstrap};
@@ -9754,6 +10153,7 @@ mod tests {
 
         #[derive(Clone, Copy)]
         enum ExitKind {
+            ChannelAddressedCloseWithDelayedContext,
             ContextReceiptWhileControlBusy,
             ContextAppendPendingClose,
             ContextRecoveryFailureThenClose,
@@ -9782,6 +10182,7 @@ mod tests {
         }
 
         for (ordinal, exit) in [
+            ExitKind::ChannelAddressedCloseWithDelayedContext,
             ExitKind::ContextReceiptWhileControlBusy,
             ExitKind::ContextAppendPendingClose,
             ExitKind::ContextRecoveryFailureThenClose,
@@ -10061,6 +10462,19 @@ mod tests {
                 .as_ref()
                 .cloned()
                 .expect("pump-exit adapter is retained");
+            if matches!(exit, ExitKind::ChannelAddressedCloseWithDelayedContext) {
+                assert_channel_close_fences_delayed_canonical_read(
+                    &service,
+                    &runtime,
+                    &member_host,
+                    &authority,
+                    &mirror_host,
+                    &session_id,
+                    &channel_id,
+                )
+                .await;
+                continue;
+            }
             if matches!(
                 exit,
                 ExitKind::ContextReceiptWhileControlBusy
@@ -11286,6 +11700,7 @@ mod tests {
             };
             let provider_loss_started = std::time::Instant::now();
             match exit {
+                ExitKind::ChannelAddressedCloseWithDelayedContext => unreachable!(),
                 ExitKind::ContextReceiptWhileControlBusy | ExitKind::ContextAppendPendingClose => {
                     unreachable!()
                 }
@@ -11959,10 +12374,107 @@ mod tests {
         feature = "memory-store",
         feature = "test-realtime-fixtures"
     ))]
+    #[tokio::test]
+    async fn raw_close_before_recovery_registration_retires_late_provider_custody() {
+        run_context_and_result_recovery_close_case(
+            Some(SummaryTestCase::BlockRegistration),
+            false,
+            false,
+            Some(RecoveryCloseCase::RawDuringRegistration),
+        )
+        .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn cancelled_raw_close_refuses_public_recovery_return_before_semantic_close() {
+        run_context_and_result_recovery_close_case(
+            Some(SummaryTestCase::BlockRegistration),
+            false,
+            false,
+            Some(RecoveryCloseCase::CancelledRawDuringRegistration),
+        )
+        .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn activated_context_replacement_raw_close_fences_delayed_source_read() {
+        run_context_and_result_recovery_close_case(
+            None,
+            false,
+            false,
+            Some(RecoveryCloseCase::ActivatedContext),
+        )
+        .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[tokio::test]
+    async fn activated_result_replacement_raw_close_fences_delayed_source_read() {
+        run_context_and_result_recovery_close_case(
+            None,
+            false,
+            false,
+            Some(RecoveryCloseCase::ActivatedResult),
+        )
+        .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    #[derive(Clone, Copy)]
+    enum RecoveryCloseCase {
+        ActivatedContext,
+        ActivatedResult,
+        RawDuringRegistration,
+        CancelledRawDuringRegistration,
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
     async fn run_context_and_result_recovery_case(
         summary_case: Option<SummaryTestCase>,
         retain_voice: bool,
         close_pending_replacement: bool,
+    ) {
+        run_context_and_result_recovery_close_case(
+            summary_case,
+            retain_voice,
+            close_pending_replacement,
+            None,
+        )
+        .await;
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures"
+    ))]
+    async fn run_context_and_result_recovery_close_case(
+        summary_case: Option<SummaryTestCase>,
+        retain_voice: bool,
+        close_pending_replacement: bool,
+        close_case: Option<RecoveryCloseCase>,
     ) {
         use meerkat_contracts::{LiveOpenTransport, WireLiveTransportBootstrap};
         use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
@@ -12299,6 +12811,11 @@ mod tests {
             custody.phase(),
             crate::surface::ExperimentalLiveChannelPhaseStatus::Active { .. }
         ));
+        let initial_activation_receipt = custody
+            .phase()
+            .activation_receipt()
+            .expect("initial real answer has active custody")
+            .to_string();
         let summary_calls = summary_producer
             .as_ref()
             .map(|producer| producer.calls.load(AtomicOrdering::SeqCst));
@@ -12454,6 +12971,22 @@ mod tests {
             Some(SummaryTestCase::BlockRecovery | SummaryTestCase::BlockRegistration)
         ) {
             let producer = summary_producer.as_ref().unwrap();
+            let public_probe = matches!(
+                close_case,
+                Some(RecoveryCloseCase::CancelledRawDuringRegistration)
+            )
+            .then(|| {
+                Arc::new(PublicRecoveryReturnProbe {
+                    inner: Arc::clone(&mirror_host),
+                    member_host: Arc::clone(&member_host),
+                    authority: Arc::clone(&authority),
+                    replacement: Mutex::new(None),
+                    returned: Mutex::new(None),
+                })
+            });
+            if let Some(probe) = &public_probe {
+                runtime.set_live_context_mirror_host(probe.clone());
+            }
             service
                 .append_external_user_content(
                     &session_id,
@@ -12504,10 +13037,77 @@ mod tests {
                     .is_none()
             );
             let origin = (old_channel.clone(), opened.pending_receipt().to_string());
-            member_host
-                .close_experimental_live_pending_channel(authority.as_ref(), &origin.0, &origin.1)
+            let prepares_before_close = authority.prepare_sequence.load(AtomicOrdering::SeqCst);
+            if let Some(probe) = &public_probe {
+                let replacement = probe
+                    .replacement
+                    .lock()
+                    .await
+                    .clone()
+                    .expect("real generated recovery names its descendant");
+                assert!(
+                    authority
+                        .transport
+                        .registered_by_channel
+                        .lock()
+                        .await
+                        .is_empty(),
+                    "blocked registration has no physical binding to close"
+                );
+                let physical_gate = Arc::new(RecoveryRegistrationBarrier::default());
+                *authority.physical_close_barrier.lock().await = Some(Arc::clone(&physical_gate));
+                let closing_host = Arc::clone(&member_host);
+                let closing_authority = Arc::clone(&authority);
+                let closing_origin = origin.0.clone();
+                let closing = tokio::spawn(async move {
+                    closing_host
+                        .close_live_channel(Some(closing_authority.as_ref()), &closing_origin)
+                        .await
+                });
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    physical_gate.entered.notified(),
+                )
                 .await
-                .expect("explicit exact close cancels recovery despite already-closed origin");
+                .expect("raw close pauses after physical NotBound, before semantic close");
+                closing.abort();
+                assert!(
+                    closing
+                        .await
+                        .expect_err("close observer was cancelled")
+                        .is_cancelled(),
+                    "cancellation must not be reported as a successful close"
+                );
+                assert_eq!(
+                    runtime
+                        .live_execution_channel_phase(&session_id, &replacement)
+                        .await
+                        .unwrap(),
+                    Some(meerkat_core::LiveExecutionChannelPhase::Revoked),
+                );
+                assert_eq!(
+                    runtime.live_session_for_active_channel(&replacement).await,
+                    Some(session_id.clone()),
+                    "cancelled observer leaves revoked pending custody, not Closed"
+                );
+            } else if matches!(close_case, Some(RecoveryCloseCase::RawDuringRegistration)) {
+                assert_eq!(
+                    member_host
+                        .close_live_channel(Some(authority.as_ref()), &origin.0)
+                        .await
+                        .expect("raw origin close revokes its unregistered recovery descendant"),
+                    meerkat_contracts::LiveCloseStatus::Closed,
+                );
+            } else {
+                member_host
+                    .close_experimental_live_pending_channel(
+                        authority.as_ref(),
+                        &origin.0,
+                        &origin.1,
+                    )
+                    .await
+                    .expect("explicit exact close cancels recovery despite already-closed origin");
+            }
             if matches!(summary_case, Some(SummaryTestCase::BlockRegistration)) {
                 registration_barrier.release.notify_one();
             } else {
@@ -12517,6 +13117,57 @@ mod tests {
                 recovery_task.await.expect("join blocked recovery").is_err(),
                 "late preparation is refused even while no fresh channel occupies the source"
             );
+            if let Some(probe) = &public_probe {
+                let returned = probe
+                    .returned
+                    .lock()
+                    .await
+                    .take()
+                    .expect("public recovery returned");
+                assert!(
+                    matches!(
+                        returned,
+                        Err(crate::surface::ExperimentalLiveContextRecoveryError::ClosedBeforePublication)
+                    ),
+                    "public return must reject Revoked before publication, got {returned:?}"
+                );
+                let replacement = probe.replacement.lock().await.clone().unwrap();
+                assert_eq!(
+                    runtime
+                        .live_execution_channel_phase(&session_id, &replacement)
+                        .await
+                        .unwrap(),
+                    Some(meerkat_core::LiveExecutionChannelPhase::Revoked),
+                    "failed public return unbinds mechanics without fabricating semantic close"
+                );
+                assert!(
+                    authority
+                        .transport
+                        .registered_by_channel
+                        .lock()
+                        .await
+                        .is_empty()
+                );
+                assert!(authority.pending_context_recovery.lock().await.is_empty());
+                assert!(
+                    mirror_host
+                        .pending_replacement_required(&session_id)
+                        .await
+                        .is_none()
+                );
+                assert_eq!(
+                    member_host
+                        .close_experimental_live_pending_channel(
+                            authority.as_ref(),
+                            &origin.0,
+                            &origin.1,
+                        )
+                        .await
+                        .expect("exact retry finishes the revoked descendant"),
+                    meerkat_contracts::LiveCloseStatus::Closed,
+                );
+                runtime.set_live_context_mirror_host(mirror_host.clone());
+            }
             assert!(
                 mirror_host
                     .pending_replacement_required(&session_id)
@@ -12538,6 +13189,12 @@ mod tests {
                     .is_empty()
             );
             assert!(authority.pending_context_recovery.lock().await.is_empty());
+            assert!(authority.pending_result_recovery.lock().await.is_empty());
+            assert_eq!(
+                authority.prepare_sequence.load(AtomicOrdering::SeqCst),
+                prepares_before_close,
+                "late provider registration cannot mint another bootstrap after explicit close"
+            );
             let fresh = member_host
                 .open_with_execution_identity(
                     authority.as_ref(),
@@ -12852,6 +13509,28 @@ mod tests {
             );
         }
         assert!(authority.pending_context_recovery.lock().await.is_empty());
+        let context_activation_receipt = assert_activated_replacement_custody(
+            member_host.as_ref(),
+            authority.as_ref(),
+            &replacement_channel,
+            &replacement_pending_receipt,
+            opened.pending_receipt(),
+            &initial_activation_receipt,
+        )
+        .await;
+        if matches!(close_case, Some(RecoveryCloseCase::ActivatedContext)) {
+            assert_channel_close_fences_delayed_canonical_read(
+                &service,
+                &runtime,
+                &member_host,
+                &authority,
+                &mirror_host,
+                &session_id,
+                &replacement_channel,
+            )
+            .await;
+            return;
+        }
 
         // Exercise the distinct result-delivery ambiguity authority through
         // the same physical replacement choreography without manufacturing a
@@ -13154,6 +13833,28 @@ mod tests {
             3 + extra_opens
         );
         assert!(authority.pending_result_recovery.lock().await.is_empty());
+        assert_activated_replacement_custody(
+            member_host.as_ref(),
+            authority.as_ref(),
+            &result_replacement_channel,
+            &result_pending_receipt,
+            &replacement_pending_receipt,
+            &context_activation_receipt,
+        )
+        .await;
+        if matches!(close_case, Some(RecoveryCloseCase::ActivatedResult)) {
+            assert_channel_close_fences_delayed_canonical_read(
+                &service,
+                &runtime,
+                &member_host,
+                &authority,
+                &mirror_host,
+                &session_id,
+                &result_replacement_channel,
+            )
+            .await;
+            return;
+        }
 
         member_host
             .close_live_channel(Some(authority.as_ref()), &result_replacement_channel)

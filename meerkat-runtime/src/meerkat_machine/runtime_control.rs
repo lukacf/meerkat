@@ -4498,6 +4498,49 @@ impl MeerkatMachine {
         let _mutation_guard = self
             .lock_current_durability_ready_session_mutation_gate(session_id)
             .await?;
+        self.revoke_live_channel_close_custody_under_guard(session_id, channel_id, receipt)
+            .await
+    }
+
+    /// Reacquire the original machine-owned receipt for a channel-addressed
+    /// host close. Ordinary channels have no experimental custody to revoke.
+    #[cfg(feature = "live")]
+    pub async fn revoke_bound_live_channel_close_custody(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Result<Option<LiveChannelCloseCustodyAuthority>, RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        let Some(receipt) = state
+            .live_experimental_pending_receipt_by_channel
+            .get(channel_id.as_str())
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        self.revoke_live_channel_close_custody_under_guard(
+            session_id,
+            channel_id,
+            &LiveChannelCloseReceipt::Pending(receipt),
+        )
+        .await
+        .map(Some)
+    }
+
+    #[cfg(feature = "live")]
+    async fn revoke_live_channel_close_custody_under_guard(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+        receipt: &LiveChannelCloseReceipt,
+    ) -> Result<LiveChannelCloseCustodyAuthority, RuntimeDriverError> {
         let (pending_receipt, activation_receipt) = match receipt {
             LiveChannelCloseReceipt::Pending(value) => (Some(value.clone()), None),
             LiveChannelCloseReceipt::Activation(value) => (None, Some(value.clone())),
@@ -9322,10 +9365,12 @@ impl MeerkatMachine {
                     .to_string(),
             });
         }
+        let activation_receipt = uuid::Uuid::new_v4().to_string();
         let (_, effects) = self
             .apply_session_dsl_input(
                 recovery.session_id(),
                 crate::meerkat_machine::dsl::MeerkatMachineInput::BindLiveContextRecoveryChannel {
+                    activation_receipt: activation_receipt.clone(),
                     session_id: recovery.session_id().to_string(),
                     closing_channel_id: recovery.closing_channel_id().to_string(),
                     replacement_channel_id: recovery.replacement_channel_id().to_string(),
@@ -9348,6 +9393,7 @@ impl MeerkatMachine {
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         for effect in effects.as_slice() {
             let crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveContextRecoveryChannelBound {
+                activation_receipt: effect_activation,
                 session_id,
                 closing_channel_id,
                 replacement_channel_id,
@@ -9367,6 +9413,7 @@ impl MeerkatMachine {
                 || closing_channel_id != recovery.closing_channel_id().as_str()
                 || replacement_channel_id != recovery.replacement_channel_id().as_str()
                 || append_id != recovery.append_id()
+                || effect_activation != &activation_receipt
                 || *effect_seed_cursor != canonical_seed_cursor
                 || *effect_answer_sequence != answer_observation_sequence
                 || runtime_id.0.as_str() != recovery.runtime_id().0.as_str()
@@ -9398,8 +9445,10 @@ impl MeerkatMachine {
                 .retain(|(queued_session, sequence), _| {
                     queued_session != recovery.session_id() || *sequence > canonical_seed_cursor
                 });
-            return Ok(LiveWebrtcAnswerExecutionBindingAuthority::new(
-                answer, binding,
+            return Ok(LiveWebrtcAnswerExecutionBindingAuthority::new_active(
+                answer,
+                binding,
+                activation_receipt,
             ));
         }
         Err(RuntimeDriverError::Internal(
@@ -9474,10 +9523,12 @@ impl MeerkatMachine {
             });
         }
         let operation = recovery.delivery().operation();
+        let activation_receipt = uuid::Uuid::new_v4().to_string();
         let (_, effects) = self
             .apply_session_dsl_input(
                 recovery.session_id(),
                 crate::meerkat_machine::dsl::MeerkatMachineInput::BindLiveDelegationResultRecoveryChannel {
+                    activation_receipt: activation_receipt.clone(),
                     session_id: recovery.session_id().to_string(),
                     closing_channel_id: recovery.closing_channel_id().to_string(),
                     replacement_channel_id: recovery.replacement_channel_id().to_string(),
@@ -9503,6 +9554,7 @@ impl MeerkatMachine {
             .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         for effect in effects.as_slice() {
             let crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveDelegationResultRecoveryChannelBound {
+                activation_receipt: effect_activation,
                 session_id,
                 closing_channel_id,
                 replacement_channel_id,
@@ -9527,6 +9579,7 @@ impl MeerkatMachine {
                         operation.operation_id(),
                     )
                 || result_digest != recovery.delivery().result_digest()
+                || effect_activation != &activation_receipt
                 || *effect_seed_cursor != canonical_seed_cursor
                 || *effect_answer_sequence != answer_observation_sequence
                 || runtime_id.0.as_str() != recovery.runtime_id().0.as_str()
@@ -9558,8 +9611,10 @@ impl MeerkatMachine {
                 .retain(|(queued_session, sequence), _| {
                     queued_session != recovery.session_id() || *sequence > canonical_seed_cursor
                 });
-            return Ok(LiveWebrtcAnswerExecutionBindingAuthority::new(
-                answer, binding,
+            return Ok(LiveWebrtcAnswerExecutionBindingAuthority::new_active(
+                answer,
+                binding,
+                activation_receipt,
             ));
         }
         Err(RuntimeDriverError::Internal(

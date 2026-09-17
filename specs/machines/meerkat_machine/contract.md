@@ -682,7 +682,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AuthorizeLiveDelegationResultRelease`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String)
 - `AuthorizeLiveDelegationResultDelivery`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition)
 - `ResolveLiveDelegationResultDelivery`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, result_digest: String, replacement_channel_id: String, canonical_seed_cursor: u64, observation: LiveDelegationResultDeliveryObservation)
-- `BindLiveDelegationResultRecoveryChannel`(session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, result_digest: String, canonical_seed_cursor: u64)
+- `BindLiveDelegationResultRecoveryChannel`(activation_receipt: String, session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, operation_id: OperationId, result_digest: String, canonical_seed_cursor: u64)
 - `AdmitLiveBridgeOperation`(session_id: String, channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_ref: String, provider_delegation_ref: String, provider_call_ref: String, agent_identity: AgentIdentity, canonical_context_revision: String, request_digest: String, structural_lineage_proven: Bool)
 - `ConfirmLiveBridgeFinalInput`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_ref: String)
 - `AuthorizeLiveBridgeExecutionStart`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, request_digest: String)
@@ -704,7 +704,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EnqueueLiveContextRow`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_cursor: u64, content_digest: String, commit_authority_token: String, disposition: LiveContextRowDisposition)
 - `AdvanceLiveContextCanonicalCoverage`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
 - `ResolveLiveContextAppend`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, previous_cursor: u64, next_cursor: u64, replacement_channel_id: String, canonical_seed_cursor: u64, observation: LiveContextAppendObservation)
-- `BindLiveContextRecoveryChannel`(session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_seed_cursor: u64)
+- `BindLiveContextRecoveryChannel`(activation_receipt: String, session_id: String, closing_channel_id: String, replacement_channel_id: String, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, append_id: String, canonical_seed_cursor: u64)
 - `AbandonLiveOpenAdmission`(session_id: String, channel_id: String)
 - `RecordLiveRefreshQueued`(channel_id: String, queue_acceptance_sequence: u64)
 - `RecordLiveCloseClosed`(session_id: String, channel_id: String, close_observation_sequence: u64)
@@ -971,7 +971,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveDelegationResultDeliveryAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition)
 - `LiveDelegationResultDeliveryResolved`(channel_id: String, operation_id: OperationId, result_digest: String, disposition: LiveDelegationResultDisposition, observation: LiveDelegationResultDeliveryObservation, speech_disposition: LiveDelegationResultSpeechDisposition, retry_allowed: Bool, recovery_required: Bool)
 - `LiveDelegationResultAmbiguityRecoveryAuthorized`(session_id: String, closing_channel_id: String, replacement_channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition, canonical_seed_cursor: u64, llm_identity: SessionLlmIdentity, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
-- `LiveDelegationResultRecoveryChannelBound`(session_id: String, closing_channel_id: String, replacement_channel_id: String, operation_id: OperationId, result_digest: String, canonical_seed_cursor: u64, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `LiveDelegationResultRecoveryChannelBound`(activation_receipt: String, session_id: String, closing_channel_id: String, replacement_channel_id: String, operation_id: OperationId, result_digest: String, canonical_seed_cursor: u64, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `LiveBridgeOperationAdmitted`(session_id: String, channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_ref: String, provider_delegation_ref: String, provider_call_ref: String, agent_identity: AgentIdentity, canonical_context_revision: String, request_digest: String, phase: LiveBridgeOperationPhase)
 - `LiveBridgeOperationReplayObserved`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_delegation_ref: String, provider_call_ref: String)
 - `LiveBridgeProtocolDriftCloseAuthorized`(channel_id: String, operation_id: OperationId, provider_delegation_ref: String, provider_call_ref: String)
@@ -996,7 +996,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveContextCanonicalCoverageAdvanced`(channel_id: String, append_id: String, previous_cursor: u64, next_cursor: u64, disposition: LiveContextRowDisposition)
 - `LiveContextAppendResolved`(channel_id: String, append_id: String, cursor: u64, observation: LiveContextAppendObservation, retry_allowed: Bool)
 - `LiveContextAmbiguityRecoveryAuthorized`(session_id: String, closing_channel_id: String, replacement_channel_id: String, append_id: String, canonical_seed_cursor: u64, llm_identity: SessionLlmIdentity, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
-- `LiveContextRecoveryChannelBound`(session_id: String, closing_channel_id: String, replacement_channel_id: String, append_id: String, canonical_seed_cursor: u64, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `LiveContextRecoveryChannelBound`(activation_receipt: String, session_id: String, closing_channel_id: String, replacement_channel_id: String, append_id: String, canonical_seed_cursor: u64, status: LiveWebrtcAnswerPublicStatus, answered: Bool, sequence: u64, answer_observation_sequence: u64, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `SessionEventStreamOpenResolved`(stream_id: String, session_id: String, opened: Bool, sequence: u64)
 - `SessionEventStreamTerminalResolved`(stream_id: String, session_id: String, reason: RpcEventStreamTerminalReason, error_code: Option<RpcEventStreamTerminalErrorCode>, detail: Option<String>, sequence: u64)
 - `SessionEventStreamCloseResolved`(stream_id: String, closed: Bool, already_closed: Bool, sequence: u64)
@@ -15777,7 +15777,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BindLiveDelegationResultRecoveryChannelIdle`
 - From: `Idle`
-- On: `BindLiveDelegationResultRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, operation_id, result_digest, canonical_seed_cursor)
+- On: `BindLiveDelegationResultRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, operation_id, result_digest, canonical_seed_cursor, activation_receipt)
 - Guards:
   - `answer_observation_sequence_present`
   - `recovery_not_cancelled`
@@ -15792,7 +15792,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BindLiveDelegationResultRecoveryChannelAttached`
 - From: `Attached`
-- On: `BindLiveDelegationResultRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, operation_id, result_digest, canonical_seed_cursor)
+- On: `BindLiveDelegationResultRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, operation_id, result_digest, canonical_seed_cursor, activation_receipt)
 - Guards:
   - `answer_observation_sequence_present`
   - `recovery_not_cancelled`
@@ -15807,7 +15807,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BindLiveDelegationResultRecoveryChannelRunning`
 - From: `Running`
-- On: `BindLiveDelegationResultRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, operation_id, result_digest, canonical_seed_cursor)
+- On: `BindLiveDelegationResultRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, operation_id, result_digest, canonical_seed_cursor, activation_receipt)
 - Guards:
   - `answer_observation_sequence_present`
   - `recovery_not_cancelled`
@@ -17145,7 +17145,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BindLiveContextRecoveryChannelIdle`
 - From: `Idle`
-- On: `BindLiveContextRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, append_id, canonical_seed_cursor)
+- On: `BindLiveContextRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, append_id, canonical_seed_cursor, activation_receipt)
 - Guards:
   - `answer_observation_sequence_present`
   - `recovery_not_cancelled`
@@ -17162,7 +17162,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BindLiveContextRecoveryChannelAttached`
 - From: `Attached`
-- On: `BindLiveContextRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, append_id, canonical_seed_cursor)
+- On: `BindLiveContextRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, append_id, canonical_seed_cursor, activation_receipt)
 - Guards:
   - `answer_observation_sequence_present`
   - `recovery_not_cancelled`
@@ -17179,7 +17179,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BindLiveContextRecoveryChannelRunning`
 - From: `Running`
-- On: `BindLiveContextRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, append_id, canonical_seed_cursor)
+- On: `BindLiveContextRecoveryChannel`(session_id, closing_channel_id, replacement_channel_id, answer_observation_sequence, runtime_id, fence_token, generation, append_id, canonical_seed_cursor, activation_receipt)
 - Guards:
   - `answer_observation_sequence_present`
   - `recovery_not_cancelled`

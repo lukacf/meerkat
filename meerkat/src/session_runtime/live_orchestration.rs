@@ -788,6 +788,14 @@ mod orchestrator {
         LiveChannelRequestPublicKind, LiveCommandPublicKind, LiveOpenAdmissionRejection,
     };
 
+    #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+    #[derive(Clone, Copy)]
+    enum ExperimentalLiveClosePurpose {
+        Explicit,
+        ContextRecovery,
+        ResultRecovery,
+    }
+
     /// Surface-agnostic live-channel orchestrator.
     ///
     /// Borrows the resolved infrastructure from a calling surface
@@ -2992,9 +3000,9 @@ mod orchestrator {
 
         // --- channel verbs -------------------------------------------------
 
-        /// Close exact experimental transport custody before generated close,
-        /// then acknowledge its retained terminal-fault publication. `None`
-        /// leaves an ordinary transport to its existing close coordinator.
+        /// Revoke generated append/recovery custody before retiring transport,
+        /// then commit close and acknowledge retained terminal-fault publication.
+        /// `None` leaves an ordinary transport to its existing coordinator.
         #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
         pub async fn close_experimental_live_channel(
             &self,
@@ -3003,8 +3011,13 @@ mod orchestrator {
             channel: &LiveChannelId,
         ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
         {
-            self.close_experimental_live_channel_inner(host, authority, channel, true)
-                .await
+            self.close_experimental_live_channel_inner(
+                host,
+                authority,
+                channel,
+                ExperimentalLiveClosePurpose::Explicit,
+            )
+            .await
         }
 
         /// The sealed recovery proves its append already resolved ambiguous.
@@ -3039,7 +3052,42 @@ mod orchestrator {
                 host,
                 authority,
                 recovery.closing_channel_id(),
-                false,
+                ExperimentalLiveClosePurpose::ContextRecovery,
+            )
+            .await
+        }
+
+        #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
+        pub async fn close_experimental_live_channel_for_result_recovery(
+            &self,
+            host: &Arc<LiveAdapterHost>,
+            authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
+            recovery: &meerkat_runtime::live_execution::LiveDelegationResultAmbiguityRecoveryAuthority,
+        ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
+        {
+            let binding = self
+                .runtime_adapter
+                .live_delegation_runtime_binding(
+                    recovery.session_id(),
+                    recovery.closing_channel_id(),
+                )
+                .await
+                .map_err(|error| {
+                    crate::surface::ExperimentalLiveChannelCloseError::LifecycleAuthority(
+                        error.to_string(),
+                    )
+                })?;
+            if binding.runtime_id() != recovery.runtime_id()
+                || binding.fence_token() != recovery.fence_token()
+                || binding.generation() != recovery.generation()
+            {
+                return Err(crate::surface::ExperimentalLiveChannelCloseError::BindingMismatch);
+            }
+            self.close_experimental_live_channel_inner(
+                host,
+                authority,
+                recovery.closing_channel_id(),
+                ExperimentalLiveClosePurpose::ResultRecovery,
             )
             .await
         }
@@ -3050,7 +3098,7 @@ mod orchestrator {
             host: &Arc<LiveAdapterHost>,
             authority: &dyn crate::experimental_gpt_live::ExperimentalLiveOpenAuthorityProvider,
             channel: &LiveChannelId,
-            flush_context_delivery: bool,
+            purpose: ExperimentalLiveClosePurpose,
         ) -> Result<Option<LiveCloseResult>, crate::surface::ExperimentalLiveChannelCloseError>
         {
             use crate::experimental_gpt_live::ExperimentalLivePhysicalClose;
@@ -3061,14 +3109,58 @@ mod orchestrator {
                 .live_session_for_status_channel(channel)
                 .await
                 .ok_or(ExperimentalLiveChannelCloseError::BindingMismatch)?;
+            let close_custody = if matches!(purpose, ExperimentalLiveClosePurpose::Explicit) {
+                self.runtime_adapter
+                    .revoke_bound_live_channel_close_custody(&session, channel)
+                    .await
+                    .map_err(|error| {
+                        ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
+                    })?
+            } else {
+                None
+            };
+            if let Some(custody) = close_custody.as_ref() {
+                for recovery_channel in custody.recovery_channel_ids() {
+                    if self
+                        .runtime_adapter
+                        .live_session_for_active_channel(recovery_channel)
+                        .await
+                        .as_ref()
+                        == Some(&session)
+                    {
+                        let closed = Box::pin(self.close_experimental_live_channel_inner(
+                            host,
+                            authority,
+                            recovery_channel,
+                            ExperimentalLiveClosePurpose::Explicit,
+                        ))
+                        .await?;
+                        if closed.is_none() {
+                            self.close_live_channel(host, recovery_channel, Some(&session))
+                                .await?;
+                        }
+                    }
+                }
+            }
             let physical = authority
                 .close_physical_if_bound(channel, &session)
                 .await
                 .map_err(ExperimentalLiveChannelCloseError::PhysicalAuthority)?;
             if matches!(physical, ExperimentalLivePhysicalClose::NotBound) {
+                if close_custody
+                    .as_ref()
+                    .is_some_and(|custody| custody.already_closed())
+                {
+                    self.runtime_adapter
+                        .retire_live_assistant_output_handles(&session, channel);
+                    authority.unbind_channel(channel, &session).await;
+                    return Ok(Some(LiveCloseResult {
+                        status: meerkat_contracts::LiveCloseStatus::Closed,
+                    }));
+                }
                 return Ok(None);
             }
-            if flush_context_delivery
+            if !matches!(purpose, ExperimentalLiveClosePurpose::ContextRecovery)
                 && let meerkat_runtime::live_context_mirror::LiveContextDrainCompletion::Failed(
                     error,
                 ) = self

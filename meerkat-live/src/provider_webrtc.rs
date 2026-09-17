@@ -842,6 +842,17 @@ impl LiveSidebandCommand {
         })
     }
 
+    /// Commentary and delegation results are spoken aloud by the provider;
+    /// thinking and instructions appends are quiet.
+    #[must_use]
+    pub fn is_spoken(&self) -> bool {
+        matches!(
+            self.kind,
+            LiveSidebandCommandKind::AppendSession { .. }
+                | LiveSidebandCommandKind::ReleaseDelegation { .. }
+        )
+    }
+
     #[must_use]
     pub fn binding(&self) -> &ProviderWebrtcBinding {
         match &self.kind {
@@ -1104,6 +1115,15 @@ pub trait ProviderWebrtcSidebandSession: Send + Sync {
     /// Mechanical cleanup invoked by the answer strategy. This is not a
     /// semantic context release and therefore carries no release authority.
     async fn close(&self) -> Result<(), ProviderWebrtcBrokerError>;
+
+    /// Whether an owner append on a quiet lane (thinking) is still awaiting
+    /// the provider's acknowledgement. Measured against gpt-live-1, such an
+    /// append is injected only at an input frame stall and the provider
+    /// withholds `session.closed` until then, so a close issued in this
+    /// state cannot settle while media flows.
+    async fn quiet_append_pending(&self) -> bool {
+        false
+    }
 }
 
 /// Mechanical result of provider answer construction.

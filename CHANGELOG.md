@@ -48,21 +48,43 @@ them.
 - `LiveContextBootstrapMode::Concurrent` (opt-in; `BeforeOpen` stays the
   default) opens live media while a bounded summary of the historical
   conversation is generated in the background. Reserved canonical history is
-  kept separate from provider-acknowledged coverage, the summary and the
-  causal reassertions travel through the quiet native thinking lane, and
+  kept separate from provider-acknowledged coverage, and
   `LiveContextPreparationStatus` exposes capturing, generating, delivering,
   provider-acknowledged, and typed failure states independently of media.
   The summary is delivered on the provider's trusted instructions lane,
-  framed as background that anything said during the call supersedes; the
-  quiet thinking lane, which the provider does not treat as recallable
-  knowledge, carries only the causal-tail reassertions.
+  framed as conversation history that anything said during the call
+  supersedes and that is not to be answered or acknowledged aloud. Measured
+  against gpt-live-1, the quiet thinking lane is not treated as recallable
+  knowledge, so it carries only the causal tail: rows committed between the
+  summary snapshot and its acknowledgement, replayed so the model keeps the
+  live order of facts. Speech after the acknowledgement is never re-sent.
 - Observation provenance for live transcripts: the generated MeerkatMachine
-  admits every provider turn in stream order (`RecordLiveContextObservation`)
-  and freezes the exact summary acknowledgement cut
-  (`RecordLiveContextBootstrapAckCut`). Canonical rows carry an opaque
-  `LiveContextObservationId`; only rows admitted before the cut are reasserted
-  after the summary, rows without a claim are honestly unsequenced, and
-  transcript sidecars gain schema V3 for the claim.
+  admits one ordinal per playback segment in stream order
+  (`RecordLiveContextObservation`) and freezes the exact summary
+  acknowledgement cut (`RecordLiveContextBootstrapAckCut`). Canonical rows
+  carry an opaque `LiveContextObservationId`; only rows admitted before the
+  cut are reasserted after the summary, rows without a claim are honestly
+  unsequenced, and transcript sidecars gain schema V3 for the claim.
+- Spoken owner context (typed rows voiced as commentary and delegation
+  results) is never started while the provider reports an open user turn; it
+  waits for the turn to end, bounded at eight seconds
+  (`SPOKEN_CONTEXT_USER_TURN_BOUND`), so the assistant does not talk over the
+  user and the user's speech is not lost to the provider. Typed rows stay on
+  the commentary lane: measured against gpt-live-1, the model keeps the user's
+  later speech authoritative over a row it voiced itself, whereas the same
+  row delivered as quiet knowledge became the newest user fact.
+- Public GPT Live close no longer waits on a provider that cannot confirm.
+  Measured against gpt-live-1, a pending quiet (thinking) append is injected
+  and acknowledged only at an input frame stall and the provider withholds
+  `session.closed` until then; with microphone audio still flowing that never
+  happens. Close now mutes input, sends `session.close`, and when a quiet
+  append is pending gives the provider one second
+  (`LIVE_CLOSE_QUIET_APPEND_BOUND`) before retiring the transport locally.
+  Otherwise a `session.close` the provider accepted but never confirmed is
+  retired locally after twenty seconds (`LIVE_CLOSE_CONFIRMATION_BOUND`);
+  earlier attempts keep the binding for retry so a slow but progressing drain
+  can still settle. Local retirement is logged as unconfirmed closure, never
+  reported as provider-confirmed.
 - Hosts can admit host-designated conversational human input into a mob
   member through the generated fenced work admission, preserving actual
   `Message::User` attribution and interaction identity.
@@ -147,8 +169,13 @@ them.
   `InstructionsContextAppendAcknowledged`, `InstructionsContextAppendRejected`,
   and `InstructionsContextAppendInterruptedByClose`
   (`GptLiveBrokerObservation::*` discriminants move);
-  `LiveSidebandProviderCommand` gains `AppendInstructionsContext` and
-  `LiveSidebandCommand::append_instructions_context` is new. `MobError` gains `WorkInputCompletionUnavailable` and
+  `LiveSidebandProviderCommand` gains `AppendInstructionsContext`
+  (`LiveSidebandProviderCommand::*` discriminants move);
+  `LiveSidebandCommand::append_instructions_context` and
+  `LiveSidebandCommand::is_spoken` are new. Under the
+  `test-realtime-fixtures` feature, `thinking_capture::EventKind` gains
+  `InstructionsAppendAttempt` and `InstructionsAppended`
+  (`EventKind::*` discriminants move). `MobError` gains `WorkInputCompletionUnavailable` and
   `WorkInputIdempotencyConflict`;
   `MobSessionService::commit_live_delegation_final_transcript` takes the
   transcript identity and `MobSessionService` no longer provides a default for

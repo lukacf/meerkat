@@ -59,6 +59,15 @@ pub mod thinking_capture {
             matched_owned: bool,
             accepted: bool,
         },
+        InstructionsAppendAttempt {
+            client_event_id: String,
+            text: String,
+        },
+        InstructionsAppended {
+            client_event_id: Option<String>,
+            matched_owned: bool,
+            accepted: bool,
+        },
     }
 
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -159,11 +168,18 @@ pub mod thinking_capture {
                 EventKind::ThinkingAppendAttempt {
                     client_event_id,
                     text,
+                }
+                | EventKind::InstructionsAppendAttempt {
+                    client_event_id,
+                    text,
                 } => {
                     client_event_id.len() <= Self::MAX_ID_BYTES
                         && text.len() <= Self::MAX_TEXT_BYTES
                 }
                 EventKind::ThinkingAppended {
+                    client_event_id, ..
+                }
+                | EventKind::InstructionsAppended {
                     client_event_id, ..
                 } => client_event_id
                     .as_ref()
@@ -863,6 +879,18 @@ impl PublicLiveBrokerSession {
                 text: content.clone(),
             });
         }
+        #[cfg(feature = "test-realtime-fixtures")]
+        if let Some(capture) = &self.thinking_capture
+            && let ClientEvent {
+                event_id: Field::Value(client_event_id),
+                command: Command::InstructionsAppend { content, .. },
+            } = &event
+        {
+            capture.record(thinking_capture::EventKind::InstructionsAppendAttempt {
+                client_event_id: client_event_id.clone(),
+                text: content.clone(),
+            });
+        }
         if self.sender.send(event).await.is_err() {
             self.state.lock().await.append_delivery_ambiguous = true;
             return Err(GptLiveBrokerError::AppendDeliveryAmbiguous { token });
@@ -903,6 +931,28 @@ impl PublicLiveBrokerSession {
             };
             let mut state = self.state.lock().await;
             #[cfg(feature = "test-realtime-fixtures")]
+            let instructions_ack = self.thinking_capture.as_ref().and_then(|capture| {
+                if !matches!(&frame.event, ServerEvent::InstructionsAppended { .. }) {
+                    return None;
+                }
+                if frame
+                    .client_event_id
+                    .as_ref()
+                    .is_some_and(|id| id.len() > thinking_capture::Capture::MAX_ID_BYTES)
+                {
+                    capture.string_limit();
+                    return None;
+                }
+                let matched_owned = frame
+                    .client_event_id
+                    .as_deref()
+                    .and_then(|id| state.find_append_receipt(id))
+                    .is_some_and(|(append, _)| {
+                        state.pending_appends[append.0].lane == PendingAppendLane::Instructions
+                    });
+                Some((frame.client_event_id.clone(), matched_owned))
+            });
+            #[cfg(feature = "test-realtime-fixtures")]
             let thinking_ack = self.thinking_capture.as_ref().and_then(|capture| {
                 if !matches!(&frame.event, ServerEvent::ThinkingAppended { .. }) {
                     return None;
@@ -927,6 +977,16 @@ impl PublicLiveBrokerSession {
             let applied = state.apply_frame(frame);
             #[cfg(feature = "test-realtime-fixtures")]
             if let Some(capture) = &self.thinking_capture
+                && let Some((client_event_id, matched_owned)) = instructions_ack
+            {
+                capture.record(thinking_capture::EventKind::InstructionsAppended {
+                    client_event_id,
+                    matched_owned,
+                    accepted: applied.is_ok(),
+                });
+            }
+            #[cfg(feature = "test-realtime-fixtures")]
+            if let Some(capture) = &self.thinking_capture
                 && let Some((client_event_id, matched_owned)) = thinking_ack
             {
                 capture.record(thinking_capture::EventKind::ThinkingAppended {
@@ -948,6 +1008,16 @@ impl PublicLiveBrokerSession {
         if state.close_requested || state.closed_observed {
             return Ok(());
         }
+        // Measured against gpt-live-1: a pending quiet (thinking) append is
+        // injected and acknowledged only at an input frame stall, and the
+        // provider withholds `session.closed` until then. With microphone
+        // audio still flowing that stall never comes. Muting input first
+        // creates it, so a close issued while an append is in flight can
+        // complete instead of waiting on media the client has not stopped.
+        self.sender
+            .send(ClientEvent::new(Command::InputAudioMute))
+            .await
+            .map_err(map_live_error)?;
         self.sender
             .send(ClientEvent::new(Command::Close))
             .await
@@ -2815,6 +2885,8 @@ mod tests {
         assert_eq!(release["type"], "session.commentary.append");
         assert_eq!(release["delegation_id"], "dlg_public");
         send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a2","client_event_id":release["event_id"],"start_ms":2.0,"end_ms":2.0})).await;
+        let mute = recv_json(&mut socket, &capture).await;
+        assert_eq!(mute["type"], "session.input_audio.mute");
         let close = recv_json(&mut socket, &capture).await;
         assert_eq!(close["type"], "session.close");
         send_json(&mut socket, json!({"type":"session.closed","event_id":"c","session":snapshot,"reason":"close_requested","usage":{"seconds":2.5}})).await;
@@ -2944,7 +3016,7 @@ mod tests {
                 if transcript == "one moment"
         ));
         let events = capture.lock().expect("capture lock").client_events.clone();
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 4);
         assert_eq!(events[0]["content"], "{\"canonical_messages\":[]}");
         assert_eq!(events[1]["content"], "Table booked for two.");
         assert!(
@@ -2952,7 +3024,10 @@ mod tests {
                 .iter()
                 .all(|event| event["event_id"].is_string())
         );
-        assert_eq!(events[2]["type"], "session.close");
+        // Close mutes input first so a pending quiet append can be injected
+        // and the provider can confirm closure.
+        assert_eq!(events[2]["type"], "session.input_audio.mute");
+        assert_eq!(events[3]["type"], "session.close");
         server.abort();
     }
 
@@ -2982,6 +3057,8 @@ mod tests {
                     ).await;
                     send_json(&mut socket, output_delta(" continues")).await;
                     send_json(&mut socket, thinking_ack(commands[0]["event_id"].as_str())).await;
+                    let mute = recv_json(&mut socket, &capture).await;
+                    assert_eq!(mute["type"], "session.input_audio.mute");
                     let close = recv_json(&mut socket, &capture).await;
                     assert_eq!(close["type"], "session.close");
                     send_json(&mut socket, json!({
@@ -3090,7 +3167,11 @@ mod tests {
             ));
             assert!(session.next_observation().await.unwrap().is_none());
             let events = capture.lock().unwrap().client_events.clone();
-            assert_eq!(events.len(), 4, "no extra commands or automatic retry");
+            assert_eq!(
+                events.len(),
+                5,
+                "three fragments, the close-time input mute, and the close; no automatic retry"
+            );
             assert_eq!(
                 events[..3]
                     .iter()
@@ -3300,6 +3381,8 @@ mod tests {
             send_json(&mut socket, output_delta(", booked")).await;
             tokio::time::sleep(std::time::Duration::from_millis(1750)).await;
             send_json(&mut socket, output_delta(" for two")).await;
+            let mute = recv_json(&mut socket, &capture).await;
+            assert_eq!(mute["type"], "session.input_audio.mute");
             let close = recv_json(&mut socket, &capture).await;
             assert_eq!(close["type"], "session.close");
             send_json(&mut socket, json!({"type":"session.closed","event_id":"c","session":snapshot,"reason":"close_requested","usage":{"seconds":6.5}})).await;
@@ -3397,12 +3480,14 @@ mod tests {
                 .await;
                     send_json(&mut socket, output_delta("unfinished")).await;
                     if during_close {
-                        let message = socket.recv().await.unwrap().unwrap();
-                        let AxumMessage::Text(text) = message else {
-                            panic!("expected close request");
-                        };
-                        let request: Value = serde_json::from_str(&text).unwrap();
-                        assert_eq!(request["type"], "session.close");
+                        for expected in ["session.input_audio.mute", "session.close"] {
+                            let message = socket.recv().await.unwrap().unwrap();
+                            let AxumMessage::Text(text) = message else {
+                                panic!("expected {expected} request");
+                            };
+                            let request: Value = serde_json::from_str(&text).unwrap();
+                            assert_eq!(request["type"], expected);
+                        }
                     }
                     socket.send(AxumMessage::Close(None)).await.unwrap();
                 })
@@ -3481,6 +3566,8 @@ mod tests {
                 json!({"type":"session.future.event","event_id":"x"}),
             )
             .await;
+            let mute = recv_json(&mut socket, &capture).await;
+            assert_eq!(mute["type"], "session.input_audio.mute");
             let close = recv_json(&mut socket, &capture).await;
             assert_eq!(close["type"], "session.close");
         }

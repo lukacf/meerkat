@@ -364,6 +364,20 @@ pub enum PublicGptLivePlaybackPolicy {
 #[doc(hidden)]
 pub use meerkat_openai::public_live::thinking_capture;
 
+/// How long a close waits for the provider's confirmation when a quiet
+/// context append is still pending injection. Such an append settles only at
+/// an input frame stall, so waiting longer buys nothing while media flows.
+pub const LIVE_CLOSE_QUIET_APPEND_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long an accepted `session.close` may go unconfirmed by the provider
+/// before the owner retires the transport locally. Earlier close attempts
+/// keep the binding for retry so a slow but progressing drain can settle.
+pub const LIVE_CLOSE_CONFIRMATION_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Longest a spoken owner append waits for the provider to end an open user
+/// turn before it is sent anyway.
+pub const SPOKEN_CONTEXT_USER_TURN_BOUND: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// Prefix for the concurrent-bootstrap summary delivered on the instructions
 /// lane. Facts captured before the call are subordinate to anything said
 /// during it, and the model is not asked to recite them.
@@ -2213,6 +2227,9 @@ struct ActiveExperimentalGptLiveBinding {
 struct ExperimentalGptLiveDrain {
     requested: AtomicBool,
     close_sent: AtomicBool,
+    /// When `session.close` was accepted by the transport; the bound for
+    /// owner-side termination of an unconfirmed closure counts from here.
+    close_sent_at: std::sync::Mutex<Option<tokio::time::Instant>>,
     physically_retired: AtomicBool,
     reader: std::sync::Mutex<
         Option<Result<meerkat_live::ProviderWebrtcEofEvidence, ProviderWebrtcBrokerError>>,
@@ -2305,8 +2322,25 @@ impl ExperimentalGptLiveDrain {
             .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
         *pending = None;
         outcome.map_err(|_| ProviderWebrtcBrokerError::Unavailable)??;
+        if let Ok(mut sent_at) = self.close_sent_at.lock()
+            && sent_at.is_none()
+        {
+            *sent_at = Some(tokio::time::Instant::now());
+        }
         self.close_sent.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// Whether `session.close` was accepted at least `bound` ago and the
+    /// provider has still not confirmed closure.
+    fn closure_unconfirmed_for(&self, bound: std::time::Duration) -> bool {
+        self.close_sent.load(Ordering::Acquire)
+            && self
+                .close_sent_at
+                .lock()
+                .ok()
+                .and_then(|sent_at| *sent_at)
+                .is_some_and(|sent_at| sent_at.elapsed() >= bound)
     }
 
     fn result(&self) -> Option<Result<ExperimentalGptLiveDrainOutcome, ProviderWebrtcBrokerError>> {
@@ -2788,6 +2822,12 @@ struct ExperimentalGptLiveDeferredAdapter {
     drain: std::sync::Mutex<Option<Arc<ExperimentalGptLiveDrain>>>,
     closed: AtomicBool,
     closed_notify: Notify,
+    /// The provider reported a user turn that has not finished yet. Spoken
+    /// owner context (commentary, delegation results) waits for it to end so
+    /// the assistant never talks over the user; the provider's own user turn
+    /// boundaries are the only evidence used.
+    user_turn_open: AtomicBool,
+    user_turn_changed: Notify,
     snapshot_cuts: bool,
     playback_policy: PublicGptLivePlaybackPolicy,
 }
@@ -2849,6 +2889,8 @@ impl ExperimentalGptLiveDeferredAdapter {
             drain: std::sync::Mutex::new(None),
             closed: AtomicBool::new(false),
             closed_notify: Notify::new(),
+            user_turn_open: AtomicBool::new(false),
+            user_turn_changed: Notify::new(),
             snapshot_cuts: false,
             playback_policy: PublicGptLivePlaybackPolicy::default(),
         }
@@ -2860,6 +2902,26 @@ impl ExperimentalGptLiveDeferredAdapter {
         observation: LiveSidebandObservation,
     ) -> Result<(), ProviderWebrtcBrokerError> {
         self.push_observation_with_context(observation, None)
+    }
+
+    /// Hold spoken owner context while the provider reports an open user
+    /// turn, so the assistant does not talk over the user. Returns when the
+    /// turn ends, the adapter closes, or `bound` elapses; the bound keeps a
+    /// user turn the provider never closes from stalling context forever.
+    async fn wait_for_quiet_user(&self, bound: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + bound;
+        loop {
+            if !self.user_turn_open.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            let changed = self.user_turn_changed.notified();
+            let closed = self.closed_notify.notified();
+            tokio::select! {
+                () = changed => {}
+                () = closed => {}
+                () = tokio::time::sleep_until(deadline) => return,
+            }
+        }
     }
 
     /// Whether the next snapshot delta of this provider turn opens a new
@@ -3295,6 +3357,8 @@ impl ExperimentalGptLiveDeferredAdapter {
                 turn,
                 role: LiveSidebandTurnRole::User,
             } => {
+                self.user_turn_open.store(true, Ordering::Release);
+                self.user_turn_changed.notify_waiters();
                 if let Some(observation_id) = context_observation_id {
                     let Ok(mut observations) = self.turn_context_observations.lock() else {
                         return Some(LiveAdapterObservation::Error {
@@ -3370,6 +3434,8 @@ impl ExperimentalGptLiveDeferredAdapter {
                 transcript,
             } => match role {
                 LiveSidebandTurnRole::User => {
+                    self.user_turn_open.store(false, Ordering::Release);
+                    self.user_turn_changed.notify_waiters();
                     let Ok(mut observations) = self.turn_context_observations.lock() else {
                         return Some(LiveAdapterObservation::Error {
                             code: LiveAdapterErrorCode::InternalError,
@@ -4168,10 +4234,21 @@ impl ExperimentalGptLiveWebrtcTransport {
             .into_sideband_append_authority(binding)
             .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
         let command = match kind {
+            // A typed row is conversational input the provider has not heard.
+            // It is voiced as commentary: measured against gpt-live-1, the
+            // model keeps the user's later speech authoritative over a row
+            // it voiced itself, whereas the same row delivered as quiet
+            // knowledge became the newest user fact and displaced it.
             meerkat_runtime::live_execution::LiveContextAppendKind::Ordinary => {
                 LiveSidebandCommand::append_session_context(sideband, text)
             }
             meerkat_runtime::live_execution::LiveContextAppendKind::CausalReassertion => {
+                // Speech the provider heard while the summary was being
+                // prepared is replayed quietly after the summary so the model
+                // keeps the live order of facts. Measured against gpt-live-1:
+                // the thinking lane injects promptly (its acknowledgement can
+                // wait for a turn boundary, which the close bound covers) and
+                // does not steer the model, unlike the instructions lane.
                 LiveSidebandCommand::append_thinking_context(sideband, text)
             }
             meerkat_runtime::live_execution::LiveContextAppendKind::HistoryBootstrap => {
@@ -4294,6 +4371,21 @@ impl ExperimentalGptLiveWebrtcTransport {
         command: LiveSidebandCommand,
     ) -> Result<ExperimentalGptLiveAppendDispatch, ExperimentalGptLiveBridgeError> {
         let attempt = command.attempt();
+        // Commentary and delegation results are spoken by the provider as
+        // soon as they land; never start one while the user is speaking.
+        if command.is_spoken() {
+            let adapter = self
+                .registered_by_channel
+                .lock()
+                .await
+                .get(command.binding().channel_id())
+                .map(|registration| Arc::clone(&registration.adapter));
+            if let Some(adapter) = adapter {
+                adapter
+                    .wait_for_quiet_user(SPOKEN_CONTEXT_USER_TURN_BOUND)
+                    .await;
+            }
+        }
         let (resolution_tx, resolution_rx) = oneshot::channel();
         self.pending_deliveries.lock().await.insert(
             attempt.clone(),
@@ -4865,18 +4957,62 @@ impl ExperimentalGptLiveWebrtcTransport {
             return Ok(false);
         };
         drain.retry_projection();
-        let (outcome, close_result) = if activated {
+        let (outcome, close_result) = if activated && sideband.quiet_append_pending().await {
+            // A quiet append is awaiting injection. The provider injects it
+            // only at an input frame stall and withholds `session.closed`
+            // until then; with media flowing the drain cannot settle. Ask the
+            // provider to close, give it one bounded chance to confirm, then
+            // retire the transport locally. Not provider-confirmed closure.
+            let close_result = drain.request_close(Arc::clone(&sideband)).await;
+            match tokio::time::timeout(LIVE_CLOSE_QUIET_APPEND_BOUND, drain.wait()).await {
+                Ok(Ok(outcome)) => (outcome, Some(close_result)),
+                Ok(Err(error)) => {
+                    return Err(ProviderWebrtcSignalingError::SidebandClose(error));
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        session_id = %binding.session_id(),
+                        channel_id = %binding.channel_id(),
+                        "provider did not confirm closure while a quiet context append was pending injection; retiring the live transport locally without provider confirmation"
+                    );
+                    (
+                        ExperimentalGptLiveDrainOutcome::Terminated,
+                        Some(close_result),
+                    )
+                }
+            }
+        } else if activated {
             // Keep the exact binding reachable by the control consumer until
             // provider EOF and successful canonical projection are witnessed.
-            tokio::select! {
-                result = drain.wait() => (
-                    result.map_err(ProviderWebrtcSignalingError::SidebandClose)?,
-                    None,
-                ),
-                result = drain.request_close(Arc::clone(&sideband)) => (
-                    drain.wait().await.map_err(ProviderWebrtcSignalingError::SidebandClose)?,
-                    Some(result),
-                ),
+            let waited: Result<_, ProviderWebrtcSignalingError> = tokio::select! {
+                result = drain.wait() => result
+                    .map(|outcome| (outcome, None))
+                    .map_err(ProviderWebrtcSignalingError::SidebandClose),
+                result = drain.request_close(Arc::clone(&sideband)) => drain
+                    .wait()
+                    .await
+                    .map(|outcome| (outcome, Some(result)))
+                    .map_err(ProviderWebrtcSignalingError::SidebandClose),
+            };
+            match waited {
+                Ok(settled) => settled,
+                // The provider accepted `session.close` long ago and has not
+                // confirmed closure. Retaining the binding for retry is right
+                // while the drain can still settle; past this bound nothing
+                // will, so the transport is retired locally. This is not
+                // provider-confirmed closure and is logged as such.
+                Err(ProviderWebrtcSignalingError::SidebandClose(
+                    ProviderWebrtcBrokerError::Unavailable,
+                )) if drain.closure_unconfirmed_for(LIVE_CLOSE_CONFIRMATION_BOUND) => {
+                    tracing::warn!(
+                        session_id = %binding.session_id(),
+                        channel_id = %binding.channel_id(),
+                        bound_secs = LIVE_CLOSE_CONFIRMATION_BOUND.as_secs(),
+                        "provider did not confirm closure within the bound after session.close; retiring the live transport locally without provider confirmation"
+                    );
+                    (ExperimentalGptLiveDrainOutcome::Terminated, None)
+                }
+                Err(error) => return Err(error),
             }
         } else {
             (
@@ -5962,6 +6098,15 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
     async fn close(&self) -> Result<(), ProviderWebrtcBrokerError> {
         self.session.close().await.map_err(map_broker_error)
     }
+
+    async fn quiet_append_pending(&self) -> bool {
+        self.correlations
+            .lock()
+            .await
+            .appends
+            .reservations
+            .contains_key(&SidebandAppendLane::Thinking)
+    }
 }
 
 impl ExperimentalGptLiveSideband {
@@ -6415,6 +6560,57 @@ mod tests {
             profile: None,
             origin: meerkat_core::BindingOrigin::Configured,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spoken_context_waits_for_the_open_user_turn_within_a_bound() {
+        let adapter = Arc::new(ExperimentalGptLiveDeferredAdapter::new(
+            meerkat_core::SessionLlmIdentity {
+                model: "gpt-live-1".to_string(),
+                provider: meerkat_core::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            },
+        ));
+        // No user turn open: no wait at all.
+        adapter
+            .wait_for_quiet_user(SPOKEN_CONTEXT_USER_TURN_BOUND)
+            .await;
+        adapter.user_turn_open.store(true, Ordering::Release);
+        let waiter = Arc::clone(&adapter);
+        let waited = tokio::spawn(async move {
+            let started = tokio::time::Instant::now();
+            waiter
+                .wait_for_quiet_user(SPOKEN_CONTEXT_USER_TURN_BOUND)
+                .await;
+            started.elapsed()
+        });
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(
+            !waited.is_finished(),
+            "an open user turn holds spoken context"
+        );
+        adapter.user_turn_open.store(false, Ordering::Release);
+        adapter.user_turn_changed.notify_waiters();
+        let waited = waited.await.expect("waiter");
+        assert!(
+            waited < SPOKEN_CONTEXT_USER_TURN_BOUND,
+            "the turn end releases the wait"
+        );
+        // A user turn the provider never closes releases at the bound.
+        adapter.user_turn_open.store(true, Ordering::Release);
+        let waiter = Arc::clone(&adapter);
+        let bounded = tokio::spawn(async move {
+            let started = tokio::time::Instant::now();
+            waiter
+                .wait_for_quiet_user(SPOKEN_CONTEXT_USER_TURN_BOUND)
+                .await;
+            started.elapsed()
+        });
+        tokio::time::advance(SPOKEN_CONTEXT_USER_TURN_BOUND + std::time::Duration::from_millis(10))
+            .await;
+        assert!(bounded.await.expect("bounded waiter") >= SPOKEN_CONTEXT_USER_TURN_BOUND);
     }
 
     #[tokio::test]
@@ -8466,6 +8662,8 @@ mod tests {
             assert_eq!(release["type"], "session.commentary.append");
             assert_eq!(release["delegation_id"], DELEGATION_ID);
             send_json(&mut socket, json!({"type":"session.commentary.appended","event_id":"a2","start_ms":2.0,"end_ms":2.0})).await;
+            let mute = recv_json(&mut socket, &capture).await;
+            assert_eq!(mute["type"], "session.input_audio.mute");
             let close = recv_json(&mut socket, &capture).await;
             assert_eq!(close["type"], "session.close");
             send_json(&mut socket, json!({"type":"session.closed","event_id":"c","session":snapshot,"reason":"close_requested","usage":{"seconds":2.5}})).await;
@@ -8865,11 +9063,12 @@ mod tests {
         );
 
         let events = capture.lock().expect("capture lock").client_events.clone();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert_eq!(events[0]["type"], "session.commentary.append");
         assert_eq!(events[0]["delegation_id"], public_wire::DELEGATION_ID);
         assert_eq!(events[0]["content"], "Table booked for two.");
-        assert_eq!(events[1]["type"], "session.close");
+        assert_eq!(events[1]["type"], "session.input_audio.mute");
+        assert_eq!(events[2]["type"], "session.close");
         server.abort();
     }
 
@@ -10015,6 +10214,74 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unconfirmed_provider_closure_is_retired_locally_after_the_bound() {
+        let transport = ExperimentalGptLiveWebrtcTransport::new();
+        let binding = ProviderWebrtcBinding::new(
+            meerkat_live::LiveChannelId::new("close-unconfirmed"),
+            meerkat_core::SessionId::new(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let (retirement_tx, _retirement_rx) = mpsc::channel(1);
+        let active = spawn_sideband_actors(
+            binding.clone(),
+            Arc::new(ControlledAmbiguousSideband::new()),
+            test_deferred_adapter(),
+            1,
+            retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
+        );
+        let drain = Arc::clone(&active.drain);
+        active.observation_actor.abort();
+        active.adapter_pump.abort();
+        active.control_actor.abort();
+        active
+            .activation_gate
+            .committed
+            .store(true, Ordering::Release);
+        transport
+            .active_by_session
+            .lock()
+            .await
+            .insert(binding.session_id().clone(), active);
+        // The provider accepts session.close but never confirms closure:
+        // no EOF, no projection receipt, no control settlement.
+        let started = tokio::time::Instant::now();
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match transport.close_exact(&binding, None).await {
+                Ok(true) => break,
+                Ok(false) => panic!("binding vanished without a close outcome"),
+                Err(_) => {
+                    assert!(
+                        started.elapsed() < LIVE_CLOSE_CONFIRMATION_BOUND,
+                        "an unconfirmed closure must be retired once the bound has elapsed"
+                    );
+                    assert_eq!(
+                        transport.active_binding(binding.session_id()).await,
+                        Some(binding.clone()),
+                        "before the bound the binding is retained for retry"
+                    );
+                }
+            }
+        }
+        assert!(drain.close_sent.load(Ordering::Acquire));
+        assert!(started.elapsed() >= LIVE_CLOSE_CONFIRMATION_BOUND);
+        assert!(
+            attempts >= 4,
+            "several retained attempts precede local retirement"
+        );
+        assert!(
+            transport
+                .active_binding(binding.session_id())
+                .await
+                .is_none(),
+            "local retirement releases the binding"
+        );
     }
 
     #[tokio::test(start_paused = true)]

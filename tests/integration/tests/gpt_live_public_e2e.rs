@@ -1257,6 +1257,39 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
 }
 
 /// Collect every transcript delta text after `start` in browser event order.
+/// Assistant transcript that answers the user input of the exchange that
+/// began at `start`. Public Live deltas carry the provider's `start_ms`; the
+/// reply is the assistant speech that starts no earlier than the user's last
+/// input delta (minus a small tolerance for trailing punctuation deltas the
+/// provider finalizes after the reply began). Assistant speech that started
+/// while the question was still playing answers older context rows, not
+/// this question, and is excluded.
+fn answer_transcript_text(events: &[Value], start: usize) -> String {
+    const TRAILING_PUNCTUATION_TOLERANCE_MS: f64 = 750.0;
+    let user_last_start = events[start..]
+        .iter()
+        .filter(|event| is_user_input(event))
+        .filter_map(|event| event["start_ms"].as_f64())
+        .fold(None, |max: Option<f64>, value| {
+            Some(max.map_or(value, |m| m.max(value)))
+        });
+    let Some(user_last_start) = user_last_start else {
+        return String::new();
+    };
+    let threshold = user_last_start - TRAILING_PUNCTUATION_TOLERANCE_MS;
+    events[start..]
+        .iter()
+        .filter(|event| event["type"] == "session.output_transcript.delta")
+        .filter(|event| {
+            event["start_ms"]
+                .as_f64()
+                .is_some_and(|value| value >= threshold)
+        })
+        .filter_map(|event| event["delta"].as_str().or_else(|| event["text"].as_str()))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 fn output_transcript_text(events: &[Value], start: usize) -> String {
     events[start..]
         .iter()
@@ -1727,8 +1760,12 @@ async fn s99_native_exchange(
             !events[start..].iter().any(is_client_delegation),
             "history and correction exchanges must use native voice, not delegated text or TTS"
         );
+        // The answer is what the assistant says after the question. Queued
+        // context rows drained after the summary acknowledgement may be
+        // spoken while the question is still playing; that speech answers
+        // older rows, not this question, so it is excluded.
         let text = user_start
-            .map(|i| output_transcript_text(&events, i))
+            .map(|_| answer_transcript_text(&events, start))
             .unwrap_or_default();
         let audio = live.peer.audio_evidence().await?;
         if matches_text(&text.to_lowercase()) && audio.has_decoded_speech_since(baseline) {
@@ -1739,10 +1776,7 @@ async fn s99_native_exchange(
                 audio,
             })?;
             println!("GPT_LIVE_PUBLIC_CONCURRENT_AUDIO fixture={fixture} evidence={audio:?}");
-            return Ok(output_transcript_text(
-                &live.peer.events().await?,
-                user_start.unwrap(),
-            ));
+            return Ok(answer_transcript_text(&live.peer.events().await?, start));
         }
         if Instant::now() >= deadline {
             s99_evidence(live)?.record(EvidenceRecord::ExchangeEnd {
@@ -1754,6 +1788,34 @@ async fn s99_native_exchange(
                 "S99 native exchange lacked fresh matching transcript/decoded speech; fixture={fixture} audio={audio:?}; {}",
                 live.peer.event_summary(&events[start..])
             ).into());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Let the assistant finish whatever it is saying before the next question,
+/// as a person would: queued context the provider voices after the user
+/// stops speaking must not be mistaken for the reply to the next question.
+async fn s99_wait_for_assistant_quiet(
+    live: &mut PublicLiveHarness,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const QUIET_FOR: Duration = Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last_len = live.peer.events().await?.len();
+    let mut quiet_since = Instant::now();
+    loop {
+        let events = live.peer.events().await?;
+        if events.len() != last_len {
+            if events[last_len..].iter().any(is_assistant_output) {
+                quiet_since = Instant::now();
+            }
+            last_len = events.len();
+        }
+        if quiet_since.elapsed() >= QUIET_FOR {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("assistant did not stop speaking before the next question".into());
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -1912,6 +1974,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     assert!(elapsed >= S99_MIN_SUMMARY_DELAY);
     s99_release_summary(&mut live, first_capture).await?;
     evidence.stage(EvidenceStage::HistoricalRecall)?;
+    s99_wait_for_assistant_quiet(&mut live).await?;
     // The pre-acknowledgement question offers an honest-unknown escape; once
     // the summary is acknowledged the question asks for the exact phrase.
     let recalled = s99_native_exchange(&mut live, "recall_history", |text| {
@@ -1923,6 +1986,7 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // summary fragments and the pre-ACK causal tail) is on the wire by now.
     let thinking_after_recall = evidence.thinking_append_attempts()?;
     evidence.stage(EvidenceStage::CurrentFactsRecall)?;
+    s99_wait_for_assistant_quiet(&mut live).await?;
     let current = s99_native_exchange(&mut live, "current", |text| {
         text.contains("cobalt") && text.contains("marigold")
     })
@@ -1930,12 +1994,19 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     assert!(!current.to_lowercase().contains("tangerine"));
     assert!(!current.to_lowercase().contains("violet"));
     assert!(!current.to_lowercase().contains("daffodil"));
-    // The provider heard both post-ACK answers itself; neither may be echoed
-    // back as new thinking context. Pre-ACK causal reassertions may still be
-    // trickling out here, so the check is on content: the vault phrase was
-    // never spoken before the acknowledgement, and the current-facts answer
-    // is the only assistant speech naming cobalt and marigold together.
-    let thinking_after_current = evidence.thinking_append_attempts()?;
+    // The instructions lane carries only the framed bootstrap summary (one
+    // so far). The thinking lane carries the causal tail: rows committed
+    // between the summary snapshot and its acknowledgement, replayed quietly
+    // so the model keeps the live order of facts. Speech after the
+    // acknowledgement is never re-sent: the vault phrase was first spoken
+    // after it, and the current-facts answer is the only assistant speech
+    // naming cobalt and marigold together.
+    let owner = evidence.owner_appends()?;
+    assert_eq!(owner.framed_summaries, 1, "exactly one summary was delivered");
+    assert!(
+        owner.instructions_attempts >= owner.framed_summaries,
+        "instructions attempts are the summary and its continuation fragments"
+    );
     let attempts = evidence.thinking_append_attempt_texts()?;
     assert!(
         !attempts
@@ -1953,7 +2024,8 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
         "fresh post-acknowledgement assistant speech was re-sent as thinking context"
     );
     println!(
-        "GPT_LIVE_PUBLIC_NO_ECHO thinking_append_attempts_after_recall={thinking_after_recall} after_current={thinking_after_current}"
+        "GPT_LIVE_PUBLIC_NO_ECHO thinking_attempts={} instructions_attempts={} summaries={} thinking_after_recall={thinking_after_recall}",
+        owner.thinking_attempts, owner.instructions_attempts, owner.framed_summaries
     );
     live.assert_existing_text_identity().await?;
 
@@ -1989,14 +2061,22 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     s99_assert_pending(&mut live, &replacement).await?;
     s99_release_summary(&mut live, replacement).await?;
     evidence.stage(EvidenceStage::ReplacementRecall)?;
+    s99_wait_for_assistant_quiet(&mut live).await?;
     s99_native_exchange(&mut live, "recall_history", |text| {
         s99_recalls_phrase(text, &phrase)
     })
     .await?;
     live.close_exact().await?;
     live.assert_existing_text_identity().await?;
-    // Close flushes whatever the causal-tail drain still held. Nothing spoken
-    // after an acknowledgement may have been queued for reassertion.
+    // Close flushes whatever the causal-tail drain still held. After the
+    // replacement's summary the owner has delivered exactly two framed
+    // summaries (the obsolete job's late summary went nowhere), and nothing
+    // spoken after an acknowledgement was ever queued for reassertion.
+    let owner = evidence.owner_appends()?;
+    assert_eq!(
+        owner.framed_summaries, 2,
+        "the original and the replacement summary were delivered; the obsolete job's was not"
+    );
     let attempts = evidence.thinking_append_attempt_texts()?;
     assert!(
         !attempts

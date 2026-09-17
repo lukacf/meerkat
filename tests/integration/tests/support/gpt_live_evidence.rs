@@ -266,6 +266,18 @@ struct State {
     thinking_append_attempts: usize,
     /// Bounded copy of the attempted thinking-append texts, for echo checks.
     thinking_append_texts: Vec<String>,
+    /// Owned instructions-lane attempts and how many opened a framed summary.
+    instructions_append_attempts: usize,
+    framed_summary_attempts: usize,
+}
+
+/// What the owner injected into the provider so far, by lane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnerAppends {
+    pub thinking_attempts: usize,
+    pub instructions_attempts: usize,
+    /// Instructions attempts that open a bootstrap summary (carry its framing).
+    pub framed_summaries: usize,
 }
 
 struct Inner {
@@ -332,6 +344,8 @@ impl Journal {
                 attached_channels: Vec::new(),
                 thinking_append_attempts: 0,
                 thinking_append_texts: Vec::new(),
+                instructions_append_attempts: 0,
+                framed_summary_attempts: 0,
             }),
             started: Instant::now(),
             path,
@@ -466,6 +480,16 @@ impl Journal {
                     state.thinking_append_texts.push(text.clone());
                 }
             }
+            if let thinking_capture::EventKind::InstructionsAppendAttempt { text, .. } =
+                &event.event
+            {
+                let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+                state.instructions_append_attempts += 1;
+                if text.starts_with(meerkat::experimental_gpt_live::LIVE_CONTEXT_BOOTSTRAP_FRAMING)
+                {
+                    state.framed_summary_attempts += 1;
+                }
+            }
             self.record(Record::Thinking { event })?;
         }
         if let Some(fault) = self.0.wire.fault() {
@@ -490,6 +514,17 @@ impl Journal {
             .lock()
             .map_err(|_| Fault::Poisoned)?
             .thinking_append_attempts)
+    }
+
+    /// Owner appends observed so far, by lane.
+    pub fn owner_appends(&self) -> Result<OwnerAppends, Fault> {
+        self.flush_wire()?;
+        let state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+        Ok(OwnerAppends {
+            thinking_attempts: state.thinking_append_attempts,
+            instructions_attempts: state.instructions_append_attempts,
+            framed_summaries: state.framed_summary_attempts,
+        })
     }
 
     /// Texts of every owned thinking-append attempt so far. Pre-ACK causal

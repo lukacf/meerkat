@@ -72,14 +72,19 @@ runs:
     # at four parallel jobs (measured 2026-09-18). Linux overcommits, but a
     # 16 GB hosted runner still needs somewhere to page; swap turns an
     # OOM kill into a slower tail.
-    - name: Add swap
+    - name: Ensure swap
       shell: bash
       run: |
         set -euo pipefail
-        sudo fallocate -l 8G /swapfile
-        sudo chmod 600 /swapfile
-        sudo mkswap /swapfile
-        sudo swapon /swapfile
+        # Hosted runners already mount a /swapfile; top up only when the total
+        # is under 8 GB, with a separate file so the live one is never touched.
+        swap_kb="$(awk '/SwapTotal/ { print $2 }' /proc/meminfo)"
+        if (( swap_kb < 8 * 1024 * 1024 )); then
+          sudo fallocate -l 8G /xwin-swapfile
+          sudo chmod 600 /xwin-swapfile
+          sudo mkswap /xwin-swapfile
+          sudo swapon /xwin-swapfile
+        fi
         free -g
 
     - name: Cross-compile surface binaries

@@ -1,0 +1,129 @@
+name: Build Windows release binaries from Linux
+description: >-
+  Cross-compile the four surface binaries for x86_64-pc-windows-msvc on an
+  Ubuntu runner with cargo-xwin (clang-cl, lld-link, and the Windows SDK), then
+  package them as the release zips.
+
+inputs:
+  version:
+    description: Release version to embed-check and to name the archives with (v prefix allowed).
+    required: true
+  cargo-xwin-version:
+    description: cargo-xwin release to install.
+    required: false
+    default: "0.23.1"
+  cargo-xwin-sha256:
+    description: SHA-256 of the pinned cargo-xwin Linux x86_64 tarball.
+    required: false
+    default: "c492c6dfb7e5ac0eee586b796e0fc950ba13077e7f0bbb046f445d71790d5360"
+
+outputs:
+  dist-dir:
+    description: Directory holding the packaged release zips.
+    value: ${{ steps.package.outputs.dist_dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Add Windows target
+      shell: bash
+      run: rustup target add x86_64-pc-windows-msvc
+
+    # Ubuntu does not ship a `clang-cl` binary; clang enters cl mode from its
+    # argv[0], so a symlink is the whole driver. llvm-18 supplies llvm-lib and
+    # llvm-rc, lld-18 supplies lld-link.
+    - name: Install LLVM cross toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get -o Acquire::Retries=3 update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install --yes --no-install-recommends clang-18 lld-18 llvm-18 zip
+        mkdir -p "${RUNNER_TEMP}/xwin-bin"
+        ln -sf "$(command -v clang-18)" "${RUNNER_TEMP}/xwin-bin/clang-cl"
+        for tool in lld-link llvm-lib llvm-rc llvm-ar; do
+          ln -sf "/usr/lib/llvm-18/bin/${tool}" "${RUNNER_TEMP}/xwin-bin/${tool}"
+        done
+        echo "${RUNNER_TEMP}/xwin-bin" >> "${GITHUB_PATH}"
+        echo "/usr/lib/llvm-18/bin" >> "${GITHUB_PATH}"
+        "${RUNNER_TEMP}/xwin-bin/clang-cl" --version | head -1
+        "${RUNNER_TEMP}/xwin-bin/lld-link" --version | head -1
+
+    - name: Install cargo-xwin
+      shell: bash
+      env:
+        XWIN_VERSION: ${{ inputs.cargo-xwin-version }}
+        XWIN_SHA256: ${{ inputs.cargo-xwin-sha256 }}
+      run: |
+        set -euo pipefail
+        archive="cargo-xwin-v${XWIN_VERSION}.x86_64-unknown-linux-musl.tar.gz"
+        curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${archive}" \
+          "https://github.com/rust-cross/cargo-xwin/releases/download/v${XWIN_VERSION}/${archive}"
+        echo "${XWIN_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+        tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/xwin-bin" cargo-xwin
+        cargo xwin --version
+
+    - name: Restore Windows SDK cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/xwin-cache
+        key: xwin-sdk-${{ runner.os }}-cargo-xwin-${{ inputs.cargo-xwin-version }}
+
+    # The largest generated crates peak above 13 GB of resident rustc memory
+    # at four parallel jobs (measured 2026-09-18). Linux overcommits, but a
+    # 16 GB hosted runner still needs somewhere to page; swap turns an
+    # OOM kill into a slower tail.
+    - name: Ensure swap
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Hosted runners already mount a /swapfile; top up only when the total
+        # is under 8 GB, with a separate file so the live one is never touched.
+        swap_kb="$(awk '/SwapTotal/ { print $2 }' /proc/meminfo)"
+        if (( swap_kb < 8 * 1024 * 1024 )); then
+          sudo fallocate -l 8G /xwin-swapfile
+          sudo chmod 600 /xwin-swapfile
+          sudo mkswap /xwin-swapfile
+          sudo swapon /xwin-swapfile
+        fi
+        free -g
+
+    - name: Cross-compile surface binaries
+      shell: bash
+      env:
+        CARGO_TARGET_DIR: target
+        CARGO_INCREMENTAL: "0"
+        XWIN_CACHE_DIR: ${{ runner.temp }}/xwin-cache
+      run: |
+        set -euo pipefail
+        # Package names (for cargo build -p); binary names differ via [[bin]].
+        cargo xwin build --locked --release --target x86_64-pc-windows-msvc \
+          -p rkat -p meerkat-rpc -p meerkat-rest -p meerkat-mcp-server
+
+    - name: Package Windows archives
+      id: package
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        TARGET: x86_64-pc-windows-msvc
+      run: |
+        set -euo pipefail
+        BINARIES=("rkat" "rkat-rpc" "rkat-rest" "rkat-mcp")
+        mkdir -p dist
+        VERSION="${VERSION#v}"
+        VERSION="${VERSION//\//-}"
+        for bin in "${BINARIES[@]}"; do
+          src="target/${TARGET}/release/${bin}.exe"
+          artifact_name="${bin}-${VERSION}-${TARGET}.zip"
+          if [[ ! -f "$src" ]]; then
+            echo "Missing expected binary at $src" >&2
+            exit 1
+          fi
+          if ! grep -aF -- "$VERSION" "$src" >/dev/null; then
+            echo "Binary ${bin} for ${TARGET} does not embed release version ${VERSION}" >&2
+            exit 1
+          fi
+          # The exe sits at the archive root, matching the previous 7z layout.
+          zip -j -q "dist/${artifact_name}" "$src"
+          echo "packaged=${bin} -> dist/${artifact_name}"
+        done
+        echo "dist_dir=dist" >> "${GITHUB_OUTPUT}"

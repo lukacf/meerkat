@@ -30,6 +30,18 @@ them.
 
 ## [Unreleased]
 
+### Changed
+
+- Windows release binaries are cross-compiled from Linux with cargo-xwin
+  (clang-cl, lld-link, the Windows SDK) and then verified on a Windows runner.
+  The native windows-latest build ran 190 to 275 minutes on every release from
+  v0.8.11 to v0.8.39 and lost its runner at 162 minutes on v0.8.40, because
+  Windows has no memory overcommit and the generated machine crates peak above
+  13 GB; the same build takes about 20 minutes at four jobs on Linux. The
+  Windows-only pagefile, disk-reclaim, `CARGO_BUILD_JOBS=2`, and opt-level
+  mitigations are gone, so Windows binaries get full release codegen again.
+  Archive names and layout are unchanged.
+
 ## [0.8.40] - 2026-09-17
 
 ### Added

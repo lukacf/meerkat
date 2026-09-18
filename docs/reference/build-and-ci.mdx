@@ -294,7 +294,10 @@ binary packaging backend. The former CI control-plane workflow at
 `.github/workflows/buildbuddy.yml` is `workflow_call`-only and has no caller,
 so it is inert and is not a fleet that CI starts automatically. Release
 validation and packaging use explicit BuildBuddy actions when selected by the
-owner; Windows packaging and registry publication remain GitHub-hosted.
+owner; Windows binaries are cross-compiled from Linux with cargo-xwin
+(clang-cl, lld-link, the Windows SDK) on a hosted Ubuntu runner, verified on a
+windows-latest runner, and packaged there; registry publication remains
+GitHub-hosted.
 
 ## Doctor
 

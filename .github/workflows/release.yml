@@ -605,8 +605,12 @@ jobs:
   build_binaries:
     name: Build and package surface binaries with GitHub-hosted runners
     needs: [require_ci_green, release_validate_gate]
+    # Linux/macOS fallback lane only. Under the owner BuildBuddy split those
+    # four targets come from build_binaries_buildbuddy, and Windows is always
+    # cross-compiled by build_binaries_windows_cross, so this job is skipped.
     if: >-
       always() &&
+      !(github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))) &&
       needs.require_ci_green.result == 'success' &&
       (needs.release_validate_gate.result == 'success' ||
        (github.event_name == 'workflow_dispatch' &&
@@ -624,7 +628,20 @@ jobs:
     container: ${{ contains(matrix.target, 'unknown-linux-gnu') && 'docker.io/library/buildpack-deps:bullseye' || '' }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON((github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))) && '{"include":[{"runs-on":"windows-latest","target":"x86_64-pc-windows-msvc","archive_ext":"zip"}]}' || '{"include":[{"runs-on":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","archive_ext":"tar.gz"},{"runs-on":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","archive_ext":"tar.gz"},{"runs-on":"macos-15","target":"aarch64-apple-darwin","archive_ext":"tar.gz"},{"runs-on":"macos-15-large","target":"x86_64-apple-darwin","archive_ext":"tar.gz"},{"runs-on":"windows-latest","target":"x86_64-pc-windows-msvc","archive_ext":"zip"}]}') }}
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - runs-on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - runs-on: macos-15
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+          - runs-on: macos-15-large
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
 
     steps:
       - name: Checkout
@@ -637,52 +654,6 @@ jobs:
       - name: Add release target
         run: rustup target add ${{ matrix.target }}
 
-      # The 32GB fixed pagefile below plus the release build's target
-      # artifacts exhaust the hosted runner's C: drive deterministically
-      # (three consecutive v0.7.24 asset-lane failures: "There is not enough
-      # space on the disk"). Reclaim the preinstalled toolchains this build
-      # never uses before committing the pagefile.
-      - name: Reclaim Windows runner disk space
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $before = (Get-PSDrive -Name C).Free / 1GB
-          $targets = @(
-            'C:\Android',
-            'C:\Program Files (x86)\Android',
-            'C:\Program Files\dotnet',
-            'C:\hostedtoolcache\windows\CodeQL',
-            'C:\Modules',
-            'C:\Program Files\MongoDB',
-            'C:\Program Files\PostgreSQL',
-            'C:\Program Files\Unity Hub',
-            'C:\selenium'
-          )
-          foreach ($t in $targets) {
-            if (Test-Path $t) {
-              Write-Host "Removing $t"
-              Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue
-            }
-          }
-          $after = (Get-PSDrive -Name C).Free / 1GB
-          Write-Host ("C: free before {0:N1} GB, after {1:N1} GB" -f $before, $after)
-
-      # Windows has no memory overcommit: rustc's peak commit on the large
-      # generated crates (meerkat-machine-schema) exceeds the 16GB runner's
-      # default commit limit and aborts with 0xc0000409 ("memory allocation
-      # of N bytes failed"). Expand the pagefile so commit capacity matches
-      # what Linux runners get via overcommit.
-      - name: Expand Windows pagefile
-        if: runner.os == 'Windows'
-        uses: al-cheb/configure-pagefile-action@9b6da52fb72a3c6147c1aad2df22d8d905681adc # v1.5
-        with:
-          # Fixed size: Windows grows demand-sized pagefiles too slowly for
-          # parallel rustc allocation bursts (the v0.7.16 tag run OOM-aborted
-          # mid-growth at 16GB->24GB), so preallocate the full capacity.
-          minimum-size: 32GB
-          maximum-size: 32GB
-          disk-root: 'C:'
-
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
@@ -692,18 +663,42 @@ jobs:
       # config. Linux release builds run inside the Bullseye container as a
       # different user, so repo-cargo's first git query otherwise fails with
       # "detected dubious ownership" before Cargo starts. audiopus-sys also
-      # falls back to building bundled Opus and requires CMake, but is not
-      # compatible with CMake 4. Bullseye supplies the compatible 3.x lane;
-      # assert that boundary instead of inheriting an undeclared host tool.
+      # falls back to building bundled Opus and requires CMake 3.x (bundled
+      # Opus declares cmake_minimum_required 3.1, which CMake 4 refuses).
+      # Bullseye's apt cmake is not used: on 2026-09-18 bullseye-security's
+      # pool had dropped libarchive13 deb11u5 while the CDN still served the
+      # old index, on both architectures, so `apt-get install cmake` failed
+      # with 404 regardless of retries. A pinned Kitware tarball, verified by
+      # sha256, is the only CMake this lane accepts.
       - name: Prepare Linux release container
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-          apt-get -o Acquire::Retries=3 update
-          DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install --yes --no-install-recommends cmake
-          cmake_version="$(cmake --version | awk 'NR == 1 { print $3 }')"
+          cmake_version_pin="3.31.12"
+          case "$(uname -m)" in
+            x86_64)
+              cmake_arch="linux-x86_64"
+              cmake_sha256="0dc2e9a6860f06bf10bd8fadc03e35d9eeb4df46e33763a7e480e987758f385c"
+              ;;
+            aarch64)
+              cmake_arch="linux-aarch64"
+              cmake_sha256="83f8fd91d2038a56556e1400390fcfe42f79602940c494f6c6f1cdae7f9e7f40"
+              ;;
+            *)
+              echo "Linux release container: unsupported architecture $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          cmake_tarball="cmake-${cmake_version_pin}-${cmake_arch}.tar.gz"
+          curl -fsSL --retry 3 --retry-all-errors -o "/tmp/${cmake_tarball}" \
+            "https://github.com/Kitware/CMake/releases/download/v${cmake_version_pin}/${cmake_tarball}"
+          echo "${cmake_sha256}  /tmp/${cmake_tarball}" | sha256sum --check --strict
+          mkdir -p /opt/cmake
+          tar -xzf "/tmp/${cmake_tarball}" -C /opt/cmake --strip-components=1
+          echo "/opt/cmake/bin" >> "${GITHUB_PATH}"
+          cmake_version="$(/opt/cmake/bin/cmake --version | awk 'NR == 1 { print $3 }')"
           case "${cmake_version}" in
             3.*) ;;
             *)
@@ -711,6 +706,7 @@ jobs:
               exit 1
               ;;
           esac
+          echo "Linux release container: cmake ${cmake_version} from Kitware tarball"
 
       - name: Build surface binaries
         shell: bash
@@ -718,24 +714,6 @@ jobs:
           CARGO_TARGET_DIR: target
         run: |
           set -euo pipefail
-          # Windows has no memory overcommit, so it was the lane that exposed
-          # the DSL schema() emission blowup (rustc peaking at tens of GB on
-          # the machine catalog: LLVM OOM on meerkat-mcp, 0xc0000409 stack
-          # overruns on meerkat-runtime/meerkat-machine-schema across the
-          # v0.7.14-v0.7.16 tag runs). The root cause is fixed at the
-          # generator (#835 chunks the emission). The 0.8.31 tag and recovery
-          # runs nevertheless both spent more than three hours in this step
-          # after the council machine expansion, reproducing the prior LLVM
-          # failure shape. Restore the proven Windows-only opt-level pins;
-          # Linux/macOS binaries keep full release codegen.
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            export CARGO_BUILD_JOBS=2
-            {
-              printf '\n[profile.release.package.meerkat-machine-schema]\nopt-level = 0\n'
-              printf '\n[profile.release.package.meerkat-runtime]\nopt-level = 1\n'
-              printf '\n[profile.release.package.meerkat-mcp]\nopt-level = 1\n'
-            } >> .cargo/config.toml
-          fi
           cargo_cmd=(./scripts/repo-cargo)
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             # The immutable v0.8.30 wrapper asks Git for
@@ -783,11 +761,7 @@ jobs:
           VERSION="${VERSION//\//-}"
 
           for bin in "${BINARIES[@]}"; do
-            if [[ "${RUNNER_OS}" == "Windows" ]]; then
-              src="target/${TARGET}/release/${bin}.exe"
-            else
-              src="target/${TARGET}/release/${bin}"
-            fi
+            src="target/${TARGET}/release/${bin}"
             artifact_name="${bin}-${VERSION}-${TARGET}.${ARCHIVE_EXT}"
 
             if [[ ! -f "$src" ]]; then
@@ -803,11 +777,7 @@ jobs:
               ./scripts/check-linux-release-binary-portability.sh "$src"
             fi
 
-            if [[ "$ARCHIVE_EXT" == "zip" ]]; then
-              7z a -tzip "${GITHUB_WORKSPACE}/dist/${artifact_name}" "$(cygpath -w "$src")"
-            else
-              tar -czf "dist/${artifact_name}" -C "$(dirname "$src")" "$(basename "$src")"
-            fi
+            tar -czf "dist/${artifact_name}" -C "$(dirname "$src")" "$(basename "$src")"
             echo "packaged=${bin} -> dist/${artifact_name}"
           done
 
@@ -822,6 +792,110 @@ jobs:
           name: meerkat-${{ matrix.target }}-${{ matrix.runs-on }}
           path: dist/*
           if-no-files-found: error
+
+  build_binaries_windows_cross:
+    name: Cross-compile and package Windows surface binaries on Linux
+    needs: [require_ci_green, release_validate_gate]
+    if: >-
+      always() &&
+      needs.require_ci_green.result == 'success' &&
+      (needs.release_validate_gate.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.publish_release_assets_only == 'true' &&
+        needs.release_validate_gate.result == 'skipped')) &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.publish_release_assets_only == 'true'))
+    # Windows binaries are cross-compiled from Linux with cargo-xwin (clang-cl,
+    # lld-link, the Windows SDK). The native windows-latest build ran 190 to
+    # 275 minutes on every release from v0.8.11 to v0.8.39 and lost its runner
+    # at 162 minutes on v0.8.40, because Windows has no memory overcommit and
+    # the generated machine crates peak above 13 GB. The same build takes
+    # about 20 minutes at four jobs on Linux; verify_windows_binaries then
+    # proves the result on a real Windows runner.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
+
+      - uses: ./.github/actions/setup-rust-ci
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-x86_64-pc-windows-msvc-cross
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        env:
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          VERSION="${VERSION//\//-}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and package
+        uses: ./.github/actions/build-windows-cross
+        with:
+          version: ${{ steps.version.outputs.version }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+
+      # Same artifact name the native Windows job produced, so the publisher,
+      # the asset recovery mode, and the release manifest see no change.
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: meerkat-x86_64-pc-windows-msvc-windows-latest
+          path: dist/*
+          if-no-files-found: error
+
+  verify_windows_binaries:
+    name: Verify Windows binaries on a Windows runner
+    needs: [build_binaries_windows_cross]
+    if: always() && needs.build_binaries_windows_cross.result == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: meerkat-x86_64-pc-windows-msvc-windows-latest
+          path: dist
+
+      - name: Run each binary
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.build_binaries_windows_cross.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:VERSION
+          if (-not $version) { throw 'release version output missing' }
+          New-Item -ItemType Directory -Force -Path extracted | Out-Null
+          Get-ChildItem dist -Filter *.zip | ForEach-Object {
+            Expand-Archive -Path $_.FullName -DestinationPath extracted -Force
+          }
+          foreach ($bin in @('rkat', 'rkat-rpc', 'rkat-rest', 'rkat-mcp')) {
+            $exe = Join-Path extracted "$bin.exe"
+            if (-not (Test-Path $exe)) { throw "missing $exe" }
+            $out = & $exe --version 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "$bin --version exited $LASTEXITCODE`n$out" }
+            if ($out -notmatch [regex]::Escape($version)) { throw "$bin --version did not report $version`n$out" }
+            Write-Host "$bin --version: $($out.Trim())"
+          }
+          & (Join-Path extracted 'rkat.exe') --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "rkat --help exited $LASTEXITCODE" }
+          Write-Host "all four Windows binaries run on windows-latest"
 
   build_binaries_buildbuddy:
     name: Build and package surface binaries via BuildBuddy
@@ -1068,7 +1142,8 @@ jobs:
         run: scripts/verify-release-asset-provenance release-artifacts "${RELEASE_TAG}"
 
       # Never churn already-published archives on a rerun. Missing archives
-      # are still added, while the final publisher handles Windows later.
+      # are still added, while the final publisher handles the cross-compiled
+      # Windows archives later.
       - name: Publish macOS/Linux release assets
         uses: softprops/action-gh-release@v2
         with:
@@ -1184,7 +1259,7 @@ jobs:
       (startsWith(github.ref, 'refs/tags/v') ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.publish_release_assets_only == 'true'))
-    needs: [build_binaries, build_binaries_buildbuddy]
+    needs: [build_binaries, build_binaries_buildbuddy, build_binaries_windows_cross, verify_windows_binaries]
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Check selected release binary backend
@@ -1194,18 +1269,25 @@ jobs:
           bb_selected="${{ github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))) }}"
           github_result="${{ needs.build_binaries.result }}"
           buildbuddy_result="${{ needs.build_binaries_buildbuddy.result }}"
+          windows_cross_result="${{ needs.build_binaries_windows_cross.result }}"
+          windows_verify_result="${{ needs.verify_windows_binaries.result }}"
+
+          # Windows is always cross-compiled on Linux and then verified on a
+          # Windows runner, whichever lane builds Linux/macOS.
+          echo "Windows cross-compile (Linux, cargo-xwin): ${windows_cross_result}"
+          echo "Windows binary verification (windows-latest): ${windows_verify_result}"
+          [[ "${windows_cross_result}" == "success" && "${windows_verify_result}" == "success" ]] || exit 1
 
           if [[ "${bb_selected}" == "true" ]]; then
-            # Hybrid lane split: BuildBuddy builds Linux/macOS; Windows always
-            # builds on a GitHub-hosted runner (no self-hosted Windows RBE
-            # executors are registered for the org's pool).
+            # Owner lane split: BuildBuddy builds Linux/macOS; the hosted
+            # fallback matrix is skipped.
             echo "BuildBuddy release binary build (Linux/macOS) selected: ${buildbuddy_result}"
-            echo "GitHub-hosted release binary build (Windows) selected: ${github_result}"
-            [[ "${buildbuddy_result}" == "success" && "${github_result}" == "success" ]]
+            echo "GitHub-hosted Linux/macOS fallback skipped: ${github_result}"
+            [[ "${buildbuddy_result}" == "success" && "${github_result}" == "skipped" ]]
             exit $?
           fi
 
-          echo "GitHub-hosted release binary build selected: ${github_result}"
+          echo "GitHub-hosted Linux/macOS release binary build selected: ${github_result}"
           echo "BuildBuddy release binary build skipped: ${buildbuddy_result}"
           [[ "${github_result}" == "success" && "${buildbuddy_result}" == "skipped" ]]
 
@@ -1225,8 +1307,8 @@ jobs:
         github.event.inputs.publish_release_assets_only == 'true' &&
         needs.release_semver_gate.result == 'skipped')) &&
       needs.build_binaries_gate.result == 'success'
-    # Waiting for the early publisher prevents manifest upload races if a
-    # future Windows build happens to finish before the Unix release job.
+    # Waiting for the early publisher prevents manifest upload races if the
+    # Windows cross-build happens to finish before the Unix release job.
     # `always()` above keeps this authoritative path available if that early
     # optimization is skipped or fails.
     needs:

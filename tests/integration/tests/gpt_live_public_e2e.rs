@@ -1134,7 +1134,12 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
     // channel-bound Meerkat executor. The public API emits an opaque client
     // delegation with no task text; Meerkat joins it to the user transcript,
     // runs the executor, and appends the result as commentary.
-    let before = greeting.len();
+    //
+    // The greeting acknowledgement above fires at the start of the barge-in
+    // reply, not its end. Let that reply finish before speaking again; a
+    // request spoken into it is a second barge-in the provider may drop.
+    wait_for_assistant_quiet(&mut peer).await?;
+    let before = peer.events().await?.len();
     peer.call(json!({"type":"play","name":"delegation"}))
         .await?;
     let joined = wait_for_events(&mut peer, 120, |events| {
@@ -1799,12 +1804,26 @@ async fn s99_native_exchange(
 async fn s99_wait_for_assistant_quiet(
     live: &mut PublicLiveHarness,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    wait_for_assistant_quiet(&mut live.peer).await
+}
+
+/// Wait until the assistant has produced no output event for three seconds.
+///
+/// The public API keeps the assistant turn open and streams its answer for
+/// seconds after the transcript settles. Speaking into that answer is a
+/// barge-in, and the provider sometimes drops a barge-in that lands inside
+/// the reply to a previous barge-in (observed as a phase with no admitted
+/// user speech at all). A real user waits for the answer to end; so do the
+/// scenarios, at every point where a spoken fixture follows assistant output.
+async fn wait_for_assistant_quiet(
+    peer: &mut BrowserPeer,
+) -> Result<(), Box<dyn std::error::Error>> {
     const QUIET_FOR: Duration = Duration::from_secs(3);
     let deadline = Instant::now() + Duration::from_secs(30);
-    let mut last_len = live.peer.events().await?.len();
+    let mut last_len = peer.events().await?.len();
     let mut quiet_since = Instant::now();
     loop {
-        let events = live.peer.events().await?;
+        let events = peer.events().await?;
         if events.len() != last_len {
             if events[last_len..].iter().any(is_assistant_output) {
                 quiet_since = Instant::now();
@@ -2556,6 +2575,8 @@ async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Erro
         updated["messages"].to_string().contains("Violet"),
         "delayed update must first commit to the unchanged background session"
     );
+    // The typed update is voiced as owner commentary; do not speak into it.
+    wait_for_assistant_quiet(&mut live.peer).await?;
     let before_updated_recall = live.peer.events().await?.len();
     let audio_baseline = live.peer.audio_evidence().await?;
     live.peer

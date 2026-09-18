@@ -104,6 +104,12 @@ them.
 
 ### Fixed
 
+- Turbo S scenarios 97 and 98 no longer speak into the assistant's answer. The
+  greeting acknowledgement fires at the start of the barge-in reply, and a typed
+  background update is voiced as commentary, so the next spoken fixture landed
+  as a second barge-in that the provider sometimes drops (a phase with no
+  admitted user speech, failing both Turbo S attempts). Both scenarios now wait
+  for three seconds of assistant silence first, as scenario 99 already did.
 - `ForkCacheInheritance` documentation now states what the value is: provider-
   authored breakpoint evidence carried for accounting continuity, not a
   request-time lever. Request lowering never reads it, so a mob fork that

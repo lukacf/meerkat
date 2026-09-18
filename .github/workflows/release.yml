@@ -823,6 +823,18 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
 
+      # The published source is always the release tag, but a recovery
+      # dispatch runs this workflow definition from main, and a tag cut
+      # before the cross-build lane existed has no copy of the composite
+      # action. Local actions resolve against the checked-out tree, so fetch
+      # the workflow's own ref beside the tag checkout and run the tooling
+      # from there (same shape as the semver recovery policy checkout).
+      - name: Checkout release tooling
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tooling
+          persist-credentials: false
       - uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
@@ -842,7 +854,7 @@ jobs:
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
 
       - name: Build and package
-        uses: ./.github/actions/build-windows-cross
+        uses: ./.release-tooling/.github/actions/build-windows-cross
         with:
           version: ${{ steps.version.outputs.version }}
 

@@ -56,7 +56,11 @@ runs:
       run: |
         set -euo pipefail
         archive="cargo-xwin-v${XWIN_VERSION}.x86_64-unknown-linux-musl.tar.gz"
-        curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${archive}" \
+        # GitHub release downloads answered four straight 500s within
+        # seconds on 2026-09-18; the pinned sha256 below makes a longer
+        # retry window safe.
+        curl -fsSL --retry 8 --retry-delay 10 --retry-all-errors \
+          -o "${RUNNER_TEMP}/${archive}" \
           "https://github.com/rust-cross/cargo-xwin/releases/download/v${XWIN_VERSION}/${archive}"
         echo "${XWIN_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
         tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/xwin-bin" cargo-xwin

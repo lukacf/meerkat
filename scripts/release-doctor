@@ -187,16 +187,33 @@ else
   bad "Release workflow should build Linux/macOS assets on BuildBuddy and keep Windows off the BuildBuddy lane (no self-hosted Windows RBE executors are registered)"
 fi
 
-# Windows release binaries always build on a GitHub-hosted runner: under the
-# BuildBuddy lane split the hosted job runs with a Windows-only matrix, and
-# the binary gate requires BOTH lanes to succeed.
-if grep -Fq '"runs-on":"windows-latest","target":"x86_64-pc-windows-msvc"' "${release_workflow}" &&
-  grep -Fq 'GitHub-hosted release binary build (Windows) selected' "${release_workflow}" &&
-  grep -Fq '[[ "${buildbuddy_result}" == "success" && "${github_result}" == "success" ]]' "${release_workflow}" &&
+# Windows release binaries are cross-compiled from Linux with cargo-xwin and
+# then verified on a Windows runner; the binary gate requires both of those
+# jobs whichever lane builds Linux/macOS, and no hosted matrix entry builds
+# natively on windows-latest any more.
+if awk '
+    /^  build_binaries_windows_cross:/ { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:/ { in_job = 0 }
+    in_job && /uses: \.\/\.github\/actions\/build-windows-cross/ { uses = 1 }
+    in_job && /runs-on: ubuntu-latest/ { linux = 1 }
+    in_job && /name: meerkat-x86_64-pc-windows-msvc-windows-latest/ { artifact = 1 }
+    END { exit (uses && linux && artifact) ? 0 : 1 }
+  ' "${release_workflow}" &&
+  awk '
+    /^  verify_windows_binaries:/ { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:/ { in_job = 0 }
+    in_job && /runs-on: windows-latest/ { native = 1 }
+    in_job && /--version/ { version = 1 }
+    END { exit (native && version) ? 0 : 1 }
+  ' "${release_workflow}" &&
+  grep -Fq 'needs: [build_binaries, build_binaries_buildbuddy, build_binaries_windows_cross, verify_windows_binaries]' "${release_workflow}" &&
+  grep -Fq '[[ "${windows_cross_result}" == "success" && "${windows_verify_result}" == "success" ]] || exit 1' "${release_workflow}" &&
+  ! grep -Eq 'runs-on: *"?windows-latest"?.*target' "${release_workflow}" &&
+  ! grep -Fq '"runs-on":"windows-latest","target":"x86_64-pc-windows-msvc"' "${release_workflow}" &&
   ! grep -Fq 'king.europe.buildbuddy.io' "${release_workflow}"; then
-  pass "Release workflow routes Windows builds to a GitHub-hosted runner alongside the BuildBuddy Linux/macOS lanes"
+  pass "Release workflow cross-compiles Windows binaries on Linux, verifies them on windows-latest, and gates on both"
 else
-  bad "Release workflow should build Windows on a GitHub-hosted runner (Windows-only matrix under the BuildBuddy lane split) with a gate requiring both lanes"
+  bad "Release workflow should cross-compile Windows binaries on Linux (build_binaries_windows_cross using build-windows-cross), verify them on windows-latest (verify_windows_binaries), keep the artifact name meerkat-x86_64-pc-windows-msvc-windows-latest, and gate on both jobs"
 fi
 
 web_build_timeout="$(

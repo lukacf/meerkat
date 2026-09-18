@@ -1,0 +1,80 @@
+name: Validate Windows cross-build
+
+# Exercises the Windows release lane (Linux cross-compile with cargo-xwin, then
+# native verification on a Windows runner) against any ref without cutting a
+# tag. It publishes nothing and attests nothing.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build_windows_cross:
+    name: Cross-compile Windows binaries on Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: ./.github/actions/setup-rust-ci
+
+      - name: Resolve workspace version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk -F '"' '/^\[workspace.package\]/ { in_pkg = 1 } in_pkg && /^version[[:space:]]*=/ { print $2; exit }' Cargo.toml)"
+          [[ -n "${version}" ]] || { echo "workspace version not found" >&2; exit 1; }
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and package
+        uses: ./.github/actions/build-windows-cross
+        with:
+          version: ${{ steps.version.outputs.version }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: meerkat-x86_64-pc-windows-msvc-windows-latest
+          path: dist/*
+          if-no-files-found: error
+
+  verify_windows_binaries:
+    name: Verify Windows binaries on windows-latest
+    needs: build_windows_cross
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: meerkat-x86_64-pc-windows-msvc-windows-latest
+          path: dist
+
+      - name: Run each binary
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.build_windows_cross.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:VERSION
+          if (-not $version) { throw 'version output missing' }
+          New-Item -ItemType Directory -Force -Path extracted | Out-Null
+          Get-ChildItem dist -Filter *.zip | ForEach-Object {
+            Expand-Archive -Path $_.FullName -DestinationPath extracted -Force
+          }
+          foreach ($bin in @('rkat', 'rkat-rpc', 'rkat-rest', 'rkat-mcp')) {
+            $exe = Join-Path extracted "$bin.exe"
+            if (-not (Test-Path $exe)) { throw "missing $exe" }
+            $out = & $exe --version 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "$bin --version exited $LASTEXITCODE`n$out" }
+            if ($out -notmatch [regex]::Escape($version)) { throw "$bin --version did not report $version`n$out" }
+            Write-Host "$bin --version: $($out.Trim())"
+          }
+          & (Join-Path extracted 'rkat.exe') --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "rkat --help exited $LASTEXITCODE" }
+          Write-Host "all four Windows binaries run on windows-latest"

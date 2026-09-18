@@ -349,7 +349,7 @@ make audit       # Security audit via cargo-deny
 
 **Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) — the expensive low-churn lanes: `lint` (clippy `--all-targets`), `lint-feature-matrix`, `test-feature-matrix`, `test-minimal`, `test-surface-modularity`, `e2e-system`, `test-sdk-web` (unconditional), `wasm-contract` (unconditional), `check-rust-release-packaging`, cargo-deny sweep.
 
-The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on 2026-07-03 (cost); the file is inert (`workflow_call`-only, no caller) and pending deletion. The BuildBuddy-hosted RELEASE flow (remote.buildbuddy.io) covers Linux/macOS binaries; Windows release binaries build on GitHub-hosted runners (the org pool has no self-hosted Windows RBE executors).
+The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on 2026-07-03 (cost); the file is inert (`workflow_call`-only, no caller) and pending deletion. The BuildBuddy-hosted RELEASE flow (remote.buildbuddy.io) covers Linux/macOS binaries; Windows release binaries are cross-compiled from Linux with cargo-xwin (clang-cl, lld-link, the Windows SDK) on a GitHub-hosted Ubuntu runner and then verified on a windows-latest runner (the org pool has no self-hosted Windows RBE executors).
 
 **Release** (`.github/workflows/release.yml`) — runs on `v*` tag push or manual dispatch:
 
@@ -358,7 +358,7 @@ The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on
 | `require_ci_green` | Always | Requires successful Cargo CI for the release commit |
 | `release_validate_cargo` / `release_validate_buildbuddy` | Eligible manual dispatches only | Validate release state through the selected lane; tag runs reuse exact-tree CI and skip both jobs |
 | `release_validate_gate` | Tags and full/package dispatches | Accept exact-tree CI on tags or the selected manual validation lane; Web-only and asset-only recovery skip it |
-| `build_binaries` / `build_binaries_buildbuddy` / `build_binaries_gate` | Tags or manual asset recovery | BuildBuddy builds Linux/macOS (4 targets); Windows always builds on a GitHub-hosted runner (no self-hosted Windows RBE executors); each target packages 4 binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`); the gate requires the selected lanes |
+| `build_binaries` / `build_binaries_buildbuddy` / `build_binaries_windows_cross` / `verify_windows_binaries` / `build_binaries_gate` | Tags or manual asset recovery | BuildBuddy builds Linux/macOS (4 targets); `build_binaries_windows_cross` cross-compiles Windows from Linux with cargo-xwin and `verify_windows_binaries` runs the result on windows-latest; each target packages 4 binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`); the gate requires the selected lanes plus both Windows jobs |
 | `build_web_sdk_package` | Tags or package/Web recovery without a reused artifact | Builds the `@rkat/web` package artifact |
 | `publish_github_release` | Tags or manual asset recovery | Downloads artifacts, generates `checksums.sha256` + `index.json`, publishes or repairs the GitHub Release |
 | `update_homebrew` | After GitHub release or asset recovery | Updates the Homebrew tap formula |

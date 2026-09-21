@@ -50,7 +50,18 @@ them.
   fabricated zero). Feature-owned capability declaration `CapabilityId::Decision`,
   tool provenance `ToolSourceKind::Decision` (catalog DSL first), realm-config
   vocabulary `meerkat_core::DecisionConfig`, and facade composition in
-  `meerkat::build_decision_service`.
+  `meerkat::build_decision_service` / `meerkat::build_host_decision_service`.
+  Inside an agent turn the `decide` tool routes over the event-isolated fork
+  of the loop's current client taken from each `ToolDispatchContext`
+  (`nested_model_route`), so it follows hot-swaps and fallbacks and never
+  streams into the session event channel. Hosts with no admitted session
+  route name an explicit `[decision.host_route]` (`provider`, `model`,
+  optional `auth_binding`). The Jev credential resolves through
+  `CredentialSourceSpec::Env` / `InlineSecret` only in this release; the
+  managed-store and AuthMachine lease paths are refused typed
+  (`DecisionUnavailableReason::CredentialSourceUnsupported`) rather than
+  half-wired. Failed evaluations carry the accounting that was still
+  measured (`DecisionError::BackendFailure { failure, accounting, budget }`).
 
 ### Changed
 

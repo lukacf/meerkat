@@ -3198,6 +3198,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-copilot",
  "meerkat-core",
+ "meerkat-decision",
  "meerkat-live",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",

@@ -61,6 +61,13 @@ pub struct Config {
     pub model_fallback: ModelFallbackConfig,
     /// Optional decision service route and limits (`[decision]`). The
     /// agent-callable tool is switched separately by `tools.decision_enabled`.
+    /// An untouched table is not written back: the merge treats it as
+    /// "nothing declared", so rendering it would claim an override that was
+    /// never made.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::decision_config::DecisionConfig::is_default"
+    )]
     pub decision: crate::decision_config::DecisionConfig,
     pub presentation: PresentationConfig,
     /// Realm-scoped connection sets (backend profiles, auth profiles,

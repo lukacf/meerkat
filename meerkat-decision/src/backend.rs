@@ -4,12 +4,17 @@
 //! caller's question ids. It owns transport, protocol, and native-signal
 //! decoding only. Answer semantics, option membership, level bounds, and the
 //! fixed interpretation belong to the service.
+//!
+//! Every attempt sequence — successful or not — reports the accounting it
+//! consumed, so the service can settle the caller's budget from what was
+//! actually spent rather than from an assumption of zero.
 
 use async_trait::async_trait;
 use meerkat_core::time_compat::{Duration, Instant};
 
 use crate::contracts::{BackendKind, BinaryAnswer, RouteProvenance};
 use crate::error::BackendFailure;
+use crate::service::DecisionAdmission;
 use crate::validate::ValidatedRequest;
 
 /// Absolute deadline for one evaluation; retries and repair draw on it.
@@ -78,12 +83,13 @@ pub enum RawAnswer {
     },
 }
 
-/// Accounting as the backend reported it.
+/// Accounting as the backend reported it, covering every attempt made.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendUsage {
-    /// Raw provider usage from an LLM route; normalized by the service through
+    /// Raw provider usage from an LLM route, one entry per provider call
+    /// (including bounded repair attempts). Normalized by the service through
     /// the shared [`meerkat_core::types::TurnUsage`] contract.
-    Provider(meerkat_core::types::Usage),
+    Provider(Vec<meerkat_core::types::Usage>),
     /// Tokens reported by a non-LLM model backend.
     Reported {
         input_tokens: u64,
@@ -104,6 +110,35 @@ pub struct BackendResponse {
     pub attempts: u32,
 }
 
+/// A failed attempt sequence together with the accounting it consumed.
+///
+/// A backend that made provider calls before failing reports their usage
+/// here so the caller's budget is settled from spent tokens, never released
+/// as if nothing happened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FailedEvaluation {
+    pub failure: BackendFailure,
+    pub usage: BackendUsage,
+    pub attempts: u32,
+}
+
+impl FailedEvaluation {
+    /// A failure that happened before any provider call.
+    pub fn before_any_call(failure: BackendFailure) -> Self {
+        Self {
+            failure,
+            usage: BackendUsage::Unmeasured,
+            attempts: 0,
+        }
+    }
+}
+
+impl From<BackendFailure> for FailedEvaluation {
+    fn from(failure: BackendFailure) -> Self {
+        Self::before_any_call(failure)
+    }
+}
+
 /// A decision backend.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -111,12 +146,14 @@ pub trait DecisionBackend: Send + Sync {
     fn kind(&self) -> BackendKind;
 
     /// Evaluate one validated request within `deadline`, using at most
-    /// `max_attempts` backend attempts. A valid answer the caller may dislike
-    /// is never a reason to try again.
+    /// `max_attempts` backend attempts. The admission carries the owner-issued
+    /// route for backends bound to the caller's session. A valid answer the
+    /// caller may dislike is never a reason to try again.
     async fn evaluate(
         &self,
+        admission: &DecisionAdmission,
         request: &ValidatedRequest,
         deadline: Deadline,
         max_attempts: u32,
-    ) -> Result<BackendResponse, BackendFailure>;
+    ) -> Result<BackendResponse, FailedEvaluation>;
 }

@@ -197,7 +197,11 @@ pub fn validate_answers(
         if request.question(&id).is_none() {
             return Err(AnswerValidationError::UnknownQuestion { id: raw_id });
         }
-        by_id.insert(id, answer);
+        if by_id.insert(id.clone(), answer).is_some() {
+            // Two answers for one question is a disagreement, not a value to
+            // elect between.
+            return Err(AnswerValidationError::DuplicateAnswer { question: id });
+        }
     }
 
     let mut judgments = IndexMap::with_capacity(request.questions().len());
@@ -354,7 +358,16 @@ fn choice_distribution<'a>(
                 question: id.clone(),
                 option: option.clone(),
             })?;
-        probabilities.insert(option_id, unit(id, "probabilities", probability)?);
+        let key = option_id.to_string();
+        if probabilities
+            .insert(option_id, unit(id, "probabilities", probability)?)
+            .is_some()
+        {
+            return Err(AnswerValidationError::DuplicateDistributionKey {
+                question: id.clone(),
+                key,
+            });
+        }
     }
     Ok(NativeSignal::ChoiceDistribution {
         backend,
@@ -379,7 +392,14 @@ fn grade_distribution(
                 levels: levels_len,
             });
         }
-        probabilities[level as usize] = Some(unit(id, "probabilities", probability)?);
+        let slot = &mut probabilities[level as usize];
+        if slot.is_some() {
+            return Err(AnswerValidationError::DuplicateDistributionKey {
+                question: id.clone(),
+                key: level.to_string(),
+            });
+        }
+        *slot = Some(unit(id, "probabilities", probability)?);
     }
     let probabilities = probabilities
         .into_iter()
@@ -574,21 +594,21 @@ pub(crate) mod tests {
             ),
         ];
         assert!(matches!(
-            validate_answers(&request, BackendKind::SessionLlm, answers.clone()).unwrap_err(),
+            validate_answers(&request, BackendKind::Llm, answers.clone()).unwrap_err(),
             AnswerValidationError::OptionNotSupplied { ref option, .. } if option == "sales"
         ));
 
         answers[1].1 = RawAnswer::ChoiceAbstain;
         answers.push(("extra".to_string(), RawAnswer::GradeAbstain));
         assert!(matches!(
-            validate_answers(&request, BackendKind::SessionLlm, answers.clone()).unwrap_err(),
+            validate_answers(&request, BackendKind::Llm, answers.clone()).unwrap_err(),
             AnswerValidationError::UnknownQuestion { ref id } if id == "extra"
         ));
 
         answers.pop();
         answers.pop();
         assert!(matches!(
-            validate_answers(&request, BackendKind::SessionLlm, answers.clone()).unwrap_err(),
+            validate_answers(&request, BackendKind::Llm, answers.clone()).unwrap_err(),
             AnswerValidationError::MissingAnswer { ref question } if question.as_str() == "frustration"
         ));
 
@@ -597,7 +617,7 @@ pub(crate) mod tests {
             RawAnswer::GradeLevel { index: 3 },
         ));
         assert!(matches!(
-            validate_answers(&request, BackendKind::SessionLlm, answers.clone()).unwrap_err(),
+            validate_answers(&request, BackendKind::Llm, answers.clone()).unwrap_err(),
             AnswerValidationError::LevelOutOfRange {
                 level: 3,
                 levels: 3,
@@ -605,13 +625,23 @@ pub(crate) mod tests {
             }
         ));
 
+        answers.push((
+            "frustration".to_string(),
+            RawAnswer::GradeLevel { index: 1 },
+        ));
+        assert!(matches!(
+            validate_answers(&request, BackendKind::Llm, answers.clone()).unwrap_err(),
+            AnswerValidationError::DuplicateAnswer { ref question } if question.as_str() == "frustration"
+        ));
+
+        answers.pop();
         answers.pop();
         answers.push((
             "frustration".to_string(),
             RawAnswer::BinaryCategorical(BinaryAnswer::No),
         ));
         assert!(matches!(
-            validate_answers(&request, BackendKind::SessionLlm, answers).unwrap_err(),
+            validate_answers(&request, BackendKind::Llm, answers).unwrap_err(),
             AnswerValidationError::KindMismatch {
                 expected: QuestionKind::Grade,
                 actual: QuestionKind::Binary,

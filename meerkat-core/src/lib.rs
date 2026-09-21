@@ -34,8 +34,8 @@ pub mod connection;
 pub mod context_budget;
 pub mod decision_config;
 pub use decision_config::{
-    DEFAULT_JEV_ENDPOINT, DEFAULT_JEV_MODEL, DecisionBackendSelection, DecisionConfig,
-    DecisionLimitsConfig, JevBackendConfig,
+    DecisionBackendSelection, DecisionConfig, DecisionHostRoute, DecisionLimitsConfig,
+    JevBackendConfig,
 };
 mod digest_observability;
 pub mod error;

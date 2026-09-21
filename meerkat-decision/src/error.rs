@@ -8,7 +8,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::contracts::{
-    BackendKind, InvalidIdentifier, InvalidStateShape, QuestionId, QuestionKind,
+    BackendKind, BudgetParticipation, DecisionAccounting, InvalidIdentifier, InvalidStateShape,
+    QuestionId, QuestionKind,
 };
 
 /// The request was refused before any backend work.
@@ -114,6 +115,10 @@ pub enum AnswerValidationError {
         question: QuestionId,
         option: String,
     },
+    #[error("question `{question}` received more than one answer")]
+    DuplicateAnswer { question: QuestionId },
+    #[error("question `{question}` distribution names `{key}` more than once")]
+    DuplicateDistributionKey { question: QuestionId, key: String },
 }
 
 /// Operational failure of the backend call. None of these is a judgment.
@@ -139,8 +144,16 @@ pub enum BackendFailure {
     ServiceError { status: u16, message: String },
     #[error("backend response could not be decoded: {message}")]
     InvalidResponse { message: String },
+    #[error(
+        "backend output was cut at the {max_output_tokens}-token allowance before the answer \
+         envelope completed; raise decision.limits.max_output_tokens (thinking models spend \
+         the allowance on reasoning first)"
+    )]
+    OutputTruncated { max_output_tokens: u32 },
     #[error("provider request failed: {message}")]
     Provider { message: String },
+    #[error("no admitted LLM route is available for this invocation: {message}")]
+    RouteUnavailable { message: String },
 }
 
 impl BackendFailure {
@@ -165,6 +178,11 @@ pub enum DecisionUnavailableReason {
     CredentialSourceUnsupported { backend: BackendKind, kind: String },
     #[error("backend {backend:?} is not compiled into this build")]
     BackendNotCompiled { backend: BackendKind },
+    #[error(
+        "the llm backend has no route for a host invocation: declare [decision.host_route] \
+         or evaluate through an agent's admitted session route"
+    )]
+    HostRouteNotConfigured,
 }
 
 /// Stable machine-readable code for a [`DecisionError`].
@@ -194,6 +212,10 @@ impl DecisionErrorCode {
 }
 
 /// Every way an evaluation can fail.
+///
+/// Failures that happen after the backend was invoked carry the accounting
+/// that was still measured and how the caller's budget was settled, so a
+/// failed evaluation never pretends nothing was spent.
 #[derive(Debug, Clone, PartialEq, thiserror::Error, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "code", rename_all = "snake_case")]
@@ -202,12 +224,23 @@ pub enum DecisionError {
     InvalidRequest(RequestValidationError),
     #[error("decision service unavailable: {0}")]
     Unavailable(DecisionUnavailableReason),
-    #[error("decision backend failed: {0}")]
-    BackendFailure(BackendFailure),
-    #[error("decision backend returned an invalid answer: {0}")]
-    InvalidAnswer(AnswerValidationError),
+    #[error("decision backend failed: {failure}")]
+    BackendFailure {
+        failure: BackendFailure,
+        accounting: DecisionAccounting,
+        budget: BudgetParticipation,
+    },
+    #[error("decision backend returned an invalid answer: {error}")]
+    InvalidAnswer {
+        error: AnswerValidationError,
+        accounting: DecisionAccounting,
+        budget: BudgetParticipation,
+    },
     #[error("decision evaluation exceeded its {deadline_ms} ms deadline")]
-    DeadlineExceeded { deadline_ms: u64 },
+    DeadlineExceeded {
+        deadline_ms: u64,
+        budget: BudgetParticipation,
+    },
     #[error("decision refused by the caller's token budget: {used} of {limit} tokens used")]
     BudgetRefused { used: u64, limit: u64 },
 }
@@ -217,8 +250,8 @@ impl DecisionError {
         match self {
             Self::InvalidRequest(_) => DecisionErrorCode::InvalidRequest,
             Self::Unavailable(_) => DecisionErrorCode::Unavailable,
-            Self::BackendFailure(_) => DecisionErrorCode::BackendFailure,
-            Self::InvalidAnswer(_) => DecisionErrorCode::InvalidAnswer,
+            Self::BackendFailure { .. } => DecisionErrorCode::BackendFailure,
+            Self::InvalidAnswer { .. } => DecisionErrorCode::InvalidAnswer,
             Self::DeadlineExceeded { .. } => DecisionErrorCode::DeadlineExceeded,
             Self::BudgetRefused { .. } => DecisionErrorCode::BudgetRefused,
         }
@@ -228,18 +261,6 @@ impl DecisionError {
 impl From<RequestValidationError> for DecisionError {
     fn from(error: RequestValidationError) -> Self {
         Self::InvalidRequest(error)
-    }
-}
-
-impl From<AnswerValidationError> for DecisionError {
-    fn from(error: AnswerValidationError) -> Self {
-        Self::InvalidAnswer(error)
-    }
-}
-
-impl From<BackendFailure> for DecisionError {
-    fn from(error: BackendFailure) -> Self {
-        Self::BackendFailure(error)
     }
 }
 

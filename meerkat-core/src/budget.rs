@@ -515,8 +515,10 @@ pub struct NestedUsageReservation {
 /// What the nested call measured, as reported by its backend seam.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NestedUsageMeasurement {
-    /// Provider-authored normalized accounting for a nested LLM turn.
-    ProviderTurn(crate::types::TurnUsage),
+    /// Provider-authored normalized accounting for every provider call the
+    /// nested operation made (one entry per attempt, including bounded
+    /// repair attempts). Every attempt counts; none is dropped.
+    ProviderTurns(Vec<crate::types::TurnUsage>),
     /// Total tokens reported by a non-LLM model backend. Such a backend has no
     /// presented-token convention to normalize and must not be dressed up as
     /// an LLM provider to fit [`crate::types::TurnUsage`].
@@ -578,31 +580,19 @@ impl NestedUsageAccounting {
     ///
     /// Measured usage replaces the estimate so the axis carries the exact
     /// normalized total; an unmeasured call releases the estimate entirely.
+    /// Settlement always lands on the accounting the reservation was minted
+    /// from, so a handle for another budget cannot move a charge between
+    /// owners.
     pub fn settle(
         &self,
-        mut reservation: NestedUsageReservation,
+        reservation: NestedUsageReservation,
         measurement: NestedUsageMeasurement,
     ) -> NestedUsageSettlement {
-        reservation.settled = true;
-        let reserved = reservation.reserved_tokens;
-        let actual = match measurement {
-            NestedUsageMeasurement::ProviderTurn(turn_usage) => {
-                turn_usage.normalized_total_tokens()
-            }
-            NestedUsageMeasurement::BackendReported { total_tokens } => total_tokens,
-            NestedUsageMeasurement::Unmeasured => {
-                release_reserved_tokens(&self.accounting, reserved);
-                return NestedUsageSettlement::Unmeasured;
-            }
-        };
-        if actual >= reserved {
-            self.accounting
-                .tokens_used
-                .fetch_add(actual - reserved, Ordering::AcqRel);
-        } else {
-            release_reserved_tokens(&self.accounting, reserved - actual);
-        }
-        NestedUsageSettlement::Charged { tokens: actual }
+        debug_assert!(
+            Arc::ptr_eq(&self.accounting, &reservation.accounting),
+            "nested usage reservation settled through a handle for another budget"
+        );
+        reservation.settle(measurement)
     }
 
     /// Remaining aggregate token allowance, if the owner is limited.
@@ -632,6 +622,32 @@ impl NestedUsageReservation {
     /// Tokens charged to the aggregate axis by this reservation.
     pub fn reserved_tokens(&self) -> u64 {
         self.reserved_tokens
+    }
+
+    /// Settle against the owning accounting exactly once.
+    pub fn settle(mut self, measurement: NestedUsageMeasurement) -> NestedUsageSettlement {
+        self.settled = true;
+        let reserved = self.reserved_tokens;
+        let actual = match measurement {
+            NestedUsageMeasurement::ProviderTurns(turns) => {
+                turns.iter().fold(0u64, |total, turn| {
+                    total.saturating_add(turn.normalized_total_tokens())
+                })
+            }
+            NestedUsageMeasurement::BackendReported { total_tokens } => total_tokens,
+            NestedUsageMeasurement::Unmeasured => {
+                release_reserved_tokens(&self.accounting, reserved);
+                return NestedUsageSettlement::Unmeasured;
+            }
+        };
+        if actual >= reserved {
+            self.accounting
+                .tokens_used
+                .fetch_add(actual - reserved, Ordering::AcqRel);
+        } else {
+            release_reserved_tokens(&self.accounting, reserved - actual);
+        }
+        NestedUsageSettlement::Charged { tokens: actual }
     }
 }
 
@@ -959,7 +975,7 @@ mod tests {
     }
 
     fn measured(input_tokens: u64, output_tokens: u64) -> NestedUsageMeasurement {
-        NestedUsageMeasurement::ProviderTurn(crate::types::TurnUsage::host_declared(
+        NestedUsageMeasurement::ProviderTurns(vec![crate::types::TurnUsage::host_declared(
             crate::Provider::Other,
             "nested-test-model",
             crate::types::Usage {
@@ -969,7 +985,45 @@ mod tests {
                 cache_read_tokens: None,
                 provider_accounting: None,
             },
-        ))
+        )])
+    }
+
+    #[test]
+    fn nested_settlement_sums_every_provider_attempt() {
+        let budget = Budget::new(BudgetLimits::default().with_max_tokens(10_000));
+        let nested = budget.nested_usage_accounting();
+        let reservation = nested.reserve(10).unwrap();
+        let turn = |input: u64, output: u64| {
+            crate::types::TurnUsage::host_declared(
+                crate::Provider::Other,
+                "nested-test-model",
+                crate::types::Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_creation_tokens: None,
+                    cache_read_tokens: None,
+                    provider_accounting: None,
+                },
+            )
+        };
+        let settlement = nested.settle(
+            reservation,
+            NestedUsageMeasurement::ProviderTurns(vec![turn(40, 12), turn(40, 12)]),
+        );
+        assert_eq!(settlement, NestedUsageSettlement::Charged { tokens: 104 });
+        assert_eq!(budget.token_usage(), Some((104, 10_000)));
+    }
+
+    #[test]
+    fn nested_settlement_lands_on_the_reservation_owner_not_the_settling_handle() {
+        let owner = Budget::new(BudgetLimits::default().with_max_tokens(1_000));
+        let other = Budget::new(BudgetLimits::default().with_max_tokens(1_000));
+        let reservation = owner.nested_usage_accounting().reserve(100).unwrap();
+        assert_eq!(owner.token_usage(), Some((100, 1_000)));
+        let settlement = reservation.settle(measured(30, 20));
+        assert_eq!(settlement, NestedUsageSettlement::Charged { tokens: 50 });
+        assert_eq!(owner.token_usage(), Some((50, 1_000)));
+        assert_eq!(other.token_usage(), Some((0, 1_000)));
     }
 
     #[test]

@@ -18,12 +18,43 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::backend::{
-    BackendResponse, BackendUsage, Deadline, DecisionBackend, RawAnswer, RawDistribution,
-    RawGradeDistribution,
+    BackendResponse, BackendUsage, Deadline, DecisionBackend, FailedEvaluation, RawAnswer,
+    RawDistribution, RawGradeDistribution,
 };
 use crate::contracts::{BackendKind, Question, RouteProvenance};
-use crate::error::BackendFailure;
+use crate::error::{BackendFailure, DecisionUnavailableReason};
+use crate::service::DecisionAdmission;
 use crate::validate::ValidatedRequest;
+
+/// Default TypeSafe evaluation endpoint. Feature-owned: core carries only
+/// the config shape, never a vendor address.
+pub const DEFAULT_JEV_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
+/// Default Jev model alias.
+pub const DEFAULT_JEV_MODEL: &str = "jev-latest";
+
+/// Largest response body the adapter will read, so a misbehaving endpoint
+/// cannot flood memory or the caller's transcript.
+const MAX_RESPONSE_BODY_BYTES: usize = 256 * 1024;
+/// Longest error body echoed into a typed failure message.
+const MAX_ERROR_BODY_CHARS: usize = 2_048;
+
+/// Typed proof that the host permitted disclosing admitted decision inputs to
+/// the Jev endpoint. The only way to obtain one is from a config whose
+/// `allow_disclosure` is `true`, so no constructor path can skip the check.
+#[derive(Debug, Clone, Copy)]
+pub struct JevDisclosurePermit(());
+
+impl JevDisclosurePermit {
+    pub fn from_config(config: &JevBackendConfig) -> Result<Self, DecisionUnavailableReason> {
+        if config.allow_disclosure {
+            Ok(Self(()))
+        } else {
+            Err(DecisionUnavailableReason::DisclosureNotPermitted {
+                backend: BackendKind::Jev,
+            })
+        }
+    }
+}
 
 /// A bearer secret whose bytes never appear in `Debug` output or logs.
 #[derive(Clone)]
@@ -98,8 +129,11 @@ pub struct JevBackend {
 }
 
 impl JevBackend {
+    /// Construct the adapter. The disclosure permit is required so admitted
+    /// inputs can never reach the vendor without the host's explicit grant.
     pub fn new(
         config: &JevBackendConfig,
+        _disclosure: JevDisclosurePermit,
         credential: Arc<dyn JevCredentialSource>,
     ) -> Result<Self, JevBackendBuildError> {
         let endpoint = reqwest::Url::parse(&config.endpoint).map_err(|error| {
@@ -298,6 +332,47 @@ fn backoff_for(attempt: u32) -> Duration {
     Duration::from_millis(250u64.saturating_mul(1u64 << attempt.min(6)))
 }
 
+/// Read at most [`MAX_RESPONSE_BODY_BYTES`] of the response body.
+async fn read_bounded_body(response: reqwest::Response) -> Result<String, BackendFailure> {
+    if let Some(length) = response.content_length()
+        && length > MAX_RESPONSE_BODY_BYTES as u64
+    {
+        return Err(BackendFailure::InvalidResponse {
+            message: format!(
+                "response body of {length} bytes exceeds the {MAX_RESPONSE_BODY_BYTES}-byte limit"
+            ),
+        });
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| BackendFailure::Transport {
+            message: error.without_url().to_string(),
+        })?;
+    if bytes.len() > MAX_RESPONSE_BODY_BYTES {
+        return Err(BackendFailure::InvalidResponse {
+            message: format!(
+                "response body of {} bytes exceeds the {MAX_RESPONSE_BODY_BYTES}-byte limit",
+                bytes.len()
+            ),
+        });
+    }
+    String::from_utf8(bytes.to_vec()).map_err(|error| BackendFailure::InvalidResponse {
+        message: format!("response body is not UTF-8: {error}"),
+    })
+}
+
+/// Bound a vendor error body before it enters a typed failure (and, through
+/// a tool result, the caller's transcript).
+fn bounded_error_body(text: &str) -> String {
+    if text.chars().count() <= MAX_ERROR_BODY_CHARS {
+        return text.to_string();
+    }
+    let mut bounded: String = text.chars().take(MAX_ERROR_BODY_CHARS).collect();
+    bounded.push_str("… [truncated]");
+    bounded
+}
+
 #[async_trait]
 impl DecisionBackend for JevBackend {
     fn kind(&self) -> BackendKind {
@@ -306,23 +381,34 @@ impl DecisionBackend for JevBackend {
 
     async fn evaluate(
         &self,
+        _admission: &DecisionAdmission,
         request: &ValidatedRequest,
         deadline: Deadline,
         max_attempts: u32,
-    ) -> Result<BackendResponse, BackendFailure> {
+    ) -> Result<BackendResponse, FailedEvaluation> {
         let body = encode_request(request, &self.model);
         let mut attempts = 0u32;
         loop {
             attempts += 1;
+            // Jev reports usage only on a decoded success; a failed attempt
+            // carries no measured accounting.
+            let fail = |failure: BackendFailure| FailedEvaluation {
+                failure,
+                usage: BackendUsage::Unmeasured,
+                attempts,
+            };
             if deadline.is_expired() {
-                return Err(BackendFailure::Timeout);
+                return Err(fail(BackendFailure::Timeout));
             }
-            let secret = self.credential.bearer_secret().await.map_err(|error| {
-                BackendFailure::CredentialUnavailable {
-                    message: error.to_string(),
+            let secret = match self.credential.bearer_secret().await {
+                Ok(secret) => secret,
+                Err(error) => {
+                    return Err(fail(BackendFailure::CredentialUnavailable {
+                        message: error.to_string(),
+                    }));
                 }
-            })?;
-            let response = self
+            };
+            let response = match self
                 .http
                 .post(self.endpoint.clone())
                 .bearer_auth(secret.expose())
@@ -331,34 +417,39 @@ impl DecisionBackend for JevBackend {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|error| {
-                    if error.is_timeout() {
-                        BackendFailure::Timeout
-                    } else {
-                        BackendFailure::Transport {
-                            message: error.without_url().to_string(),
-                        }
-                    }
-                })?;
+            {
+                Ok(response) => response,
+                Err(error) if error.is_timeout() => return Err(fail(BackendFailure::Timeout)),
+                Err(error) => {
+                    return Err(fail(BackendFailure::Transport {
+                        message: error.without_url().to_string(),
+                    }));
+                }
+            };
             let status = response.status();
-            let text = response
-                .text()
-                .await
-                .map_err(|error| BackendFailure::Transport {
-                    message: error.without_url().to_string(),
-                })?;
+            let text = match read_bounded_body(response).await {
+                Ok(text) => text,
+                Err(failure) => return Err(fail(failure)),
+            };
             let failure = match status.as_u16() {
                 200 => {
-                    let decoded: WireResponse = serde_json::from_str(&text).map_err(|error| {
-                        BackendFailure::InvalidResponse {
-                            message: error.to_string(),
+                    let decoded: WireResponse = match serde_json::from_str(&text) {
+                        Ok(decoded) => decoded,
+                        Err(error) => {
+                            return Err(fail(BackendFailure::InvalidResponse {
+                                message: error.to_string(),
+                            }));
                         }
-                    })?;
-                    let answers = decoded
+                    };
+                    let answers = match decoded
                         .answers
                         .into_iter()
                         .map(|(id, answer)| decode_answer(answer).map(|raw| (id, raw)))
-                        .collect::<Result<Vec<_>, _>>()?;
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        Ok(answers) => answers,
+                        Err(failure) => return Err(fail(failure)),
+                    };
                     let usage = match decoded.usage {
                         Some(usage) => BackendUsage::Reported {
                             input_tokens: usage.input_tokens,
@@ -378,20 +469,22 @@ impl DecisionBackend for JevBackend {
                     });
                 }
                 401 => BackendFailure::Unauthorized,
-                422 => BackendFailure::InvalidRequestRejected { message: text },
+                422 => BackendFailure::InvalidRequestRejected {
+                    message: bounded_error_body(&text),
+                },
                 429 => BackendFailure::RateLimited,
                 529 => BackendFailure::Overloaded,
                 code => BackendFailure::ServiceError {
                     status: code,
-                    message: text,
+                    message: bounded_error_body(&text),
                 },
             };
             if !failure.is_transient() || attempts >= max_attempts {
-                return Err(failure);
+                return Err(fail(failure));
             }
             let wait = backoff_for(attempts).min(deadline.remaining());
             if wait.is_zero() {
-                return Err(BackendFailure::Timeout);
+                return Err(fail(BackendFailure::Timeout));
             }
             tracing::debug!(
                 attempt = attempts,
@@ -454,17 +547,42 @@ mod tests {
         (addr, state)
     }
 
-    fn backend_for(addr: SocketAddr) -> JevBackend {
-        let config = JevBackendConfig {
+    fn config_for(addr: SocketAddr) -> JevBackendConfig {
+        JevBackendConfig {
             endpoint: format!("http://{addr}/v1/systemone"),
-            model: "jev-latest".into(),
-            ..JevBackendConfig::default()
-        };
+            model: DEFAULT_JEV_MODEL.into(),
+            credential: meerkat_core::CredentialSourceSpec::InlineSecret {
+                secret: "unused".into(),
+            },
+            allow_disclosure: true,
+        }
+    }
+
+    fn backend_for(addr: SocketAddr) -> JevBackend {
+        let config = config_for(addr);
         JevBackend::new(
             &config,
+            JevDisclosurePermit::from_config(&config).unwrap(),
             StaticJevCredential::new(JevBearerSecret::new("test-secret")),
         )
         .unwrap()
+    }
+
+    fn admission() -> DecisionAdmission {
+        DecisionAdmission::host_unbudgeted()
+    }
+
+    #[test]
+    fn disclosure_permit_is_only_minted_when_the_host_allowed_disclosure() {
+        let mut config = config_for("127.0.0.1:1".parse().unwrap());
+        assert!(JevDisclosurePermit::from_config(&config).is_ok());
+        config.allow_disclosure = false;
+        assert!(matches!(
+            JevDisclosurePermit::from_config(&config),
+            Err(DecisionUnavailableReason::DisclosureNotPermitted {
+                backend: BackendKind::Jev
+            })
+        ));
     }
 
     const SUCCESS: &str = r#"{
@@ -484,7 +602,12 @@ mod tests {
         let request = validated();
 
         let response = backend
-            .evaluate(&request, Deadline::after(Duration::from_secs(5)), 2)
+            .evaluate(
+                &admission(),
+                &request,
+                Deadline::after(Duration::from_secs(5)),
+                2,
+            )
             .await
             .unwrap();
 
@@ -541,10 +664,15 @@ mod tests {
         let (addr, state) = serve(vec![(401, "{}".into())]).await;
         let backend = backend_for(addr);
         let failure = backend
-            .evaluate(&validated(), Deadline::after(Duration::from_secs(5)), 3)
+            .evaluate(
+                &admission(),
+                &validated(),
+                Deadline::after(Duration::from_secs(5)),
+                3,
+            )
             .await
             .unwrap_err();
-        assert_eq!(failure, BackendFailure::Unauthorized);
+        assert_eq!(failure.failure, BackendFailure::Unauthorized);
         assert_eq!(state.calls.load(Ordering::SeqCst), 1);
     }
 
@@ -553,11 +681,16 @@ mod tests {
         let (addr, _) = serve(vec![(422, r#"{"error":"bad question"}"#.into())]).await;
         let backend = backend_for(addr);
         let failure = backend
-            .evaluate(&validated(), Deadline::after(Duration::from_secs(5)), 3)
+            .evaluate(
+                &admission(),
+                &validated(),
+                Deadline::after(Duration::from_secs(5)),
+                3,
+            )
             .await
             .unwrap_err();
         assert!(matches!(
-            failure,
+            failure.failure,
             BackendFailure::InvalidRequestRejected { ref message } if message.contains("bad question")
         ));
     }
@@ -572,7 +705,12 @@ mod tests {
         .await;
         let backend = backend_for(addr);
         let response = backend
-            .evaluate(&validated(), Deadline::after(Duration::from_secs(10)), 3)
+            .evaluate(
+                &admission(),
+                &validated(),
+                Deadline::after(Duration::from_secs(10)),
+                3,
+            )
             .await
             .unwrap();
         assert_eq!(response.attempts, 3);
@@ -584,10 +722,16 @@ mod tests {
         let (addr, _) = serve(vec![(429, String::new()), (429, String::new())]).await;
         let backend = backend_for(addr);
         let failure = backend
-            .evaluate(&validated(), Deadline::after(Duration::from_secs(10)), 2)
+            .evaluate(
+                &admission(),
+                &validated(),
+                Deadline::after(Duration::from_secs(10)),
+                2,
+            )
             .await
             .unwrap_err();
-        assert_eq!(failure, BackendFailure::RateLimited);
+        assert_eq!(failure.failure, BackendFailure::RateLimited);
+        assert_eq!(failure.attempts, 2);
     }
 
     #[tokio::test]
@@ -600,17 +744,24 @@ mod tests {
             }
         }
         let (addr, state) = serve(vec![(200, SUCCESS.to_string())]).await;
-        let config = JevBackendConfig {
-            endpoint: format!("http://{addr}/v1/systemone"),
-            ..JevBackendConfig::default()
-        };
-        let backend = JevBackend::new(&config, Arc::new(NoSecret)).unwrap();
+        let config = config_for(addr);
+        let backend = JevBackend::new(
+            &config,
+            JevDisclosurePermit::from_config(&config).unwrap(),
+            Arc::new(NoSecret),
+        )
+        .unwrap();
         let failure = backend
-            .evaluate(&validated(), Deadline::after(Duration::from_secs(5)), 1)
+            .evaluate(
+                &admission(),
+                &validated(),
+                Deadline::after(Duration::from_secs(5)),
+                1,
+            )
             .await
             .unwrap_err();
         assert!(matches!(
-            failure,
+            failure.failure,
             BackendFailure::CredentialUnavailable { .. }
         ));
         assert_eq!(state.calls.load(Ordering::SeqCst), 0);
@@ -625,11 +776,27 @@ mod tests {
         let Ok(key) = std::env::var("JEV_API_KEY") else {
             return;
         };
-        let config = JevBackendConfig::default();
-        let backend =
-            JevBackend::new(&config, StaticJevCredential::new(JevBearerSecret::new(key))).unwrap();
+        let config = JevBackendConfig {
+            endpoint: DEFAULT_JEV_ENDPOINT.into(),
+            model: DEFAULT_JEV_MODEL.into(),
+            credential: meerkat_core::CredentialSourceSpec::InlineSecret {
+                secret: "unused".into(),
+            },
+            allow_disclosure: true,
+        };
+        let backend = JevBackend::new(
+            &config,
+            JevDisclosurePermit::from_config(&config).unwrap(),
+            StaticJevCredential::new(JevBearerSecret::new(key)),
+        )
+        .unwrap();
         let response = backend
-            .evaluate(&validated(), Deadline::after(Duration::from_secs(30)), 3)
+            .evaluate(
+                &admission(),
+                &validated(),
+                Deadline::after(Duration::from_secs(30)),
+                3,
+            )
             .await
             .unwrap();
         let answers: BTreeMap<_, _> = response.answers.into_iter().collect();

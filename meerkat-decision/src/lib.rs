@@ -35,8 +35,8 @@ pub mod tool;
 pub mod validate;
 
 pub use backend::{
-    BackendResponse, BackendUsage, Deadline, DecisionBackend, RawAnswer, RawDistribution,
-    RawGradeDistribution,
+    BackendResponse, BackendUsage, Deadline, DecisionBackend, FailedEvaluation, RawAnswer,
+    RawDistribution, RawGradeDistribution,
 };
 pub use contracts::{
     BackendKind, BinaryAnswer, BinaryCriteria, BinaryJudgment, BudgetParticipation, ChoiceJudgment,
@@ -52,11 +52,11 @@ pub use error::{
 };
 #[cfg(all(feature = "jev", not(target_arch = "wasm32")))]
 pub use jev::{
-    JevBackend, JevBackendBuildError, JevBearerSecret, JevCredentialError, JevCredentialSource,
-    StaticJevCredential,
+    DEFAULT_JEV_ENDPOINT, DEFAULT_JEV_MODEL, JevBackend, JevBackendBuildError, JevBearerSecret,
+    JevCredentialError, JevCredentialSource, JevDisclosurePermit, StaticJevCredential,
 };
-pub use llm_backend::{SESSION_LLM_SYSTEM_PROMPT, SessionLlmBackend};
-pub use service::{BudgetAdmission, DecisionAdmission, DecisionService};
+pub use llm_backend::{LLM_ROUTE_SYSTEM_PROMPT, LlmRouteBackend, RouteBinding};
+pub use service::{BudgetAdmission, DecisionAdmission, DecisionService, RouteAdmission};
 pub use tool::{
     DECIDE_TOOL_NAME, DECISION_TOOL_SOURCE_ID, DecisionToolSurface, decide_tool_input_schema,
     wire_decision_tool,

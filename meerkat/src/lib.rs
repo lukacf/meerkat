@@ -315,7 +315,7 @@ mod factory;
 // Optional decision service composition (route selection, credential seam,
 // `decide` tool wiring). The feature crate owns the semantics.
 mod decision_compose;
-pub use decision_compose::build_decision_service;
+pub use decision_compose::{build_decision_service, build_host_decision_service};
 pub use meerkat_decision::{
     BackendKind as DecisionBackendKind, BinaryAnswer, BinaryCriteria, BinaryJudgment,
     BudgetAdmission as DecisionBudgetAdmission, BudgetParticipation as DecisionBudgetParticipation,

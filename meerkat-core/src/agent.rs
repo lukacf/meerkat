@@ -685,6 +685,7 @@ pub struct ToolDispatchContext {
     streaming: Option<crate::ToolStreamingDispatchContext>,
     live_bridge_admission: Option<LiveBridgeToolDispatchAdmission>,
     nested_usage: Option<crate::budget::NestedUsageAccounting>,
+    nested_model_route: Option<Arc<dyn AgentLlmClient>>,
 }
 
 /// Process-local live bridge authority carried to the last actual tool
@@ -986,6 +987,7 @@ impl ToolDispatchContext {
             streaming: None,
             live_bridge_admission: None,
             nested_usage: None,
+            nested_model_route: None,
         }
     }
 
@@ -1097,6 +1099,28 @@ impl ToolDispatchContext {
     #[must_use]
     pub fn nested_usage_accounting(&self) -> Option<&crate::budget::NestedUsageAccounting> {
         self.nested_usage.as_ref()
+    }
+
+    /// Bind the event-isolated fork of the loop's current LLM route.
+    ///
+    /// The agent loop attaches the fork of the client it is using for this
+    /// run, so a tool making its own bounded model call follows the current
+    /// session identity (hot-swap, fallback) instead of a build-time copy.
+    #[must_use]
+    pub fn with_nested_model_route(mut self, route: Arc<dyn AgentLlmClient>) -> Self {
+        self.nested_model_route = Some(route);
+        self
+    }
+
+    /// Event-isolated fork of the current admitted LLM route, when the
+    /// dispatching loop's client could provide one.
+    ///
+    /// Absent for standalone contexts and for custom clients that cannot fork
+    /// an event-isolated route; a tool needing a route then reports a typed
+    /// unavailability rather than electing a route of its own.
+    #[must_use]
+    pub fn nested_model_route(&self) -> Option<&Arc<dyn AgentLlmClient>> {
+        self.nested_model_route.as_ref()
     }
 
     pub fn current_turn_image(

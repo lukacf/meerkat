@@ -5548,32 +5548,10 @@ impl AgentFactory {
                     BuildAgentError::Config(format!("session LLM capability hydration: {err}"))
                 })?;
         }
-        // Decision route: the same admitted provider/model/auth client as the
-        // session, on an event-isolated adapter so the nested judge request
-        // never streams deltas into the session event channel, never flips
-        // output observation, and never inherits provider-native tools.
+        // Decision route: the `decide` tool takes the event-isolated fork of
+        // the loop's *current* client from each dispatch context, so it follows
+        // hot-swaps and fallbacks; nothing is captured at build time.
         let effective_decision = self.decision.resolve(config.tools.decision_enabled);
-        let mut decision_route_client: Option<Arc<dyn AgentLlmClient>> = if effective_decision {
-            match (
-                llm_client.as_ref(),
-                build_config.agent_llm_client_override.as_ref(),
-            ) {
-                (Some(raw_client), _) => Some(Arc::new(
-                    LlmClientAdapter::try_for_provider_identity(
-                        Arc::clone(raw_client),
-                        model.clone(),
-                        provider,
-                    )
-                    .map_err(|error| BuildAgentError::Config(error.to_string()))?,
-                )),
-                // A host-supplied agent client owns its own event semantics;
-                // the decision route shares it rather than inventing a fork.
-                (None, Some(agent_client)) => Some(Arc::clone(agent_client)),
-                (None, None) => None,
-            }
-        } else {
-            None
-        };
         let event_tap = meerkat_core::new_event_tap();
         let llm_adapter: Arc<dyn AgentLlmClient> = if let Some(agent_client) =
             build_config.agent_llm_client_override.take()
@@ -6411,8 +6389,7 @@ impl AgentFactory {
         // 9c2. Compose tools with the decision surface (after WorkGraph, before
         // mob). Disabled means no service, no client, no credential lookup.
         if effective_decision {
-            let decision_dispatcher =
-                crate::decision_compose::wire_decision_tools(config, decision_route_client.take())?;
+            let decision_dispatcher = crate::decision_compose::wire_decision_tools(config)?;
             let decision_usage = render_tool_usage_instructions(decision_dispatcher.as_ref());
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
                 tools,
@@ -14489,7 +14466,15 @@ mod tests {
         let mut config = Config::default();
         config.tools.decision_enabled = true;
         config.decision.backend = meerkat_core::DecisionBackendSelection::Jev;
-        config.decision.jev = Some(meerkat_core::JevBackendConfig::default());
+        config.decision.jev = Some(meerkat_core::JevBackendConfig {
+            endpoint: meerkat_decision::DEFAULT_JEV_ENDPOINT.into(),
+            model: meerkat_decision::DEFAULT_JEV_MODEL.into(),
+            credential: meerkat_core::CredentialSourceSpec::Env {
+                env: "JEV_API_KEY".into(),
+                fallback: Vec::new(),
+            },
+            allow_disclosure: false,
+        });
 
         let Err(error) = factory.build_agent(build, &config).await else {
             unreachable!("Jev without host disclosure permission must fail closed");

@@ -204,12 +204,16 @@ impl AgentToolDispatcher for DecisionToolSurface {
         let request: DecisionRequest = serde_json::from_value(args)
             .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
 
-        // Budget participation comes from the dispatching loop, never from
-        // the arguments. Absent accounting is reported, not fabricated.
-        let admission = DecisionAdmission::new(match context.nested_usage_accounting() {
+        // Budget participation and the LLM route come from the dispatching
+        // loop, never from the arguments. Absent accounting is reported, not
+        // fabricated; an absent route is a typed backend unavailability.
+        let mut admission = DecisionAdmission::new(match context.nested_usage_accounting() {
             Some(accounting) => BudgetAdmission::Nested(accounting.clone()),
             None => BudgetAdmission::NotIssued,
         });
+        if let Some(route) = context.nested_model_route() {
+            admission = admission.with_session_route(Arc::clone(route));
+        }
 
         match self.service.evaluate(&admission, request).await {
             Ok(result) => {
@@ -237,16 +241,87 @@ mod tests {
     use serde_json::value::RawValue;
 
     use super::*;
-    use crate::llm_backend::SessionLlmBackend;
+    use crate::llm_backend::LlmRouteBackend;
     use crate::llm_backend::tests::ScriptedClient;
 
     fn surface(outputs: Vec<&str>) -> DecisionToolSurface {
         let client = ScriptedClient::new(outputs);
-        let backend = Arc::new(SessionLlmBackend::new(client, 256));
+        let backend = Arc::new(LlmRouteBackend::fixed(client, 256));
         DecisionToolSurface::new(Arc::new(DecisionService::new(
             backend,
             DecisionLimitsConfig::default(),
         )))
+    }
+
+    fn session_surface() -> DecisionToolSurface {
+        DecisionToolSurface::new(Arc::new(DecisionService::new(
+            Arc::new(LlmRouteBackend::admitted_session(256)),
+            DecisionLimitsConfig::default(),
+        )))
+    }
+
+    #[tokio::test]
+    async fn session_bound_tool_takes_its_route_from_the_dispatch_context() {
+        let surface = session_surface();
+        let compliant = r#"{"answers": {"is_urgent": "yes", "department": "billing"}}"#;
+        let raw = args();
+
+        let first = ScriptedClient::with_identity(
+            vec![compliant],
+            meerkat_core::Provider::Anthropic,
+            "first-model",
+        );
+        let context = ToolDispatchContext::default().with_nested_model_route(first);
+        let outcome = surface
+            .dispatch_with_context(
+                ToolCallView {
+                    id: "c1",
+                    name: "decide",
+                    args: &raw,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&outcome.result.text_content()).unwrap();
+        assert_eq!(value["route"]["provider"], "anthropic");
+        assert_eq!(value["route"]["model"], "first-model");
+
+        let second = ScriptedClient::with_identity(
+            vec![compliant],
+            meerkat_core::Provider::Gemini,
+            "second-model",
+        );
+        let context = ToolDispatchContext::default().with_nested_model_route(second);
+        let outcome = surface
+            .dispatch_with_context(
+                ToolCallView {
+                    id: "c2",
+                    name: "decide",
+                    args: &raw,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&outcome.result.text_content()).unwrap();
+        assert_eq!(
+            value["route"]["model"], "second-model",
+            "a swapped identity is followed"
+        );
+
+        let error = surface
+            .dispatch(ToolCallView {
+                id: "c3",
+                name: "decide",
+                args: &raw,
+            })
+            .await
+            .unwrap_err();
+        let ToolError::ExecutionFailedWithData { data, .. } = error else {
+            unreachable!("a missing route is a typed backend failure");
+        };
+        assert_eq!(data["failure"]["reason"], "route_unavailable");
     }
 
     fn args() -> Box<RawValue> {
@@ -309,7 +384,7 @@ mod tests {
         assert!(!result.is_error);
         let value: Value = serde_json::from_str(&result.text_content()).unwrap();
         assert_eq!(value["contract"], "v1");
-        assert_eq!(value["route"]["backend"], "session_llm");
+        assert_eq!(value["route"]["backend"], "llm");
         assert_eq!(value["judgments"]["is_urgent"]["judgment"]["answer"], "yes");
         assert_eq!(
             value["judgments"]["department"]["judgment"]["option"],
@@ -367,7 +442,14 @@ mod tests {
         };
         assert!(message.starts_with("backend_failure:"));
         assert_eq!(data["code"], "backend_failure");
-        assert_eq!(data["reason"], "invalid_response");
+        assert_eq!(data["failure"]["reason"], "invalid_response");
+        // A failure after the backend ran still reports what was spent and how
+        // the caller's budget was settled; a host-unbudgeted call was never issued.
+        assert!(
+            data["accounting"].is_object(),
+            "accounting is reported even on failure: {data}"
+        );
+        assert_eq!(data["budget"]["kind"], "not_issued");
     }
 
     #[tokio::test]

@@ -462,8 +462,10 @@ impl Judgment {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum BackendKind {
-    /// One bounded structured request through the session's admitted LLM route.
-    SessionLlm,
+    /// One bounded structured request through an admitted LLM route: the
+    /// session's own route for the agent tool, the explicit host route for
+    /// host invocations.
+    Llm,
     /// The explicitly configured Jev evaluation endpoint.
     Jev,
 }
@@ -503,7 +505,7 @@ pub struct QuestionJudgment {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum RouteProvenance {
-    SessionLlm {
+    Llm {
         provider: meerkat_core::Provider,
         model: String,
     },
@@ -517,7 +519,7 @@ pub enum RouteProvenance {
 impl RouteProvenance {
     pub const fn backend(&self) -> BackendKind {
         match self {
-            Self::SessionLlm { .. } => BackendKind::SessionLlm,
+            Self::Llm { .. } => BackendKind::Llm,
             Self::Jev { .. } => BackendKind::Jev,
         }
     }

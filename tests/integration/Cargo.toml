@@ -20,6 +20,7 @@ meerkat-comms.workspace = true
 meerkat-providers.workspace = true
 meerkat-contracts.workspace = true
 meerkat-core.workspace = true
+meerkat-decision.workspace = true
 meerkat-live = { workspace = true }
 meerkat-models = { workspace = true }
 meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }
@@ -75,6 +76,11 @@ test-support = ["meerkat-mob/test-support"]
 [[test]]
 name = "live_mob_tools"
 path = "tests/live_mob_tools.rs"
+required-features = ["integration-real-tests"]
+
+[[test]]
+name = "live_decision"
+path = "tests/live_decision.rs"
 required-features = ["integration-real-tests"]
 
 [[test]]

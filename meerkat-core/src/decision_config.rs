@@ -30,11 +30,20 @@ pub struct DecisionConfig {
     /// mere presence never selects Jev and never triggers a key lookup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jev: Option<JevBackendConfig>,
+    /// Explicit LLM route for host invocations on the `llm` backend. The
+    /// agent tool never reads it; a host without one cannot evaluate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_route: Option<DecisionHostRoute>,
     /// Bounded request, candidate, deadline, attempt, and output limits.
     pub limits: DecisionLimitsConfig,
 }
 
 impl DecisionConfig {
+    /// Whether this table carries no declaration beyond the defaults.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
     /// Validate configuration invariants for this table.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.backend == DecisionBackendSelection::Jev && self.jev.is_none() {
@@ -45,6 +54,9 @@ impl DecisionConfig {
         if let Some(jev) = self.jev.as_ref() {
             jev.validate()?;
         }
+        if let Some(route) = self.host_route.as_ref() {
+            route.validate()?;
+        }
         self.limits.validate()
     }
 }
@@ -54,22 +66,51 @@ impl DecisionConfig {
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionBackendSelection {
-    /// One bounded, tool-free structured request through the session's
-    /// already-admitted LLM route. No new account, credential, or endpoint.
+    /// One bounded, tool-free structured request through an admitted LLM
+    /// route. The agent-callable tool inherits the session's already-admitted
+    /// route; host invocations (gateways, feature policies) use the explicit
+    /// `[decision.host_route]`. No new account, credential, or endpoint.
     #[default]
-    SessionLlm,
+    Llm,
     /// The explicitly configured Jev (TypeSafe) evaluation endpoint.
     Jev,
 }
 
-/// Connection facts for the Jev backend.
+/// Explicit LLM route for host invocations that have no admitted session.
 ///
-/// Credentials have exactly one owner: the typed [`CredentialSourceSpec`]
-/// resolved through the shared credential resolver at composition time. The
-/// adapter itself never reads the environment or persists tokens.
+/// The host names the exact provider and model (and optionally the realm
+/// auth binding); nothing here is elected by a leaf, SDK, or backend.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionHostRoute {
+    pub provider: crate::Provider,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_binding: Option<crate::connection::AuthBindingRef>,
+}
+
+impl DecisionHostRoute {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.model.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "decision.host_route.model must not be empty".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Connection facts for the Jev backend.
+///
+/// Core carries only the shape: the host names the endpoint, the model, and
+/// the typed [`CredentialSourceSpec`] explicitly, and the feature crate owns
+/// any vendor defaults it documents. Credentials have exactly one owner (the
+/// realm credential resolver); the adapter never reads the environment or
+/// persists tokens.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct JevBackendConfig {
     /// Evaluation endpoint URL.
     pub endpoint: String,
@@ -80,26 +121,8 @@ pub struct JevBackendConfig {
     /// Explicit host permission to disclose admitted decision inputs to this
     /// external destination. Access to content does not authorize sending it
     /// to a new vendor; this flag is that authorization. Defaults to `false`.
+    #[serde(default)]
     pub allow_disclosure: bool,
-}
-
-/// Default TypeSafe evaluation endpoint.
-pub const DEFAULT_JEV_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
-/// Default Jev model alias.
-pub const DEFAULT_JEV_MODEL: &str = "jev-latest";
-
-impl Default for JevBackendConfig {
-    fn default() -> Self {
-        Self {
-            endpoint: DEFAULT_JEV_ENDPOINT.to_string(),
-            model: DEFAULT_JEV_MODEL.to_string(),
-            credential: CredentialSourceSpec::Env {
-                env: "JEV_API_KEY".to_string(),
-                fallback: Vec::new(),
-            },
-            allow_disclosure: false,
-        }
-    }
 }
 
 impl JevBackendConfig {
@@ -148,6 +171,9 @@ pub struct DecisionLimitsConfig {
     /// transient backoff). Never a retry-until-agreement loop.
     pub max_attempts: u32,
     /// Output-token allowance for the LLM backend's single structured request.
+    /// Thinking models spend this allowance on reasoning before the answer
+    /// envelope, so the default leaves generous headroom; a cut-off envelope
+    /// is the typed `output_truncated` failure, never a guessed answer.
     pub max_output_tokens: u32,
 }
 
@@ -161,7 +187,7 @@ impl Default for DecisionLimitsConfig {
             max_instruction_bytes: 4 * 1024,
             deadline_ms: 30_000,
             max_attempts: 2,
-            max_output_tokens: 1024,
+            max_output_tokens: 4096,
         }
     }
 }
@@ -220,9 +246,27 @@ mod tests {
     #[test]
     fn default_table_selects_session_llm_without_jev_facts() {
         let config = DecisionConfig::default();
-        assert_eq!(config.backend, DecisionBackendSelection::SessionLlm);
+        assert_eq!(config.backend, DecisionBackendSelection::Llm);
         assert!(config.jev.is_none());
+        assert!(config.is_default());
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn untouched_table_is_not_written_back_but_a_declared_one_round_trips() {
+        let rendered = toml::to_string(&crate::Config::default()).unwrap();
+        assert!(
+            !rendered.contains("[decision"),
+            "a default decision table must not be rendered: {rendered}"
+        );
+
+        let mut config = crate::Config::default();
+        config.decision.limits.max_questions = 3;
+        let rendered = toml::to_string(&config).unwrap();
+        assert!(rendered.contains("[decision.limits]"), "{rendered}");
+        let parsed: crate::Config = toml::from_str(&rendered).unwrap();
+        assert_eq!(parsed.decision, config.decision);
+        assert!(!parsed.decision.is_default());
     }
 
     #[test]
@@ -230,6 +274,7 @@ mod tests {
         let config = DecisionConfig {
             backend: DecisionBackendSelection::Jev,
             jev: None,
+            host_route: None,
             limits: DecisionLimitsConfig::default(),
         };
         let error = config.validate().unwrap_err();
@@ -260,9 +305,51 @@ credential = { kind = "env", env = "JEV_API_KEY" }
     }
 
     #[test]
+    fn host_route_parses_and_validates() {
+        let parsed: DecisionConfig = toml::from_str(
+            r#"
+backend = "llm"
+
+[host_route]
+provider = "anthropic"
+model = "claude-sonnet-4-5"
+"#,
+        )
+        .unwrap();
+        parsed.validate().unwrap();
+        let route = parsed.host_route.unwrap();
+        assert_eq!(route.provider, crate::Provider::Anthropic);
+        assert!(route.auth_binding.is_none());
+
+        let empty_model = DecisionConfig {
+            host_route: Some(DecisionHostRoute {
+                provider: crate::Provider::OpenAI,
+                model: "  ".into(),
+                auth_binding: None,
+            }),
+            ..DecisionConfig::default()
+        };
+        assert!(empty_model.validate().is_err());
+    }
+
+    #[test]
     fn unknown_keys_are_rejected_at_parse() {
         let error = toml::from_str::<DecisionConfig>("bearer_token = \"x\"\n").unwrap_err();
         assert!(error.to_string().contains("bearer_token"));
+    }
+
+    #[test]
+    fn jev_table_requires_explicit_endpoint_model_and_credential() {
+        let error = toml::from_str::<DecisionConfig>(
+            r#"
+backend = "jev"
+
+[jev]
+model = "jev-latest"
+"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("endpoint"), "{error}");
     }
 
     #[test]

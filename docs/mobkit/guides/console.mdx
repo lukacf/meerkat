@@ -4,7 +4,7 @@ description: "Embedded MobKit console with configurable branding, grouped roster
 icon: "desktop"
 ---
 
-*This page documents MobKit v0.8.35 (mirrored from [v0.8.35](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.35)).*
+*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
 
 MobKit ships a web-based operator console through its HTTP composition. The
 console/admin `mobkit_gateway` serves it directly. A persistent, SDK-driven
@@ -127,6 +127,153 @@ The center area is a multi-panel tabbed workspace. Each panel contains a `Conver
 - Textarea with "Message {agent}..." placeholder
 - Send button (↑) — also supports Enter to send, Shift+Enter for newline
 - Footer shows: target agent, member ID, profile, and status
+
+### Voice conversations
+
+When the gateway has an authenticated OpenAI Live configuration, a blue
+waveform button appears beside Send. Voice is not offered without OpenAI
+authentication, in a view-only console, or for an agent you cannot message.
+Microphone access requires HTTPS or localhost and your browser's permission.
+Source builds must enable the `openai-live` Cargo feature. Public GPT Live
+requires a compatible OpenAI API-key binding; a ChatGPT OAuth login alone
+does not enable this feature.
+
+Voice is an explicit gateway registration, not a setting in `console.toml`.
+For `mobkit_gateway`, supply `console_voice` in the init parameters alongside
+your `auth_config` and enable `persistent_sessions`:
+
+```json
+{
+  "persistent_sessions": true,
+  "console_voice": {
+    "principal": "alice@example.com",
+    "realm": "ops",
+    "auth_binding": { "realm": "ops", "binding": "openai" },
+    "voice": "marin"
+  }
+}
+```
+
+The binding must already be configured in the gateway's Meerkat host config.
+The principal must match the authenticated console subject. For an SDK-driven
+`rpc_gateway`, place the same `console_voice` registration under
+`runtime_options` and use the gateway's persistent session configuration.
+The SDK builders expose this as `.consoleVoice(config)` in TypeScript and
+`.console_voice(config)` in Python, using `OpenAiLiveGatewayConfig`.
+A Rust host that embeds `UnifiedRuntime` through its builder registers the
+same thing with `.console_voice(PublicLiveRegistration)` (plus `.live(...)`
+for the external channel) and serves
+`build_reference_app_router_with_live(decisions)`; the decision state must
+require app auth, for example `parse_console_auth_config` with
+`provider: "oidc"` for a Google-fronted console. See the Unified Runtime guide.
+Credentials stay on the server. The console checks readiness for the selected
+agent before offering voice and checks it again before microphone capture;
+registration or model availability alone does not enable the button.
+
+Click the waveform button to start a `gpt-live-1` conversation with the
+selected agent as its background agent. Audio connects without waiting for a
+summary of that agent's context; it does not change the background agent's text model.
+The voice strip above the composer names the voice agent and shows separate
+waveforms for your microphone and the live model's audio.
+
+Startup distinguishes **Starting voice** from **Connecting audio**. Once audio
+is active, the strip separately shows **Reading context**, **Preparing context**,
+or **Sending context** while the initial summary is prepared and supplied.
+You can speak, mute, and send text during preparation. **Context supplied** means
+the provider acknowledged it, not that the model has recalled or spoken it.
+Context failures stay visible without disabling the connected audio; a failed
+status read is shown separately and retried.
+
+Context preparation is a separate, tool-free summary request using the background
+agent's model and credentials; it does not change that agent's model or
+reasoning settings. The summary targets compact notes rather than replaying
+logs, and uses low or disabled OpenAI reasoning where the model catalog supports
+it. Meerkat orders the captured history and newer conversation updates, and
+cancels or fences context work when the call closes or changes. A context job
+from an old call cannot update a replacement call.
+
+The microphone and speaker controls are independent. Muting speakers silences
+local playback, not the conversation; the model's output waveform continues
+to show incoming audio. End the conversation with the close button.
+
+Voice stays with its original agent when you select another chat, switch
+tabs, or open an operator panel. Starting voice on another agent ends the
+previous voice conversation before opening the new one. Text composers remain
+usable throughout, including for the agent currently in voice mode.
+
+A gateway may also register `live: true` beside `console_voice` so an external
+client (for example an embodiment daemon opening `mobkit/live/open` over
+`{base}/live/ws`) shares the same live host. The two take turns: the newest
+engagement wins. When the external client opens a channel, the console call
+ends with "Voice moved to the external live channel", and readiness for the
+console reports `available: false` with `reason: "external_live_active"` and
+the holder until that channel closes. Starting voice again from the console
+takes the path back and closes the external channel with a typed
+`superseded_by_console_voice` reason.
+
+With GPT Live client delegation, typed messages go to the background agent;
+the composer labels that destination during voice. Its canonical context and
+results are mirrored into the voice conversation. This follows
+[OpenAI's typed-input contract](https://developers.openai.com/api/docs/guides/live-delegation#accept-typed-input):
+typed text is user data for the backend, not a live-model instruction or a
+native spoken turn. Chats with other agents do not change the voice target.
+For local session-backed agents, console messages use explicit conversational
+user admission, preserving the console interaction identity in canonical
+history. Internal events and recalled memory are not relabeled as human input.
+
+Voice ends automatically after **15 minutes of silence**, not after 15
+minutes of total call time. Text messages do not extend that audio inactivity
+window. Ending voice or closing the console releases the browser's microphone
+and playback resources. The close button immediately mutes microphone
+transmission and playback, retaining the muted WebRTC transport for up to five
+seconds while the server finalizes. Transport and capture resources are then
+released even if finalization fails; an unconfirmed close remains retryable.
+If Meerkat provides a recovery connection, the console
+reconnects to the same voice agent without changing your mute settings;
+unrecoverable audio connection loss ends voice.
+
+#### Voice acceptance tests
+
+The offline browser lane uses real local WebRTC peers without paid provider
+calls. The opt-in live lane starts a separate authenticated console and uses
+real `gpt-live-1`, real `gpt-5.5` background/peer calls, and original synthetic
+speech fixtures instead of capturing a person's microphone:
+
+```bash
+npm --prefix console run e2e:voice
+node console/voice-e2e-live.cjs --self-test
+
+# Requires OPENAI_API_KEY; this lane makes billed OpenAI calls.
+npm --prefix console run build
+npm --prefix console run e2e:voice:live
+```
+
+The live runner builds the voice-enabled gateway through `scripts/repo-cargo`.
+Set `MOBKIT_VOICE_GATEWAY_BIN` to an already-built current gateway to reuse it.
+Missing credentials fail the selected live lane; they do not produce a skip
+that looks like a passing acceptance run. The runner does not use an existing
+console or record microphone input.
+
+Coverage includes spoken requests, typed-value recall, peer results arriving
+after an initial answer, and close/reopen while background work remains pending.
+Expected native transcript content must have fresh non-silent audio nearby;
+packets, old audio peaks, or mirrored voice text masquerading as a background
+answer are not sufficient. Late ordinary background facts may reach the new
+voice conversation through current canonical context, but old receipts must
+not control it.
+
+The public API does not expose pending canonical-mirror acknowledgements.
+Exact close while an append awaits its provider acknowledgement is therefore
+covered separately by deterministic Meerkat owner tests. The paid console lane
+does not infer that hidden state from an unfinished background task.
+
+The optional summary-latency benchmark makes three billed `gpt-5.5` calls and
+checks a five-second summary budget while retaining exact context values:
+
+```bash
+./scripts/repo-cargo test -p meerkat-mobkit --features openai-live --lib \
+  console_voice_summary_live_latency_and_context_retention -- --ignored --nocapture
+```
 
 ### Signals rail - event feed
 

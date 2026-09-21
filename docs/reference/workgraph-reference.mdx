@@ -322,6 +322,19 @@ same everywhere:
 | `realm_id`, `namespace` | all | Default to the granted realm and namespace; any other value is rejected |
 | `all_namespaces` | list, snapshot, events | Present on the wire, rejected by the standard single-grant services |
 
+**Atomic scan capacity is separate from the response limit.** `ready` and
+`snapshot` fail when the whole namespace read contains more than 1,000 stored
+items, including terminal items. `snapshot` additionally rejects reads with
+more than 1,000 edges or 1,000 attention bindings. These checks happen before
+labels, status/terminal filters, or output truncation: `limit: 1` and closing
+old items do not bypass them. These are read/evaluation ceilings, not
+write/storage maxima.
+
+Plan capacity across deliberately scoped realms or namespaces issued by an
+embedding Rust host. A caller-supplied namespace string cannot widen the
+service's grant; there is no item-delete, namespace-rename, or graph-compaction
+API to reclaim this scan capacity.
+
 Items and edges are never deleted. No tool, RPC method, REST route, or CLI
 command unlinks an edge or removes an item; only the trusted attention prune
 deletes rows. Close an item that should leave live views as `cancelled`, and

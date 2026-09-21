@@ -14,7 +14,15 @@ Load this reference when working on peer trust, inter-agent messaging, comms dra
 
 Envelope classification (trusted-vs-untrusted, content-shape detection, handling mode inference) runs through MeerkatMachine DSL via the `PeerCommsHandle.classify_external_envelope` / `classify_plain_event` methods. The trait lives in `meerkat-core/src/handles.rs`; the runtime impl routes to the DSL's classification signals. `ClassifyExternalEnvelope` carries the typed `from_peer_id: PeerId` (not just a display name), and the machine echoes the canonical peer id back in the classification result — shell code reads `ingress_fact.canonical_peer_id` from the machine-owned result rather than re-deriving identity from envelope strings.
 
-Shell-side data types live in `meerkat-comms/src/peer_types.rs` (`PeerId`, `RawPeerKind`, `ContentShape`, `PeerIngressState`). These are pure data, not state machine authorities. The trust state on `ClassifiedInboxQueue` is the shared `Arc<RwLock<TrustStore>>`; per-peer phase (`PeerIngressState`) is shell mechanics — concurrency plumbing, not lifecycle truth.
+Canonical `PeerId` lives in `meerkat-core/src/comms.rs`; the current ingress-kind
+vocabulary is `PeerIngressKind` in `meerkat-core/src/interaction.rs`.
+`meerkat-comms/src/peer_types.rs` contains the shell-side `ContentShape` and
+`PeerIngressState` types, not independent state machine authorities. The trust
+state on `ClassifiedInboxQueue` is the shared `Arc<RwLock<TrustStore>>`.
+`PeerIngressState` is the queue's local projection of
+`PeerIngressAuthorityPhase`, updated only from machine receive/dequeue
+authority results through `PeerCommsHandle`. Queue storage, order, and locking
+remain mechanical; the local phase copy does not choose lifecycle truth.
 
 ## Comms drain lifecycle
 
@@ -30,7 +38,9 @@ Session identity claims route through `SessionClaimHandle` (meerkat-core/src/han
 
 - `meerkat-comms/src/runtime/comms_runtime.rs` — `CommsRuntime`
 - `meerkat-comms/src/trust.rs` — `TrustStore` (PeerId-keyed trust entries)
-- `meerkat-comms/src/peer_types.rs` — pure data types (PeerId, RawPeerKind, ContentShape, PeerIngressState)
+- `meerkat-core/src/comms.rs` — canonical `PeerId`
+- `meerkat-core/src/interaction.rs` — `PeerIngressKind`, `PeerIngressAuthorityPhase`
+- `meerkat-comms/src/peer_types.rs` — `ContentShape` and the non-authoritative `PeerIngressState` projection
 - `meerkat-comms/src/classify.rs` — envelope classification (calls `PeerCommsHandle` for lifecycle transitions; consumes machine-echoed canonical peer id)
 - `meerkat-comms/src/inbox.rs` — `ClassifiedInboxQueue`, shared trust store handle, shell-mechanics drain helpers
 - `meerkat-comms/src/inproc.rs` — `InprocRegistry`

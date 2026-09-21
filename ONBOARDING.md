@@ -7,18 +7,29 @@ the same runtime contracts.
 ## Prerequisites
 
 - Rust 1.94.1 (the pinned toolchain in `rust-toolchain.toml`)
+- `cargo-nextest` for the default Cargo test lanes
 - GNU Make
 - Git
-- Node.js only when changing the TypeScript/Web SDKs or running a local
-  Mintlify preview
+- Node.js for normal contributor validation and metadata tooling, including
+  version parity and scoped Rust checks
 - Python only when changing the Python SDK or running repository scripts that
   require it
 
-Install the pinned Rust toolchain and repository build dependencies with:
+Install the pinned Rust toolchain and its rustfmt/Clippy components with:
 
 ```bash
 make install-build-deps
 ```
+
+This target bootstraps Rust, not every validation tool. Install the separate
+Cargo test runner before using `make test` or `make agent-gate`:
+
+```bash
+./scripts/repo-cargo install cargo-nextest --locked
+```
+
+Node.js is needed even when you are not editing an SDK. SDK-specific npm
+dependencies and local Mintlify preview tooling remain task-specific setup.
 
 ## First Checkout
 

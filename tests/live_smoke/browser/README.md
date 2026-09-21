@@ -18,7 +18,25 @@ are intentionally isolated from demo apps and CI runners.
 
 ## Run
 
+The Rust-owned `make e2e-live` / `make e2e-smoke` lanes bootstrap their browser
+prerequisites. The direct npm commands below are for surface-level debugging.
+
+Before the direct run, provide a compatible raw WASM export bundle containing
+`meerkat_web_runtime.js` and `meerkat_web_runtime_bg.wasm`. To build it, have
+the Rust toolchain with the `wasm32-unknown-unknown` target and `wasm-pack`
+available (or set `RKAT_WASM_PACK_BIN` / `WASM_PACK` to a wasm-pack executable):
+
 ```bash
+# From the repository root
+npm --prefix sdks/web run build:wasm
+```
+
+Alternatively, export an absolute `MEERKAT_WEB_WASM_OUT_DIR` pointing to a
+compatible prebuilt bundle, and keep that export in the harness's environment.
+`npm run smoke` serves existing runtime files; it does not build the bundle.
+
+```bash
+# From the repository root
 cd tests/live_smoke/browser
 npm install
 npx playwright install chromium
@@ -28,7 +46,7 @@ npm run smoke
 Run a single scenario:
 
 ```bash
-npm run smoke -- --scenario BROWSER-RAW-MOB-003
+npm run smoke -- --scenario BROWSER-MOBPACK-SESSION-003
 npm run smoke -- --scenario BROWSER-RAW-MOB-004
 ```
 

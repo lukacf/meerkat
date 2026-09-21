@@ -17,8 +17,8 @@ and state transition is surfaced as a typed `AgentEvent`.
 | `ToolCallRequested` | Agent wants to invoke a tool |
 | `ToolResultReceived` | Conversation fact: the result was injected into the transcript |
 | `ToolExecutionCompleted` | Execution fact: the tool call finished, including its duration |
-| `TurnCompleted` | One agent loop iteration finished |
-| `BudgetWarning` | Warning emitted when approaching a token/time/tool-call budget limit |
+| `TurnCompleted` | Terminal assistant turn of the agentic loop completed, not each internal provider call |
+| `BudgetWarning` | The current agent loop reports a reached/exceeded token, time, or tool-call budget |
 
 ## Run
 ```bash

@@ -294,9 +294,13 @@ You can connect any MCP-capable client to a Meerkat MCP server. Run a server pro
 ### Hosting the MCP server
 
 `meerkat-mcp-server` is a library crate that provides tool schemas and handlers.
-If you need a full public MCP host, embed its `tools_list()` and
-`handle_tools_call*` entrypoints or run the bundled `rkat-mcp` binary. If you
-need a mob-only MCP host, `meerkat-mob-mcp` exposes `public_tools_list()` and
+For a full public MCP host, serve `MeerkatMcpState::advertised_tools_list()`
+from the same state used by the `handle_tools_call*` entrypoints, or run the
+bundled `rkat-mcp` binary. This instance-filtered catalog omits unavailable
+runtime tools, such as skills when no skill runtime is installed.
+`meerkat_mcp_server::tools_list()` is the static composable definition catalog,
+not the ready-to-serve instance catalog. For a mob-only MCP host,
+`meerkat-mob-mcp` exposes `public_tools_list()` and
 `handle_public_tools_call()` for the typed `meerkat_mob_*` control plane.
 
 `meerkat-mob-mcp::tools_list()` and `handle_tools_call()` remain the internal
@@ -327,6 +331,231 @@ errors; a blank value is treated as unset), and a value that does not parse is
 reported on stderr before the default applies, so an operator's typo is never
 swallowed. Clients that capture stderr see these lines; nothing changes on
 stdout.
+
+## Request cancellation
+
+The bundled server accepts MCP's `notifications/cancelled` notification.
+While a `tools/call` request with JSON-RPC ID `2` is in flight, send:
+
+```json Client -> server notification
+{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2}}
+```
+
+`requestId` must be the original request's exact ID, preserving its
+number/string type, not a session ID. This notification has no `id` and
+receives no response. It can cancel an uncommitted `meerkat_run` request before
+creation has returned a session identity. For example, cancellation before
+response publication can resolve that original request as:
+
+```json Server -> client response to the original request
+{"jsonrpc":"2.0","id":2,"error":{"code":-32005,"message":"request cancelled before response publish"}}
+```
+
+Cancellation does not roll back committed work: committed success is not
+rewritten to cancellation. This request lifecycle operation is distinct from
+`meerkat_interrupt`, which targets an existing session's turn. Raw Meerkat
+JSON-RPC instead uses `cancel` with `request_id`; do not interchange those
+transport spellings.
+
+## Event streaming
+
+### Push notifications
+
+Set `stream: true` on `meerkat_run` or `meerkat_resume`:
+
+```json tools/call request
+{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "method": "tools/call",
+  "params": {
+    "name": "meerkat_run",
+    "arguments": {"prompt": "Explain Rust ownership", "stream": true}
+  }
+}
+```
+
+The bundled server emits MCP `notifications/message` messages while the
+request runs:
+
+```json Push notification
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/message",
+  "params": {
+    "level": "info",
+    "data": {
+      "source": "meerkat",
+      "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+      "event": {
+        "event_id": "01936f8a-7b2c-7000-8000-000000000010",
+        "source": {
+          "type": "session",
+          "session_id": "01936f8a-7b2c-7000-8000-000000000001"
+        },
+        "seq": 12,
+        "timestamp_ms": 1736937000000,
+        "payload": {"type": "text_delta", "delta": "Ownership"}
+      }
+    }
+  }
+}
+```
+
+The agent event is a full `EventEnvelope<AgentEvent>`; inspect
+`params.data.event.payload`, not `params.data.event.type`. Notifications have
+no request ID and do not replace the final `tools/call` response. A failure to
+serialize an event instead emits `level: "error"` with
+`data.error: "event_serialization_failed"` and `data.message`.
+
+### Pull streams: open, read, close
+
+Pull streams are independent tool handles, not push notifications. Invoke
+these names via `tools/call`:
+
+| Tool | Arguments | Decoded result |
+|------|-----------|----------------|
+| `meerkat_event_stream_open` | Required `session_id` | `stream_id`, `session_id` |
+| `meerkat_event_stream_read` | Required `stream_id`; optional `timeout_ms`, `no_timeout` | `stream_id`, `status`, and `event` only for status `event` |
+| `meerkat_event_stream_close` | Required `stream_id` | `stream_id`, `closed` (boolean) |
+| `meerkat_mob_event_stream_open` | Required `mob_id`; optional `member_id` | `stream_id`, `mob_id`, `member_id` (null for mob-wide) |
+| `meerkat_mob_event_stream_read` | Required `stream_id`; optional `timeout_ms`, `no_timeout` | Same read-status wrapper |
+| `meerkat_mob_event_stream_close` | Required `stream_id` | `stream_id`, `closed` (boolean) |
+
+The three mob tools require the `mob` feature. Each pull-tool result wraps
+its payload as JSON text in `result.content[0].text`; parse that string once.
+For example:
+
+<CodeGroup>
+```json Open session stream
+{
+  "jsonrpc": "2.0",
+  "id": 30,
+  "method": "tools/call",
+  "params": {
+    "name": "meerkat_event_stream_open",
+    "arguments": {"session_id": "01936f8a-7b2c-7000-8000-000000000001"}
+  }
+}
+```
+
+```json Open response
+{
+  "jsonrpc": "2.0",
+  "id": 30,
+  "result": {
+    "content": [{
+      "type": "text",
+      "text": "{\"stream_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"session_id\":\"01936f8a-7b2c-7000-8000-000000000001\"}"
+    }]
+  }
+}
+```
+
+```json Open member stream (mob feature)
+{
+  "jsonrpc": "2.0",
+  "id": 40,
+  "method": "tools/call",
+  "params": {
+    "name": "meerkat_mob_event_stream_open",
+    "arguments": {"mob_id": "review-team", "member_id": "worker-1"}
+  }
+}
+```
+
+```json Decoded member-open payload (content[0].text)
+{
+  "stream_id": "550e8400-e29b-41d4-a716-446655440001",
+  "mob_id": "review-team",
+  "member_id": "worker-1"
+}
+```
+</CodeGroup>
+
+Read with flat timeout fields (there is no nested `timeout` object):
+
+```json Read session stream
+{
+  "jsonrpc": "2.0",
+  "id": 31,
+  "method": "tools/call",
+  "params": {
+    "name": "meerkat_event_stream_read",
+    "arguments": {
+      "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+      "timeout_ms": 1000,
+      "no_timeout": false
+    }
+  }
+}
+```
+
+`timeout_ms` is an optional non-negative millisecond count. Omission/`null`
+uses the production default of **5000 ms**; `no_timeout` defaults to `false`.
+`no_timeout: true` waits indefinitely and takes precedence even if
+`timeout_ms` is also supplied. Mob reads use the same flat fields with
+`meerkat_mob_event_stream_read` and the mob stream's returned ID.
+
+The decoded read payload has one of three statuses:
+
+<CodeGroup>
+```json Event (decoded session/member payload)
+{
+  "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "event",
+  "event": {
+    "event_id": "01936f8a-7b2c-7000-8000-000000000010",
+    "source": {
+      "type": "session",
+      "session_id": "01936f8a-7b2c-7000-8000-000000000001"
+    },
+    "seq": 12,
+    "timestamp_ms": 1736937000000,
+    "payload": {"type": "text_delta", "delta": "Ownership"}
+  }
+}
+```
+
+```json Timeout (decoded payload)
+{"stream_id":"550e8400-e29b-41d4-a716-446655440000","status":"timeout"}
+```
+
+```json Exhausted (decoded payload)
+{"stream_id":"550e8400-e29b-41d4-a716-446655440000","status":"closed"}
+```
+</CodeGroup>
+
+A timeout leaves the handle open for the next read. Exhaustion returns
+`closed` and removes the handle; another read then fails as not found.
+Session and per-member reads carry an `EventEnvelope<AgentEvent>` directly
+under `event`. Omit `member_id` to open a mob-wide stream: its events are
+`AttributedEvent` values with member attribution and a nested `envelope`, so
+the agent payload is at `event.envelope.payload` instead of `event.payload`.
+
+Close a handle when finished:
+
+<CodeGroup>
+```json Close session stream
+{
+  "jsonrpc": "2.0",
+  "id": 32,
+  "method": "tools/call",
+  "params": {
+    "name": "meerkat_event_stream_close",
+    "arguments": {"stream_id": "550e8400-e29b-41d4-a716-446655440000"}
+  }
+}
+```
+
+```json Decoded close payload (content[0].text)
+{"stream_id":"550e8400-e29b-41d4-a716-446655440000","closed":true}
+```
+</CodeGroup>
+
+For a mob handle, use `meerkat_mob_event_stream_close` with its `stream_id`.
+`closed: true` means this call removed the handle; `false` means it was already
+absent. Close results use a boolean, unlike a read's `status: "closed"`.
 
 ## Tool reference
 
@@ -389,11 +618,11 @@ only into foreground provider requests for this logical turn. It is not a
 System message, is not appended to Session, and is excluded from compaction and
 extraction calls.
 
-```json Response (success)
+```json Response (completed run, no extraction)
 {
   "content": [{
     "type": "text",
-    "text": "{\"content\":[{\"type\":\"text\",\"text\":\"Agent response here\"}],\"session_id\":\"01936f8a-...\",\"turns\":1,\"tool_calls\":0,\"structured_output\":null,\"schema_warnings\":null}"
+    "text": "{\"content\":[{\"type\":\"text\",\"text\":\"Agent response here\"}],\"session_id\":\"01936f8a-7b2c-7000-8000-000000000001\",\"turns\":1,\"tool_calls\":0,\"structured_output\":null,\"extraction_error\":null,\"schema_warnings\":null,\"skill_diagnostics\":null}"
   }]
 }
 ```
@@ -418,7 +647,21 @@ extraction calls.
 </ParamField>
 
 <ParamField body="provider" type="string | null" default="inferred">
-  Provider: `"anthropic"`, `"openai"`, `"gemini"`, `"self_hosted"`, `"other"`.
+  Explicit MCP override vocabulary: `"anthropic"`, `"openai"`, `"gemini"`,
+  or `"other"`. `"self_hosted"` is not an accepted explicit token here.
+  Omission/`null` still permits configured model/binding resolution, including
+  configured self-hosted routes; accepting `"other"` does not guarantee an
+  operational custom provider.
+</ParamField>
+
+<ParamField body="auth_binding" type="WireAuthBindingRef | null" default="null">
+  Optional structural credential selector, for example
+  `{"realm":"prod","binding":"anthropic","profile":"claude_oauth"}`.
+  `realm` and `binding` are required when supplied; `profile` is optional.
+  Configure the referenced [realm, binding, and auth profile](/guides/auth)
+  first. Omission/`null` lets the create resolver select credentials.
+  This is not a colon-delimited CLI string and does not accept server-owned
+  provenance. It is a `meerkat_run` selector, not a new `meerkat_resume` field.
 </ParamField>
 
 <ParamField body="output_schema" type="object | null" default="null">
@@ -430,7 +673,8 @@ extraction calls.
 </ParamField>
 
 <ParamField body="stream" type="bool" default="false">
-  Stream agent events via MCP notifications.
+  Stream agent events via `notifications/message`; see
+  [event streaming](#event-streaming) for the envelope and pull-stream tools.
 </ParamField>
 
 <ParamField body="verbose" type="bool" default="false">
@@ -533,11 +777,23 @@ tool calls. The call waits for the resumed turn to complete and returns the same
 {
   "content": [{
     "type": "text",
-    "text": "{\"content\":[{\"type\":\"text\",\"text\":\"Agent is waiting for tool results\"}],\"session_id\":\"01936f8a-...\",\"status\":\"pending_tool_call\",\"pending_tool_calls\":[{\"tool_name\":\"read_file\",\"args\":{\"path\":\"/tmp/data.txt\"}}]}"
+    "text": "{\"content\":[{\"type\":\"text\",\"text\":\"Agent is waiting for tool results\"}],\"session_id\":\"01936f8a-7b2c-7000-8000-000000000001\",\"status\":\"pending_tool_call\",\"resumable\":true,\"pending_tool_calls\":[{\"tool_use_id\":\"tc_abc123\",\"tool_name\":\"read_file\",\"args\":{\"path\":\"/tmp/data.txt\"}}]}"
   }]
 }
 ```
 </CodeGroup>
+
+Decode the pending payload from `content[0].text`. It is a control result
+with `status: "pending_tool_call"`, `session_id`, `resumable: true`,
+`pending_tool_calls`, and human-readable `content`, not a completed-run
+payload. A `session_ref` may be present when assigned by the surface;
+`session_created: true`, when present, says that the suspended request created
+the session (false is omitted). Do not infer successful-run counters from a
+pending result.
+
+Echo each provider-issued `tool_use_id` exactly in `tool_results`, as
+`tc_abc123` is echoed above. Never correlate by tool name or array position,
+even when several pending calls invoke the same tool.
 
 #### Parameter reference
 
@@ -550,7 +806,8 @@ tool calls. The call waits for the resumed turn to complete and returns the same
 </ParamField>
 
 <ParamField body="stream" type="bool" default="false">
-  Stream agent events via MCP notifications.
+  Stream agent events via `notifications/message`; see
+  [event streaming](#event-streaming).
 </ParamField>
 
 <ParamField body="verbose" type="bool" default="false">
@@ -566,7 +823,7 @@ tool calls. The call waits for the resumed turn to complete and returns the same
 </ParamField>
 
 <ParamField body="tool_results[].tool_use_id" type="string" required>
-  ID of the tool call.
+  Exact provider-issued `tool_use_id` from the matching pending call.
 </ParamField>
 
 <ParamField body="tool_results[].content" type="string" required>
@@ -610,7 +867,10 @@ tool calls. The call waits for the resumed turn to complete and returns the same
 </ParamField>
 
 <ParamField body="provider" type="string | null" default="from session">
-  Provider override. Typically inferred from `model`. Used with `model` for mid-session provider switching.
+  Provider override for mid-session switching with `model`: `"anthropic"`,
+  `"openai"`, `"gemini"`, or `"other"`, as on `meerkat_run`.
+  Omission/`null` permits normal model/binding resolution; `"self_hosted"`
+  is not an accepted explicit token.
 </ParamField>
 
 <ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
@@ -619,7 +879,9 @@ tool calls. The call waits for the resumed turn to complete and returns the same
 
 ### Response format
 
-Both `meerkat_run` and `meerkat_resume` return MCP-standard tool results. The inner `text` field is a JSON-encoded payload containing:
+Both `meerkat_run` and `meerkat_resume` return MCP-standard tool results.
+Parse the JSON-encoded `content[0].text` payload. Completed runs contain the
+fields below; callback-pending control results use the distinct shape above.
 
 <ResponseField name="content" type="array">
   MCP content blocks with the agent's text.
@@ -637,13 +899,27 @@ Both `meerkat_run` and `meerkat_resume` return MCP-standard tool results. The in
   Number of tool calls executed.
 </ResponseField>
 
-<ResponseField name="structured_output" type="object | null">
-  Parsed structured output.
+<ResponseField name="structured_output" type="JSON | null">
+  Parsed structured output when extraction succeeds, or explicit `null`.
+</ResponseField>
+
+<ResponseField name="extraction_error" type="ExtractionError | null">
+  Post-turn extraction failure details, or explicit `null`. The object has
+  `last_output` (the committed main-turn assistant text extraction tried to
+  transform), `attempts` (number of extraction attempts), and `reason`
+  (human-readable failure description).
 </ResponseField>
 
 <ResponseField name="schema_warnings" type="array | null">
   Schema compatibility warnings.
 </ResponseField>
+
+The main turn can successfully return committed text in `content` even if
+post-turn extraction fails. Inspect both `structured_output` and
+`extraction_error`; missing structured output does not prove extraction was
+never requested. Unlike REST/RPC `WireRunResult`, the MCP completed-run inner
+payload includes explicit `null` values for these absent optional fields; the
+outer MCP text wrapper remains unchanged.
 
 ### meerkat_config
 
@@ -782,7 +1058,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response
 {
-  "contract_version": "0.8.40",
+  "contract_version": {"major": 0, "minor": 8, "patch": 40},
   "providers": [
     {
       "provider": "anthropic",

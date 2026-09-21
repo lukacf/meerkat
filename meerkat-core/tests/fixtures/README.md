@@ -97,6 +97,8 @@ current-source generated or production-redacted bytes, binds the released
 producer by version and SHA-256, verifies the raw 0.8.10 ledger/invariants
 before import, and opens only a temporary copy with the current stores.
 
-Until its real `corpus/` directory is populated from the HomeCore released
-artifact, this directory remains historical digest-vector coverage only and
-the released-realm recovery test fails as an explicit release blocker.
+The separate `corpus/` now contains a synthetic clean-shutdown realm captured
+with the published `rkat` 0.8.10 binary. It is consumed by
+`meerkat-runtime/tests/recovery_contract.rs`; missing or corrupt corpus bytes
+remain a test failure. This does not turn the historical digest vectors above
+into an upgrade corpus or establish pending-input/crash recovery coverage.

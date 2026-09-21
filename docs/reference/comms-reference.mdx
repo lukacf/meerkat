@@ -89,15 +89,23 @@ fan-in steps.
 | REST `GET /comms/peers` | HTTP adapter for `comms/peers` |
 | MCP `meerkat_comms_send` / `meerkat_comms_peers` | Public MCP adapters for the same host operations |
 
-`comms/send` has a closed `kind` discriminator:
+Every `comms/send` command requires `session_id` and a closed `kind`
+discriminator. The table lists the additional required core fields:
 
 | Kind | Required core fields | Notes |
 | --- | --- | --- |
 | `input` | `body` | Local session input; optional source, stream, blocks, handling mode |
 | `peer_message` | `to`, `body` | One-way peer content |
-| `peer_lifecycle` | `to`, `lifecycle_kind` | Typed one-way lifecycle notice |
+| `peer_lifecycle` | `to`, `lifecycle_kind`, `params` | Typed one-way lifecycle notice |
 | `peer_request` | `to`, `intent`, `params` | Closed request intent and typed params |
 | `peer_response` | `to`, `in_reply_to`, `status` | `accepted`, `completed`, or `failed` |
+
+For `peer_lifecycle`, `params.peer` is a required display string; `params.role`,
+`params.description`, and `params.peer_spec` are optional. `peer`, `role`, and
+`description` are presentation metadata, not routing authority. `to` is the
+canonical destination `PeerId`; when supplied, `peer_spec` carries the typed
+canonical identity of the peer described by the lifecycle notice. Neither
+`params.peer` nor `params.peer_spec` replaces `to`.
 
 `queue` and `steer` are runtime admission modes. A `peer_response` may override
 handling mode only when its status is terminal (`completed` or `failed`);

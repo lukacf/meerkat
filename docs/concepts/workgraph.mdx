@@ -161,10 +161,14 @@ binding, launches local or remotely placed Flow steps, and projects terminal
 evidence back into that same WorkGraph authority.
 
 Durable jobs compose through the same ownership rule. `DetachedJobMachine`
-owns execution and terminal result, while a terminal evidence projector adds a
-typed reference to the item and asks WorkGraph to close it under its existing
-completion policy. A scheduled job likewise leaves time with Schedule and
-execution with the jobs subsystem.
+owns execution and terminal result. When composed by a host,
+`JobTerminalEvidenceProjector` only adds a typed evidence reference; unlike the
+Mob Flow execution bridge, it does not request closure. An authorized host or
+agent must separately request closure with the current item revision, and
+WorkGraph applies its existing completion policy. Job success is not itself
+confirmation authority, and jobs do not require WorkGraph to be enabled. A
+scheduled job likewise leaves time with Schedule and execution with the jobs
+subsystem.
 
 ## See Also
 

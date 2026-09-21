@@ -13,7 +13,7 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `schedule_bundle_schema` (route `revision_supersede_enters_occurrence_authority`): `meerkat-machine-schema/src/catalog/compositions.rs` — formal schedule bundle composition
 
 ### Scenarios
-- `revision-supersede-route` — revision-affecting schedule updates supersede pending future occurrences through the explicit route
+- `revision-supersede-route` — revision-affecting schedule updates (including deletion) supersede all outstanding nonterminal occurrences of the schedule from older revisions at commit time, including overdue Pending and in-flight Claimed/Dispatching/AwaitingCompletion, through typed occurrence Supersede and reciprocal OccurrencesSuperseded -> ConfirmOccurrencesSuperseded acknowledgement; supersession does not promise cancellation of already-dispatched external work
 - `pause-resume-without-revision` — pause and resume leave schedule revision unchanged while preserving typed ownership
 - `rolling-planning-occurrence-materialization` — rolling planning records a planning window and materializes or supersedes pending occurrences through revision-aware schedule routes
 

@@ -18,7 +18,7 @@ different denominators.
 | --- | --- | --- |
 | Event | `turn_completed.usage` | `run_completed.usage` |
 | Rust type | `TurnUsage` | `CumulativeUsage` |
-| Scope | exactly one provider request: the assistant turn that closed the run | every provider call recorded on the **session** so far, across runs |
+| Scope | exactly one provider request: the assistant turn that closed the run | every provider call recorded on the **session** before this event's emission, across runs |
 | `input_tokens` | raw provider counter (Anthropic: **uncached input only**) | already the sum of each recorded call's presented input |
 | `cache_creation_tokens` / `cache_read_tokens` | provider-reported, present | always absent |
 | `accounting` | present (provider + model + presented input) | absent by design |
@@ -28,28 +28,46 @@ carries no single provider/model and no cache detail counters: their
 relationship to the input total is provider-specific.
 
 <Warning>
-`run_completed.usage` is **session-cumulative, not run-scoped**. It is
-`Session::total_usage()`, which is persisted with the session and restored on
-resume, so on the second and later runs of a session it already contains the
-earlier runs' calls. There is no per-run token account on the event stream.
+`run_completed.usage` is **session-cumulative, not run-scoped**. It snapshots
+`Session::total_usage()` at emission time. That account is persisted with the
+session and restored on resume, so on the second and later runs it already
+contains earlier runs' recorded calls. Later calls can advance the account
+beyond this snapshot, notably structured-output extraction. There is no
+per-run token account on the event stream.
 </Warning>
 
 ## Which calls emit a usage row
 
-The event stream reports strictly fewer provider calls than the cumulative
-total charges. Every one of these calls is folded into
-`run_completed.usage`, and only the first kind publishes a `turn_completed` row:
+The event stream reports fewer provider calls than the cumulative account can
+charge. Session usage advances when a measured, chargeable outcome reaches the
+accounting path; measurement alone does not guarantee recording.
+`run_completed.usage` includes only calls recorded before its emission.
 
-| Provider call | Emits `turn_completed` | Counted in `run_completed.usage` |
+| Provider call | Emits `turn_completed` | Counted in session-cumulative usage |
 | --- | --- | --- |
 | The assistant turn that closes a run | yes | yes |
 | Intermediate tool-loop calls in the same run | no | yes |
-| The structured-output extraction call | no | yes |
-| The compaction summary call | no (`compaction_completed` instead) | yes |
+| Structured-output extraction calls and retries | no | yes, after the pre-extraction `run_completed` |
+| The compaction summary call | no (`compaction_completed` instead) | when `run_compaction` returns a chargeable outcome |
 | A host-appended or realtime assistant turn | yes | yes |
 
-Consequently `sum(turn rows) <= run_completed.usage`, usually strictly less.
-Treat the difference as unattributed cost rather than as a reconciliation error.
+Measured compaction summary usage is recorded once `run_compaction` returns an outcome,
+even if the subsequent rewrite handoff or projection fails. A measured summary
+rejected before an outcome is returned, such as an empty summary or a failed
+rebuild validation, need not appear in session usage. The cumulative account is
+therefore a record of charged outcomes, not a complete provider invoice.
+
+For structured output, `run_completed` with `extraction_required: true` precedes
+the extraction requests. Their measured usage can increase the final
+`RunResult.usage` and authoritative session account, but no replacement
+`run_completed` usage snapshot is emitted. Extraction outcome events do not
+carry that updated total. Use the final result or an authoritative session
+observation to include the extraction phase.
+
+At a comparable observation point, the normalized sum of measured turn rows
+cannot exceed the session-cumulative account, and is often strictly less.
+Treat that residual as unattributed cost, not a reconciliation error. Do not
+compare later turn rows against an earlier completion snapshot.
 
 ## Per-model attribution lives on the per-call event
 
@@ -131,8 +149,9 @@ ordinary unmeasured-accounting contract above applies; no counters are minted.
 
 ## Worked example
 
-One session, two runs. The first run makes three Anthropic calls (the first two
-request tools, the third closes the run); the second run makes one call.
+One session, two runs, with no extraction or other session activity. The first
+run makes three Anthropic calls (the first two request tools, the third closes
+the run); the second run makes one call.
 
 | Run | Call | `input_tokens` (uncached) | `cache_creation_tokens` | `cache_read_tokens` | `presented_tokens` | `output_tokens` | `turn_completed` row |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -150,7 +169,7 @@ run 2  turn_completed.usage.accounting.presented_tokens = 4700  output = 60
 run 2  run_completed.usage: input = 18420  output = 500  total = 18920
 ```
 
-Read that as follows.
+For this ordinary tool-loop example, read that as follows.
 
 - **The session total is the latest `run_completed.usage`**: 18920 tokens. The
   first run's 14160 is the same account observed earlier, not a separate run's
@@ -174,10 +193,12 @@ loop, and the `CumulativeUsage` arithmetic is pinned by
 Three specific mistakes, all of which produce a wrong number silently.
 </Warning>
 
-**1. Do not sum `run_completed.usage`.** Each one is already the session total to
-date. For the session above, adding the two observed run totals reports
-`14160 + 18920 = 33080` instead of `18920`. This is the double-count the field
-report hit. Take the latest value; never add.
+**1. Do not sum `run_completed.usage`.** Each one is already the recorded session
+total at emission. For the session above, adding the two observed run totals
+reports `14160 + 18920 = 33080` instead of `18920`. This is the double-count the
+field report hit. Use one snapshot at the desired observation point; never add
+cumulative snapshots. A pre-extraction completion event is not the final
+result's usage.
 
 **2. Do not sum per-call `input_tokens`.** Across the two turn rows above that
 gives `120 + 200 = 320`, against 9120 presented tokens, because the raw
@@ -191,10 +212,12 @@ call 3); the comparable per-call figure is
 `WireTurnUsage.total_tokens` is already the normalized form, while
 `WireUsage.total_tokens` built from a cumulative usage is the session total.
 
-The two aggregations that are always safe:
+The two safe aggregations, using comparable observation points:
 
-- **Session cost**: the latest `run_completed.usage` (equivalently
-  `RunResult.usage`, which is the same value). Nothing to add.
+- **Recorded session cost**: the latest final `RunResult.usage` or authoritative
+  session usage observation. Nothing to add. A `run_completed.usage` snapshot
+  suffices only if no later measured work, including extraction, has advanced
+  the account; it is not unconditionally equal to the final result.
 - **Per-model breakdown of the observable calls**: sum
   `turn_completed.usage.accounting.presented_tokens` and
   `turn_completed.usage.output_tokens`, grouped by
@@ -221,8 +244,13 @@ session-cumulative account, not the last call's usage.
 
 ## Known limits
 
-- There is no per-run token account. If you need one, difference consecutive
-  `run_completed.usage` values for the same session.
+- There is no per-run token account. For a complete logical-run delta,
+  difference comparable final cumulative results or authoritative session
+  observations before and after the run, including its extraction phase.
+  Isolate or account for other activity on that same session, and report
+  missing measurements separately rather than treating them as zero.
+  Differencing pre-extraction `run_completed.usage` snapshots instead can
+  charge one run's extraction to the next interval.
 - `compaction_completed.summary_tokens` is the output size of the compaction
   summary call and carries no provider/model attribution and no presented-input
   count, so compaction cost cannot be attributed from the event stream alone.

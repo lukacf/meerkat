@@ -18,7 +18,7 @@ committed with the repository:
 | `artifacts/schemas/wire-types.json` | `meerkat-contracts` schemas | Wire request/result/event types shared by protocol and SDK layers |
 | `artifacts/schemas/params.json` | `meerkat-contracts` schemas | Wire request/result parameter types shared by protocol and SDK layers |
 | `artifacts/schemas/events.json` | `meerkat-contracts` schemas | Wire event types shared by protocol and SDK layers |
-| `artifacts/schemas/errors.json` | `meerkat-contracts` error catalog | Stable wire error strings, JSON-RPC codes, HTTP statuses, and CLI exits |
+| `artifacts/schemas/errors.json` | `meerkat-contracts` error catalog | Error vocabulary/envelope schemas plus the four-entry `JsonRpcErrorCodes` subset (`SCOPE_DENIED`, `HOST_UNAVAILABLE`, `STALE_CURSOR`, `STALE_FENCE`) |
 | `artifacts/schemas/capabilities.json` | `meerkat-contracts` capability catalog | Capability IDs and status shapes |
 | `artifacts/schemas/models.json` | Model catalog emission | Models catalog wire shapes |
 | `artifacts/schemas/runtime-host.json` | Runtime host schema emission | Runtime host info, capability, and health projections |
@@ -28,8 +28,18 @@ These files are generated outputs. Change the owning Rust catalogs and run
 `make verify-schema-freshness`, `make verify-rpc-surface-alignment`, and
 `make verify-rest-surface-alignment` to check source/catalog/router parity.
 
-`rkat-rpc initialize` returns the compiled feature subset at runtime. The
-catalog above is the full documented surface, including sessions, events,
+For complete error projections, use `ErrorCode::jsonrpc_code()`,
+`ErrorCode::http_status()`, and `ErrorCode::cli_exit_code()` in
+`meerkat-contracts/src/error/mod.rs`, or the [error-code table](#error-code-reference)
+below. `errors.json` does not contain full HTTP or CLI projection tables.
+
+The JSON-RPC `initialize` method on `rkat-rpc` returns the subset enabled by
+both the compiled build and runtime composition: skills require a skill
+runtime, and live methods require configured live transport support.
+`capabilities/get` similarly reports linked owners' registered capabilities
+with config-resolved statuses, not every vocabulary member; an unavailable
+feature may have no row. The catalog above is the full documented surface,
+including sessions, events,
 streams, blobs, artifacts, approvals, durable jobs and monitors, schedules,
 WorkGraph, runtime health, live channels, mobs, MCP, comms, models,
 capabilities, config, auth, realms, and usage.
@@ -84,8 +94,8 @@ capabilities, config, auth, realms, and usage.
 | `StepLedgerEntry` | `meerkat_mob` | Per-target step execution record |
 | `FailureLedgerEntry` | `meerkat_mob` | Flow-level failure log record |
 | `FlowRunConfig` | `meerkat_mob` | Immutable per-run config snapshot |
-| `LiveAdapterStatus` | `meerkat_core` | Live channel adapter status |
-| `LiveChannelCapabilities` | `meerkat_core` | Capabilities advertised by an open live channel (input/output modalities, continuity mode, tool semantics) |
+| `LiveAdapterStatus` | `meerkat_core::live_adapter` | Live channel adapter status |
+| `LiveChannelCapabilities` | `meerkat_core::live_adapter` | Capabilities advertised by an open live channel (input/output modalities, continuity mode, tool semantics) |
 | `ModelCapabilities` | `meerkat_core::model_profile` | Per-model capability set; `realtime: bool` gates whether `live/open` succeeds for a session |
 
 ## Traits
@@ -340,7 +350,7 @@ See the [structured output guide](/guides/structured-output) for usage details.
 
 | Type | Purpose |
 |------|---------|
-| `HookPoint` | 8 extension points (`RunStarted` through `TurnBoundary`) |
+| `HookPoint` | 14 extension points: `RunStarted`, `RunCompleted`, `RunFailed`, `PreLlmRequest`, `PostLlmResponse`, `PreToolExecution`, `PostToolExecution`, `TurnBoundary`, `RuntimeInputAccepted`, `RuntimeInputRejected`, `RuntimeInputDeduplicated`, `PeerIngressCommitted`, `PeerEgressCommitted`, `InteractionCompleted` |
 | `HookCapability` | `Observe`, `Guardrail` |
 | `HookExecutionMode` | `Foreground` (blocking) or `Background` (async) |
 | `HookEntryConfig` | Per-hook configuration (id, point, priority, runtime) |
@@ -376,7 +386,7 @@ See the [skills guide](/guides/skills) for usage details.
 | `WireSessionInfo` | Session metadata |
 | `WireSessionSummary` | Lightweight session summary |
 | `WireEvent` | Event wire format |
-| `WireUsage` | Token/cost usage breakdown |
+| `WireUsage` | Token usage with optional cache creation/read token counters; no monetary cost fields |
 | `ContractVersion` | Semver version, lock-stepped with `workspace.package.version` (see `meerkat-contracts/src/version.rs`) |
 | `CoreCreateParams` | Session creation parameters |
 | `OutputSchema` + `structured_output_retries` | Structured-output schema and retry settings carried directly on session/turn request surfaces |
@@ -433,7 +443,15 @@ For session-service transport behavior specifically, see the [Capability matrix]
 
 All implement `AgentLlmClient` and normalize streaming responses to `LlmEvent` (text deltas, tool call deltas, usage updates, done).
 
-`LlmError` variants: `RateLimited`, `ServerOverloaded`, `NetworkTimeout`, `ConnectionReset`, `ServerError`, `InvalidRequest`, `InvalidInputShape`, `InvalidConfig`, `AuthenticationFailed`, `ContentFiltered`, `ContextLengthExceeded`, `ModelNotFound`, `InvalidApiKey`, `QuotaExhausted`, `Unknown`, `StreamParseError`, `IncompleteResponse`. Use `error.is_retryable()` to check if an error should be retried.
+`LlmError` variants: `RateLimited`, `ServerOverloaded`, `NetworkTimeout`, `ConnectionReset`, `ServerError`, `InvalidRequest`, `RequestTooLarge`, `InvalidInputShape`, `InvalidConfig`, `AuthenticationFailed`, `AuthorizationRouteChanged`, `ContentFiltered`, `PolicyStop`, `ContextLengthExceeded`, `ModelNotFound`, `InvalidApiKey`, `QuotaExhausted`, `Unknown`, `StreamParseError`, `IncompleteResponse`. Use `error.is_retryable()` to check whether the error is retryable, respecting its recovery boundary:
+
+- `RequestTooLarge` requires request-size remediation, not an unchanged
+  automatic retry; optional `encoded_bytes` and `max_bytes` describe the cap.
+- `AuthorizationRouteChanged` **is retryable**, but retry must happen above
+  request projection so provider-specific lowering is rebuilt for the new
+  authorization route.
+- `PolicyStop` requires operator review. Do not automatically retry it,
+  switch providers, or reset the conversation to bypass the stop.
 
 ## Storage implementations
 

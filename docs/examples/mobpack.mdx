@@ -154,6 +154,7 @@ starts. `--prompt` is sugar for `--param prompt=<text>`.
 rkat mob run ./dist/release-triage.mobpack \
   --flow main \
   --prompt "triage latest regressions" \
+  --param severity='"high"' \
   --trust-policy permissive \
   --json
 ```

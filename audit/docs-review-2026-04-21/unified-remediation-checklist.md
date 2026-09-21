@@ -8,15 +8,15 @@ detailed evidence/source material.
 
 ## Source reports
 
-- [README.md](/Users/luka/.codex/worktrees/fc6a/meerkat/audit/docs-review-2026-04-21/README.md)
-- [agent-01-getting-started-and-nav.md](/Users/luka/.codex/worktrees/fc6a/meerkat/audit/docs-review-2026-04-21/agent-01-getting-started-and-nav.md)
-- [agent-02-concepts-and-configuration.md](/Users/luka/.codex/worktrees/fc6a/meerkat/audit/docs-review-2026-04-21/agent-02-concepts-and-configuration.md)
-- [agent-03-guides-auth-providers-models.md](/Users/luka/.codex/worktrees/fc6a/meerkat/audit/docs-review-2026-04-21/agent-03-guides-auth-providers-models.md)
-- [agent-04-guides-tools-hooks-skills-memory.md](/Users/luka/.codex/worktrees/fc6a/meerkat/audit/docs-review-2026-04-21/agent-04-guides-tools-hooks-skills-memory.md)
-- [agent-05-guides-mobs-comms-realtime-scheduling.md](/Users/luka/.codex/worktrees/fc6a/meerkat/audit/docs-review-2026-04-21/agent-05-guides-mobs-comms-realtime-scheduling.md)
-- [agent-06-surfaces-cli-api-sdk-rust.md](/Users/luka/.codex/worktrees/fc6a/meerkat/audit/docs-review-2026-04-21/agent-06-surfaces-cli-api-sdk-rust.md)
-- [agent-07-reference-architecture-and-contracts.md](/Users/luka/.codex/worktrees/fc6a/meerkat/audit/docs-review-2026-04-21/agent-07-reference-architecture-and-contracts.md)
-- [agent-08-meerkat-skill-files.md](/Users/luka/.codex/worktrees/fc6a/meerkat/audit/docs-review-2026-04-21/agent-08-meerkat-skill-files.md)
+- [README.md](README.md)
+- [agent-01-getting-started-and-nav.md](agent-01-getting-started-and-nav.md)
+- [agent-02-concepts-and-configuration.md](agent-02-concepts-and-configuration.md)
+- [agent-03-guides-auth-providers-models.md](agent-03-guides-auth-providers-models.md)
+- [agent-04-guides-tools-hooks-skills-memory.md](agent-04-guides-tools-hooks-skills-memory.md)
+- [agent-05-guides-mobs-comms-realtime-scheduling.md](agent-05-guides-mobs-comms-realtime-scheduling.md)
+- [agent-06-surfaces-cli-api-sdk-rust.md](agent-06-surfaces-cli-api-sdk-rust.md)
+- [agent-07-reference-architecture-and-contracts.md](agent-07-reference-architecture-and-contracts.md)
+- [agent-08-meerkat-skill-files.md](agent-08-meerkat-skill-files.md)
 
 ## How To Use This Checklist
 

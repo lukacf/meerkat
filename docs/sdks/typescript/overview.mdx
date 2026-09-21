@@ -367,10 +367,12 @@ createSessionStreaming(
 Creates a new session and returns an `EventStream` for the first turn. Iterate the stream to receive typed events as they arrive. The final `RunResult` is available on `stream.result` after iteration completes.
 
 ```typescript
+import { isTextDelta } from "@rkat/sdk";
+
 const stream = client.createSessionStreaming("Explain async/await in TypeScript");
 
 for await (const event of stream) {
-  if (event.type === "text_delta") {
+  if (isTextDelta(event)) {
     process.stdout.write(event.delta);
   }
 }
@@ -431,7 +433,12 @@ are not expressible through the current deferred TypeScript wrapper.
 
 ## Session
 
-`createSession()` and `createSessionStreaming()` both produce a `Session` object that acts as the handle for all subsequent turns on the same conversation. The SDK does not own a second execution path; it only wraps the canonical runtime session identity.
+`createSession()` resolves to a `Session` object that acts as the handle for
+subsequent turns on the same conversation. `createSessionStreaming()` instead
+returns an `EventStream`: after consumption, `stream.result` is the final
+`RunResult` and `stream.sessionId` is the created session's identity. The
+stream does not construct a `Session` wrapper or expose its methods. Both
+creation paths use the canonical runtime session lifecycle.
 
 ### Identity
 
@@ -515,11 +522,15 @@ stream(
 ): EventStream
 ```
 
-Sends another turn and returns an `EventStream`. Iterating it yields typed `AgentEvent` objects. The session's last-result shortcuts are updated when iteration completes.
+Sends another turn and returns an `EventStream`, whose iterator is typed as
+`AsyncIterable<StreamEvent>`. The session's last-result shortcuts are updated
+when iteration completes.
 
 ```typescript
+import { isTextDelta } from "@rkat/sdk";
+
 for await (const event of session.stream("Elaborate on point three")) {
-  if (event.type === "text_delta") {
+  if (isTextDelta(event)) {
     process.stdout.write(event.delta);
   }
 }
@@ -552,32 +563,53 @@ Removes this session from the server. The `Session` object should not be used af
 async invokeSkill(skillRef: SkillRef, prompt: string): Promise<RunResult>
 ```
 
-Calls `requireCapability("skills")`, then runs a turn with the provided structured `SkillKey` injected:
+Calls `requireCapability("skills")`, then runs a turn with the provided
+structured `SkillKey` injected. Discover an installed active skill first;
+names alone need not be unique across sources:
 
 ```typescript
+const matches = (await client.listSkills()).filter(
+  (entry) => entry.is_active && entry.key.skill_name === "code-review",
+);
+const [skill] = matches;
+if (!skill || matches.length !== 1) {
+  throw new Error("Expected one active code-review skill; select a source UUID if ambiguous.");
+}
 const result = await session.invokeSkill(
-  { sourceUuid: "abc123", skillName: "code-review" },
+  { sourceUuid: skill.key.source_uuid, skillName: skill.key.skill_name },
   "Review this function for safety issues",
 );
 ```
+
+`listSkills()` returns generated wire-shaped keys; invocation maps
+`key.source_uuid` and `key.skill_name` to `sourceUuid` and `skillName`.
 
 ### send() and peers()
 
 ```typescript
 async send(command: CommsCommand): Promise<CommsSendReceipt>
-async peers(): Promise<Array<Record<string, unknown>>>
+async peers(): Promise<PeerDirectoryEntry[]>
 ```
 
 Scope comms operations to this session. Requires the `comms` capability.
+Directory entries retain wire-shaped fields, including `peer_id` and
+`sendable_kinds`. Display names are not routing identities and may collide:
+select the intended sendable peer and send to its `peer_id`.
 
 ```typescript
+const matches = (await session.peers()).filter(
+  (peer) => peer.name === "agent-b" && peer.sendable_kinds.includes("peer_message"),
+);
+const [peer] = matches;
+if (!peer || matches.length !== 1) {
+  throw new Error("Expected one sendable agent-b peer; select a peer_id if ambiguous.");
+}
 await session.send({
   kind: "peer_message",
-  to: "agent-b",
+  to: peer.peer_id,
   body: "Hello!",
   handling_mode: "queue",
 });
-const peers = await session.peers();
 ```
 
 ### subscribeEvents()
@@ -609,9 +641,16 @@ console.log(client.capabilities);
 
 // Check a single capability
 if (client.hasCapability("comms")) {
+  const matches = (await session.peers()).filter(
+    (peer) => peer.name === "agent-b" && peer.sendable_kinds.includes("peer_message"),
+  );
+  const [peer] = matches;
+  if (!peer || matches.length !== 1) {
+    throw new Error("Expected one sendable agent-b peer; select a peer_id if ambiguous.");
+  }
   await session.send({
     kind: "peer_message",
-    to: "agent-b",
+    to: peer.peer_id,
     body: "Hi",
     handling_mode: "queue",
   });
@@ -644,11 +683,24 @@ client.requireCapability("skills");  // throws CapabilityUnavailableError if not
 
 ## Config management
 
+`getConfig()` returns a generated `ConfigEnvelope`; writes return
+`ConfigWriteResult`. These preserve optional nullable snake_case metadata
+(`realm_id`, `instance_id`, `backend`, `resolved_paths`, and, for writes,
+`live_propagation`). The `config` field is `unknown`, not a typed settings
+object. Patch known fields without spreading it, and print the returned value
+directly or validate it before reading properties.
+
 ```typescript
 const config = await client.getConfig();
-await client.setConfig({ ...config.config, model: "claude-opus-4-8" });
-const updated = await client.patchConfig({ max_tokens: 8192 });
-console.log(updated.config.max_tokens);
+const modelUpdate = await client.patchConfig(
+  { agent: { model: "claude-opus-4-8" } },
+  { expectedGeneration: config.generation },
+);
+const updated = await client.patchConfig(
+  { max_tokens: 8192 },
+  { expectedGeneration: modelUpdate.generation },
+);
+console.log(updated.config);
 ```
 
 ---
@@ -701,7 +753,7 @@ await client.close();
 
 <Accordion title="Streaming a turn">
 ```typescript
-import { MeerkatClient } from "@rkat/sdk";
+import { MeerkatClient, isTextDelta, isTurnCompleted } from "@rkat/sdk";
 
 const client = new MeerkatClient();
 await client.connect();
@@ -711,23 +763,20 @@ const session = await client.createSession("You are a helpful assistant.", {
 });
 
 for await (const event of session.stream("Explain Rust lifetimes in two sentences")) {
-  switch (event.type) {
-    case "text_delta":
-      process.stdout.write(event.delta);
-      break;
-    case "turn_completed":
-      console.log(`\nStop reason: ${event.stopReason}`);
-      // `accounting` names the resolved model and the normalized presented
-      // input for this one call; `inputTokens` is the raw provider counter.
-      if (event.usage) {
-        console.log(
-          `${event.usage.accounting?.model}: ` +
-            `${event.usage.accounting?.presentedTokens} in / ${event.usage.outputTokens} out`,
-        );
-      } else {
-        console.log("Usage: unmeasured");
-      }
-      break;
+  if (isTextDelta(event)) {
+    process.stdout.write(event.delta);
+  } else if (isTurnCompleted(event)) {
+    console.log(`\nStop reason: ${event.stopReason}`);
+    // `accounting` names the resolved model and the normalized presented
+    // input for this one call; `inputTokens` is the raw provider counter.
+    if (event.usage) {
+      console.log(
+        `${event.usage.accounting?.model}: ` +
+          `${event.usage.accounting?.presentedTokens} in / ${event.usage.outputTokens} out`,
+      );
+    } else {
+      console.log("Usage: unmeasured");
+    }
   }
 }
 
@@ -740,20 +789,26 @@ await client.close();
 import { MeerkatClient } from "@rkat/sdk";
 
 const client = new MeerkatClient();
-await client.connect();
 
-client.requireCapability("skills");
-
-const session = await client.createSession("Let's review some code.");
-
-const result = await session.invokeSkill(
-  { sourceUuid: "abc123", skillName: "code-review" },
-  "Review this function for correctness and safety",
-);
-
-console.log(result.text);
-
-await client.close();
+try {
+  await client.connect();
+  client.requireCapability("skills");
+  const matches = (await client.listSkills()).filter(
+    (entry) => entry.is_active && entry.key.skill_name === "code-review",
+  );
+  const [skill] = matches;
+  if (!skill || matches.length !== 1) {
+    throw new Error("Expected one active code-review skill; select a source UUID if ambiguous.");
+  }
+  const session = await client.createSession("Let's review some code.");
+  const result = await session.invokeSkill(
+    { sourceUuid: skill.key.source_uuid, skillName: skill.key.skill_name },
+    "Review this function for correctness and safety",
+  );
+  console.log(result.text);
+} finally {
+  await client.close();
+}
 ```
 </Accordion>
 

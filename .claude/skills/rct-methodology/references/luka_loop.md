@@ -1,10 +1,21 @@
 # Luka Loop (Generalized Ralph Loop)
 
-This section defines how to scaffold and run the Luka Loop in any repo.
+This section describes the intended Luka Loop design for a complete installation.
 
-## Required Folder Layout (self-contained)
+**Availability in this checkout:** The skill's `assets/luka_loop/.rct` payload
+and the resulting repo-local `.rct/scripts/` automation are not supplied.
+`scripts/luka_scaffold.py` exits with `Missing assets` before copying files.
+Use the manual spec → plan → checklist workflow and the standalone renderer
+described in `strict_pipeline.md` instead.
 
-All artifacts live under `.rct/`:
+The layout, transitions, prompts, scripts, and safety properties below are
+design descriptions, not verified features available here. Before using a
+separately supplied complete installation, inspect its implementation and
+prerequisites, including its checklist/status schema and commit policy.
+
+## Intended Folder Layout (complete installation only)
+
+The design keeps all RCT artifacts under `.rct/`:
 
 ```
 .rct/
@@ -22,7 +33,7 @@ All artifacts live under `.rct/`:
 
 **IMPORTANT:** There is NO `CHECKLIST.md` at repo root. The `docs/` folder may contain legacy/outdated content and should be ignored.
 
-## Phase Status State Machine
+## Intended Phase Status State Machine
 
 ```
 in_progress ──(all tasks done)──► ready_for_gate ──(gate pass)──► ready_for_final ──(gate pass)──► approved
@@ -43,26 +54,35 @@ in_progress ──(all tasks done)──► ready_for_gate ──(gate pass)─�
 | `blockers` | Gate found issues | Impl agent fixes blockers |
 | `approved` | Phase complete | Move to next phase |
 
-### Automatic Transitions
+### Intended Automatic Transitions
+
+Verify these behaviors in a separately supplied implementation; this checkout
+does not provide the scripts that perform them.
 
 - **Stale blockers**: If status=`blockers` but `blockers.yaml` is empty, auto-transitions to `ready_for_gate`
 - **Gate timeout**: After 1 hour, creates timeout blocker and sets status to `blockers` (continues loop)
 
-## Scaffold
+## Scaffold (complete installation only)
 
-Use the scaffold script to create the structure and templates:
+Do not run the bundled scaffold expecting it to work without its payload.
+Only after verifying that a separately supplied skill installation contains
+`assets/luka_loop/.rct`, use that installation's scaffold script. The paths
+below are placeholders for the verified installation and target repository:
 
 ```bash
-python /path/to/skills/rct-methodology/scripts/luka_scaffold.py /path/to/repo
+python3 /path/to/skills/rct-methodology/scripts/luka_scaffold.py /path/to/repo
 ```
 
-## Prompts
+Preserve existing `.rct/` metadata and review the files to be copied. Do not
+use `--force` merely to replace an unrelated project's spec or checklist.
+
+## Expected Prompts (not supplied here)
 
 - `.rct/prompts/LUKA_IMPL.md` - Implementation agent instructions
 - `.rct/prompts/LUKA_ROLLBACK.md` - Rollback agent for earlier-phase issues
 - `.rct/prompts/LUKA_FINALIZE.md` - Final commit after all phases approved
 
-## Scripts
+## Expected Repo-Local Scripts (not supplied here)
 
 | Script | Purpose |
 |--------|---------|
@@ -74,7 +94,8 @@ python /path/to/skills/rct-methodology/scripts/luka_scaffold.py /path/to/repo
 
 ## Reviewers
 
-Default reviewer templates in `.rct/agents/`:
+For manual reviews, adapt the supplied `reviewer_prompts.md` reference into
+`.rct/agents/`. A complete Luka installation is intended to use these reviewers:
 - `rct-guardian.md` - Representation contract tests
 - `integration-sheriff.md` - Cross-component wiring
 - `spec-auditor.md` - Requirements compliance
@@ -82,15 +103,18 @@ Default reviewer templates in `.rct/agents/`:
 
 Customize per project and add extra reviewers as needed.
 
-## Safety Features
+## Intended Safety Features (verify separately)
 
-- **Atomic locking**: Uses `mkdir` for POSIX-atomic lock to prevent concurrent loops
-- **Verdict race protection**: Uses `.done` marker files to detect complete writes
-- **PID verification**: Checks process is actually codex before killing stale processes
-- **Log size limits**: Caps reviewer logs at 10MB to prevent disk exhaustion
-- **Phase ordering**: Always sorts phases by ID to ensure correct order
+Do not claim these protections without inspecting and validating the separately
+supplied implementation:
 
-## Loop Behavior
+- **Atomic locking**: Verify POSIX-atomic `mkdir` locking prevents concurrent loops
+- **Verdict race protection**: Verify `.done` markers identify complete writes
+- **PID verification**: Verify a stale process is actually Codex before terminating it
+- **Log size limits**: Verify the intended 10MB reviewer-log cap is enforced
+- **Phase ordering**: Verify phases are sorted by ID
+
+## Intended Loop Behavior (complete installation only)
 
 1. **Implementation**: Codex uses LUKA_IMPL prompt
 2. **Gate**: Reviewers run via review_harness (spawns codex per reviewer)
@@ -98,9 +122,10 @@ Customize per project and add extra reviewers as needed.
 4. **Rollback**: If blockers have origin_phase, runs LUKA_ROLLBACK
 5. **Finalize**: After all phases approved, runs LUKA_FINALIZE
 
-## Commit Convention
+## Optional Finalization Convention
 
-Finalize prompt commits with prefix:
+No automatic finalization is available in this checkout. If a separately supplied
+finalization prompt is authorized to commit, the intended commit prefix is:
 
 ```
 [Luka Loop] <summary>

@@ -56,13 +56,18 @@ provider-native server-tool blocks, such as web search, into typed kinds.
 
 ## Decisions and ordering
 
-`Observe` hooks never deny. `Guardrail` hooks may return `Allow` or typed
-`Deny { hook_id, reason_code, message, payload }`. Foreground hooks run by
+`Observe` expresses observational intent, but is not by itself an enforced deny
+barrier at ordinary foreground hook points: the current `DefaultHookEngine`
+honors a foreground `Deny` even when the hook's capability is `Observe`.
+Use `Guardrail` to declare intended `Allow` / typed
+`Deny { hook_id, reason_code, message, payload }` behavior. Foreground hooks run by
 ascending priority and then registration order. The first denial short-circuits
 remaining foreground and background hooks.
 
 Background hooks are observational. Every background hook must have `Observe`
 capability or configuration validation rejects it, regardless of hook point.
+The engine suppresses decisions from `Background` mode; this is distinct from
+the capability label alone.
 
 The six committed-fact points are always observe-only and reject `Guardrail`
 capability in either execution mode. Their session-scoped dispatcher does not

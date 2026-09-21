@@ -30,11 +30,14 @@ This page focuses on the host control plane. It does **not** treat agent-side `m
           "profiles": {
             "lead": {
               "model": "claude-opus-4-8",
-              "peer_description": "Coordinates triage"
+              "peer_description": "Coordinates triage",
+              "tools": { "comms": true },
+              "external_addressable": true
             },
             "analyst": {
               "model": "claude-sonnet-4-6",
-              "peer_description": "Investigates issues"
+              "peer_description": "Investigates issues",
+              "tools": { "comms": true }
             }
           },
           "flows": {
@@ -58,11 +61,21 @@ This page focuses on the host control plane. It does **not** treat agent-side `m
                 "lead": {
                     "model": "claude-opus-4-8",
                     "peer_description": "Coordinates triage",
+                    "tools": {"comms": True},
+                    "external_addressable": True,
                 },
                 "analyst": {
                     "model": "claude-sonnet-4-6",
                     "peer_description": "Investigates issues",
+                    "tools": {"comms": True},
                 },
+            },
+            "flows": {
+                "triage": {
+                    "steps": {
+                        "scan": {"role": "lead", "message": "Prioritize incoming issues."}
+                    }
+                }
             },
         }
     )
@@ -78,10 +91,20 @@ This page focuses on the host control plane. It does **not** treat agent-side `m
           lead: {
             model: "claude-opus-4-8",
             peer_description: "Coordinates triage",
+            tools: { comms: true },
+            external_addressable: true,
           },
           analyst: {
             model: "claude-sonnet-4-6",
             peer_description: "Investigates issues",
+            tools: { comms: true },
+          },
+        },
+        flows: {
+          triage: {
+            steps: {
+              scan: { role: "lead", message: "Prioritize incoming issues." },
+            },
           },
         },
       },
@@ -94,8 +117,22 @@ This page focuses on the host control plane. It does **not** treat agent-side `m
     let definition: MobDefinition = serde_json::from_value(json!({
         "id": "release-triage",
         "profiles": {
-            "lead": { "model": "claude-opus-4-8" },
-            "analyst": { "model": "claude-sonnet-4-6" }
+            "lead": {
+                "model": "claude-opus-4-8",
+                "tools": { "comms": true },
+                "external_addressable": true
+            },
+            "analyst": {
+                "model": "claude-sonnet-4-6",
+                "tools": { "comms": true }
+            }
+        },
+        "flows": {
+            "triage": {
+                "steps": {
+                    "scan": { "role": "lead", "message": "Prioritize incoming issues." }
+                }
+            }
         }
     }))?;
 
@@ -327,6 +364,11 @@ private member-host materialization wire.
 
 Use the host control plane when an application needs to deliver content directly to a member session.
 
+`mob/member_send` and SDK `Member.send` require the target's profile to set
+`external_addressable: true`; omission means `false`. The creation examples
+opt in the lead only. Internal flow dispatch and ordinary peer messaging do
+not require this external-entry opt-in.
+
 <Tabs>
   <Tab title="JSON-RPC">
     ```json
@@ -367,7 +409,9 @@ Use the host control plane when an application needs to deliver content directly
 
 Use the work lane when you need a cancellable work reference rather than plain content delivery.
 The work lane uses the opaque `member_ref` returned by spawn, member list, or
-member send responses.
+member send responses. Externally originated work also requires
+`external_addressable: true` on the selected member's profile; use lead-1's
+`member_ref` for these examples.
 
 <Tabs>
   <Tab title="JSON-RPC">
@@ -460,13 +504,24 @@ member send responses.
 
 The current CLI is strongest for helper-style workflows on an existing mob:
 
+Assume ordinary members `lead-1` and `analyst-2` have already been spawned as
+above. Keep `lead-1` live as the fork source, and give each temporary helper a
+fresh identity distinct from those persistent members.
+
 ```bash
-rkat mob spawn-helper release-triage "Join as lead-1 and summarize the release status." --profile lead --agent-identity lead-1 --result-label release-summary --max-text-bytes 4096
-rkat mob fork-helper release-triage lead-1 "Investigate the flaky test history." --profile analyst --agent-identity analyst-2 --result-label flaky-test-review --max-text-bytes 4096
+rkat mob spawn-helper release-triage "Summarize the release status." --profile lead --agent-identity release-summary-helper --result-label release-summary --max-text-bytes 4096
+rkat mob fork-helper release-triage lead-1 "Investigate the flaky test history." --profile analyst --agent-identity flaky-review-helper --result-label flaky-test-review --max-text-bytes 4096
 rkat mob member-status release-triage lead-1 --json
 rkat mob respawn release-triage analyst-2 --initial-message "Resume with a fresh runtime."
 rkat mob wait-kickoff release-triage --json
 ```
+
+Both helper commands run one bounded task, capture its result, and attempt
+retirement. Successful cleanup removes the helper from the active roster;
+`retirement_error` reports cleanup debt without erasing the committed result.
+Do not rely on a completed one-shot helper remaining live as a later fork
+source. The status and respawn commands above address the ordinary members,
+not the temporary helpers.
 
 ## Events and subscriptions
 

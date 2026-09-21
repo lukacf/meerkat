@@ -43,6 +43,7 @@ import type {
   SkillRuntimeDiagnostics,
   SchemaWarning,
   AgentEvent,
+  StreamEvent,
   AgentEventEnvelope,
   AttributedMobEvent,
   EventEnvelope,
@@ -400,14 +401,19 @@ interface SkillQuarantineDiagnostic {
 
 ## EventStream
 
-`EventStream` is an `AsyncIterable<AgentEvent>` returned by `createSessionStreaming()` and `session.stream()`. It yields typed events as the agent runs, then makes the final `RunResult` available on `stream.result`.
+`EventStream` is an `AsyncIterable<StreamEvent>` returned by
+`createSessionStreaming()` and `session.stream()`. It yields events as the
+agent runs, then makes the final `RunResult` available on `stream.result`.
+`StreamEvent` includes `AgentEvent` and scoped wrappers. Use the exported type
+guards for direct payloads because `UnknownEvent` keeps the event union
+open-ended; the guards do not unwrap scoped events.
 
 ```typescript
-class EventStream implements AsyncIterable<AgentEvent> {
+class EventStream implements AsyncIterable<StreamEvent> {
   readonly sessionId: string;
   readonly result: RunResult;  // throws if accessed before iteration completes
 
-  [Symbol.asyncIterator](): AsyncGenerator<AgentEvent>;
+  [Symbol.asyncIterator](): AsyncGenerator<StreamEvent, void, undefined>;
 
   /** Consume all events and return the final RunResult. */
   collect(): Promise<RunResult>;
@@ -420,8 +426,11 @@ class EventStream implements AsyncIterable<AgentEvent> {
 ### Iterating
 
 ```typescript
-for await (const event of session.stream("Summarise this")) {
-  if (event.type === "text_delta") {
+import { isTextDelta } from "@rkat/sdk";
+
+const stream = session.stream("Summarise this");
+for await (const event of stream) {
+  if (isTextDelta(event)) {
     process.stdout.write(event.delta);
   }
 }
@@ -510,6 +519,13 @@ The 0.8.24 handwritten parser has known integration gaps:
 
 These are SDK/code-generation gaps. The legacy parser shapes below describe
 the exported 0.8.24 TypeScript interfaces, not an alternate server contract.
+
+In the current **0.8.40** SDK, `model_fallback_skipped`,
+`model_fallback_staged`, `model_fallback_committed`, and
+`model_fallback_target_failed` are also absent from the generated inventory.
+If a runtime emits one during model fallback, receiving it raises
+`UNKNOWN_EVENT_TYPE` rather than yielding `UnknownEvent`. Streams that do not
+receive these events are not affected by this particular gap.
 
 ### Session lifecycle events
 
@@ -797,16 +813,32 @@ const session = await client.createSession("Hello!", {
 });
 
 // Inject a skill for a specific turn via session.turn()
+const matches = (await client.listSkills()).filter(
+  (entry) => entry.is_active && entry.key.skill_name === "extraction-email",
+);
+const [skill] = matches;
+if (!skill || matches.length !== 1) {
+  throw new Error("Expected one active extraction-email skill; select a source UUID if ambiguous.");
+}
+const skillRef = {
+  sourceUuid: skill.key.source_uuid,
+  skillName: skill.key.skill_name,
+};
 const result = await session.turn("Extract emails from this text", {
-  skillRefs: [{ sourceUuid: "abc123", skillName: "extraction-email" }],
+  skillRefs: [skillRef],
 });
 
 // Convenience method on Session — wraps turn() with requireCapability check
 const result2 = await session.invokeSkill(
-  { sourceUuid: "abc123", skillName: "extraction-email" },
+  skillRef,
   "Extract emails from this text",
 );
 ```
+
+Discovery returns generated `key.source_uuid` / `key.skill_name` fields,
+which must be mapped to `SkillRef`'s camelCase keys. The turn examples require
+an installed active skill and reject ambiguous names; select the intended
+source UUID explicitly when multiple sources provide that name.
 
 ---
 

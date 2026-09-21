@@ -31,11 +31,27 @@ The packed definition declares five roles:
 | Scribe | Maintains the timeline, decisions, owners, and open questions |
 
 The definition is production-shaped, but this shell example stops at browser
-bootstrap assembly. A host application must separately import the source
-`definition.json`, pass it to `@rkat/web` `createMob()`, spawn the declared
+bootstrap assembly. A host application must separately import
+`mobpack/definition.json`, inline its referenced skills as described below,
+pass the prepared definition to `@rkat/web` `createMob()`, spawn the declared
 members, and add its own prompt and transcript UI before operators can use the
 team. Runtime initialization does not expose or instantiate the full packed
 definition.
+
+### Required browser skill preparation
+
+The source definition uses filesystem-backed `skills` entries, which browser
+member construction rejects. Before `createMob()` / `spawn()`, load each
+referenced skill's trusted text from `mobpack/skills/*.md` (paths here are
+relative to this example directory), or from the trust-verified pack. Replace
+each corresponding `definition.skills` entry with
+`{ source: "inline", content: skillText }`, preserving the entry's key and every
+profile's skill references. Bundle those trusted texts into the host or serve
+them as host-managed assets; the WASM runtime cannot read those filesystem paths.
+
+`initFromMobpack()` compiles verified pack skills into standalone session
+prompts. It does not supply filesystem skills to a separately imported
+`MobDefinition`; that definition still needs the explicit inlining step.
 
 ## Prerequisites
 ```bash
@@ -103,8 +119,9 @@ until a host application creates sessions or mob members.
 
 ## Suggested Integration Exercise
 
-In a custom `@rkat/web` host, import `mobpack/definition.json`, create the mob
-and its members, then add a prompt input that sends the kickoff scenario from
+In a custom `@rkat/web` host, import `mobpack/definition.json`, replace its
+referenced path skills with inline trusted text as above, then create the mob
+and spawn its members. Add a prompt input that sends the kickoff scenario from
 `prompts/incident-kickoff.md` to the commander. A good first turn is:
 
 ```text

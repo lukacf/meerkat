@@ -13,7 +13,10 @@ scratch space and not semantic memory.
 ## Operating Rules
 
 - Use `workgraph_create` for a new durable commitment. Keep related work in the
-  same namespace; omitted namespace means `default`.
+  same host-granted namespace. Omitting `namespace` uses the namespace bound
+  by the host's grant; it is `default` only when that is the granted namespace.
+  The grant authorizes one immutable realm/namespace scope. Supplying another
+  namespace string does not switch scope — it is rejected.
 - Use `workgraph_ready` to find eligible work. Do not infer readiness from item
   fields, blocker counts, due times, or edges yourself.
 - Claim an item before doing durable or shared work with `workgraph_claim`.
@@ -75,7 +78,7 @@ scratch space and not semantic memory.
 
 ## Typical Loop
 
-1. Call `workgraph_ready` for the active realm and namespace.
+1. Call `workgraph_ready` within the host-granted realm and namespace.
 2. Pick an item that matches the current objective.
 3. Claim it with the current item revision as `expected_revision`.
 4. Do the work.

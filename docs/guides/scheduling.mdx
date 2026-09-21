@@ -117,6 +117,11 @@ Use WorkGraph for shared pending work and dependencies; use Schedule for time.
     };
     use std::collections::BTreeMap;
 
+    let create: SessionMaterializationSpec = serde_json::from_value(serde_json::json!({
+        "model": "claude-sonnet-4-6",
+        "system_prompt": "You are a health-check assistant."
+    }))?;
+
     let schedule = service.create(CreateScheduleRequest {
         name: Some("hourly-health-check".into()),
         description: None,
@@ -126,11 +131,7 @@ Use WorkGraph for shared pending work and dependencies; use Schedule for time.
             end_at_utc: None,
         }),
         target: TargetBinding::session(SessionTargetBinding::materialize_on_demand(
-            SessionMaterializationSpec {
-                model: "claude-sonnet-4-6".into(),
-                system_prompt: Some("You are a health-check assistant.".into()),
-                ..Default::default()
-            },
+            create,
             ScheduledSessionAction::Prompt {
                 prompt: "Check system health and report anomalies.".into(),
                 system_prompt: None,
@@ -147,6 +148,9 @@ Use WorkGraph for shared pending work and dependencies; use Schedule for time.
         planning_horizon_occurrences: None,
     }).await?;
     ```
+
+    Deserializing applies the materialization type's serde field defaults;
+    `SessionMaterializationSpec` does not implement Rust's `Default` trait.
   </Tab>
 </Tabs>
 

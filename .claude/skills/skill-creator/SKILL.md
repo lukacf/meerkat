@@ -174,7 +174,7 @@ To complete SKILL.md, answer the following questions:
 
 ### Step 5: Packaging a Skill
 
-Once the skill is ready, it should be packaged into a distributable zip file that gets shared with the user. The packaging process automatically validates the skill first to ensure it meets all requirements:
+Once the skill is ready, it should be packaged into a distributable zip file that gets shared with the user. Complete the manual pre-packaging review below first; the packaging script performs only lightweight checks, not full skill validation:
 
 ```bash
 scripts/package_skill.py <path/to/skill-folder>
@@ -188,15 +188,25 @@ scripts/package_skill.py <path/to/skill-folder> ./dist
 
 The packaging script will:
 
-1. **Validate** the skill automatically, checking:
-   - YAML frontmatter format and required fields
-   - Skill naming conventions and directory structure
-   - Description completeness and quality
-   - File organization and resource references
+1. **Check** the skill automatically:
+   - The input path exists and is a directory, and `SKILL.md` exists
+   - Frontmatter delimiters match the validator's regex, with `name:` and `description:` markers present
+   - The name captured by the regex contains only lowercase letters, digits, and hyphens, with no leading, trailing, or consecutive hyphens
+   - The description text captured by the line-oriented regex contains no angle brackets (`<` or `>`)
 
-2. **Package** the skill if validation passes, creating a zip file named after the skill (e.g., `my-skill.zip`) that includes all files and maintains the proper directory structure for distribution.
+2. **Package** the skill if those checks pass, creating a zip file named after the skill folder (e.g., `my-skill.zip`) that includes all files and maintains the proper directory structure for distribution.
 
-If validation fails, the script will report the errors and exit without creating a package. Fix any validation errors and run the packaging command again.
+These regex checks do not parse YAML, assess description completeness or quality,
+check directory/name agreement, or verify resource references. A successful
+package is not proof that those requirements are satisfied.
+
+**Manual pre-packaging review:**
+- Parse the frontmatter as YAML and verify the required fields and intended values.
+- Review the description for completeness, clear triggers, and quality.
+- Confirm that the skill directory and declared name agree.
+- Review file organization and verify every referenced script, reference, and asset exists at the documented location.
+
+If an automatic check fails, the script will report the failure and exit without creating a package. Fix any automatic or manual review failures before packaging again.
 
 ### Step 6: Iterate
 

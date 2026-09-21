@@ -166,7 +166,7 @@ Defaults:
 
 - `--tools safe`
 - default model is OpenAI `gpt-6-astra` unless realm config/auth binding selects another model; catalog support does not imply access through Azure, Copilot, or custom backends
-- current recommended Gemini model is `gemini-3.5-flash`
+- current default/recommended Gemini model is `gemini-3.8-flash`; `gemini-3.5-flash` remains a supported alternative
 - CLI realm state is project-local by default: `<project-root>/.rkat/realms/<ws-...>/`, where the project root is the nearest ancestor containing `.rkat` and falls back to the context root outside a project; that head realm's config composes over its parent chain and the HOME-rooted `global` doc (`~/.rkat/config.toml`)
 - stream on in a TTY, off in pipes/scripts
 - piped stdin is blob context unless `--stdin lines`
@@ -411,7 +411,7 @@ the sweep with `--realm`/`--root` instead.
 
 ```bash
 rkat storage doctor [--json] [--root <PATH>]...
-rkat storage migrate [--apply] [--json] [--root <PATH>]... [--adopt-root <PATH>] [--fence-wait-secs <SECS>]
+rkat storage migrate [--apply] [--bridge-pre-0-8-10] [--json] [--root <PATH>]... [--adopt-root <PATH>] [--fence-wait-secs <SECS>]
 rkat storage prune [--apply] [--older-than-days <DAYS>] [--json] [--root <PATH>]...
 ```
 
@@ -438,18 +438,29 @@ Exit 0 = no error-severity findings; exit 1 = errors found.
 `storage migrate` is the offline migration framework, dry-run by default;
 `--apply` runs the fenced migration. Per realm: (1) ledger baseline — under
 the realm's exclusive maintenance fence (`--fence-wait-secs`, default 10,
-bounds the in-flight-operation drain wait), every store opens through its
-normal constructor so guarded schema-ledger migrations converge files of any
-vintage; (2) state-root adoption — report-only, realms are used where they
+bounds the in-flight-operation drain wait), supported realm stores open through
+their normal constructors so guarded schema-ledger migrations converge supported
+schemas; (2) state-root adoption — report-only, realms are used where they
 lie; (3) split-brain reconciliation — a realm id under 2+ swept roots is a
 fail-closed refusal unless `--apply --adopt-root <PATH>` names the swept root
 to keep, in which case every other copy is archived read-only under the
 registered `*.pre-<version>-<timestamp>` backup naming (no merging, no
-synthesis); (4) deprecated leftovers — report-only. Unsupported unstamped
-session state is never adopted or laundered by this verb. The 0.8.11
-compatibility floor is Meerkat 0.8.10; state from older releases must be
-migrated offline with the older binary before repinning. There is no separate
-`rkat session migrate` compatibility command.
+synthesis); (4) deprecated leftovers — report-only. Per-mob databases under
+`mobs/` are report-only in this command; their owning store converges supported
+schemas on its next open.
+
+The ordinary-open compatibility floor introduced in 0.8.11 remains Meerkat
+0.8.10. For exact supported pre-floor SQLite schemas, the explicit offline
+recovery route is `rkat storage migrate --apply --bridge-pre-0-8-10`. It runs
+before normal migration under the same exclusive maintenance fence and
+authenticates each domain against its owning migration manifest. It is not an
+arbitrary-vintage importer: unknown, ambiguous, malformed, future, or unsupported
+state is refused, not stamped into legitimacy. Read the per-domain report:
+legacy records can be refused, and a later domain failure can leave earlier
+domains migrated. Ordinary opens never invoke this bridge; other old state
+requires a compatible older-binary migration before repinning. There is no
+separate `rkat session migrate` compatibility command.
+`--bridge-pre-0-8-10` requires `--apply` and a realm pinned to `sqlite`.
 `--adopt-root` without `--apply` is a usage error. Credential stores are never
 read, moved, or reported. Exit 1 = errors or fail-closed refusals (including
 split-brain without `--adopt-root` and an unacquirable maintenance fence).
@@ -480,9 +491,15 @@ rkat auth refresh <PROFILE_ID>
 
 `rkat auth login <provider>` provisions the reserved `global` realm in the
 HOME-rooted doc (`~/.rkat/config.toml`), so one sign-in is inherited by every
-workspace realm via the chain tail (cross-workspace). Interactive OAuth writes
-`global:anthropic_oauth`, `global:openai_oauth`, or `global:google_oauth`;
-non-interactive api-key login writes `global:default_<provider>`. Legacy logins
+workspace realm via the chain tail (cross-workspace). Interactive provider OAuth writes
+`global:anthropic_oauth`, `global:openai_oauth`, or `global:google_oauth`.
+With the default-enabled `copilot` feature, `rkat auth login copilot` runs
+GitHub device OAuth (`github_copilot_oauth`) and provisions
+`global:copilot_openai`, `global:copilot_anthropic`, and
+`global:copilot_gemini`. These routes share the `github_copilot` credential
+account and use provider-specific Copilot backends; Copilot is not a fourth
+LLM `--provider` value. Reduced builds without `copilot` cannot use this login.
+Non-interactive api-key login writes `global:default_<provider>`. Legacy logins
 persisted under `dev`; on the run path those credentials and the `[realm.global]`
 binding section migrate to `global` once (idempotent, no-clobber), so an existing
 sign-in keeps working without re-login. There is no `dev` default anymore.
@@ -524,3 +541,8 @@ rkat workgraph attention-list [--namespace <NS>] [--status active|paused|stopped
 rkat workgraph attention-pause <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--json]
 rkat workgraph attention-resume <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--json]
 ```
+
+The flags above are parsed, but the current CLI binds WorkGraph to the active
+realm's immutable `default` namespace grant. Non-default `--namespace` requests
+and `--all-namespaces` scans are rejected; flags do not grant cross-namespace
+authority. Broader access requires separate host capability composition.

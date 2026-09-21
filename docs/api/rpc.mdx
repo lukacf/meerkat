@@ -87,8 +87,9 @@ TLS-terminating proxy; the listener itself still accepts plain WebSocket bytes.
 
 This table mirrors the generated catalog in `artifacts/schemas/rpc-methods.json`
 (`meerkat_contracts::rpc_method_catalog`). `initialize` returns the methods
-enabled in the running binary, so reduced or feature-limited builds expose a
-subset.
+enabled by both the compiled build and runtime composition. Reduced builds,
+an absent skill runtime, or unconfigured live transports can expose a subset
+of this full catalog.
 
 | Method | Category | Params | Result | Description |
 | --- | --- | --- | --- | --- |
@@ -254,7 +255,7 @@ subset.
 | `auth/profile/get` | Auth | `BindingIdParams` | `WireAuthProfileDetail` | Resolve one binding's auth profile with an optional profile override |
 | `auth/profile/create` | Auth | `CreateProfileParams` | `WireAuthProfileCreated` | Store direct credentials for a configured auth binding |
 | `auth/profile/delete` | Auth | `BindingIdParams` | `WireAuthProfileCleared` | Clear credentials for a configured auth binding |
-| `auth/login/start` | Auth | `LoginStartParams` | `WireLoginStart` | Begin interactive authorization-code OAuth (returns authorize_url + pkce_verifier) |
+| `auth/login/start` | Auth | `LoginStartParams` | `WireLoginStart` | Begin an OAuth login; returns authorize_url, state, redirect_uri, and provider (PKCE verifier stays server-side) |
 | `auth/login/complete` | Auth | `LoginCompleteParams` | `WireLoginReady` | Exchange authorization code for tokens; persists to TokenStore |
 | `auth/login/device_start` | Auth | `DeviceStartParams` | `WireDeviceStart` | Begin device-code OAuth; returns user_code + verification URL |
 | `auth/login/device_complete` | Auth | `DeviceCompleteParams` | `WireDeviceCompleteResult` | Single-poll completion for a device-code OAuth login |
@@ -342,9 +343,11 @@ that began and then stopped producing progress.
 
 Standard JSON-RPC 2.0 with `"jsonrpc": "2.0"` on every message. Three message types:
 
-- **Request** (client -> server): has `id`, `method`, `params`
-- **Response** (server -> client): has `id`, `result` or `error`
-- **Notification** (server -> client): has `method`, `params`, no `id`
+- **Request** (either direction): has `id`, `method`, `params`. The server
+  sends `tool/execute` requests to clients for registered callback tools.
+- **Response** (back to the requester): echoes `id` with `result` or `error`.
+- **Notification** (either direction): has `method`, `params`, no `id`, and
+  receives no response.
 
 <Accordion title="Full lifecycle diagram">
   ```text
@@ -370,6 +373,99 @@ Standard JSON-RPC 2.0 with `"jsonrpc": "2.0"` on every message. Three message ty
     |<-- result {} ------------------|
   ```
 </Accordion>
+
+## Request cancellation
+
+Cancel an in-flight request by its exact JSON-RPC request ID, preserving its
+number/string type. For example, while `session/create` request `2` is still
+in flight, send this notification:
+
+```json Client -> server notification
+{"jsonrpc":"2.0","method":"cancel","params":{"request_id":2}}
+```
+
+The notification has no `id` and receives no reply. When cancellation wins
+before the original request commits success, the original request receives
+`REQUEST_CANCELLED` (`-32005`):
+
+```json Server -> client response to the original request
+{"jsonrpc":"2.0","id":2,"error":{"code":-32005,"message":"request cancelled before response publish"}}
+```
+
+The target is a request ID, not a session ID, so cancellation can be sent
+before session creation returns an identity. It is not a rollback guarantee:
+committed success is not rewritten to cancellation. This is separate from
+`turn/interrupt`, which targets an existing session's turn. MCP uses the
+different `notifications/cancelled` notification and `requestId` spelling
+described in the [MCP reference](/api/mcp#request-cancellation).
+
+## Callback tools
+
+Register client-owned foreground tools with `tools/register`:
+
+<CodeGroup>
+```json Client -> server
+{
+  "jsonrpc": "2.0",
+  "id": 12,
+  "method": "tools/register",
+  "params": {
+    "tools": [{
+      "name": "read_file",
+      "description": "Read a permitted project file",
+      "input_schema": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"]
+      }
+    }]
+  }
+}
+```
+
+```json Server -> client
+{"jsonrpc":"2.0","id":12,"result":{"registered":1}}
+```
+</CodeGroup>
+
+Registration advertises the tool; execution requires the reverse exchange.
+During a turn, the server sends its own JSON-RPC request:
+
+<CodeGroup>
+```json Server -> client request
+{
+  "jsonrpc": "2.0",
+  "id": "srv-1",
+  "method": "tool/execute",
+  "params": {
+    "tool_use_id": "call_123",
+    "name": "read_file",
+    "arguments": {"path": "data.txt"}
+  }
+}
+```
+
+```json Client -> server response
+{
+  "jsonrpc": "2.0",
+  "id": "srv-1",
+  "result": {"content": "File contents", "is_error": false}
+}
+```
+</CodeGroup>
+
+Echo the server request's `id`, not the turn's ID or `tool_use_id`.
+`tool_use_id` is the provider's tool-call correlation identity; `name` selects
+the registered tool and `arguments` contains its JSON arguments. In the result,
+`content` defaults to an empty string and `is_error` defaults to `false` if
+omitted. A client can instead return a JSON-RPC `error` for the same request
+ID; the server projects it as a tool-execution error.
+
+Keep reading and answering reverse requests while waiting for the turn's
+result, or the turn cannot finish its callback. This foreground RPC exchange
+is neither MCP's `pending_tool_calls`/`meerkat_resume` continuation nor the
+separate detached-job callback extensions. `tool/execute` is not a
+client-callable catalog method.
 
 ## Session methods
 
@@ -404,9 +500,12 @@ Handshake. Returns server capabilities.
 ```
 </CodeGroup>
 
-The actual array contains every method compiled into the server. For the full
-documented list and parameter/result type names, use
-`artifacts/schemas/rpc-methods.json`.
+The example array is abbreviated. The actual array reflects the compiled
+build **and** the runtime's enabled composition: `skills/list` requires a
+skill runtime; `live/*` requires a configured live transport, and
+`live/webrtc/answer` additionally requires enabled WebRTC support. For the
+full catalog rather than this runtime subset, including parameter/result type
+names, use `artifacts/schemas/rpc-methods.json`.
 
 <ResponseField name="server_info.name" type="string">
   Server name.
@@ -462,7 +561,7 @@ Create a new session and run the first turn. Set `initial_turn` to `"deferred"` 
     "enable_memory": false,
     "enable_schedule": null,
     "enable_workgraph": null,
-    "keep_alive": null,
+    "keep_alive": false,
     "comms_name": null,
     "provider_params": null,
     "preload_skills": [
@@ -479,7 +578,7 @@ Create a new session and run the first turn. Set `initial_turn` to `"deferred"` 
 }
 ```
 
-```json Response
+```json Response (minimal immediate request)
 {
   "jsonrpc": "2.0",
   "id": 2,
@@ -492,20 +591,23 @@ Create a new session and run the first turn. Set `initial_turn` to `"deferred"` 
       "input_tokens": 50,
       "output_tokens": 200,
       "total_tokens": 250
-    },
-    "structured_output": null,
-    "schema_warnings": null
+    }
   }
 }
 ```
 </CodeGroup>
 
-Only `prompt` is required. All other fields are optional and fall back to config defaults. During execution, `session/event` notifications are emitted (see [Notifications](#notifications)).
+Only `prompt` is required. Other fields follow the per-field defaults and
+override rules below; not every omitted value inherits configuration.
+During execution, `session/event` notifications are emitted (see
+[Notifications](#notifications)).
 
 #### Parameter reference
 
-<ParamField body="prompt" type="string" required>
-  The user prompt to send to the agent.
+<ParamField body="prompt" type="ContentInput (string | ContentBlock[])" required>
+  The user prompt as a string or typed content-block array, for example
+  `[{"type":"text","text":"Hello"}]`. Media support depends on the selected
+  model/provider; see [model capabilities](/reference/capability-matrix).
 </ParamField>
 
 <ParamField body="injected_context" type="ContentInput[] | null" default="null">
@@ -528,39 +630,58 @@ Only `prompt` is required. All other fields are optional and fall back to config
 </ParamField>
 
 <ParamField body="provider" type="string | null" default="inferred from model">
-  Provider name: `"anthropic"`, `"openai"`, `"gemini"`, `"self_hosted"`, `"other"`.
+  Provider name: `"anthropic"`, `"openai"`, `"gemini"`, or `"self_hosted"`.
+</ParamField>
+
+<ParamField body="auth_binding" type="WireAuthBindingRef | null" default="null">
+  Structural credential selector, for example
+  `{"realm":"prod","binding":"anthropic","profile":"claude_oauth"}`.
+  `realm` and `binding` are required when supplied; `profile` is optional.
+  Configure the referenced [realm, binding, and auth profile](/guides/auth)
+  first. Omission/`null` lets the create resolver choose credentials.
+  A colon-delimited CLI string is not accepted; provenance is server-owned.
 </ParamField>
 
 <ParamField body="max_tokens" type="u32 | null" default="config default">
   Max tokens per turn.
 </ParamField>
 
-<ParamField body="system_prompt" type="string | null" default="null">
-  Override system prompt.
+<ParamField body="system_prompt" type="SystemPromptOverride" default="inherit">
+  Omission/`null` inherits the base prompt; a string sets an explicit base
+  prompt; `{"action":"disable"}` suppresses inherited/config/default/AGENTS
+  base prompt sources. Separately appended dispatcher, tool, and additional
+  instruction sections may remain, so disabling is not a promise of no System
+  content. This create-time policy differs from `turn/start`'s ordinary
+  ordered System-message string.
 </ParamField>
 
 <ParamField body="output_schema" type="object | null" default="null">
   JSON schema for structured output extraction (wrapper or raw schema).
 </ParamField>
 
-<ParamField body="structured_output_retries" type="u32" default="2">
-  Max retries for structured output validation.
+<ParamField body="structured_output_retries" type="u32 | null" default="null (config default)">
+  Max retries for structured output validation. Omission/`null` inherits
+  configuration (stock default `2`); explicit `0` is preserved.
 </ParamField>
 
 <ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
   Run-scoped hook overrides (entries to add, hook IDs to disable).
 </ParamField>
 
-<ParamField body="enable_builtins" type="bool" default="false">
-  Enable built-in tools (task management, etc.).
+<ParamField body="enable_builtins" type="bool | null" default="null (host/factory default)">
+  Override built-in tools (task management, etc.). Omission/`null` inherits
+  host/factory configuration; explicit `false` disables them.
 </ParamField>
 
-<ParamField body="enable_shell" type="bool" default="false">
-  Enable shell tool (requires `enable_builtins`).
+<ParamField body="enable_shell" type="bool | null" default="null (host/factory default)">
+  Override the shell tool (requires built-ins). Omission/`null` inherits
+  host/factory configuration; explicit `false` disables it.
 </ParamField>
 
-<ParamField body="enable_memory" type="bool" default="false">
-  Enable semantic memory (`memory_search` tool + compaction indexing).
+<ParamField body="enable_memory" type="bool | null" default="null (host/factory default)">
+  Override semantic memory (`memory_search` tool + compaction indexing).
+  Omission/`null` inherits host/factory configuration; explicit `false`
+  disables it.
 </ParamField>
 
 <ParamField body="enable_schedule" type="bool | null" default="null">
@@ -571,8 +692,10 @@ Only `prompt` is required. All other fields are optional and fall back to config
   Override WorkGraph tools for this session. `null` uses the surface default.
 </ParamField>
 
-<ParamField body="keep_alive" type="bool | null" default="null">
-  Keep session alive after turn for comms. `null` = inherit persisted session intent, `true` = enable, `false` = disable. Requires `comms_name` when enabled.
+<ParamField body="keep_alive" type="bool" default="false">
+  Keep the new session alive after its turn for comms. Omission is `false`;
+  `null` is rejected on create. `true` requires `comms_name`. This differs
+  from `turn/start`'s nullable override of existing session intent.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="null">
@@ -605,13 +728,26 @@ Only `prompt` is required. All other fields are optional and fall back to config
   Token usage breakdown.
 </ResponseField>
 
-<ResponseField name="structured_output" type="object | null">
-  Parsed structured output.
+<ResponseField name="structured_output" type="JSON (optional)">
+  Parsed structured output when extraction succeeds. Omitted when absent.
 </ResponseField>
 
-<ResponseField name="schema_warnings" type="array | null">
-  Schema compatibility warnings.
+<ResponseField name="extraction_error" type="ExtractionError (optional)">
+  Post-turn extraction failure details: `last_output` is the committed
+  main-turn assistant text that extraction attempted to transform, `attempts`
+  is the number of extraction attempts made, and `reason` describes the
+  failure. Omitted when absent.
 </ResponseField>
+
+<ResponseField name="schema_warnings" type="SchemaWarning[] (optional)">
+  Schema compatibility warnings. Omitted when absent.
+</ResponseField>
+
+A successful run result can retain committed `text` even when post-turn
+structured-output extraction fails. Inspect `structured_output` together with
+`extraction_error`; absence of structured output does not prove extraction was
+never requested. These optional fields in `WireRunResult` are omitted when
+absent, not filled with `null`.
 
 ### session/history
 
@@ -864,7 +1000,7 @@ Supported replacement variants are `message`, `user_content_block`, `assistant_b
 
 ### session/list
 
-List active sessions.
+List sessions.
 
 <CodeGroup>
 ```json Request
@@ -877,13 +1013,24 @@ List active sessions.
   "id": 3,
   "result": {
     "sessions": [
-      {"session_id": "01936f8a-...", "state": "idle"},
-      {"session_id": "01936f8b-...", "state": "running"}
+      {
+        "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+        "created_at": 1736937000,
+        "updated_at": 1736937060,
+        "message_count": 4,
+        "total_tokens": 500,
+        "is_active": false
+      }
     ]
   }
 }
 ```
 </CodeGroup>
+
+Each row is a `WireSessionSummary` with `created_at` and `updated_at` in
+Unix seconds. `is_active` is the reported session activity flag, not a
+runtime-state enum. Optional `session_ref` and non-empty `labels` may also be
+present.
 
 `session/list` is owner-paginated rather than load-all/truncate: omitted
 `limit` defaults to 100, the maximum is 1,000, and `offset` is capped at
@@ -899,11 +1046,11 @@ not materialize an oversized graph and truncate it after the fact.
 
 ### session/read
 
-Get session state.
+Get session metadata.
 
 <CodeGroup>
 ```json Request
-{"jsonrpc":"2.0","id":4,"method":"session/read","params":{"session_id":"01936f8a-..."}}
+{"jsonrpc":"2.0","id":4,"method":"session/read","params":{"session_id":"01936f8a-7b2c-7000-8000-000000000001"}}
 ```
 
 ```json Response
@@ -911,10 +1058,13 @@ Get session state.
   "jsonrpc": "2.0",
   "id": 4,
   "result": {
-    "session_id": "01936f8a-...",
-    "state": "idle",
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "created_at": 1736937000,
+    "updated_at": 1736937060,
     "message_count": 4,
-    "total_tokens": 500
+    "is_active": false,
+    "model": "claude-sonnet-4-6",
+    "provider": "anthropic"
   }
 }
 ```
@@ -923,6 +1073,12 @@ Get session state.
 <ParamField body="session_id" type="string" required>
   Session ID to read.
 </ParamField>
+
+The result is `WireSessionInfo`, not the list summary: it includes
+`model`/`provider` but no `total_tokens` or `state`. Timestamps are Unix
+seconds, and `is_active` is the reported activity flag. Optional fields
+include `session_ref`, `last_assistant_text`, `resolved_capabilities`, and
+non-empty `labels`.
 
 ### session/archive
 
@@ -981,22 +1137,22 @@ Start a new turn on an existing session.
       "input_tokens": 300,
       "output_tokens": 400,
       "total_tokens": 700
-    },
-    "structured_output": null,
-    "schema_warnings": null
+    }
   }
 }
 ```
 </CodeGroup>
 
-Returns the same result shape as `session/create`. Fails with error code `-32001` (SESSION_BUSY) if a turn is already in progress.
+Returns the same run-result shape as `session/create`. Fails with error code `-32002` (SESSION_BUSY) if a turn is already in progress.
 
 <ParamField body="session_id" type="string" required>
   Session ID to continue.
 </ParamField>
 
-<ParamField body="prompt" type="string" required>
-  The follow-up prompt.
+<ParamField body="prompt" type="ContentInput (string | ContentBlock[])" required>
+  The follow-up prompt as text or typed content blocks, for example
+  `[{"type":"text","text":"Continue"}]`. Media support is model/provider
+  dependent; see [model capabilities](/reference/capability-matrix).
 </ParamField>
 
 <ParamField body="injected_context" type="ContentInput[] | null" default="null">
@@ -1020,8 +1176,27 @@ Returns the same result shape as `session/create`. Fails with error code `-32001
   Provider override (e.g. `"anthropic"`, `"openai"`, `"gemini"`). Typically inferred from `model`.
 </ParamField>
 
-<ParamField body="provider_params" type="object | null" default="from session">
-  Provider-specific parameters (e.g. `{"thinking_budget": 10000}`). Applied alongside model/provider override.
+<ParamField body="provider_params" type="TurnMetadataOverride | null" default="preserve">
+  Omission/`null` preserves current session parameters.
+  `{"action":"set","value":{"thinking_budget_tokens":10000}}` replaces the
+  stored override; `{"action":"clear"}` clears it. The compatibility form
+  `{"thinking_budget_tokens":10000}` is also accepted as a Set payload.
+  The inner object is the typed `ProviderParamsOverride` with
+  `temperature`, `top_p`, `max_output_tokens`, `reasoning`,
+  `thinking_budget_tokens`, and typed `provider_tag` extensions, not an
+  arbitrary bag of provider-native keys. Applies alongside model/provider
+  overrides.
+</ParamField>
+
+<ParamField body="auth_binding" type="TurnMetadataOverride | null" default="preserve">
+  Omission/`null` preserves the session's binding.
+  `{"action":"set","value":{"realm":"prod","binding":"anthropic","profile":"claude_oauth"}}`
+  selects an existing [configured binding/profile](/guides/auth);
+  `profile` is optional. A bare binding object such as
+  `{"realm":"prod","binding":"anthropic"}` is also accepted as a Set payload.
+  `{"action":"clear"}` removes the persisted override and resumes normal
+  credential resolution; it does not disable credentials. Do not supply
+  server-owned provenance.
 </ParamField>
 
 <ParamField body="max_tokens" type="u32 | null" default="from session">
@@ -1038,17 +1213,44 @@ Cancel an in-flight turn. No-op if the session is idle.
 
 <CodeGroup>
 ```json Request
-{"jsonrpc":"2.0","id":7,"method":"turn/interrupt","params":{"session_id":"01936f8a-..."}}
+{"jsonrpc":"2.0","id":7,"method":"turn/interrupt","params":{"session_id":"01936f8a-7b2c-7000-8000-000000000001"}}
 ```
 
 ```json Response
-{"jsonrpc":"2.0","id":7,"result":{"interrupted":true}}
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "interrupted": true,
+    "result": "interrupted"
+  }
+}
+```
+
+```json Response (deferred/staged session)
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "interrupted": false,
+    "result": "staged_noop"
+  }
+}
 ```
 </CodeGroup>
 
 <ParamField body="session_id" type="string" required>
   Session ID to interrupt.
 </ParamField>
+
+`interrupted` is derived from the typed `result`. The public classifier
+reports `"interrupted"`/`true` for an existing idle session's no-op as well
+as a live interruption; it is not proof that a live turn was cancelled.
+An admitted deferred/staged session has no materialized run to interrupt and
+returns `"staged_noop"`/`false`. Failures use JSON-RPC errors rather than
+these successful outcomes.
 
 ## Event methods
 
@@ -1896,16 +2098,20 @@ Create a session on a realtime-capable model and call `live/open`:
 <ParamField body="seed_max_chars" type="usize | null" default="null">
   Optional positive serialized-character budget for the core-owned seed
   message window. Omitted preserves the complete canonical history. When
-  present, core selects a recent whole-turn suffix. Every ordered System
-  message is retained and their combined serialized size must fit; an existing
-  compaction-summary head may also be retained. Any truncation returns degraded
-  continuity. Zero is rejected.
+  present, core selects a recent complete-turn replay suffix. Contiguous
+  System, SystemNotice, and injected-context messages immediately preceding
+  a selected user turn stay with that turn; older System rows may be omitted.
+  An existing compaction-summary head may also be retained. Any truncation
+  returns degraded continuity. Zero is rejected.
 </ParamField>
 
-System messages are ordinary ordered transcript data and are retained by the
-message window rules above. Canonical multimodal sidecars remain outside the
-message window. Image identity, tombstones, and aggregate accounting stay
-complete even when older seed messages are omitted.
+System messages follow the same bounded replay policy as other ordered
+transcript data; their combined historical size need not fit the window.
+The complete canonical System sequence is retained separately as a refresh
+drift witness, **not** as hidden provider instructions that restore omitted
+rows. Canonical multimodal sidecars also remain outside the message window:
+image identity, tombstones, and aggregate accounting stay complete even when
+older replay messages are omitted.
 
 ### live/webrtc/answer
 
@@ -2187,7 +2393,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": "0.8.40",
+    "contract_version": {"major": 0, "minor": 8, "patch": 40},
     "providers": [
       {
         "provider": "anthropic",
@@ -2217,8 +2423,9 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 No parameters are required. The catalog is resolved from built-in model metadata plus config-backed provider/server entries; invalid provider config can yield `INVALID_PARAMS`.
 
-<ResponseField name="contract_version" type="string">
-  Contract version for the catalog response.
+<ResponseField name="contract_version" type="ContractVersion (object)">
+  Structured catalog contract version with integer `major`, `minor`, and
+  `patch` components. Unlike `initialize`, this result does not stringify it.
 </ResponseField>
 
 <ResponseField name="providers" type="array">
@@ -2233,7 +2440,12 @@ No parameters are required. The catalog is resolved from built-in model metadata
 
 ### capabilities/get
 
-Return runtime capabilities with status resolved against config. This lists every capability known to Meerkat with its current status (available, disabled by policy, not compiled, etc.).
+Return capabilities registered by the running build's linked owners, with
+status resolved against current config. This is not an enumeration of every
+capability vocabulary member: an unavailable feature can have no row at all.
+A registered declaration can still report
+`{"NotCompiled":{"feature":"..."}}`; missing declarations are not automatically
+synthesized with that status.
 
 <CodeGroup>
 ```json Request
@@ -2340,9 +2552,42 @@ Read current realm config envelope.
 ```
 </CodeGroup>
 
+### Config write results
+
+RPC `config/set` and `config/patch` return `ConfigWriteResult`: the committed
+`ConfigEnvelope` fields (`config`, `generation`, `realm_id`, `instance_id`,
+`backend`, `resolved_paths`) are flattened at the top level, with optional
+`live_propagation`.
+
+The report is omitted when the write does not fan out; the current fan-out
+trigger is a change to `agent.model`. When present, it contains:
+
+| Field | Shape / meaning |
+|-------|-----------------|
+| `clean` | Boolean: `swap_failed`, `refresh_failed`, and `close_failed` are all empty |
+| `swapped` | Session IDs whose live model identity was swapped |
+| `skipped` | `{session_id, reason}` entries; reason is `{"kind":"no_op_or_override"}` or `{"kind":"identity_lookup_failed","error":"..."}` |
+| `swap_failed` | `{session_id, error}` entries |
+| `refreshed` | Session IDs whose refresh command was accepted into the adapter queue and acknowledged by runtime authority |
+| `closed` | Session IDs whose channels were closed |
+| `refresh_failed` | `{session_id, failure}` entries with a typed refresh-failure reason |
+| `close_failed` | `{session_id, failure}` entries with a typed close-failure reason |
+
+Inspect `skipped` even when `clean` is `true`: clean does not mean every
+session changed, nor that identity lookup succeeded for every session.
+It describes this report's synchronous failure lists, not eventual provider
+application. Observe subsequent live-channel status and errors to determine
+whether an accepted refresh was applied.
+Propagation occurs **after** the config generation commits. A non-clean
+report is a successful config write with live-propagation failures, not a
+rollback of the committed generation. Reconcile the listed sessions/channels
+separately. This report is specific to RPC writes, not `config/get` or the
+REST/MCP config envelope.
+
 ### config/set
 
-Replace config, optionally using generation CAS.
+Replace config, optionally using generation CAS. Returns the
+[config write result](#config-write-results).
 
 <CodeGroup>
 ```json Request
@@ -2357,7 +2602,7 @@ Replace config, optionally using generation CAS.
 }
 ```
 
-```json Response
+```json Response (abbreviated envelope with propagation report)
 {
   "jsonrpc":"2.0",
   "id":10,
@@ -2367,7 +2612,23 @@ Replace config, optionally using generation CAS.
     "realm_id": "team-alpha",
     "instance_id": null,
     "backend": "sqlite",
-    "resolved_paths": { "...": "..." }
+    "resolved_paths": { "...": "..." },
+    "live_propagation": {
+      "clean": false,
+      "swapped": [],
+      "skipped": [{
+        "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+        "reason": {"kind": "no_op_or_override"}
+      }],
+      "swap_failed": [{
+        "session_id": "01936f8a-7b2c-7000-8000-000000000002",
+        "error": "Provider client could not be rebuilt"
+      }],
+      "refreshed": [],
+      "closed": [],
+      "refresh_failed": [],
+      "close_failed": []
+    }
   }
 }
 ```
@@ -2375,7 +2636,10 @@ Replace config, optionally using generation CAS.
 
 ### config/patch
 
-Merge-patch the config (RFC 7396).
+Merge-patch the config (RFC 7396). Returns the same
+[config write result](#config-write-results). This example changes only
+`max_tokens_per_turn`, leaving `agent.model` unchanged, so its result omits
+`live_propagation`.
 
 <CodeGroup>
 ```json Request
@@ -2412,26 +2676,39 @@ Merge-patch the config (RFC 7396).
 
 ## Notifications
 
-During turn execution, the server emits `session/event` notifications containing serialized `AgentEvent` payloads:
+During turn execution, the server emits `session/event` notifications with an
+`EventEnvelope<AgentEvent>` under `params.event`:
 
 ```json
 {
   "jsonrpc": "2.0",
   "method": "session/event",
   "params": {
-    "session_id": "01936f8a-...",
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "event": {
-      "type": "text_delta",
-      "delta": "Rust is"
+      "event_id": "01936f8a-7b2c-7000-8000-000000000010",
+      "source": {
+        "type": "session",
+        "session_id": "01936f8a-7b2c-7000-8000-000000000001"
+      },
+      "seq": 12,
+      "timestamp_ms": 1736937000000,
+      "payload": {"type": "text_delta", "delta": "Rust is"}
     }
   }
 }
 ```
 
+Inspect `params.event.payload.type` and (for text deltas)
+`params.event.payload.delta`, not `params.event.type`. `event_id`, typed
+`source`, `seq`, and `timestamp_ms` belong to the envelope; optional `mob_id`
+is envelope metadata.
+
 Event types match the `AgentEvent` enum in `meerkat-core/src/event.rs`
-(`agent_event_type` assigns each variant its stable wire name) and are emitted
-to `artifacts/schemas/events.json`. New variants must appear in both that enum
-and this table.
+(`agent_event_type` assigns each variant its stable wire name) and its schema
+projection in `artifacts/schemas/events.json`. New variants must appear in
+both that enum and this table. The decodable vocabulary includes the
+explicitly marked legacy row; not every variant is emitted by current writers.
 
 | Event | Description |
 |-------|-------------|
@@ -2449,7 +2726,9 @@ and this table.
 | `assistant_image_appended` | Canonical assistant image block appended to transcript history |
 | `tool_call_requested` | LLM wants to call a tool |
 | `tool_result_received` | Tool result processed |
-| `turn_completed` | LLM call finished |
+| `turn_completed` | LLM call finished; absent `usage` means no accounting row, not zero tokens |
+| `turn_usage_accounting_unmeasured` | Provider accounting was absent; no zero row may be fabricated, and this observation alone does not assert turn completion |
+| `turn_usage_accounting_identity_disputed` | Reported counters exist but provider/model attribution differs; preserve the reported identity and counters |
 | `tool_execution_started` | Tool dispatch began |
 | `tool_execution_completed` | Tool returned a result |
 | `tool_execution_timed_out` | Tool exceeded timeout |
@@ -2458,6 +2737,10 @@ and this table.
 | `compaction_failed` | Compaction failed |
 | `budget_warning` | Approaching resource limits |
 | `retrying` | Retrying after transient error |
+| `model_fallback_skipped` | A fallback candidate was skipped with its typed target/reason |
+| `model_fallback_staged` | A retry staged a fallback target identity before commit |
+| `model_fallback_committed` | A retry committed the fallback identity change |
+| `model_fallback_target_failed` | A selected fallback target failed; carries previous/target identity and the error |
 | `hook_started` | Hook execution began |
 | `hook_completed` | Hook finished |
 | `hook_failed` | Hook execution failed |
@@ -2466,6 +2749,10 @@ and this table.
 | `skill_resolution_failed` | Skill resolution failed |
 | `tool_config_changed` | Tool visibility or MCP config changed |
 | `background_job_completed` | Background shell job reached a typed terminal status; `terminal_status` is semantic and `status` is only an optional display mirror |
+| `transcript_rewrite_committed` | Legacy 0.8.10 compatibility/read-only full-body rewrite row; current writers must not emit it |
+| `transcript_rewrite_audit_receipt_committed` | Current receipt-only evidence for a committed ordered transcript rewrite suffix |
+| `peer_content_ingested` | Typed peer content committed into session context, with correlation/peer facts and optional sender taint; absent taint is not clean |
+| `provider_cache_breakpoints_discarded` | Cache evidence no longer binds to the committed transcript; cache reuse is reduced without itself failing the turn |
 | `interaction_complete` | Interaction-scoped stream completed |
 | `interaction_callback_pending` | Interaction reached a callback boundary and is waiting for tool results |
 | `interaction_failed` | Interaction-scoped stream failed |
@@ -2478,7 +2765,10 @@ session state after receiving it.
 
 ### session/stream_event notifications
 
-When a session event stream is open (via `session/stream_open`), the server emits `session/stream_event` notifications. The notification payload mirrors `session/event`, but is scoped to the explicit stream handle.
+When a session event stream is open (via `session/stream_open`), the server
+emits `session/stream_event` notifications. `params.event` is the same nested
+`EventEnvelope<AgentEvent>` as in `session/event`, scoped by an outer stream
+handle.
 
 ```json
 {
@@ -2487,11 +2777,54 @@ When a session event stream is open (via `session/stream_open`), the server emit
   "params": {
     "stream_id": "550e8400-e29b-41d4-a716-446655440000",
     "sequence": 1,
-    "session_id": "sess_123",
-    "event": { "...": "..." }
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "event": {
+      "event_id": "01936f8a-7b2c-7000-8000-000000000010",
+      "source": {
+        "type": "session",
+        "session_id": "01936f8a-7b2c-7000-8000-000000000001"
+      },
+      "seq": 12,
+      "timestamp_ms": 1736937000000,
+      "payload": {"type": "text_delta", "delta": "Rust is"}
+    }
   }
 }
 ```
+
+Outer `sequence` numbers the explicit stream's deliveries and is distinct
+from the source envelope's `event.seq`. Outer `stream_id` and `session_id`
+are routing fields; scoped streams can additionally carry `scope_id` and
+`scope_path`. None of these flattens or replaces `event.payload`.
+
+### session/stream_end notifications
+
+An explicit session stream terminates with this notification:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/stream_end",
+  "params": {
+    "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "ended": true,
+    "outcome": "explicit_close"
+  }
+}
+```
+
+`outcome` is `"remote_end"`, `"terminal_error"`, or `"explicit_close"`.
+Calling `session/stream_close` terminates the handle with `explicit_close`;
+normal upstream exhaustion uses `remote_end`. When a terminal error is
+reported, the notification additionally contains
+`error: {"code":"stream_queue_overflow","message":"..."}` or
+`error: {"code":"stream_receiver_gone","message":"..."}`.
+
+`stream_truncated` is an event-level lag observation, **not** this terminal
+protocol. Stop consuming a terminated handle and reopen/reconcile as needed.
+A disconnected transport or lost notification receiver cannot be relied on to
+deliver its final end notification.
 
 ### mob/stream_event notifications
 
@@ -2510,6 +2843,34 @@ When a mob event stream is open (via `mob/stream_open`), the server emits `mob/s
 ```
 
 For mob-wide streams the event is an `AttributedEvent` (`source` member identity + profile + envelope). For per-member streams the event is the raw `EventEnvelope<AgentEvent>`. Runtime incarnation ids and fence tokens are bridge-internal and are not part of public stream payloads.
+
+### mob/stream_end notifications
+
+Requires the `mob` feature. The mob terminal payload omits `session_id`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "mob/stream_end",
+  "params": {
+    "stream_id": "550e8400-e29b-41d4-a716-446655440000",
+    "ended": true,
+    "outcome": "terminal_error",
+    "error": {
+      "code": "stream_queue_overflow",
+      "message": "event stream notification queue is full"
+    }
+  }
+}
+```
+
+As with session streams, `outcome` is `"remote_end"`, `"terminal_error"`, or
+`"explicit_close"`; `mob/stream_close` selects explicit-close termination.
+Conditional `error` contains `code` (`"stream_queue_overflow"` or
+`"stream_receiver_gone"`) and `message`; it is absent without an error.
+Stop using the terminated handle and reopen/reconcile as appropriate.
+Transport disconnection can prevent delivery of this final notification.
+Neither stream-end notification is a callable RPC method.
 
 ## Error codes
 

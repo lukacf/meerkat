@@ -305,7 +305,7 @@
       "result_type": "WireAuthProfileCleared"
     },
     {
-      "description": "Begin an OAuth login; returns authorize URL, state, PKCE verifier",
+      "description": "Begin an OAuth login; returns authorize_url, state, redirect_uri, and provider (PKCE verifier stays server-side)",
       "name": "auth/login/start",
       "params_type": "LoginStartParams",
       "result_type": "WireLoginStart"

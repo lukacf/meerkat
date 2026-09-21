@@ -228,9 +228,13 @@ Incoming connections are validated in `handle_connection()` (`meerkat-comms/src/
 
 ## Transport layer
 
-All transports use a length-prefixed CBOR framing protocol implemented by `TransportCodec`.
+Signed peer TCP and UDS transports use the length-prefixed CBOR framing
+protocol implemented by `TransportCodec`. Inproc delivers typed envelopes
+directly without transport serialization; signing and admission are separate
+from framing. Plain external-event listeners use their own protocol, not this
+signed peer codec.
 
-**Wire format**: 4 bytes (big-endian) payload length followed by CBOR-encoded `Envelope` (up to 1 MB max).
+**Signed peer TCP/UDS wire format**: 4 bytes (big-endian) payload length followed by CBOR-encoded `Envelope` (up to 1 MB max).
 
 ### Address formats
 
@@ -277,6 +281,7 @@ pub enum MessageKind {
         handling_mode: Option<HandlingMode>,
         objective_id: Option<ObjectiveId>,
     },
+    #[serde(rename = "incarnation_fenced_message")]
     IncarnationFencedMessage {
         body: String,
         blocks: Option<Vec<ContentBlock>>,
@@ -701,10 +706,13 @@ Paths support `{name}` interpolation (replaced with the agent's comms name). Rel
 | `--comms-pairing-password-file <PATH>` | Read the pairing password from a file. |
 | `--no-comms` | Disable inter-agent communication entirely |
 | `--keep-alive` | Run in keep-alive mode (stay alive for comms messages and events after initial prompt) |
-| `--stdin` | Read external events from stdin (newline-delimited, only meaningful with `--keep-alive`) |
+| `--stdin <auto\|blob\|lines\|off>` | `auto` (default) and `blob` prepend finite piped input to the prompt; `lines` streams events and implies keep-alive on the normal CLI path; `off` ignores stdin |
+| `--line-format <text\|json>` | Interpret `--stdin lines` input as literal `text` (default) or whole structured `json` values |
 
 <Note>
-All comms flags require the `comms` feature at compile time (`#[cfg(feature = "comms")]`).
+Comms functionality and the stdin line-event reader require the `comms`
+feature at compile time. Finite `--stdin auto` / `--stdin blob` input does not
+require comms or keep-alive.
 </Note>
 
 ### Signed TCP remote peer
@@ -957,7 +965,7 @@ External systems can push events into a running agent without Ed25519 authentica
 
 | Source | Surface | How to use | Auth |
 |--------|---------|-----------|------|
-| Stdin | CLI | `--stdin` flag (with `--keep-alive`) | None |
+| Stdin | CLI | `--stdin lines` (implies keep-alive) | None |
 | Webhook | REST | `POST /sessions/{id}/external-events` | `RKAT_WEBHOOK_SECRET` env var |
 | RPC | JSON-RPC | `session/external_event` method | None (implicit) |
 | TCP listener | Comms | Configure `event_address` in config | `auth = "none"` required |
@@ -965,17 +973,23 @@ External systems can push events into a running agent without Ed25519 authentica
 
 ### CLI stdin events
 
-Read newline-delimited events from stdin. Each line is parsed as JSON (extracting `body` field if present) or treated as plain text.
+Use `--stdin lines` for newline-delimited events; it implies keep-alive on the
+normal CLI path. `--stdin auto` (the default) and `--stdin blob` instead read
+finite piped input as prompt context, while `--stdin off` ignores stdin.
+
+Line events default to `--line-format text`, which preserves each line
+literally, including JSON-looking text. Opt into `--line-format json` to retain
+the whole structured JSON value (falling back to text for non-JSON input).
+It never extracts a guessed `body` property: the object in this example stays
+an object rather than becoming just `"deployment failed on prod"`.
 
 ```bash
-# Keep-alive with stdin events
-rkat run "You are a monitoring agent." \
+# Keep-alive with structured stdin events
+echo '{"body":"deployment failed on prod"}' | \
+  rkat run "You are a monitoring agent." \
   --comms-name monitor \
-  --keep-alive --stdin lines \
+  --keep-alive --stdin lines --line-format json \
   --tools safe
-
-# Then type or pipe events:
-echo '{"body":"deployment failed on prod"}' | ...
 ```
 
 ### REST webhook
@@ -1067,8 +1081,8 @@ injector.inject(
 **Observation** — subscribe at the scope you need:
 
 - **session-scoped**: use the session's primary `event_tx` or `session/stream_open` (RPC) / `Session.subscribe()` (Web SDK) / `session.subscribe_events()` (Python SDK) / `session.subscribeEvents()` (TypeScript SDK)
-- **agent-scoped**: use `MobHandle::subscribe_agent_events(...)` or `mob/stream_open` (RPC) / `Member.subscribe()` or `Mob.subscribeMemberEvents(agentIdentity)` (Web SDK) / `mob.subscribe_member_events(agent_identity)` (Python/TypeScript SDK)
-- **mob-scoped**: use `MobHandle::subscribe_mob_events(...)` or `mob/stream_open` (RPC) / `Mob.subscribeEvents()` (Web SDK) / `mob.subscribe_events()` (Python/TypeScript SDK)
+- **agent-scoped**: use `MobHandle::subscribe_agent_events(...)` or `mob/stream_open` (RPC) / `Member.subscribe()` or `Mob.subscribeMemberEvents(agentIdentity)` (Web SDK) / `mob.subscribe_member_events(agent_identity)` (Python SDK) / `mob.subscribeMemberEvents(agentIdentity)` (TypeScript SDK)
+- **mob-scoped**: use `MobHandle::subscribe_mob_events(...)` or `mob/stream_open` (RPC) / `Mob.subscribeEvents()` (Web SDK) / `mob.subscribe_events()` (Python SDK) / `mob.subscribeEvents()` (TypeScript SDK)
 
 This makes the public contract explicit: comms delivers work, and observability chooses scope.
 

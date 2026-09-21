@@ -100,24 +100,37 @@ batched prompt.
 
 ### Ordered System messages
 
-`system_prompt` on `StartTurnRequest` appends one ordinary `System` message at
-that turn boundary. System messages are repeatable and may appear anywhere in
-the transcript; an update never replaces row zero or rewrites an earlier
-message.
+`system_prompt` on `StartTurnRequest` appends one ordinary, unkeyed `System`
+message at that turn boundary. System messages are repeatable and may appear
+anywhere in the transcript; an append never replaces row zero or rewrites an
+earlier message.
 
-There is no separate prompt identity or host-injection ledger. Materialization
-and resume preserve the transcript byte-for-byte and never infer a System
-message from current host configuration. A host that wants to add an
-instruction supplies it on the admitted turn, where it becomes one new ordered
-System event.
+Keyed system-prompt updates instead append rows carrying
+`SystemPromptVersionIdentity`: a `SystemPromptKey` and `SystemPromptVersion`.
+The active model view selects the latest version per key; unkeyed rows are
+never superseded. Older versions remain historical rows reachable through
+retained transcript revisions, not a promise to retain every version in the
+active model view.
 
-Compaction retains every System message in relative order. Provider adapters
-preserve each System at its exact position where the wire accepts ordinary
-`role=system` messages. A provider with only a top-level instruction field
-cannot silently hoist or merge later System rows: its request projection
-returns a typed error while the ordered row remains valid durable history.
-Provider capability never changes, rejects, or rewrites the durable Session
-itself.
+There is no host-configuration injection ledger. Materialization and resume
+never infer a System message from current host configuration. A host that
+wants to add an instruction supplies it through the admitted update path,
+where it becomes a new ordered System row rather than an overwrite.
+
+Compaction retains active keyed and unkeyed System rows verbatim in relative
+order, while discarding superseded keyed versions from the compacted active
+head. This does not rewrite their retained revision history.
+
+Provider adapters lower the active instruction view without rewriting durable
+history. Wires accepting ordered `role=system` messages normally preserve their
+positions. Anthropic's model-gated lowering can instead place turn-scoped
+instructions after their governing User and before the Assistant, subject to
+its legal predecessor constraints; this is a wire-only placement adjustment
+(see [System-message projection](/reference/capability-matrix#system-message-projection)).
+Providers with only a top-level instruction field reject later System rows
+with a typed projection error; unsupported placements on other wires also fail
+typed rather than silently hoisting or merging canonical rows. Provider
+capability never changes, rejects, or rewrites the durable Session itself.
 
 ### interrupt
 
@@ -266,11 +279,21 @@ only as part of the trusted remote-host resume path.
 
 ## Compaction contract
 
-Compaction is optional and non-fatal.
+Compaction is optional. Ordinary recoverable failures preserve uncompacted
+history and normally report `CompactionFailed`, allowing the run to continue.
 
 - Triggered by token thresholds and turn guards.
-- On failure, emits `CompactionFailed` and continues with uncompacted history.
+- A typed provider `PolicyStop` from the summary call terminates the run.
+- Unresolved durable compaction-stage authority or cleanup errors, such as
+  `SessionDurableProjectionAuthorityUnknown`, also terminate fail-closed.
+- Preserving history does not guarantee the next request fits the provider's
+  capacity; an unrepaired oversized request can still fail.
 - Compaction usage counts toward run budgets.
+
+The staged transcript-rewrite/memory transaction is distinct from the optional
+asynchronous event-audit projection. An `EventStore` audit append failure does
+not undo an already-committed turn; that guarantee does not permit ignoring
+uncertain compaction-stage authority.
 
 ## Durability
 
@@ -553,10 +576,12 @@ Whitespace is significant and its exact text bytes remain on a pending input
 so cold recovery can retry the same turn, then retire with that terminal input
 payload. During the active logical turn, Meerkat projects the caller context
 first and any runtime-admitted steers after it, each as a distinct temporary
-user-channel injected-context message immediately before the exact admitted
-conversational user message in each foreground provider request. They are never
-System messages, transcript appends, rewrite records, compaction input, or
-extraction input.
+user-channel injected-context message appended at the current foreground
+model-request tail at the authorized request boundary. No conversational-row
+anchor is required. They are never System messages, transcript appends, rewrite
+records, compaction input, or extraction input. This is separate from durable
+`injected_context`, whose rows are appended before the turn's conversational
+user message.
 
 Deferred creation cannot carry this context because no runtime input exists
 yet; attach it to the eventual turn instead. The browser/WASM standalone live

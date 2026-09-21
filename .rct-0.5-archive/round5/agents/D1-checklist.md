@@ -7,5 +7,5 @@
 - [x] `D1-05` `DOGMA-17` Fix WASM external-auth binding key to `<realm_id>:<binding_id>`. Done when the host callback receives the canonical binding identity.
 - [x] `D1-06` `DOGMA-15` Add or extend a defensive scan banning `profile_id` as runtime/persistence auth identity. Done when the scan is checked in and wired for lane/final gating.
 - [x] `D1-07` Self static review. Done when no handler or provider binding path reconstructs identity from auth/backend profile ids.
-- [x] `D1-08` Handoff note. Done when the `D2` checkpoint contract, handoff commit, and risks are recorded in [D1-plan.md](/Users/luka/.codex/worktrees/ec4d/meerkat/.rct/round5/agents/D1-plan.md).
+- [x] `D1-08` Handoff note. Done when the `D2` checkpoint contract, handoff commit, and risks are recorded in [D1-plan.md](D1-plan.md).
 - [x] `D1-09` Generated-output request. Done when any schema/regeneration need is recorded explicitly, or marked `none`.

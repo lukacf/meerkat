@@ -15,7 +15,10 @@ behind CLI, REST, JSON-RPC, MCP, SDK, and browser/WASM surfaces.
 - CLI binary: **rkat**
 - Crate names: `meerkat`, `meerkat-core`, `meerkat-client`, etc.
 - Config directory: `.rkat/`
-- Environment variables: API keys only (RKAT_* secrets and provider-native keys)
+- Environment variables: provider secrets use `RKAT_*` and provider-native keys;
+  ordinary configuration stays declarative. Explicit operational/diagnostic
+  overrides also exist, such as `RKAT_WORKER_STACK_BYTES` for
+  [worker-stack diagnosis](docs/guides/deploying.mdx#worker-stack-budget).
 
 ## Build and Test Commands
 
@@ -83,7 +86,7 @@ make e2e-smoke
 ./scripts/repo-cargo e2e       # Alias for e2e-live + e2e-smoke
 
 # Run the CLI
-./scripts/repo-cargo run -p meerkat-cli -- run "prompt"
+./scripts/repo-cargo run -p rkat -- run "prompt"
 
 # Run a specific example
 ANTHROPIC_API_KEY=... ./scripts/repo-cargo run --example simple
@@ -123,7 +126,7 @@ isolated by their path hash.
 - `meerkat-core` → rebuilds almost everything (~27s incremental)
 - `meerkat-runtime` → rebuilds mob, rpc, rest, cli, integration tests
 - `meerkat-mob` → rebuilds mob-mcp, rpc, rest, cli, integration tests
-- Leaf crates (`meerkat-machine-schema`) → fast, minimal cascade
+- `meerkat-machine-schema` → `meerkat-machine-kernels`, `meerkat-runtime`, and `meerkat-mob`, then their downstream consumers; it is not a leaf crate
 
 ## Architecture
 
@@ -327,38 +330,60 @@ make fmt         # Auto-fix formatting
 make audit       # Security audit via cargo-deny
 ```
 
-**`make ci` runs** (in order): `docs-check` → `fmt-check` → `verify-lock-consistency` → `verify-bazel-locks` → `legacy-surface-gate` → `session-control-gate` → `deprecated-backend-gate` → `bridge-no-responsestatus-gate` → `sync-meerkat-dogma-skill-docs` → `verify-version-parity` → `verify-schema-freshness` → `verify-sdk-codegen-freshness` → `verify-sdk-event-inventory` → `verify-rpc-surface-alignment` → `verify-rest-surface-alignment` → `verify-sdk-wrapper-freshness` → `verify-machine-poster-coverage` → `check-rust-release-packaging` → `machine-check-drift` → `machine-authority-docs-gate` → `runtime-authority-bypass` → `storage-ambient-gate` → `lint` → `lint-feature-matrix` → `test-unit` → `test-int` → `e2e-fast` → `e2e-system` → `test-minimal` → `test-feature-matrix` → `test-surface-modularity` → `seam-inventory` → `rmat-audit` → `audit-generated-headers` → `audit`
+**`make ci`** combines documentation, formatting, locks, generated-contract
+freshness, authority/governance checks, lint, test and feature-matrix lanes,
+release packaging, and dependency audit. It also includes
+`verify-fixture-mint-generator`, `check-rust-release-packaging-contract`,
+`protocol-check-drift`, and `semver-breaks-selftest`. This is a non-exhaustive
+summary; the `ci` target in [Makefile](Makefile) owns the complete prerequisite
+list.
 
 `rmat-audit` runs the typed governance gates: `xtask effect-authority`, `xtask ownership-ledger --check-drift`, and `xtask rmat-audit --strict` (RMAT read-seam enforcement is the `ForbiddenShellAuthorityReads` AST rule). The bridge gate is `xtask bridge-classifier` (`scripts/pre-push-bridge-no-responsestatus.sh` is a thin wrapper). The old `scripts/audit-effect-authority.sh` is deleted.
 
 ### GitHub Workflows
 
-**CI** (`.github/workflows/ci.yml`) — runs on push to main, PRs, feature branches, and manual dispatch, entirely on free GitHub-hosted runners with a ~10-minute wall-clock target (sccache + mold + per-job rust-cache keys). It calls `cargo.yml` (the only lane), then `gate` aggregates status. `cargo.yml` runs parallel jobs:
-- `changes` — path classification (docs-only changes skip the Rust jobs; SDK-relevant paths enable `sdk-web`)
-- `fmt-governance` — fmt, surface/backend gates, dogma-docs mirror, rmat-audit set, seam-inventory, runtime-authority-bypass, machine-authority docs gate, poster coverage, generated-headers audit
-- `locks` - always-run (no `needs`, no path gate, `fetch-depth: 2`): `cargo metadata --locked` plus the structural dangling-reference read on Cargo.lock, and the offline MODULE.bazel.lock recorded-input check (the generated-BUILD half stays on pre-push and local `make ci`). On a `pull_request` run the checked-out tree is `refs/pull/N/merge`, which is where textual lock merges manufacture danglers; a release branch is always self-consistent, so checking the branch cannot catch that class
-- `clippy` — workspace clippy, all features, lib/bin targets (`--all-targets` runs nightly)
-- `unit` ×8 — `cargo unit` sharded via nextest hash partitions
-- `int-heavy` ×3 / `int-rest` ×7 — integration tests split by build scope: `-p meerkat-integration-tests` shards plus crate-group lanes (mob ×2, core-machine, client-session, complement group ×3), so no job links every integration binary
-- `e2e-fast` — deterministic end-to-end lane
-- `ratchets` — docs-check, version parity, schema/SDK codegen freshness, SDK event inventory, RPC/REST surface alignment, SDK wrapper freshness, Rust release configuration (crate enumeration + documented counts) and its contract test, machine-kernel staleness
-- `wasm-check` — wasm32 cargo check + clippy `--all-targets` (every code change)
-- `wasm-contract` — executes the browser contract test via `wasm-pack test --headless --chrome` (only when wasm-relevant paths changed: meerkat-web-runtime, meerkat-contracts, sdks/web, the workflow itself)
-- `sdk-web` — full Web SDK suite (only when SDK-relevant paths changed)
-- `audit` — cargo-deny
+**CI** (`.github/workflows/ci.yml`) — runs on pushes to `main`, `ci/**`,
+`feat/**`, and `feature/**`, PRs, and manual dispatch. Its required components
+are:
+- `gcp-buildbuddy` — calls `buildbuddy.yml` in `changed-paths` mode for the
+  broad GCP BuildBuddy lane: static/native checks and tests, authority
+  governance, and path-selected SDK, WASM, feature-matrix, and audit work.
+- `github-hosted-dense-topology` — calls `mob-dense-topology.yml` to build a
+  Mob unit-test archive and run the 300-member/150-peer stress on hosted Linux.
+- `gate` (`CI gate`) — requires both component results to be `success` and
+  enforces a 2400-second (40-minute) budget from workflow creation. Successful
+  `main` pushes emit a schema-3 exact-tree attestation with backend
+  `gcp-buildbuddy+github-hosted-dense-mob` and both component results.
+
+`cargo.yml` remains a separate reusable/manually dispatchable Cargo workflow
+with its own `Cargo lane gate`; the current `ci.yml` does not call it.
+Local Make commands still default to Cargo.
 
 **Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) — the expensive low-churn lanes: `lint` (clippy `--all-targets`), `lint-feature-matrix`, `test-feature-matrix`, `test-minimal`, `test-surface-modularity`, `e2e-system`, `test-sdk-web` (unconditional), `wasm-contract` (unconditional), `check-rust-release-packaging`, cargo-deny sweep.
 
-The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on 2026-07-03 (cost); the file is inert (`workflow_call`-only, no caller) and pending deletion. The BuildBuddy-hosted RELEASE flow (remote.buildbuddy.io) covers Linux/macOS binaries; Windows release binaries are cross-compiled from Linux with cargo-xwin (clang-cl, lld-link, the Windows SDK) on a GitHub-hosted Ubuntu runner and then verified on a windows-latest runner (the org pool has no self-hosted Windows RBE executors).
+The required GCP BuildBuddy CI component is distinct from the owner-selected
+BuildBuddy release backend (remote.buildbuddy.io), which covers Linux/macOS
+binaries. Windows release binaries are cross-compiled with cargo-xwin
+(clang-cl, lld-link, the Windows SDK) on a GitHub-hosted Ubuntu runner and then
+executed for verification on a windows-latest runner.
+
+**Release semver readiness** (`.github/workflows/release-semver-readiness.yml`)
+is a separate workflow triggered by `Cargo.toml`/`CHANGELOG.md` changes on
+`main` pushes and PRs, or by manual dispatch. For unpublished candidate
+versions, it measures declared breaks and uploads exact-tree, exact-version
+evidence with 30-day configured retention. Only its successful `main`-push
+artifact, `meerkat-semver-attestation-main-<tree_sha>`, qualifies for the normal
+release semver gate; PR and manual artifacts are previews.
 
 **Release** (`.github/workflows/release.yml`) — runs on `v*` tag push or manual dispatch:
 
 | Job | Trigger | What it does |
 |-----|---------|-------------|
-| `require_ci_green` | Always | Requires successful Cargo CI for the release commit |
+| `require_ci_green` | Always | Requires successful exact-main CI for the release commit; tag runs also verify its retained exact-tree attestation (currently BuildBuddy plus hosted dense-Mob components) |
 | `release_validate_cargo` / `release_validate_buildbuddy` | Eligible manual dispatches only | Validate release state through the selected lane; tag runs reuse exact-tree CI and skip both jobs |
 | `release_validate_gate` | Tags and full/package dispatches | Accept exact-tree CI on tags or the selected manual validation lane; Web-only and asset-only recovery skip it |
-| `build_binaries` / `build_binaries_buildbuddy` / `build_binaries_windows_cross` / `verify_windows_binaries` / `build_binaries_gate` | Tags or manual asset recovery | BuildBuddy builds Linux/macOS (4 targets); `build_binaries_windows_cross` cross-compiles Windows from Linux with cargo-xwin and `verify_windows_binaries` runs the result on windows-latest; each target packages 4 binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`); the gate requires the selected lanes plus both Windows jobs |
+| `release_semver_gate` | Tags and full/package dispatches | After `require_ci_green`, verifies unexpired exact-tree, exact-version main-push readiness evidence on the normal tag/explicit-tag path; narrower manual measurement/recovery exceptions are described in the release guide |
+| `build_binaries` / `build_binaries_buildbuddy` / `build_binaries_windows_cross` / `verify_windows_binaries` / `build_binaries_gate` | Tags or manual asset recovery | The selected BuildBuddy or GitHub-hosted lane builds Linux/macOS (4 targets); `build_binaries_windows_cross` cross-compiles Windows from Linux with cargo-xwin and `verify_windows_binaries` runs the result on windows-latest; each target packages 4 binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`); the gate requires the selected lanes plus both Windows jobs |
 | `build_web_sdk_package` | Tags or package/Web recovery without a reused artifact | Builds the `@rkat/web` package artifact |
 | `publish_github_release` | Tags or manual asset recovery | Downloads artifacts, generates `checksums.sha256` + `index.json`, publishes or repairs the GitHub Release |
 | `update_homebrew` | After GitHub release or asset recovery | Updates the Homebrew tap formula |
@@ -413,8 +438,17 @@ Installed via `make install-hooks`. Two stages:
 - `scripts/pre-push-bridge-no-responsestatus.sh` (thin wrapper over `xtask bridge-classifier`)
 - `scripts/pre-push-bazel-locks.sh` (generated BUILD freshness, offline MODULE.bazel.lock recorded-input check, `bb mod deps --lockfile_mode=error` when the pinned CLI is present; `--require-bb` makes that last gate mandatory and the release preflight passes it)
 - `scripts/test-lock-consistency-gate.sh`, `scripts/test-bazel-module-lock-gate.sh`, `scripts/test-crate-enumeration-gate.sh`, `scripts/test-release-doctor-workflow-contract.sh` (contract tests: each new release-infra gate must still fail on the defect it was written for; the last one also proves the release doctor's `release.yml` assertions survive rewording)
-- `scripts/pre-push-unit.sh` (deterministic local gate: Cargo `unit` plus `e2e-fast` by default, or matching BuildBuddy lanes when `MEERKAT_BUILDBUDDY=1`; includes per-tree cache, serialized runs, and timeout retry)
+- `scripts/pre-push-unit.sh` (deterministic Cargo/nextest gate: when fresh execution is needed, runs workspace unit, integration-fast, HeadCanonical cold-restart, and `e2e-fast` lanes; serializes identical source evidence and retries a timed-out lane once. `MEERKAT_BUILDBUDDY` does not switch this hook's backend)
 - `scripts/pre-push-prune-lanes.sh` (runs from the dispatcher only after a PASSED gate: keeps at most `MEERKAT_PRE_PUSH_KEEP_LANES` (default 2) `pre-push-<hash>` hook worktrees and Cargo target lanes per repo, never touching the current lane, a lane whose dispatcher lock is live, a lane referenced by any live process, a lane with any file activity inside `MEERKAT_PRE_PUSH_LANE_IDLE_SECS` (default 21600), or any non-lane name; logs one `kept:`/`pruned:` line per lane with its reason; `MEERKAT_PRE_PUSH_KEEP_LANES=all` disables it)
+
+The inner deterministic-test cache uses a source fingerprint that excludes
+root `Cargo.lock` and `MODULE.bazel.lock`. On a lock-only cache hit, the current
+lock graph has been compiled by pre-push Clippy but is not re-tested locally;
+the reused tests ran against the prior lock graph, and CI remains
+authoritative. Fail-closed `release-projection-only` and
+`pre-push-harness-only` classifiers can also reuse existing parent source-test
+evidence. This is separate from `pre-push-dispatch.sh`'s complete-hook success
+stamp, which is keyed to the entire pushed Git tree.
 
 **Manual local preflight**:
 - `pre-commit run --hook-stage manual agent-check-changed` (runs `scripts/agent-gate --staged`)
@@ -458,7 +492,11 @@ This updates:
 - `sdks/python/meerkat/generated/` — Python generated types
 - `sdks/typescript/src/generated/` — TypeScript generated types
 
-**`make verify-schema-freshness`** detects stale committed schemas by comparing git HEAD against freshly emitted output.
+**`make verify-schema-freshness`** compares `artifacts/schemas/` in the current
+working tree with schemas freshly emitted into a separate output directory,
+normalizing JSON before comparison. It does not certify the staged files or
+Git `HEAD`. Change the typed owner, run `make regen-schemas`, and commit the
+updated generated artifacts.
 
 ### Releasing
 
@@ -467,6 +505,18 @@ make release-preflight       # Full CI + schema freshness + changelog check
 ./scripts/repo-cargo release patch  # Inspect cargo-release plan only
 ./scripts/repo-cargo release patch --execute  # Bump, commit, tag, push
 ```
+
+The combined bump/tag/push command does not itself establish release
+readiness. Prefer preparing the hook-generated release tree on `main` and
+waiting for both ordinary CI and **Release semver readiness** before
+cargo-release publishes the tag. The enforced boundary is the
+`release_semver_gate` artifact lookup after `require_ci_green`: the matching
+main-push semver evidence must exist and be unexpired then. A combined push
+can succeed if readiness finishes before that lookup, but otherwise races it.
+Local preflight and PR/manual readiness previews are not substitutes. Keep
+version/changelog generation hook-owned; see the
+[release guide](docs/guides/cd-and-distribution.md#release-workflow) for the
+separate manual measurement and completed-measurement recovery paths.
 
 **What `./scripts/repo-cargo release patch --execute` does:**
 
@@ -517,8 +567,8 @@ The canonical publish order lives in `scripts/release-rust-crates.sh` (43 crates
 - **Never change `Cargo.lock` without refreshing `MODULE.bazel.lock`** - the lock is a crate_universe extension input; `make buildbuddy-lock-update` regenerates it, and `make verify-bazel-locks` proves it
 - **Never hand-maintain a second list of workspace crates** - `scripts/release-rust-crates.sh` is the one hand-ordered enumeration; the patch config derives from it and `make check-rust-release-config` fails when the documented order, count, or patch map disagrees
 - **Never write a bare crate count in this file that nothing derives** - `make check-rust-release-config` rejects any `N crates` / `N path deps` claim it cannot bind to a computed quantity. Register the new claim in `documented_count_claim_errors` (`scripts/check_rust_release_packaging.py`) alongside the artifact that owns the number, or write it as an approximation with a leading `~`. Release crate count and internal path-dep count are different facts with different owners; they are not interchangeable even when they happen to be equal
-- **Never size a thread stack in a host binary or bypass the budget with `#[tokio::main]`** - every host runs through `meerkat_runtime::host_stack::run_host` on the one documented 8 MiB budget (`HOST_WORKER_STACK_BUDGET`); a deep frame is fixed with `meerkat_runtime::stack_relief`, not a bigger stack. The debug canary `rpc_dispatch_path_fits_debug_worker_stack_budget` (4 MiB) and nightly `make stack-budget-release` (1 MiB release) pin the numbers
-- **Use `./scripts/repo-cargo release patch --execute` for releases** - never manually bump versions or create tags; the release hook handles version projections, changelog stamping, schema/codegen refresh, BuildBuddy metadata, and parity verification automatically
+- **Never size a thread stack in a host binary or bypass the budget with `#[tokio::main]`** - every host runs through `meerkat_runtime::host_stack::run_host` on the one documented 8 MiB default budget (`HOST_WORKER_STACK_BUDGET`); a deep frame is fixed with `meerkat_runtime::stack_relief`, not a bigger stack. The debug canary `rpc_dispatch_path_fits_debug_worker_stack_budget` (4 MiB) and nightly `make stack-budget-release` (1 MiB release) pin the numbers
+- **Use cargo-release for releases** - the configured `./scripts/repo-cargo release patch --execute` flow handles version projections, changelog stamping, schema/codegen refresh, BuildBuddy metadata, and parity verification through the release hook. Never manually bump versions or create tags; also satisfy the exact-tree CI and semver-readiness prerequisites above
 
 ## Testing with Multiple Providers
 

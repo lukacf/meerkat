@@ -47,9 +47,23 @@ Reading `model.tla`:
 
 Validation:
 
-- `make machine-codegen`
-- `make machine-check-drift`
-- `make machine-verify`
-- `cargo xtask machine-codegen --all`
-- `cargo xtask machine-check-drift --all`
-- `cargo xtask machine-verify --all`
+Generation and drift checks, without running TLC:
+
+- `make machine-codegen` regenerates the authority artifacts.
+- `make machine-check-drift` checks that generated artifacts match their sources.
+- Direct xtask alternatives are `./scripts/repo-cargo xtask machine-codegen --all`
+  and `./scripts/repo-cargo xtask machine-check-drift --all`.
+
+For TLC verification, `tlc` must be on `PATH`:
+
+- `make machine-verify` is the normal budgeted TLC lane. It retains drift and
+  structural checks, runs the bounded adaptive layer-terminal witness
+  (`specs/compositions/adaptive_mob_bundle/witness-layer_terminal_feedback.cfg`),
+  and excludes the full `meerkat_mob_seam` and `adaptive_mob_bundle` composition
+  sweeps. Its wrapper also skips Cargo-backed post-checks.
+- `make machine-verify-full` is the expensive, on-demand full catalog sweep with
+  the default `Ci` (`ci.cfg`) profile and no composition exclusions. It can take
+  hours; "full" does not select the `Deep` profile or an unbounded state space.
+- `./scripts/repo-cargo xtask machine-verify --all` also selects the full sweep
+  unless callers supply overriding flags; it does not select the budgeted
+  wrapper.

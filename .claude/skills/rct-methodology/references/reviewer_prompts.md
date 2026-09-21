@@ -12,17 +12,26 @@ Store reviewer prompts under `.rct/agents/` (one file per reviewer). Replace `{P
 **All RCT artifacts are in `.rct/`:**
 - `.rct/spec.yaml` — authoritative specification (ONLY spec source)
 - `.rct/checklist.yaml` — task checklist (source of truth for task status)
-- `.rct/plan.md` — implementation plan
+- `.rct/plan.yaml` — implementation plan
 - `.rct/outputs/CHECKLIST.md` — rendered view only (NOT source of truth)
 
 **There is NO `CHECKLIST.md` at repo root.**
 
-**You MUST ignore ALL files outside `.rct/`:**
-- `docs/` — may contain outdated or legacy content
-- `docs/legacy/` — explicitly deprecated, DO NOT USE
-- `README.md` — informational only, not authoritative
+**Do not use files outside `.rct/` as competing specification authority:**
+- `docs/` — may contain outdated or legacy requirements
+- `docs/legacy/` — not the selected task's specification
+- `README.md` — informational, not a replacement requirements source
 
-If you find a conflict between `.rct/spec.yaml` and any document outside `.rct/`, the `.rct/spec.yaml` is ALWAYS correct. Do not cite external documents as evidence for blockers.
+Read the relevant implementation, tests, build/configuration files, and task
+deliverables anywhere within the repository, including outside `.rct/`.
+Those files are required behavioral evidence, not alternate specification
+authority. Cite them with the applicable `.rct/spec.yaml` requirement when
+reporting a mismatch. A documentation deliverable may also be inspected as
+evidence even when it lives in `docs/` or a README.
+
+If another document proposes conflicting requirements, retain `.rct/spec.yaml`
+as the selected task's normative specification. Do not invent requirements
+from unrelated documents.
 
 ---
 
@@ -256,12 +265,14 @@ IMPORTANT: You must INDEPENDENTLY discover the state of the codebase. Do not rel
 
 The ONLY authoritative specification is `.rct/spec.yaml`.
 
-DO NOT read or cite:
-- `docs/` or `docs/legacy/` — these are outdated/deprecated
-- Any `.md` files outside `.rct/`
-- README files
+Do not treat `docs/`, `docs/legacy/`, README files, or other documents outside
+`.rct/` as competing requirements sources.
 
-If you find yourself reading a file path that does NOT start with `.rct/`, STOP and use `.rct/spec.yaml` instead.
+Read and cite relevant implementation, tests, build/configuration files, and
+task deliverables anywhere in the repository as behavioral evidence. Do not
+stop reading source merely because its path is outside `.rct/`. If a document
+proposes competing requirements, use `.rct/spec.yaml` for the normative contract
+instead; a task's documentation deliverables can still be reviewed as evidence.
 
 Your scope is LIMITED to requirements compliance:
 - Spec requirements (MUST/REQUIRED statements) **from `.rct/spec.yaml` ONLY**
@@ -270,7 +281,7 @@ Your scope is LIMITED to requirements compliance:
 
 ## Phase-to-Spec Mapping
 
-Each phase maps to specific spec sections in `.rct/spec.yaml`. Only audit the relevant sections for Phase {PHASE}. Refer to `.rct/plan.md` for the mapping.
+Each phase maps to specific spec sections in `.rct/spec.yaml`. Only audit the relevant sections for Phase {PHASE}. Refer to `.rct/plan.yaml` for the mapping.
 
 ## Phase-Specific Expectations ("Red OK" Rules)
 
@@ -288,14 +299,17 @@ Run these commands yourself and analyze the output:
 ## Anti-Pattern Detection (REQUIRED)
 
 ### Infinite Deferral Detection
-Search for spec-required features being deferred (search ONLY in `.rct/`):
+Search the task's `.rct/` records for spec-required features being deferred:
 ```bash
 grep -ri "v0.2\|phase 0.2\|future work\|out of scope\|deferred\|later version" .rct/
 ```
 
 Cross-reference any deferred items against `.rct/spec.yaml` MUST/REQUIRED statements. If a spec-required feature appears in a deferral list, you MUST block.
 
-**DO NOT search in `docs/` — those files are not authoritative.**
+Also inspect relevant implementation and task deliverables elsewhere in the
+repository for deferrals, including documentation deliverables. Their location
+does not prevent evidence gathering; `.rct/spec.yaml` still determines which
+requirements are in scope.
 
 ### Checklist Honesty Check
 Compare checklist marks against actual implementation:
@@ -503,7 +517,9 @@ Any results in supposedly-complete code = STUB_REMAINING.
 grep -ri "v0.2\|deferred\|future work\|out of scope" .rct/
 ```
 
-Cross-reference against `.rct/spec.yaml` MUST statements. DO NOT use `docs/` — it may contain legacy content.
+Cross-reference against `.rct/spec.yaml` MUST statements. Do not use unrelated
+`docs/` content as specification authority; inspect relevant task deliverables
+there as evidence when applicable.
 
 ## Blocking Rules
 

@@ -295,14 +295,18 @@ key before making a live hive turn.
 | `/new` | Hive: archive the current session and create another. Kennel target: request a `hive-fleet` mob respawn. Direct target: currently unsupported. |
 | `/resume` | List past sessions |
 | `/resume <ID>` | Resume session by ID |
-| `/model <name>` | Set the model override for the next turn only |
+| `/model <name>` | Stage a model change for the next submitted turn |
 | `/models` | List available models |
-| `/steer` | Set handling mode to steer (interrupts current turn) |
+| `/steer` | Select cooperative inner-loop handling for subsequently submitted work, at the earliest admissible boundary |
 | `/queue` | Set handling mode to queue (waits for current turn) |
 | `/interrupt` | Interrupt the current turn |
 | `/claim` | Claim the selected target from the kennel (kennel mode) |
 | `/release` | Release the selected target back to the kennel (kennel mode) |
 | `/help` | Show help |
+
+Once a `/model` change is successfully applied, it remains the session's model
+for subsequent turns until changed again. Clearing the pending UI choice does
+not restore the previous model.
 
 ---
 

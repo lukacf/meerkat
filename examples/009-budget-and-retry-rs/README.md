@@ -4,7 +4,7 @@ Production guardrails: token budgets, tool-call limits, and retry policies for
 resilient agent execution.
 
 ## Concepts
-- `BudgetLimits` — hard caps on tokens, tool calls, and duration
+- `BudgetLimits` — cumulative token-usage stopping limits, plus caps on tool calls and duration
 - `RetryPolicy` - exponential backoff for provider failures classified as
   retryable
 - Applying a retry policy to an `AgentBuilder`
@@ -13,15 +13,20 @@ resilient agent execution.
 ## Budget Types
 | Limit | Description |
 |-------|-------------|
-| `max_tokens` | Hard cap on cumulative token usage |
+| `max_tokens` | Cumulative accounted-token stopping limit; the final provider call may overshoot |
 | `max_tool_calls` | Max tool invocations |
 | `max_duration` | Wall clock timeout |
 
+The cumulative token limit is checked around provider calls using accounted
+usage, so a completed call can exceed the remaining budget before further work
+is stopped. Separately, `max_tokens_per_turn` bounds the requested response
+output (512 in this example), not cumulative input and output usage.
+
 ## Retry Strategy
 
-When the provider returns a typed retryable failure, the configured policy
-uses this schedule. The example prints the policy but does not force a live
-provider failure.
+For typed retryable provider failures, the configured policy has this nominal
+exponential backoff, before jitter and delay selection. The example prints
+the policy but does not force a live provider failure.
 
 ```
 Attempt 1 → fail → wait 500ms →
@@ -29,6 +34,10 @@ Attempt 2 → fail → wait 1s →
 Attempt 3 → fail → wait 2s →
 Attempt 4 → give up
 ```
+
+The computed backoff includes ±10% jitter. Actual waits may instead be
+selected from provider retry hints or the rate-limit policy, and can be
+shortened by the remaining duration budget.
 
 ## Run
 ```bash

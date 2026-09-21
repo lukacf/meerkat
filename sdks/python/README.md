@@ -2,7 +2,7 @@
 
 Python SDK for the [Meerkat](https://github.com/lukacf/meerkat) runtime.
 
-- **Contract version:** `0.8.24`
+- **Contract version:** `0.8.40`
 - **Python:** `>=3.10`
 - **Package:** `meerkat-sdk`
 
@@ -22,13 +22,29 @@ pip install -e "sdks/python[dev]"
 
 ## Quick start
 
+The selected model needs a compatible credential route: an already provisioned
+auth binding or the provider's environment key. This example selects Claude.
+For a clean API-key setup, export your Anthropic key in the shell that starts
+Python; the `rkat-rpc` child inherits it:
+
+```bash
+export ANTHROPIC_API_KEY="<your-anthropic-api-key>"
+```
+
+Skip this export if you already use a compatible auth binding; pass it with
+`auth_binding` when it is not the configured default. A different provider's
+key is not a substitute for the selected model's credentials.
+
 ```python
 import asyncio
 from meerkat import MeerkatClient
 
 async def main() -> None:
     async with MeerkatClient() as client:
-        session = await client.create_session("What is the capital of France?")
+        session = await client.create_session(
+            "What is the capital of France?",
+            model="claude-sonnet-4-6",
+        )
         print(session.text)
 
         result = await session.turn("And Germany?")
@@ -111,7 +127,7 @@ Example:
 ```python
 config_envelope = await client.get_config()
 updated = await client.patch_config(
-    {"agent": {"max_tokens": 2048}},
+    {"max_tokens": 2048},
     expected_generation=config_envelope["generation"],
 )
 ```

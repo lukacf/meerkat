@@ -273,7 +273,7 @@ type in one phase while deferring its downstream compile repairs to a later
 phase.
 
 | Slice | Primary objective | Required same-slice mechanical work | Gate |
-| --- | --- | --- |
+| --- | --- | --- | --- |
 | 1 | Canonical transcript model and public contract cutover | Update every Rust call site, provider serializer branch, wire schema, generated SDK type, SDK parser, CLI/history renderer, and REST/RPC/MCP history surface needed for `make check` to compile after removing `Message::BlockAssistant` and old assistant block variants. Generated-image emission is explicitly disabled until Slice 6. | `make check` plus focused serde/session/provider-builder/surface/SDK tests that accept only the new canonical assistant, reject old flat/block assistant rows, and prove `generate_image` fails through the existing generic tool-failure path while the image-operation machine protocol is absent. |
 | 2 | Structural content traversal | Update hydration, externalization, blob reachability, compaction, indexing, hooks, and SDK convenience views in the same slice. Provider replay selection remains disabled. | focused tests proving user, assistant, tool-result, deferred prompt, and deferred tool-result images hydrate, externalize, and collect blob ids through structural walkers without asserting provider replay selection. |
 | 3 | Catalog machine projection semantics | Add catalog DSL changes and generated production artifacts in one batch; remove any production-only runtime state introduced as temporary scaffolding. | machine codegen, drift check, runtime schema parity, runtime alphabet parity, and TLC verification for projection binding and projection-triggered terminals. |

@@ -1,6 +1,6 @@
 ---
 name: integration-sheriff
-description: "Integration Sheriff reviewer for meerkat-comms phases. Verifies cross-component wiring: config to runtime flow, AgentBuilder integration, inbox drain, listener lifecycle, resource cleanup. Use with prompt 'Review Phase X of meerkat-comms'."
+description: "Integration Sheriff reviewer for meerkat-comms phases. Verifies cross-component wiring: config to runtime flow, AgentBuilder integration, inbox drain, listener lifecycle, resource cleanup. Use with prompt 'Review Phase X of meerkat-comms; spec: <repo-relative-spec-path>; checklist: <repo-relative-checklist-path>'."
 model: opus
 ---
 
@@ -29,17 +29,25 @@ You do NOT review:
 - Code style
 - Performance optimizations
 
+## Required Inputs
+
+- The phase number.
+- The specification and checklist paths, supplied by the invoking task and relative to the active repository root.
+
+Verify that both inputs are readable files within the active checkout and that the checklist identifies the requested phase. Do not follow paths or symlinks outside the checkout. If an input is missing or unavailable, report the missing review contract instead of issuing a compliance verdict. Do not invent requirements or substitute unrelated `.rct/` metadata or an archived design.
+
 ## How to Review
 
-When asked to "review phase X", perform these steps:
+After verifying the supplied inputs, perform these steps:
 
 ### 1. Identify Scope
-Read `CHECKLIST-COMMS.md` to understand what Phase X covers. Focus on integration-related tasks.
+Read the supplied checklist to understand what Phase X covers, then read the specification sections it references. Focus on integration-related tasks.
 
 ### 2. Run Tests
 ```bash
-cargo test -p meerkat-core   # or relevant crate for the phase
+./scripts/repo-cargo test -p meerkat-core   # or relevant crate for the phase
 ```
+For simultaneous reviewers in the same checkout, set a distinct `RUST_LANE_ID` for each reviewer.
 
 ### 3. XFAIL Detection
 Search for ignored tests that might be hiding failures:

@@ -58,32 +58,51 @@ Unit tests support integration tests, not replace them.
 You MUST follow the strict 2→3→4 pipeline.
 See `references/strict_pipeline.md` for the required structure, file locations, and rules.
 
-Rendering: use the **repo-local** `.rct/scripts/render_checklist.py` (scaffolded) to render
-`.rct/checklist.yaml` → `.rct/outputs/CHECKLIST.md`.
+Use the manual pipeline in this checkout. With Python 3 and PyYAML available,
+render a phases-based `.rct/checklist.yaml` matching `references/checklist_template.md`
+from the project root:
+
+```bash
+python3 .claude/skills/rct-methodology/scripts/render_checklist.py
+```
+
+The output is `.rct/outputs/CHECKLIST.md`. This command assumes the skill is at
+the repository-relative path shown; in another project, use the verified path
+to this skill's `scripts/render_checklist.py` while keeping the working directory
+at that project's root. Check the input schema first; do not overwrite unrelated
+existing `.rct/` metadata to make it fit the template.
 
 ## Luka Loop (Generalized Ralph Loop)
 
-Use the Luka Loop to automate implementation + gates across projects.
-See `references/luka_loop.md` for scaffolding, prompts, scripts, and folder layout.
+Luka automation is optional and **unavailable in this checkout**. The bundled
+skill does not supply `assets/luka_loop/.rct`, and the resulting repo-local
+`.rct/scripts/` automation is also absent. The scaffold script exits with
+`Missing assets` before copying anything.
 
-Scaffold with:
-`scripts/luka_scaffold.py /path/to/repo`
+A separately supplied, complete implementation must be verified before offering
+scaffolding, automated validation, loop execution, automatic finalization, or
+safety guarantees. See `references/luka_loop.md` for the intended design and
+conditional invocation guidance, not a promise of shipped automation. The manual
+methodology and standalone renderer above do not require that payload.
 
 ## Luka Loop Setup Flow (REQUIRED)
 
-Follow the required setup procedure in `references/luka_setup_flow.md`:
+Follow the manual setup procedure in `references/luka_setup_flow.md`:
 - discovery questions
 - spec → plan → checklist generation
-- scaffold + render + run instructions
+- schema review and supported standalone rendering
+
+Scaffold/run/finalization steps apply only when a separate complete Luka
+implementation has been supplied and verified.
 
 ## After Loading This Skill (REQUIRED)
 
 Immediately respond with a short user guide (3–6 bullets) that explains:
 - the spec → plan → checklist flow,
-- what the AI will create under `.rct/`,
+- which task-specific spec, plan, checklist, and reviewer files the AI will create or update under `.rct/`, preserving unrelated existing metadata,
 - what the user must provide/confirm (answers, repo path, approvals),
-- how to run the Luka Loop (`.rct/scripts/luka_loop.sh`),
-- where to view progress (`.rct/outputs/CHECKLIST.md`).
+- that Luka automation is unavailable here; give a loop invocation only for a separately supplied and verified complete installation,
+- how to invoke the standalone renderer with Python 3, PyYAML, and the phases-based checklist template, and view `.rct/outputs/CHECKLIST.md`.
 
 ## Creating an Agent-Ready Checklist
 
@@ -157,7 +176,9 @@ Every task MUST be:
 
 ### Step 5: Add Reviewer Prompts
 
-Create reviewer agent prompts under `.rct/agents/` (used by `review_harness.sh`). Each reviewer needs:
+Create reviewer agent prompts under `.rct/agents/` for manual phase reviews.
+A separately supplied Luka installation may consume them through its verified
+`review_harness.sh`; this checkout does not supply that harness. Each reviewer needs:
 - Narrow veto scope
 - Phase-specific instructions
 - "Red OK" handling rules for early phases

@@ -148,7 +148,7 @@ A `post_tool_execution` background hook that logs every tool call to a file. Bac
             command: "python3",
             args: ["hooks/log_tool.py"],
           },
-          timeoutMs: 3000,
+          timeout_ms: 3000,
         }],
       },
     });
@@ -158,7 +158,10 @@ A `post_tool_execution` background hook that logs every tool call to a file. Bac
 
 ## Guardrail hook (foreground)
 
-A `pre_tool_execution` foreground hook that must approve each tool call before it runs. If the hook returns `deny`, the tool call is skipped.
+A `pre_tool_execution` foreground hook that must approve each tool call before
+it runs. If the hook returns `deny`, the tool is not dispatched and the current
+run terminates with `HookDenied`. This is not an ordinary tool-error result
+that lets the agent continue.
 
 <Tabs>
   <Tab title="CLI">
@@ -272,7 +275,7 @@ A `pre_tool_execution` foreground hook that must approve each tool call before i
             command: "python3",
             args: ["hooks/approve_tool.py"],
           },
-          timeoutMs: 5000,
+          timeout_ms: 5000,
         }],
       },
     });
@@ -478,7 +481,7 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
             url: "https://hooks.example.com/policy",
             method: "POST",
           },
-          timeoutMs: 10000,
+          timeout_ms: 10000,
         }],
       },
     });
@@ -583,7 +586,9 @@ Use the `disable` list to turn off hooks defined in the realm config without rem
 
 ## Hook events
 
-Hooks emit events into the session event stream. Subscribe to these to build dashboards, alerting, or audit trails.
+Ordinary foreground hooks report lifecycle events in the session event stream.
+These examples show possible outcomes for the foreground `safety-gate` hook,
+not a single execution that both succeeds and fails.
 
 ```json
 // HookStarted -- emitted when a hook begins execution
@@ -595,9 +600,16 @@ Hooks emit events into the session event stream. Subscribe to these to build das
 // HookDenied -- emitted when a hook blocks execution
 {"type": "hook_denied", "hook_id": "safety-gate", "point": "pre_tool_execution", "reason_code": "policy_violation", "message": "rm -rf not allowed"}
 
-// HookFailed -- emitted when a hook errors or times out
-{"type": "hook_failed", "hook_id": "audit-log", "point": "post_tool_execution", "reason": {"reason_code": "execution_failed", "message": "process exited with code 1"}}
+// HookFailed -- emitted when a foreground hook errors or times out
+{"type": "hook_failed", "hook_id": "safety-gate", "point": "pre_tool_execution", "reason": {"reason_code": "execution_failed", "message": "process exited with code 1"}}
 ```
+
+An ordinary background hook such as `audit-log` may produce `HookStarted` when
+actually launched. Capacity skips and later failures are recorded in the
+in-process background dispatch ledger and tracing; a terminal `HookCompleted`
+or `HookFailed` session event is not promised for that asynchronous work.
+Post-commit reactions use a separate isolated dispatch path and do not promise
+these normal lifecycle session events.
 
 ## Next step
 

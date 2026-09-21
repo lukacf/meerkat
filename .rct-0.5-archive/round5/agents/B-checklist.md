@@ -9,5 +9,5 @@
 - [x] `B-07` `DOGMA-26` Unify realtime status semantics after `EG1a`. Done when RPC and websocket projection expose the same `attempt_count` semantics.
 - [x] `B-08` `DOGMA-11` Add or extend a whole-tree scan banning the old session-control names. Done when the scan is checked in and wired for lane/final gating.
 - [x] `B-09` Self static review. Done when no compatibility shim remains in any reviewable commit.
-- [x] `B-10` Handoff note. Done when milestone boundaries, handoff commit, and risks are recorded in [B-plan.md](/Users/luka/.codex/worktrees/ec4d/meerkat/.rct/round5/agents/B-plan.md).
+- [x] `B-10` Handoff note. Done when milestone boundaries, handoff commit, and risks are recorded in [B-plan.md](B-plan.md).
 - [x] `B-11` Generated-output request. Done when schema/catalog/SDK regen needs are recorded explicitly, or marked `none`.

@@ -203,19 +203,26 @@ Ownership splits three ways:
   the in-process and the persisted facts are quiescent (`Idle`, `Retired`,
   or a missing row) with no current run and no recorded terminal for the
   candidate's run; every other shape refuses. Commit verdicts arrive as
-  `DurableTailRecoveryCommitAuthorized` (`CommitCompleted` or
-  `RepairAndCommitInterrupted`), carry the machine-minted boundary sequence
-  — one past the last committed receipt for the run — and record the
-  candidate run as the turn terminal; hold and refusal verdicts arrive as
-  `DurableTailRecoveryAuthorized` (`HoldIntact`, `RefuseRecovery`) and
-  mutate nothing. Both hold paths — ambiguous classification and
-  unattributable input evidence — are machine-minted: no shell predicate may
-  downgrade a commit authorization to a hold. Authorization never changes
+  `DurableTailRecoveryCommitAuthorized` (`CommitCompleted`,
+  `RepairAndCommitInterrupted`, or `CommitCompletedRetainInputs`), carry the
+  machine-minted boundary sequence — one past the last committed receipt for
+  the run — and record the candidate run as the turn terminal. Hold and refusal
+  verdicts arrive as `DurableTailRecoveryAuthorized` (`HoldIntact`,
+  `RefuseRecovery`) and mutate nothing.
+  `CommitCompletedRetainInputs` lets a completed candidate commit while
+  retaining a separate unbound content input for ordinary redelivery. Only
+  inputs durably proven bound to the recovered run are terminalized, including
+  under this disposition.
+  Unbound content inputs still hold interrupted candidates; unfenceable
+  input evidence holds regardless of completed/interrupted shape. These holds
+  and the ambiguous-classification hold are machine-minted: no shell predicate
+  may downgrade a commit authorization to a hold. Authorization never changes
   the lifecycle phase.
 - **`RuntimeStore` realizes.** Only the machine's commit-authorizing effect
-  may drive the recovery commit, and it lands through
-  `RuntimeStore::atomic_apply` as one boundary: the exact store candidate is
-  promoted, the run-boundary receipt, input lifecycle transitions, terminal
+  may drive the recovery commit. Recovery seals a profile-aware
+  `PreparedRuntimeSessionCommit` and submits it through
+  `RuntimeStore::commit_prepared_session_boundary` as one boundary: the exact
+  store candidate is promoted, the run-boundary receipt, input lifecycle transitions, terminal
   outcome, catalog projection, and outbox rows commit together. WholeBlob
   promotion reuses the candidate bytes already written; HeadCanonical
   promotion advances the committed authority to the exact physical head.

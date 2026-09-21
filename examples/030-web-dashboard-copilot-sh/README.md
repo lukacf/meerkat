@@ -31,10 +31,26 @@ The generated definition has four roles:
 | `status-scribe` | Produces Slack-ready status updates and next-step checklists |
 
 This is the kind of team a host application could embed in a release dashboard.
-The host still has to import the generated source `definition.json`, use
-`@rkat/web` to create the mob and spawn the specialists, route prompts, and
-render results. Runtime initialization does not expose or instantiate the full
-packed definition.
+The host still has to import the generated source
+`.work/dashboard-copilot/definition.json`, inline its referenced skills as
+described below, use `@rkat/web` to create the mob and spawn the specialists,
+route prompts, and render results. Runtime initialization does not expose or
+instantiate the full packed definition.
+
+### Required browser skill preparation
+
+The generated definition uses filesystem-backed `skills` entries, which browser
+member construction rejects. Before `createMob()` / `spawn()`, load each
+referenced skill's trusted text from `.work/dashboard-copilot/skills/*.md`
+(paths here are relative to this example directory), or from the trust-verified
+pack. Replace each corresponding `definition.skills` entry with
+`{ source: "inline", content: skillText }`, preserving the entry's key and every
+profile's skill references. Bundle those trusted texts into the host or serve
+them as host-managed assets; the WASM runtime cannot read those filesystem paths.
+
+`initFromMobpack()` compiles verified pack skills into standalone session
+prompts. It does not supply filesystem skills to a separately imported
+`MobDefinition`; that definition still needs the explicit inlining step.
 
 ## Prerequisites
 
@@ -106,8 +122,8 @@ Imagine your internal release dashboard already shows:
 - queue depth,
 - the last 20 minutes of operator notes.
 
-After a host application creates the mob and connects a prompt UI, the copilot
-could sit beside those widgets and answer questions like:
+After a host application inlines the skills, creates the mob, and connects a
+prompt UI, the copilot could sit beside those widgets and answer questions like:
 
 - "Do we continue the rollout or pause it?"
 - "Which metric moved first after the deployment?"
@@ -139,10 +155,13 @@ not a finished copilot panel.
 ## Suggested Host Integration Pattern
 
 1. Build the web bootstrap with this script
-2. Use `@rkat/web` in a host application to create the mob and spawn its members
-3. Add prompt, event, and transcript UI for the operator
-4. Pass current dashboard context into that host application
-5. Serve or embed the completed host experience in the dashboard
+2. Import `.work/dashboard-copilot/definition.json` and replace its referenced
+   path skills with inline trusted text from `.work/dashboard-copilot/skills/`,
+   retaining the skill keys and profile references
+3. Use `@rkat/web` in a host application to create the prepared mob and spawn its members
+4. Add prompt, event, and transcript UI for the operator
+5. Pass current dashboard context into that host application
+6. Serve or embed the completed host experience in the dashboard
 
 ## Notes
 

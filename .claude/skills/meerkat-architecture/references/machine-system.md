@@ -174,12 +174,21 @@ Mapping an old phase-driven authority's input onto a parameterless DSL signal lo
 
 ## Concrete trace — user sends "Hello"
 
+Generated-input payloads below are deliberately abbreviated schematic notation,
+not copyable Rust constructors.
+
 1. **Surface** (CLI/RPC/REST): `rkat run "Hello"` → `SessionService::create_session()` → `AgentFactory::build_agent()`.
 2. **Runtime-backed surface**: calls `MeerkatMachine::prepare_bindings(session_id)`
    to obtain `SessionRuntimeBindings`, the bundle of epoch-local state,
    machine-owned handles, and cross-owner coordinators.
-3. **Accept input**: `MeerkatMachine::accept_input_with_completion(session_id, Input::Prompt { content: "Hello" })` routes through dispatch → driver.
-4. **Driver** generates `input_id`, resolves policy, calls `self.dsl_apply(mm_dsl::MeerkatMachineInput::QueueAccepted { input_id })`.
+3. **Accept input**:
+   `machine.accept_input_with_completion(&session_id, Input::Prompt(PromptInput::new("Hello", None))).await`
+   routes through dispatch → driver. `PromptInput::new` creates the header's
+   input identity before admission.
+4. **Driver** preserves that supplied identity (`input.id().clone()`) and
+   realizes admission policy from generated `ResolveAdmissionPlan` feedback.
+   For the authorized queue lane in this trace, it then applies
+   `QueueAccepted { input_id, ... }` through `self.dsl_apply(...)`.
 5. **`dsl_apply`** locks the per-session `Arc<Mutex<MeerkatMachineAuthority>>`, calls `authority.apply(input)` on the generated kernel.
 6. **Generated kernel** runs the `QueueAccepted` transition: guards that the
    input is not already tracked and has an authorized queue-lane admission,
@@ -298,7 +307,8 @@ and archived historically at `docs-internal/archive/public-docs-removed-2026-05-
 - `meerkat-machine-schema/src/catalog/dsl/<machine>.rs` — DSL source (truth)
 - `meerkat-machine-schema/src/catalog/mod.rs` — `canonical_machine_schemas()` registry
 - `meerkat-machine-schema/src/catalog/compositions.rs` — composition definitions
-- `meerkat-machine-kernels/src/runtime.rs` — `GeneratedMachineKernel` interpreter
+- `meerkat-machine-kernels/src/generated/` — ordinary typed generated kernel modules
+- `meerkat-machine-kernels/src/runtime.rs` — optional generic interpreter, exported as `test_oracle::GeneratedMachineKernel` only with `test-oracle`; production bridges invoke catalog-owned DSL bodies instead
 - `meerkat-runtime/src/meerkat_machine/dsl.rs` — MeerkatMachine DSL + runtime-local re-exports
 - `meerkat-runtime/src/meerkat_machine/dsl_authority.rs` — DSL adapter plumbing (NOT a handwritten authority)
 - `meerkat-runtime/src/handles/` — runtime impls of handle traits; the `HandleDslAuthority` shared wrapper

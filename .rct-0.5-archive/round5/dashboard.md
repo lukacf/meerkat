@@ -3,7 +3,7 @@
 Source of truth for Round 5 milestone state.
 
 - Spec source: [dogma-violations.md](/Users/luka/.codex/dogma-violations.md)
-- Tracking root: [.rct/round5](/Users/luka/.codex/worktrees/ec4d/meerkat/.rct/round5)
+- Tracking root: [.rct/round5](./)
 - Integration branch: `codex/dogma-round5-integration`
 - Current workspace branch: `codex/fix-plenty-of-dogma-violations`
 
@@ -11,7 +11,7 @@ Source of truth for Round 5 milestone state.
 
 - Only the orchestrator edits this file.
 - Agents do not run `cargo`.
-- Agents may request compile probes; probes are logged in [integration.md](/Users/luka/.codex/worktrees/ec4d/meerkat/.rct/round5/integration.md).
+- Agents may request compile probes; probes are logged in [integration.md](integration.md).
 - No compatibility shim may appear in any handoff commit.
 
 ## Status Legend

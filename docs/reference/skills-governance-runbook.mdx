@@ -26,8 +26,9 @@ Every source identity record must include:
 
 Startup rejects:
 
-- UUID collisions with conflicting fingerprints unless lineage explicitly permits.
-- UUID mutation without lineage.
+- One UUID with conflicting fingerprints, even when lineage is present.
+- Distinct UUIDs sharing a fingerprint without connecting lineage. Lineage
+  permits this case, not conflicting fingerprints for the same UUID.
 - split/merge/rotate lineage without complete per-skill remap coverage.
 
 ## Companion Skill Governance
@@ -47,10 +48,20 @@ services, stores, and typed dispatch paths remain authoritative.
 
 ## Migration Procedures
 
+For `rotate`, `split`, and `merge`, the lineage record must declare a nonempty
+`required_from_skills` inventory. It is not inferred from the remap rows, so
+remaps alone do not satisfy validation. Each listed skill name must have a
+remap from **every declared origin UUID** into a declared destination UUID.
+Matching remaps must also cover every declared origin and every declared
+destination. `rename_or_relocate` does not require this inventory or these
+rotate/split/merge coverage checks.
+
 ### Rotate (one source to one source)
 
-1. Add lineage event `rotate` from old UUID to new UUID.
-2. Add remap rows for all affected skills (`old_uuid/skill` -> `new_uuid/skill`).
+1. Add lineage event `rotate` from old UUID to new UUID, with a nonempty
+   `required_from_skills` inventory on its lineage record.
+2. Add remap rows for all affected skills (`old_uuid/skill` -> `new_uuid/skill`),
+   covering every required skill and both declared endpoints.
 3. Deploy config and verify canonicalization tests pass.
 
 ### Rename or relocate (same logical source, new UUID/path binding)
@@ -61,15 +72,22 @@ services, stores, and typed dispatch paths remain authoritative.
 
 ### Split (one source to many)
 
-1. Add lineage event `split` with all target UUIDs.
-2. Add explicit per-skill remaps from old UUID to exactly one target UUID per skill.
-3. Reject deployment if any source skill lacks remap coverage.
+1. Add lineage event `split` with the origin and all target UUIDs, and a
+   nonempty `required_from_skills` inventory on its lineage record.
+2. Add explicit per-skill remaps from old UUID to exactly one declared target
+   UUID per skill. Every declared target must receive at least one remap.
+3. Reject deployment if a required source skill or a declared endpoint lacks
+   remap coverage.
 
 ### Merge (many sources to one)
 
-1. Add lineage event `merge` with all origin UUIDs and target UUID.
-2. Add explicit per-skill remaps from each origin UUID skill to target UUID skill.
-3. Reject deployment if any origin skill lacks remap coverage.
+1. Add lineage event `merge` with all origin UUIDs and the target UUID, and a
+   nonempty `required_from_skills` inventory on its lineage record.
+2. Add explicit per-skill remaps from each origin UUID to the target UUID.
+   Every name in `required_from_skills` requires a remap for each origin,
+   not just one origin that contains that name.
+3. Reject deployment if any required origin/skill pair or declared endpoint
+   lacks remap coverage.
 
 ## Incident Recovery
 

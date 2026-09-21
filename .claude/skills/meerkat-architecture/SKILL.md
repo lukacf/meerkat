@@ -45,12 +45,12 @@ Architectural split:
   checked-in lockfile plus vendored generated BUILD bytes after Bazel exits.
   Persistent BUILD regeneration and module-lock updates are explicit maintenance
   steps, not normal local BuildBuddy lane behavior.
-- `.github/workflows/ci.yml` runs a single Cargo lane on free GitHub-hosted
-  runners (`cargo.yml`: change classification, lint+governance, tests,
-  generation ratchets, Web SDK/wasm, cargo-deny — parallel jobs, shared
-  rust-cache). Expensive low-churn lanes (feature matrices, minimal-feature,
-  surface modularity, e2e-system) run in `nightly.yml`. The GCP BuildBuddy CI
-  lane was retired 2026-07-03 (`buildbuddy.yml` is inert, pending deletion);
+- `.github/workflows/ci.yml` calls `buildbuddy.yml` in `changed-paths` mode
+  (`gcp-buildbuddy`) and `mob-dense-topology.yml`
+  (`github-hosted-dense-topology`). The aggregate `gate` requires both lanes
+  to succeed. This CI routing is separate from local backend selection.
+  Expensive low-churn lanes (feature matrices, minimal-feature,
+  surface modularity, e2e-system) run in `nightly.yml`.
   BuildBuddy remains an OPTIONAL local backend (`MEERKAT_BUILDBUDDY=1`) and
   the hosted RELEASE binary flow is unchanged.
 
@@ -291,6 +291,10 @@ Since 0.8.4 (PR #912, the storage unification arc):
   before machine admission.
 Since 0.8.8 (PR #917, the 0.8.9 durable-tail recovery release):
 
+The recovery/request API names and eager snapshot/session pairing in the first
+two bullets record the original 0.8.9 implementation. Use the current-design
+supersession note immediately afterward for integration.
+
 - **Machine-owned durable-tail recovery** — the intra-turn persistence hook
   can leave a durable physical tail (up to a fully completed turn) whose
   runtime boundary commit lost a shutdown race. Recovery is never-discard
@@ -316,6 +320,20 @@ Since 0.8.8 (PR #917, the 0.8.9 durable-tail recovery release):
   re-paired); `DurableTailRecoveryRequest` has private fields and its only
   constructor, `from_classification`, requires the classifier's own
   `DurableTailClassified` effect.
+- **Current recovery/commit API supersession** — recovery now enters through
+  `recover_durable_tail(store, session_id)`. It proves and classifies
+  store-bound evidence internally, prepares a sealed
+  `PreparedRuntimeSessionCommit` for WholeBlob or HeadCanonical, and realizes
+  it through `RuntimeStore::commit_prepared_session_boundary`, superseding
+  the caller-assembled request and direct `atomic_apply` handoff above.
+  `BoundSessionCommit` is now a disjoint profile-aware carrier: typed/untyped
+  WholeBlob, a prepared HeadCanonical boundary, or receipt-only provisional
+  promotion. `with_session` seals lazily; `whole_blob_bytes()` performs
+  fallible on-demand encoding for WholeBlob. `with_bound_session` preserves an
+  already prepared carrier and its exact predecessor/suffix proof rather than
+  reminting it from a `Session`. No path may re-pair typed authority with
+  unrelated bytes. See `references/runtime-control-plane.md` and gotchas rule
+  45 for current guidance.
 - **Typed durable resume holds** — `SessionError::DurableTailHeldForRecovery`
   / `DurableEvidenceQuarantined` (codes `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY`
   / `SESSION_DURABLE_EVIDENCE_QUARANTINED`, `durable_resume_hold` structured
@@ -505,7 +523,11 @@ the realtime-binding plane were removed. Live channels are caller-initiated via
 Phase 1 of the machine-authority convergence is closed:
 
 - Catalog DSL is the source for production machine bodies and generated kernels.
-- `runtime_schema_parity` asserts catalog/production schema equality for all canonical machines.
+- `runtime_schema_parity` checks the explicitly enumerated Phase 1
+  production-schema pairs in `phase1_schema_parity_cases()`
+  (`meerkat-machine-codegen/tests/runtime_schema_parity.rs`). Equality remains
+  required for all canonical machines; this suite's case table is not an
+  exhaustive catalog-coverage claim.
 - `runtime_alphabet_parity` uses typed command classification manifests; string whitelists are forbidden.
 - `flow_run`, `flow_frame`, and `loop_iteration` are MobMachine-owned fail-closed projection reducers. They are support modules for `MobRun` projection shape, not canonical machines.
 
@@ -611,7 +633,7 @@ DSL/machine domain. Key files: `meerkat-core/src/connection.rs` (`RealmChain`,
 | `meerkat-client` | Compatibility client shim that re-exports provider surfaces | Compatibility exports only |
 | `meerkat-auth-core` | Shared auth primitives, token stores, OAuth helpers, MCP OAuth discovery/DCR/PKCE/refresh, cloud authorizers | — |
 | `meerkat-providers` | Compatibility provider-runtime/auth shim surface | — |
-| `meerkat-anthropic` / `meerkat-openai` / `meerkat-gemini` | Provider-specific client/runtime implementations | Implements `AgentLlmClient` via provider-specific crates |
+| `meerkat-anthropic` / `meerkat-openai` / `meerkat-gemini` | Provider-specific client/runtime implementations | Native clients implement `LlmClient`; `meerkat_llm_core::LlmClientAdapter` adapts them to `AgentLlmClient` |
 | `meerkat-store` | Session-store implementations and adapters (SQLite, Jsonl, Memory), HeadCanonical rows and exact activation import, realm manifest v2 pinning + cross-candidate first-start reservation, disk doctor/migrate (`doctor.rs`, `migrate.rs`) | Implements `SessionStore`, `StorageMigrator` |
 | `meerkat-tools` | Tool registry, builtins, shell, session-scoped task store | Implements `AgentToolDispatcher` |
 | `meerkat-mcp` | MCP client, protocol transport, router mechanics (routes to `ExternalToolSurfaceHandle`; asks injected auth resolver for bearer tokens but does not own OAuth lifecycle) | — |
@@ -631,7 +653,7 @@ DSL/machine domain. Key files: `meerkat-core/src/connection.rs` (`RealmChain`,
 | `meerkat-schedule` | Once/interval/calendar scheduling, occurrence lifecycle, delivery, and host-runnable targets | `ScheduleService`, `ScheduleDriver`, `ScheduleStore` |
 | `meerkat-web-runtime` | WASM browser deployment (wasm_bindgen exports) | — |
 | `meerkat-machine-schema` | Rust-native machine/composition catalog DSL — the formal authority | — |
-| `meerkat-machine-kernels` | Generated kernel interpreter for all machines/compositions | `GeneratedMachineKernel` |
+| `meerkat-machine-kernels` | Typed generated kernel modules in `src/generated`; optional generic test oracle | `generated::*`; `test_oracle::GeneratedMachineKernel` only with `test-oracle` |
 | `meerkat-machine-codegen` | TLA+ model generation, TLC verification, drift detection | — |
 | `meerkat` (facade) | `AgentFactory`, `FactoryAgentBuilder`, persistence helpers, re-exports, `RealmStorageProvider` seam + `DiskStorageProvider` + fail-closed durability enforcement | Wires everything together |
 
@@ -660,7 +682,8 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 
 - `meerkat-machine-schema/src/catalog/dsl/` — DSL sources (one per canonical machine; the roster and count are owned by `canonical_machine_schemas()`)
 - `meerkat-machine-schema/src/catalog/mod.rs` — `canonical_machine_schemas()` registry
-- `meerkat-machine-kernels/src/runtime.rs` — `GeneratedMachineKernel` interpreter
+- `meerkat-machine-kernels/src/generated/` — ordinary typed generated kernel surface; production authority changes originate in catalog DSL and its bridge modules
+- `meerkat-machine-kernels/src/runtime.rs` — optional generic interpreter, exported as `test_oracle::GeneratedMachineKernel` only with `test-oracle`
 - `meerkat-runtime/src/meerkat_machine/` — `MeerkatMachine`, session management, dispatch paths, DSL adapter
 - `meerkat-runtime/src/handles/` — runtime impls of DSL handle traits
 - `meerkat-core/src/handles.rs` — DSL handle trait definitions

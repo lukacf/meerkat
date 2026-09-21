@@ -82,7 +82,7 @@ rkat config get|set|patch ...
 rkat capabilities
 rkat doctor
 rkat storage doctor [--json] [--root PATH]...       # read-only storage diagnosis
-rkat storage migrate [--apply] [--adopt-root PATH]  # offline fenced migration (dry-run default)
+rkat storage migrate [--apply] [--bridge-pre-0-8-10] [--adopt-root PATH]  # offline fenced migration (dry-run default)
 rkat storage prune [--apply] [--older-than-days N]  # registered backup-artifact lifecycle
 rkat run --comms-listen-tcp 0.0.0.0:4200 --comms-advertise-tcp host.example:4200 --comms-binding-out target.binding.json --keep-alive "..."
 rkat-rpc                                # JSON-RPC stdio
@@ -141,6 +141,11 @@ rkat workgraph attention-list [--namespace <NS>] [--status active|paused|stopped
 rkat workgraph attention-pause <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--json]
 rkat workgraph attention-resume <BINDING_ID> --expected-revision <N> [--namespace <NS>] [--json]
 ```
+
+These namespace flags are syntactically valid, but the current CLI composes a
+grant for the active realm's `default` namespace only. It rejects non-default
+`--namespace` requests and `--all-namespaces` scans. Broader access needs
+separate host capability composition; the flags cannot widen the grant.
 
 RPC exposes `workgraph/get`, `workgraph/list`, `workgraph/ready`,
 `workgraph/snapshot`, `workgraph/events`, `workgraph/goal/status`, and
@@ -398,9 +403,14 @@ rkat auth refresh <PROFILE_ID>
 
 CLI `login` provisions the reserved `global` realm in the HOME-rooted doc
 (`~/.rkat/config.toml`), inherited by every workspace realm via the chain tail.
-Interactive OAuth writes `global:anthropic_oauth`, `global:openai_oauth`, or
+Direct-provider OAuth writes `global:anthropic_oauth`, `global:openai_oauth`, or
 `global:google_oauth`; non-interactive api-key login writes
-`global:default_<provider>`. Legacy `dev`-realm logins migrate to `global` on the
+`global:default_<provider>`. With `copilot` compiled (default),
+`rkat auth login copilot` runs GitHub device OAuth (`github_copilot_oauth`) and
+provisions `global:copilot_openai`, `global:copilot_anthropic`, and
+`global:copilot_gemini`, all sharing the `github_copilot` credential account.
+These are provider-specific Copilot backends, not a fourth LLM provider family.
+Legacy `dev`-realm logins migrate to `global` on the
 run path (idempotent, no-clobber). Credential reads inherit down the chain;
 writes are strict-owner and must explicitly address the realm that defines the
 binding. A child-addressed inherited write is rejected with owner information;
@@ -598,25 +608,36 @@ Client methods:
 
 - `create_session(prompt, *, model, auth_binding=None, ...)` → `Session` — `auth_binding` scopes credentials to a realm/binding
 - `create_session_streaming(prompt, ...)` → `EventStream`
-- `list_sessions()` → `list[SessionInfo]`
-- `read_session(session_id)` → dict
+- `list_sessions(*, labels=None, limit=None, offset=None)` → `list[SessionSummary]`
+- `read_session(session_id)` → `SessionDetails`
 - `read_session_history(session_id, offset=0, limit=None)` → `SessionHistory`
 - `get_blob(blob_id)` → `BlobPayload`
-- `create_mob(definition, ..., auth_binding=None)` → `Mob`
-- `list_mobs()` → `list[MobSummary]`
+- `create_mob(*, definition)` → `Mob` — call `await client.create_mob(definition=definition)`
+- `list_mobs()` → `list[dict[str, Any]]`
 - `get_config()` / `set_config(...)` / `patch_config(...)`
-- `mcp_add(params)` / `mcp_remove(params)` / `mcp_reload(params)`
+- `mcp_add(session_id, server_config, *, persisted=False)`
+- `mcp_remove(session_id, server_name, *, persisted=False)`
+- `mcp_reload(session_id, *, server_name=None, persisted=False)`
 - `list_skills()`
 - `capabilities` (property, populated during `connect()`)
 - `get_runtime_host_info()` / `get_runtime_host_capabilities()` / `get_runtime_host_health()`
 
 Live channel helpers:
 
-- `live_open(session_id, seed_max_chars=None)` → `LiveOpenResult`
-- `live_status(session_id)` / `live_close(session_id)`
-- `live_send_input_text(session_id, text)` / `live_send_input_audio(session_id, data)`
-- `live_commit_input(session_id)` / `live_interrupt(session_id)` / `live_truncate(session_id, ...)`
-- `live_refresh(session_id, ...)`
+- `live_open(session_id, turning_mode=None, transport=None, seed_max_chars=None)` → `dict[str, Any]` carrying the `LiveOpenResult` wire shape
+- `live_status(channel_id)` / `live_close(channel_id)`
+- `live_send_input_text(channel_id, text)`
+- `live_send_input_audio(channel_id, data_base64, sample_rate_hz, channels)`
+- `live_send_input_image(channel_id, idempotency_key, mime, data_base64)`
+- `live_send_input_video_frame(channel_id, codec, data_base64, timestamp_ms)`
+- `live_webrtc_answer(channel_id, token, offer_sdp)`
+- `live_commit_input(channel_id, response_modality=None)` / `live_interrupt(channel_id)`
+- `live_truncate(channel_id, item_id, content_index, audio_played_ms)`
+- `live_refresh(channel_id)`
+
+Call `opened = await client.live_open(session_id, ...)`, then keep
+`channel_id = opened["channel_id"]`. All subsequent helpers above address that
+channel, not the session ID. Both audio format arguments are required.
 
 Auth helpers:
 
@@ -657,6 +678,13 @@ Mob methods:
 
 Type/parsing notes:
 
+- `SessionSummary` and `SessionDetails` inherit `SessionInfo` and its shared
+  fields; they are dataclasses, not dictionaries. Mob listing currently
+  returns dictionaries.
+- Mob creation accepts only the definition, not `auth_binding`. A mob role
+  `Profile` does not declare an initial auth binding either. Configure
+  host/realm credentials, or select a preconfigured realm binding through
+  supported per-member spawn/helper auth options.
 - capability status may arrive as externally-tagged enum maps (e.g. `{"DisabledByPolicy": {...}}`) and is normalized to the tag string.
 - event-envelope parsing requires canonical `event_id`, typed `source`, `seq`, `timestamp_ms`, and object `payload` facts; missing or malformed facts fail with `INVALID_RESPONSE` rather than being defaulted.
 - `RunResult.skill_diagnostics` is typed as `SkillRuntimeDiagnostics`.
@@ -676,12 +704,14 @@ await client.connect({
   realmId: "team-alpha",      // optional
   instanceId: "ts-worker-1",  // optional
   realmBackend: "sqlite",     // optional creation hint
-  isolated: true,             // optional — new generated realm
   stateRoot: "/path",         // optional
   contextRoot: "/path",       // optional
   userConfigRoot: "/path",    // optional
 });
 ```
+
+For a fresh isolated realm, use `await client.connect({ isolated: true })`
+instead. `realmId` and `isolated: true` are mutually exclusive.
 
 Client methods:
 
@@ -691,7 +721,7 @@ Client methods:
 - `readSession(sessionId)` → object
 - `readSessionHistory(sessionId, { offset, limit }?)` → `SessionHistory`
 - `getBlob(blobId)` → `BlobPayload`
-- `createMob(definition, options?)` → `Mob` — accepts `authBinding`
+- `createMob({ definition })` → `Mob` — call `await client.createMob({ definition })`; neither mob creation nor a mob role `Profile` declares an initial auth binding. Configure host/realm credentials, or select a preconfigured realm binding through supported per-member spawn/helper auth options.
 - `listMobs()` → `MobSummary[]`
 - `getConfig()` / `setConfig(...)` / `patchConfig(...)`
 - `mcpAdd(params)` / `mcpRemove(params)` / `mcpReload(params)`
@@ -703,7 +733,9 @@ Live channel helpers:
 
 - `liveOpen({ session_id, seed_max_chars? })` / `liveStatus(params)` / `liveClose(params)`
 - `LiveChannel.session(client, sessionId, { seedMaxChars? })` — session-bound convenience wrapper
-- `liveSendInput(params)` / `liveSendInputImage(params)` / `liveSendInputVideoFrame(params)`
+- `liveSendInput(params)` — raw params-object API
+- `liveSendInputImage(channelId, idempotencyKey, mime, dataBase64)`
+- `liveSendInputVideoFrame(channelId, codec, dataBase64, timestampMs)`
 - `liveCommitInput(params)` / `liveInterrupt(params)` / `liveTruncate(params)`
 - `liveRefresh(params)`
 
@@ -738,7 +770,8 @@ Mob methods:
 - `Mob.status()` / `Mob.lifecycle(action)`
 - `Mob.spawn(spec)` / `Mob.retire(agentIdentity)` / `Mob.respawn(agentIdentity)`
 - `Mob.wire(a, b)` / `Mob.unwire(a, b)` — identity-keyed
-- `Mob.listMembers()` / `Mob.sendMessage(agentIdentity, message)`
+- `Mob.listMembers()` / `Mob.member(agentIdentity)` → `Member`
+- `Member.send(content, options?)` — call `mob.member(agentIdentity).send(content, options?)`
 - `Mob.listFlows()` / `Mob.run(params, options)` / `Mob.runFlow(flowId, params)` / `Mob.flowStatus(runId)` / `Mob.runResult(runId)` / `Mob.cancelFlow(runId)`
 - `Mob.subscribeMemberEvents(agentIdentity)` → `EventSubscription<AgentEventEnvelope>`
 - `Mob.subscribeEvents()` → `EventSubscription<AttributedMobEvent>`
@@ -757,29 +790,57 @@ Type/parsing notes:
 
 ## Rust SDK
 
-**AgentFactory vs AgentBuilder**: `AgentFactory` (facade crate) is the opinionated composition layer that
-wires all tool categories (builtins, shell, comms, memory, mob, skills) into the dispatcher.
-`AgentBuilder` (meerkat-core) is lower-level — it takes pre-built components and has no tool opinions.
-All surfaces go through `AgentFactory`; direct `AgentBuilder` usage means manual dispatcher composition.
+**AgentFactory vs AgentBuilder**: use `AgentFactory::build_agent()` for supported
+construction, including standalone Rust embedding. Customize
+`AgentBuildConfig`'s client, dispatcher, store, hook, and skill overrides instead
+of bypassing the factory. `AgentBuilder` remains a public low-level
+configuration type, but production finalization crosses the private
+facade-authorized bridge; its standalone finalizers are core-test-only, not a
+downstream construction escape hatch.
 
-Recommended realm-aware factory bootstrap:
+Named-realm configuration with standalone factory construction:
 
 ```rust
+use std::sync::Arc;
 use meerkat::{AgentFactory, AgentBuildConfig};
-use meerkat_core::Config;
-use meerkat_store;
+use meerkat_core::{Config, EffectiveConfigReader, connection::RealmId};
+use meerkat_store::{FilesystemRealmConfigSource, realm_paths_in};
 
-let config = Config::load().await?;
-let realm = meerkat_store::realm_paths("team-alpha");
+let realms_root = std::env::current_dir()?.join(".rkat").join("realms");
+let realm_id = RealmId::parse("team-alpha")?;
+let realm = realm_paths_in(&realms_root, realm_id.as_str());
+let global_doc = Config::global_config_path().ok_or("home config path unavailable")?;
+let reader = EffectiveConfigReader::new(Arc::new(FilesystemRealmConfigSource::new(
+    realms_root,
+    global_doc,
+    meerkat_models::canonical(),
+)));
+let mut config = reader.effective_config(&realm_id).await?;
+config.apply_env_overrides()?;
+config.validate(meerkat_models::canonical())?;
 let factory = AgentFactory::new(realm.root.clone())
     .runtime_root(realm.root)
     .builtins(true)
-    .shell(true)
-    .mob(true);  // opt-in mob orchestration tools
+    .shell(true);
 
-let build = AgentBuildConfig::new("claude-sonnet-4-6");
+let mut build = AgentBuildConfig::new("claude-sonnet-4-6");
+build.realm_id = Some(realm_id);
 let mut agent = factory.build_agent(build, &config).await?;
 ```
+
+This composes a config snapshot for the named realm, but deliberately retains
+the default `StandaloneEphemeral` build mode; paths alone do not make it a
+runtime-backed service. The main skill's persistent-service quickstart uses
+the same explicit root for config and storage. A manually supplied raw
+`Config` is also valid for embedding, but `Config::load()` and opening named
+persistence do not themselves compose that realm's parent chain.
+
+Mob tools need both a `MobToolsFactory` (for example
+`AgentMobToolSurfaceFactory`) and explicit per-build
+`ToolCategoryOverride::Enable`, resolved through generated create-only
+operator authority. The factory's `.mob(true)` ambient default supplies
+neither prerequisite by itself and grants no scope over existing mobs.
+See the complete `with_mob_tools` handoff in `mobs.md`.
 
 `AgentBuildConfig`/session metadata carry `realm_id`, `instance_id`, `backend`, and `config_generation`.
 
@@ -814,20 +875,29 @@ let build = SessionBuildOptions {
 
 `prepare_bindings()` is the single canonical helper: it registers the session, mints the epoch, and returns `SessionRuntimeBindings { session_id, epoch_id, ops_lifecycle, cursor_state }`. The factory validates `bindings.session_id == session.id()` on `SessionOwned` builds.
 
-Skill introspection (standalone, no session required):
+Skill introspection (requires facade feature `skills`; standalone, no session required):
+
+This example assumes the stock native factory's embedded sources, including
+the `task-workflow` skill. With custom sources or identity configuration, use
+a canonical key that the configured runtime can actually load.
 
 ```rust
-use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
+use meerkat_core::skills::{SkillFilter, SkillKey, SkillName, SourceUuid};
 
-if let Some(runtime) = factory.build_skill_runtime(&config).await {
+if let Some(runtime) = factory.build_skill_runtime(&config).await? {
     let entries = runtime.list_all_with_provenance(&SkillFilter::default()).await?;
     let key = SkillKey::new(
         SourceUuid::builtin(),
         SkillName::parse("task-workflow")?,
     );
-    let doc = runtime.load_from_source(&key, Some("company")).await?;
+    let doc = runtime.load_from_source(&key, None).await?;
 }
 ```
+
+`None` loads the resolved canonical key. In the factory's composite source,
+an explicit `Some(...)` selector is a registered source UUID as text, not a
+human-readable repository name. That attached source must be able to load
+the full canonical key; selecting an unrelated source does not rewrite it.
 
 ---
 
@@ -837,8 +907,15 @@ if let Some(runtime) = factory.build_skill_runtime(&config).await {
 - **Peer lifecycle typing**: mob lifecycle routing is typed at ingress. `mob.peer_added`, `mob.peer_retired`, and `mob.peer_unwired` are silent lifecycle notices; `mob.kickoff_failed` and `mob.kickoff_cancelled` are visible lifecycle notices. Do not depend on mob defaults in `silent_comms_intents` for canonical behavior.
 - **Comms choice**: agents use `send_message` for ordinary collaboration, `send_request` for structured ask/reply, and `send_response` for replies. Public peer reservation streams were removed.
 - Hooks and skills resolve from runtime root. Workspace-default CLI realms preserve project ergonomics.
-- **Skill introspection**: `SkillRuntime::list_all_with_provenance()` returns active + shadowed skills; `load_from_source()` bypasses first-wins.
-- Multi-agent orchestration uses mobs exclusively. `MemberLaunchMode::Fork` provides history branching via `Session::fork()`. `spawn_helper()`/`fork_helper()` provide one-call convenience; both require `result_label` and `max_text_bytes` and return a `BoundedHelperRunOutcome` carrying the certified bounded result.
+- **Skill introspection**: `SkillRuntime::list_all_with_provenance()` returns active + shadowed skills. `load_from_source(key, None)` loads the canonical key; the factory composite accepts registered source UUID text for explicit source selection.
+- Multi-agent orchestration uses mobs exclusively. `MemberLaunchMode::Fork`
+  (including prompt-context `fork_helper`) creates a fresh member/session
+  seeded with rendered source-history context, not an O(1) copy-on-write
+  transcript clone. Low-level `Session::fork()` / `fork_at()` are separate
+  structural primitives; the agent tool `fork_off` persists a durable child
+  from an exact committed prefix and resumes it. `spawn_helper()` /
+  `fork_helper()` require `result_label` and `max_text_bytes` and return a
+  `BoundedHelperRunOutcome` carrying the certified bounded result.
 
 ---
 
@@ -846,9 +923,11 @@ if let Some(runtime) = factory.build_skill_runtime(&config).await {
 
 Flow declarations live under `[flows.<flow_id>]`.
 
-### v1: flat step declarations
+### Flat step authoring
 
-Step declarations live under `[flows.<flow_id>.steps.<step_id>]`.
+Step declarations live under `[flows.<flow_id>.steps.<step_id>]`. Flat
+authoring normalizes once at decode/construction to the canonical root frame;
+all execution uses `FlowFrameEngine`.
 
 Key step fields:
 
@@ -863,35 +942,63 @@ Key step fields:
 - `timeout_ms`
 - `expected_schema_ref` (optional)
 
-### v2: frame-based execution root
+### Explicit frame root
 
-When `[flows.<flow_id>].root` is present, the flow uses frame-based execution via `FlowFrameEngine`.
+An explicit `[flows.<flow_id>].root` takes precedence over the root that would
+otherwise be generated from flat step dependencies. It does not select a
+different execution engine. Named `steps` still own the role/message bodies.
 
 Frame root declaration: `[flows.<flow_id>.root]` with `nodes` map of `FlowNodeSpec` entries.
 
 Node types:
 
-- `type = "step"` — a single step within a frame
-- `type = "repeat_until"` — a loop node with `loop_id`, `body` (nested `FrameSpec`), `until` (condition expression), `max_iterations`, and `depends_on`
+- `kind = "step"` — references a named `step_id`; supply `depends_on` and
+  `depends_on_mode = "all"|"any"` (optional `branch`).
+- `kind = "repeat_until"` — supply `loop_id`, `depends_on`, `depends_on_mode`,
+  `body` (nested `FrameSpec`), `max_iterations`, and a typed `until`, e.g.
+  `{ op = "eq", path = "steps.run_tests.all_pass", value = true }`.
 
-v2 flows still support flat `steps` for backward compatibility; when `root` is present it takes precedence.
+Minimal complete flow using explicit frame authoring:
+
+```toml
+[flows.review.steps.check]
+role = "reviewer"
+message = "Review the change."
+
+[flows.review.root.nodes.check]
+kind = "step"
+step_id = "check"
+depends_on = []
+depends_on_mode = "all"
+```
+
+For the loop example, define `run_tests` with `output_format = "json"` and
+request `{"all_pass": boolean}` output; see the complete
+[release-flow example](mobs.md#v2-flows-frame-based-execution-with-loops).
 
 ### Topology contract
 
-- `[topology] mode = "strict"|"permissive"`
+- `[topology] mode = "advisory"|"strict"` — write the mode explicitly when
+  supplying a topology table; the Rust enum's `Advisory` default does not make
+  that required serialized field optional.
 - `rules = [{ from_role = "...", to_role = "...", allowed = true|false }]`
 - wildcard `"*"` role matching is supported.
 
 ### Agent-facing delegation tools
 
-`AgentMobToolSurface` provides 10 agent-internal mob tools:
+With generated authority, `AgentMobToolSurface` exposes thirteen base
+agent-internal tool definitions; visibility does not bypass per-call scope or
+objective/durable-fork prerequisites:
 
 | Tool | Purpose |
 |------|---------|
 | `delegate` | Quick helper spawn (implicit mob, auto-wire) |
+| `conclude_objective` | Supply only `outcome` for this turn's pre-addressed kickoff objective |
 | `mob_create` | Create a mob from a definition |
 | `mob_destroy` | Destroy a mob and archive all members |
-| `mob_spawn_member` | Spawn a member into any mob |
+| `mob_spawn_member` | Spawn a member into an authorized mob |
+| `fork_off` | Take `member_id` + `task`, fork an exact committed transcript prefix through the durable resume path, and retain the child; optional `expected_output` is guidance, not a schema |
+| `council` | Take a `topic` and existing `{mob_id, member_id, role}` participants; fork them into a bounded temporary discussion mob and clean up |
 | `mob_retire_member` | Archive a member and its session |
 | `mob_check_member` | Check a member's execution status and output |
 | `mob_list_members` | List members of a mob |
@@ -899,4 +1006,8 @@ v2 flows still support flat `steps` for backward compatibility; when `root` is p
 | `mob_wire` | Wire a local mob member to a local or typed external peer |
 | `mob_unwire` | Remove a mob wiring relationship |
 
-These tools are composed via `MobToolsFactory` late-binding. Operator capabilities are runtime-injected.
+These tools are composed via `MobToolsFactory` late-binding. Operator
+capabilities are runtime-injected. A profile store adds `mob_profile_create`,
+`mob_profile_get`, `mob_profile_list`, `mob_profile_update`, and
+`mob_profile_delete`; `mob_profile_list_sources` additionally requires a parent
+tool snapshot provider. See `mobs.md` for bounds, cleanup, and authority details.

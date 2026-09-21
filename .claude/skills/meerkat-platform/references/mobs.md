@@ -101,7 +101,10 @@ Primary crates:
 - lifecycle: `stop()`, `resume()`, `complete()`, `reset()`, `destroy()`, `shutdown()`
 - flows: `list_flows()`, `run_flow()`, `run_flow_with_stream()`, `flow_status()`, `cancel_flow()`
 - subscriptions: `subscribe_agent_events()`, `subscribe_all_agent_events()`, `subscribe_mob_events()`, `subscribe_mob_events_with_config()`
-- tasks: `task_create()`, `task_update()`, `task_list()`, `task_get()`
+
+Scratch `task_create` / `task_update` / `task_list` / `task_get` are separately
+enabled agent tools, not `MobHandle` methods. Durable shared commitments belong
+to WorkGraph, not that scratch-task surface.
 
 ### Rust example: full lifecycle via `MobBuilder` + `MobHandle`
 
@@ -193,6 +196,7 @@ comms = true
             AgentIdentity::from("lead-1"),
             None,
             None,
+            None, // no explicit host placement
         )
         .await?;
     let _status = state.mob_status(&mob_id).await?;
@@ -211,6 +215,7 @@ session-scoped `AgentMobToolSurface` dispatcher.
 
 ```rust
 use std::sync::Arc;
+use meerkat_core::ToolCategoryOverride;
 use meerkat_core::service::{MobToolsFactory, SessionBuildOptions};
 use meerkat_mob::{MobControlPrincipal, MobSessionService};
 use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
@@ -224,12 +229,21 @@ fn with_mob_tools(
     ));
     let factory: Arc<dyn MobToolsFactory> =
         Arc::new(AgentMobToolSurfaceFactory::new(state));
-    SessionBuildOptions {
+    let mut build = SessionBuildOptions {
         mob_tools: Some(factory),
         ..Default::default()
-    }
+    };
+    build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Enable);
+    build
 }
 ```
+
+Pass this result as `CreateSessionRequest.build` to a factory-backed service.
+It supplies both dispatcher infrastructure and explicit per-build enablement;
+the factory/runtime handoff mints generated create-only operator authority.
+It does not grant access to arbitrary existing mobs. `.mob(true)` alone is
+only an ambient factory default; never construct authority or runtime bindings
+by hand to compensate for missing composition.
 
 `external_tools` is still the right slot for callback tools and MCP-backed
 dispatchers. Mob orchestration uses the separate `mob_tools` slot so operator
@@ -313,8 +327,15 @@ reachable as a signed peer or external mob member.
 
 - Mob member spawn uses deferred initial turn semantics.
 - Session creation for spawn registers the session without immediately running a model turn.
-- Autonomous members then start host loops explicitly from mob actor lifecycle control.
-- First model work is triggered by real dispatch (`external_turn`, peer message, or flow step).
+- Fresh runtime-backed `autonomous_host` members start their host loops and
+  automatically admit an initial kickoff after activation/readiness. The
+  kickoff uses `initial_message` when supplied, otherwise a fallback prompt.
+  This is real runtime prompt dispatch and can call the provider without any
+  later user message, peer message, or flow step.
+- `turn_driven` members have a separate dispatch path: an explicitly supplied
+  initial message can run an initial turn, but an omitted message does not
+  imply the autonomous fallback kickoff. Recovery that resumes an
+  authoritative transcript suppresses a manufactured autonomous kickoff.
 - Concurrent spawns provision in parallel; actor finalization stays serialized for deterministic state transitions.
 - `spawn_many(Vec<SpawnMemberSpec>)` exposes this as first-class runtime API.
 
@@ -381,16 +402,21 @@ mob_spawn(mob_id, specs_json) → result JSON  [async]
 mob_wire / mob_unwire / mob_wire_peer / mob_unwire_peer / mob_retire / mob_respawn  [async]
 mob_list_members / mob_member_send / mob_events(mob_id, after_cursor: string, limit: u32) / mob_status / mob_list
 mob_lifecycle(mob_id, action)  [async]
-mob_run_flow → run_id string  [async] / mob_flow_status / mob_run_result / mob_cancel_flow  [async]
+mob_run_flow → run_id string  [async] / mob_flow_status / mob_cancel_flow  [async]
 mob_member_subscribe [async] / mob_subscribe_events [async] → stream_id string / poll_subscription / close_subscription
 ```
 There is no `wire_cross_mob` export.
+There is also no browser `mob_run_result` export: `mob_flow_status` returns a
+`MobFlowStatusResult` JSON envelope with `run` (state and ledgers, or null).
+The Web SDK's `mob.flowStatus(runId)` unwraps it to `FlowStatus | null`.
+Native RPC `mob/run_result` and native SDK run-result helpers are separate
+surface contracts.
 
 ### RPC
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-{"jsonrpc":"2.0","id":2,"method":"session/create","params":{"prompt":"Use mob_* tools to create a lead/worker mob and return status."}}
+{"jsonrpc":"2.0","id":2,"method":"session/create","params":{"prompt":"Use mob_* tools to create a lead/worker mob and return status.","enable_mob":true}}
 ```
 
 ### REST
@@ -398,7 +424,7 @@ There is no `wire_cross_mob` export.
 ```bash
 curl -X POST http://127.0.0.1:8080/sessions \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"Use mob_* tools to create a lead/worker mob and return status."}'
+  -d '{"prompt":"Use mob_* tools to create a lead/worker mob and return status.","enable_mob":true}'
 ```
 
 ### MCP
@@ -407,7 +433,8 @@ curl -X POST http://127.0.0.1:8080/sessions \
 {
   "name": "meerkat_run",
   "arguments": {
-    "prompt": "Use mob_* tools to create a lead/worker mob and return status."
+    "prompt": "Use mob_* tools to create a lead/worker mob and return status.",
+    "enable_mob": true
   }
 }
 ```
@@ -431,12 +458,19 @@ import { MeerkatClient } from "@rkat/sdk";
 
 const client = new MeerkatClient();
 await client.connect({ realmId: "team-alpha" });
-const result = await client.createSession({
-  prompt: "Use mob_* tools to create a lead/worker mob and return status.",
-});
+const result = await client.createSession(
+  "Use mob_* tools to create a lead/worker mob and return status.",
+  { enableMob: true },
+);
 console.log(result.text);
 await client.close();
 ```
+
+These execution examples require a host with mob support and a composed
+`MobToolsFactory`; `enable_mob` / `enableMob` explicitly requests generated
+create-only operator capability. It does not grant arbitrary existing-mob
+scopes or bypass per-call authorization. The Python design-only prompt does
+not require the model to execute mob tools.
 
 ## Flows (subfeature)
 
@@ -454,13 +488,19 @@ Flow essentials:
 
 ### v2 flows (frame-based execution with loops)
 
-v2 flows carry `FlowSpec.root: FrameSpec` as the execution root. When `root` is present, the `FlowFrameEngine` drives execution instead of flat topological-sort dispatch.
+All flows execute through `FlowFrameEngine` with a canonical
+`FlowSpec.root: FrameSpec`. Flat step declarations normalize to that root at
+decode/construction; an explicitly authored `root` takes precedence over the
+generated structure. These are two authoring forms, not separate engines.
 
 Key types:
 
 - `FrameSpec` — a set of `FlowNodeSpec` nodes forming a dependency graph within a frame
 - `FlowNodeSpec` — either `Step(FrameStepSpec)` or `RepeatUntil(RepeatUntilSpec)`
-- `RepeatUntilSpec` — loop with `loop_id`, `depends_on`, `body: FrameSpec`, `until: ConditionExpr`, `max_iterations: u32`
+- `FrameStepSpec` — references a named `step_id`, with `depends_on` and
+  `depends_on_mode`; role/message stay in the flow's `steps` map
+- `RepeatUntilSpec` — loop with `loop_id`, `depends_on`, `depends_on_mode`,
+  `body: FrameSpec`, `until: ConditionExpr`, `max_iterations: u32`
 
 Execution model:
 
@@ -471,15 +511,40 @@ Execution model:
 - Frame-step outcomes route back through MobMachine-owned transitions; direct mutation from executor code is prohibited
 - Recovery handles ready-frame / pending-body-frame drift and returns typed incompatibility for pre-v2 active runs
 
-Definition example:
+Definition example inside a mob with `tester` and `lead` profiles:
 
 ```toml
 [flows.release_flow]
 description = "Iterative release check"
 
-[flows.release_flow.root]
-nodes.check_quality = { type = "repeat_until", loop_id = "quality_loop", body = { nodes = { run_tests = { type = "step", role = "tester", message = "Run tests" } } }, until = "all_pass", max_iterations = 5, depends_on = [] }
-nodes.ship = { type = "step", role = "lead", message = "Ship it", depends_on = ["check_quality"] }
+[flows.release_flow.steps.run_tests]
+role = "tester"
+message = 'Run tests and return only JSON with an "all_pass" boolean: true if all pass, false otherwise.'
+output_format = "json"
+
+[flows.release_flow.steps.ship]
+role = "lead"
+message = "Ship it."
+
+[flows.release_flow.root.nodes.check_quality]
+kind = "repeat_until"
+loop_id = "quality_loop"
+depends_on = []
+depends_on_mode = "all"
+max_iterations = 5
+until = { op = "eq", path = "steps.run_tests.all_pass", value = true }
+
+[flows.release_flow.root.nodes.check_quality.body.nodes.run_tests]
+kind = "step"
+step_id = "run_tests"
+depends_on = []
+depends_on_mode = "all"
+
+[flows.release_flow.root.nodes.ship]
+kind = "step"
+step_id = "ship"
+depends_on = ["check_quality"]
+depends_on_mode = "all"
 ```
 
 ### Operational flow controls
@@ -491,14 +556,18 @@ nodes.ship = { type = "step", role = "lead", message = "Ship it", depends_on = [
 
 ### Agent-facing delegation tools
 
-Agents can orchestrate mobs programmatically via tools exposed by `AgentMobToolSurface` (`meerkat-mob-mcp/src/agent_tools.rs`):
+With generated authority, `AgentMobToolSurface`
+(`meerkat-mob-mcp/src/agent_tools.rs`) exposes thirteen base definitions:
 
 | Tool | Purpose |
 |------|---------|
 | `delegate` | Quick helper spawn — creates implicit mob on first use, spawns member, auto-wires comms |
+| `conclude_objective` | Supply only `outcome` to conclude the kickoff objective pre-addressed by the current turn |
 | `mob_create` | Create a mob from a definition |
 | `mob_destroy` | Destroy a mob and archive all members |
-| `mob_spawn_member` | Spawn a member into any mob |
+| `mob_spawn_member` | Spawn a member into an authorized mob |
+| `fork_off` | Fork the current durable member's committed transcript prefix through the resume path, run the task, return bounded final text, and retain the child member |
+| `council` | Fork existing specialist members into a temporary discussion mob, run bounded rounds/merge, and clean up |
 | `mob_retire_member` | Archive a member and its session |
 | `mob_check_member` | Check a member's execution status and output |
 | `mob_list_members` | List members of a mob |
@@ -506,7 +575,24 @@ Agents can orchestrate mobs programmatically via tools exposed by `AgentMobToolS
 | `mob_wire` | Wire a member to a local or external peer (creates comms trust) |
 | `mob_unwire` | Remove a wiring relationship between a member and a peer |
 
-When a realm profile store is configured, six additional profile-management tools are surfaced — they treat profiles as reusable, versioned member templates:
+`conclude_objective` requires an objective-correlated turn and its resolved
+lead principal. `fork_off` requires the caller to be a durable mob member with
+spawn authority; supply `member_id` and `task`, optionally `message_count`,
+`expected_output` (prompt guidance, not a validated schema), `result_label`,
+and `max_text_bytes`. This durable transcript fork is distinct from
+`MemberLaunchMode::Fork` / `fork_helper`, which seed a fresh session's prompt
+with rendered history; low-level `Session::fork()` / `fork_at()` are separate
+structural primitives.
+
+`council` requires creation authority and scope over each source mob. Supply a
+`topic` and participants with `mob_id`, `member_id`, and discussion `role`;
+optional controls include `council_id`, `max_rounds`, `max_exchanges`,
+`max_result_bytes`, `timeout_seconds`, and `merge`. Source profiles are
+resolved by the tool; participants are forks, not the original members.
+Visibility alone satisfies none of these per-call prerequisites.
+
+A realm profile store adds five profile-management tools for reusable,
+versioned member templates:
 
 | Tool | Purpose |
 |------|---------|
@@ -515,7 +601,10 @@ When a realm profile store is configured, six additional profile-management tool
 | `mob_profile_list` | List profiles in the realm |
 | `mob_profile_update` | Update a profile with `expected_revision` for CAS |
 | `mob_profile_delete` | Delete a profile with `expected_revision` for CAS |
-| `mob_profile_list_sources` | List the provenance sources contributing profiles |
+
+With both that store and a parent tool snapshot provider,
+`mob_profile_list_sources` additionally lists visible tool sources grouped by
+provenance. A profile store alone does not expose it.
 
 These tools are composed into the agent's tool dispatcher via `MobToolsFactory` late-binding. Operator authority is injected at runtime through `MobToolAuthorityContext`; ambient mob enablement alone does not surface operator tools on resume.
 

@@ -20,6 +20,12 @@ example. There is no separate Gemma page: Gemma 4 is one family under the same
 self-hosted model system as Ollama, LM Studio, vLLM, or another private
 OpenAI-compatible endpoint.
 
+The Ollama, LM Studio, and vLLM recipes below are alternatives. Put the chosen
+server and alias tables plus the common realm binding in the default global
+config document, `~/.rkat/config.toml`, so the workspace can inherit them.
+Replace the generic server/alias examples with the chosen recipe rather than
+combining every example, and run only commands whose aliases you registered.
+
 ## Model
 
 Every self-hosted setup has three pieces:
@@ -194,6 +200,10 @@ lightest local setup.
     ```
   </Step>
   <Step title="Register Ollama">
+    In the common `[realm.global.backend.local]` binding backend, change
+    `server = "local"` to `server = "ollama"`. Keep the binding named `local`
+    and its `local_auth` profile in `global`.
+
     ```toml config.toml
     [self_hosted.servers.ollama]
     transport = "openai_compatible"
@@ -249,6 +259,10 @@ Use LM Studio when you want a desktop-managed OpenAI-compatible server.
     Load the Gemma 4 model in LM Studio, then start the local server.
   </Step>
   <Step title="Register LM Studio">
+    In the common `[realm.global.backend.local]` binding backend, change
+    `server = "local"` to `server = "lmstudio"`. Keep the binding named `local`
+    and its `local_auth` profile in `global`.
+
     ```toml config.toml
     [self_hosted.servers.lmstudio]
     transport = "openai_compatible"
@@ -260,6 +274,9 @@ Use LM Studio when you want a desktop-managed OpenAI-compatible server.
     Use the model name LM Studio exposes in its `/v1/models` output.
 
     ```toml config.toml
+    [self_hosted]
+    default_model = "gemma-4-e4b"
+
     [self_hosted.models.gemma-4-e4b]
     server = "lmstudio"
     remote_model = "google/gemma-4-e4b"
@@ -287,6 +304,9 @@ Use vLLM when you want a private server with more deployment control.
     Start vLLM with the Gemma 4 model you want to expose.
   </Step>
   <Step title="Register the server">
+    In the common `[realm.global.backend.local]` binding backend, change
+    `server = "local"` to `server = "vllm"`. Keep the binding named `local`.
+
     ```toml config.toml
     [self_hosted.servers.vllm]
     transport = "openai_compatible"
@@ -294,10 +314,11 @@ Use vLLM when you want a private server with more deployment control.
     api_style = "chat_completions"
     ```
 
-    If the endpoint requires a token, point the realm auth profile at it:
+    If the endpoint requires a token, replace the common `global` auth profile
+    with this one and set `VLLM_API_TOKEN` before running Meerkat:
 
     ```toml config.toml
-    [realm.dev.auth.local_auth]
+    [realm.global.auth.local_auth]
     provider = "self_hosted"
     auth_method = "static_bearer"
     source = { kind = "env", env = "VLLM_API_TOKEN" }
@@ -354,8 +375,21 @@ rkat models
 rkat doctor
 rkat auth bindings --realm global
 rkat auth test --realm global local
-rkat run -m gemma-4-31b "Say hello in one sentence."
 ```
+
+Then run the model that the selected recipe defines:
+
+```bash
+# Ollama or vLLM recipe:
+rkat run --auth-binding global:local -m gemma-4-31b "Say hello in one sentence."
+
+# LM Studio recipe:
+rkat run --auth-binding global:local -m gemma-4-e4b "Say hello in one sentence."
+```
+
+Here `local` is the binding ID, not necessarily the server ID. Its backend's
+`server` must match the selected recipe (`ollama`, `lmstudio`, or `vllm`) and
+the alias's `server`.
 
 The expected result:
 

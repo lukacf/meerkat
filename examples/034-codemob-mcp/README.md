@@ -81,8 +81,8 @@ consult(question: "What about the edge case?", session_id: "<id from previous ca
 - `system_prompt` — Custom persona (default: general technical advisor)
 - `shell` — Enable shell access for running commands
 - `skills` — Inject domain knowledge (e.g. `["meerkat-platform", "rct-methodology"]`)
-- `provider_params` — Typed per-turn provider settings (e.g. `{"temperature": 0.2}`, or `{"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}`)
-- `session_id` — Continue a previous session (model/prompt/shell inherited)
+- `provider_params` — Typed initial-session build settings (e.g. `{"temperature": 0.2}`, or `{"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}`). Ignored when `session_id` is supplied; continuations retain the session's settings.
+- `session_id` — Continue a previous session (model/system prompt/shell/provider settings inherited)
 
 ### `deliberate`
 
@@ -148,7 +148,7 @@ different perspectives.
 | `gemini-3.1-flash-lite-preview` | Google | Fastest | Advocate, skeptic, perf reviewer, contrarian |
 | `gemini-3.5-flash` | Google | Current fast model | Available for override |
 | `claude-sonnet-4-6` | Anthropic | Fast + capable | RCT aggregator, implementer |
-| `gpt-5.5-pro` | OpenAI | Deepest reasoning | Available for override (slow — use sparingly) |
+| `gpt-5.5-pro` | OpenAI | Deepest reasoning | RCT `integration_sheriff` (slow — use sparingly) |
 
 ## Skills
 
@@ -170,7 +170,8 @@ Available skills (depends on your environment):
 
 `consult` returns a real session ID. Passing it back in a follow-up `consult`
 call continues the conversation with its retained history, model, system
-prompt, shell setting, and injected skills.
+prompt, shell setting, injected skills, and provider settings. Supplying
+`provider_params` on a continuation does not update the existing session.
 
 `deliberate` also labels its mob ID as `session_id`, but its current reuse path
 does not preserve the first call's history reliably or replace an existing
@@ -190,11 +191,29 @@ deliberate(
 )
 ```
 
-Role names match the agent names in each pack (visible via `list_packs`).
+Override keys are exact, pack-defined role names. `list_packs` returns pack
+names, descriptions, agent counts, and flow-step counts, not role names.
+The built-in keys are:
+
+| Pack | `model_overrides` keys |
+|------|------------------------|
+| `advisor` | `advisor` |
+| `review` | `reviewer`, `security`, `perf`, `synthesizer` |
+| `architect` | `planner`, `critic`, `synthesizer` |
+| `brainstorm` | `ideator_a`, `ideator_b`, `ideator_c`, `synthesizer` |
+| `red-team` | `advocate`, `adversary`, `judge` |
+| `rct` | `orchestrator`, `implementer`, `rct_guardian`, `integration_sheriff`, `spec_auditor`, `aggregator` |
+| `implement` | `implementer`, `reviewer` |
+| `panel` | `moderator`, `purist`, `pragmatist`, `skeptic`, `veteran` |
+
+See the [pack definitions](src/packs/) for role configuration and defaults.
 
 ## Provider Parameters
 
-Pass provider-specific settings applied to all agents in a pack:
+For `deliberate`, provider settings are applied to all agents when constructing
+the pack. For `consult`, they are initial-session build settings only:
+continuations inherit the existing settings and ignore a supplied
+`provider_params` value.
 
 ```
 deliberate(

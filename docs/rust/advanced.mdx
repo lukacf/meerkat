@@ -135,8 +135,13 @@ Built-in clients for major LLM providers:
 
     let client = OpenAiClient::new("sk-...".to_string());
     let client = OpenAiClient::new("key".to_string())
-        .with_base_url("https://my-deployment.openai.azure.com".to_string());
+        .with_base_url("https://openai-proxy.example.com".to_string());
     ```
+
+    The override above is for an OpenAI-compatible proxy that preserves
+    Responses API routes and authentication. Azure requires its own
+    [backend/auth-binding configuration](/guides/auth); changing only the base
+    URL does not select Azure endpoint or authentication behavior.
   </Tab>
   <Tab title="Gemini">
     ```rust
@@ -222,11 +227,20 @@ cache_free.provider_params = Some(ProviderParamsOverride {
 
 <Accordion title="Implementing a custom LLM client">
 
+This toy client declares synthetic inclusive token counts through
+`TurnUsage::host_declared`. Real provider adapters should attach their actual
+normalized provider accounting and convention instead; do not relabel
+provider counters as host evidence just to suppress an accounting warning.
+Leaving `Usage.provider_accounting` absent is legal, but emits
+`TurnUsageAccountingUnmeasured`, leaves `TurnCompleted.usage` absent, and
+advances neither session token totals nor token-budget accounting. The answer
+does not fail merely because accounting is unmeasured.
+
 ```rust
 use async_trait::async_trait;
 use meerkat::{AgentLlmClient, AgentError, LlmStreamResult, Message, ToolDef, StopReason, Usage};
 use meerkat::AssistantBlock;
-use meerkat_core::Provider;
+use meerkat_core::{Provider, TurnUsage};
 use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
 use std::sync::Arc;
 
@@ -242,11 +256,15 @@ impl AgentLlmClient for MyCustomClient {
         temperature: Option<f32>,
         provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<LlmStreamResult, AgentError> {
-        // Call your LLM API here
+        let usage = TurnUsage::host_declared(
+            self.provider(),
+            self.model(),
+            Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
+        ).into_inner();
         Ok(LlmStreamResult::new(
             vec![AssistantBlock::Text { text: "Response text".to_string(), meta: None }],
             StopReason::EndTurn,
-            Usage { input_tokens: 10, output_tokens: 20, ..Default::default() },
+            usage,
         ))
     }
 
@@ -365,19 +383,69 @@ This distinction matters: queueing an event and consuming it are no longer treat
 
 <Accordion title="SSE streaming example">
 
+This application helper requires `axum`, `async-stream`, and `tokio`, plus
+`meerkat` and a matching exact-pinned `meerkat-core` dependency. Your HTTP
+handler supplies the service and a **per-session** broadcast feed of
+`AgentEvent` payloads from the configured observation surface. The local
+`sse_event` formatter below is application code, not an SDK export.
+
+The host supplies a service implementing `SessionServiceCommsExt`, whose
+`event_injector` extension can expose a session's optional injector.
+
+Injection only queues input; observation is session-wide, not correlated to
+that input. Closing on the next run terminal, as below, is appropriate only
+when the host ensures no other in-flight or queued work can produce it.
+`RunCompleted` ends the main run; structured-output extraction can follow.
+
 ```rust
+use axum::{
+    http::StatusCode,
+    response::{
+        IntoResponse, Response,
+        sse::{Event, Sse},
+    },
+};
+use meerkat::{AgentEvent, SessionId};
+use meerkat_core::service::SessionServiceCommsExt;
+use meerkat_core::{EventInjectorError, HandlingMode, PlainEventSource};
+use std::convert::Infallible;
+use tokio::sync::broadcast;
+
+fn sse_event(name: &str, data: &str) -> Result<Event, Infallible> {
+    Ok(Event::default().event(name).data(data))
+}
+
 async fn handle_chat(
+    service: &dyn SessionServiceCommsExt,
     session_id: SessionId,
     user_msg: String,
-    session_events: tokio::sync::broadcast::Sender<SessionEvent>,
-) -> impl IntoResponse {
-    let injector = service.event_injector(&session_id).await.unwrap();
+    session_events: broadcast::Sender<AgentEvent>,
+) -> Result<impl IntoResponse, Response> {
+    let injector = service.event_injector(&session_id).await.ok_or_else(|| {
+        (StatusCode::CONFLICT, "Session has no available event injector").into_response()
+    })?;
     let mut events = session_events.subscribe();
-    injector.inject(user_msg.into(), PlainEventSource::Rpc, HandlingMode::Queue, None)?;
+    injector
+        .inject(user_msg.into(), PlainEventSource::Rpc, HandlingMode::Queue, None)
+        .map_err(|error| {
+            let response = match error {
+                EventInjectorError::Full => (StatusCode::TOO_MANY_REQUESTS, "Session inbox is full"),
+                EventInjectorError::Closed => (StatusCode::SERVICE_UNAVAILABLE, "Session inbox is closed"),
+            };
+            response.into_response()
+        })?;
 
-    Sse::new(async_stream::stream! {
-        while let Ok(session_event) = events.recv().await {
-            match session_event.event.payload {
+    Ok(Sse::new(async_stream::stream! {
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                    yield sse_event("lagged", &format!("Dropped {dropped} events; resynchronize"));
+                    break;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            match event {
                 AgentEvent::TextDelta { delta } => yield sse_event("delta", &delta),
                 AgentEvent::RunCompleted { ref result, .. } => {
                     yield sse_event("done", result);
@@ -390,7 +458,7 @@ async fn handle_chat(
                 _ => {}
             }
         }
-    })
+    }))
 }
 ```
 </Accordion>
@@ -422,10 +490,9 @@ mismatched source role fails closed. Ordinary resume should leave it as
 ```rust
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat::{
-    CreateSessionRequest, DeferredPromptPolicy, SessionService,
+    CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionService,
     StartTurnRequest, StartTurnRuntimeSemantics, SystemPromptOverride,
 };
-use meerkat_core::service::InitialTurnPolicy;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

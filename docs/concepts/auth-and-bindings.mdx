@@ -102,15 +102,24 @@ Realm config is resolved through its configured parent chain and an optional
 
 - Binding reads inherit. A workspace realm can use a binding defined in a
   parent or in `global`.
-- Credential writes are strict-owner and explicitly addressed. Login, logout,
-  refresh, and managed credential persistence must name the realm that defines
-  the binding. A child-addressed inherited write is rejected with the owner;
-  the service does not forward it automatically.
+- `HostAuthService` and RPC/REST credential writes are strict-owner and
+  explicitly addressed. A child-addressed inherited write is rejected with
+  the owner; those services do not forward it automatically.
 - A resolved inherited binding retains its owning realm as provenance. That
   realm keys managed credentials and auth leases.
 
-This is why `rkat auth login`, which provisions `global`, works from every
-workspace without copying the credential into each workspace config.
+<Warning>
+**Current CLI logout exception:** when the loaded config resolves
+`child:<binding>` to an inherited owner, `rkat auth logout child:<binding>`
+can clear that owner's stored credential, including a shared credential
+account used by other routes. Explicitly address the true owner instead. A
+bare logout binding means `global`; `--realm` does not retarget logout.
+HostAuthService/RPC/REST strict ownership and the raw-head `config get` /
+`set` / `patch` read/write split are unchanged.
+</Warning>
+
+Interactive `rkat auth login` provisions `global`, whose credentials are
+readable from workspace realms without copying them into each workspace config.
 
 ## Credential Sources
 

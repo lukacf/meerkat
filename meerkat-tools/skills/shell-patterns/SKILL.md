@@ -10,12 +10,23 @@ Use shell tools for concrete local commands, verification, and long-running
 processes. Keep commands scoped to the user's workspace and report important
 results back into the conversation.
 
+## Background Prerequisites
+
+`background: true` requires canonical session and operation bindings plus a
+persistent realm job store, persistent blob store, and delivery projector.
+Shell availability alone does not provide these resources: a shell-enabled
+standalone or ephemeral composition can reject background execution with a
+typed tool error. There is no process-local detached-job fallback. Use
+foreground shell there (`background: false`, the default).
+
 ## Operating Rules
 
 - Use `shell` for short foreground commands.
-- For ordinary long-running commands, use `shell` with `background: true`,
-  keep the returned `job_id`, then inspect with `shell_job_status` or list jobs
-  with `shell_jobs`.
+- When the durable runtime above is wired, use `shell` with `background: true`
+  for ordinary long-running commands. Keep the returned `job_id`, then inspect
+  with `shell_job_status` or list jobs with `shell_jobs`. A queued receipt
+  acknowledges submission, not command success; inspect the terminal result
+  before claiming completion.
 - A background shell submission is durable, but its worker is explicitly
   non-resumable. After a restart the job record remains and a lost worker
   becomes `worker_lost`; Meerkat does not silently replay the command.

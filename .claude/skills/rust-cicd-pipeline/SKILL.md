@@ -12,13 +12,17 @@ description: |
 
 This skill provides a complete, production-ready CI/CD pipeline for Rust projects featuring:
 
-- **Progressive Validation**: Auto-fix and generated-file sync on commit;
-  secret, format, codegen, lock, Clippy, and deterministic repo gates on push
+- **Progressive Validation (portable template)**: Formatting verification, Clippy,
+  unit tests, secrets, and general file checks on commit; full tests,
+  documentation builds, and dependency audit on push
 - **Makefile as Single Source of Truth**: Identical commands locally and in any CI system
 - **No GitHub Actions Dependency**: Works with Jenkins, GitLab CI, or any CI runner
 - **Version Consistency**: Automatic verification between tag and Cargo.toml
 
 ## Architecture Overview
+
+The hook column below describes the portable template. Meerkat's separate
+auto-fix/generated-file-sync hook policy is described under Pre-commit Configuration.
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
@@ -26,16 +30,16 @@ This skill provides a complete, production-ready CI/CD pipeline for Rust project
 │     Hooks       │     │    System       │     │    Process      │
 ├─────────────────┤     ├─────────────────┤     ├─────────────────┤
 │ On commit:      │     │ On push/PR:     │     │ On v* tag:      │
-│ - cargo fmt fix │     │ - make lint     │     │ - Verify version│
-│ - sync generated│     │ - make test     │     │ - Read notes    │
-│   files         │     │ - make test-all │     │ - Build release │
-│                 │     │ - make audit    │     │ - Tag artifacts │
+│ - fmt check     │     │ - make lint     │     │ - Verify version│
+│ - clippy        │     │ - make test     │     │ - Read notes    │
+│ - unit tests    │     │ - make test-all │     │ - Build release │
+│ - secrets/files │     │ - make audit    │     │ - Tag artifacts │
 │                 │     │                 │     │                 │
 ├─────────────────┤     └─────────────────┘     └─────────────────┘
 │ On push:        │              │
-│ - secrets/fmt   │              ▼
-│ - changed clippy│     ┌─────────────────┐
-│ - repo gates    │     │    Makefile     │
+│ - full tests    │              ▼
+│ - docs build    │     ┌─────────────────┐
+│ - deps audit    │     │    Makefile     │
 └─────────────────┘     │    Makefile     │
          │              │ (Single Source) │
          └──────────────┤ - test          │
@@ -134,9 +138,32 @@ Bazel metadata freshness, selector behavior, or lane isolation.
 
 ### Pre-commit Configuration
 
-The `.pre-commit-config.yaml` runs:
+#### Portable template (generated projects)
 
-**On every commit**:
+The setup script copies `references/pre-commit-config.yaml`. Its hooks use
+`pre-commit` as the default stage, with explicit `pre-push` overrides and
+file/type filters:
+
+**On commit**:
+- Formatting verification: `cargo fmt --all -- --check` (not an auto-fix)
+- Clippy: `cargo clippy --all-targets -- -D warnings`
+- Fast unit tests: `make test`
+- Secret detection and general file checks (whitespace, end-of-file, YAML/TOML, merge conflicts, large files)
+
+**On push**:
+- Full tests: `make test-all`
+- Documentation build: `make doc`
+- Dependency audit: `make audit`
+
+Customize this portable template for the target project. It does not install
+Meerkat's repository-specific scripts or generated-file synchronization.
+
+#### Meerkat repository policy
+
+Meerkat's root `.pre-commit-config.yaml` is separate from the portable template.
+Its hooks run according to their file filters and stages:
+
+**On commit**:
 - Rust formatting auto-fix
 - Bazel BUILD regeneration when Cargo metadata changes
 - Meerkat dogma mirror synchronization when its sources change
@@ -147,9 +174,8 @@ The `.pre-commit-config.yaml` runs:
 - machine/codegen, lock, generated-header, and documentation contract gates
 - the deterministic workspace unit, integration, and e2e gate
 
-Customize hooks based on your project needs.
-
-See `references/pre-commit-config.yaml` for the template.
+Use the root configuration for Meerkat's policy; use
+`references/pre-commit-config.yaml` for the portable template described above.
 
 ### Portable CI Integration
 
@@ -283,7 +309,9 @@ Ensure feature flags are consistent between Cargo.toml and test commands.
 
 ## Test Categories and Policy
 
-The pipeline uses test categories with clear boundaries:
+The following lane timing describes Meerkat's repository policy, not the portable
+template's commit-time unit-test hook described above. Test categories have clear
+boundaries:
 
 | Category | Speed | I/O | Dependencies | When Run |
 |----------|-------|-----|--------------|----------|

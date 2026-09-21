@@ -153,11 +153,14 @@ The compaction cycle emits events into the session stream:
 }
 ```
 
-If the built-in summarization request itself is rejected as over-context or
-too large, Meerkat uses a deterministic mechanical handoff summary so the
-session can shed old rows and continue. Ordinary LLM errors still emit
-`compaction_failed` and preserve the original transcript. A configured curator
-never falls back to the mechanical or LLM path.
+If the built-in summarization request fails with a recognized over-context or
+request-too-large error, Meerkat can use a deterministic mechanical handoff
+summary to shed old rows. This is allowed only when current history has no
+protected, unsummarized assistant transcript observations with source
+`SpokenUnmeasured`. With those observations, the compaction attempt emits
+`compaction_failed` and preserves the original transcript, as it does for
+ordinary LLM errors. A configured curator never falls back to the mechanical
+or LLM path.
 
 Custom thresholds via the Rust SDK:
 
@@ -221,12 +224,23 @@ Cap resource usage per session with token, time, and tool-call limits. When a bu
 
 <Tabs>
   <Tab title="CLI">
+    Configure the cumulative token budget in the active realm config:
+
+    ```toml
+    [limits]
+    budget = 10000
+    ```
+
     ```bash
     rkat run "Research this topic" \
       --max-tokens 10000 \
       --max-duration 30s \
       --max-tool-calls 5
     ```
+
+    `--max-tokens` limits each model call's output, not cumulative consumption.
+    The `limits.budget` setting above supplies the aggregate token limit
+    corresponding to `budget_limits.max_tokens` in the API examples.
   </Tab>
   <Tab title="JSON-RPC">
     ```json
@@ -298,6 +312,7 @@ Cap resource usage per session with token, time, and tool-call limits. When a bu
         budget_limits: Some(BudgetLimits {
             max_tokens: Some(10_000),
             max_duration: Some(Duration::from_secs(30)),
+            max_turn_duration: None,
             max_tool_calls: Some(5),
         }),
         ..Default::default()

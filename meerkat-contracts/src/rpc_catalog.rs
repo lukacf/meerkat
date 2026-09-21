@@ -395,7 +395,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         ),
         RpcMethodDescriptor::typed(
             "auth/login/start",
-            "Begin an OAuth login; returns authorize URL, state, PKCE verifier",
+            "Begin an OAuth login; returns authorize_url, state, redirect_uri, and provider (PKCE verifier stays server-side)",
             "LoginStartParams",
             "WireLoginStart",
         ),

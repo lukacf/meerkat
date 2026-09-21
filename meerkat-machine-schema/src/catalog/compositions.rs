@@ -179,7 +179,7 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
             transaction_plan(
                 "revision_supersede_and_replan",
                 "update_schedule_revision",
-                "revision-affecting schedule updates supersede pending future occurrences before replanning",
+                "revision-affecting schedule updates (including deletion) supersede all outstanding nonterminal occurrences of the schedule from older revisions at commit time, including overdue Pending and in-flight Claimed/Dispatching/AwaitingCompletion, through typed occurrence Supersede and reciprocal OccurrencesSuperseded -> ConfirmOccurrencesSuperseded acknowledgement; supersession does not promise cancellation of already-dispatched external work",
                 "ScheduleStore::commit_schedule_mutation",
                 &[],
             ),
@@ -208,7 +208,7 @@ pub fn schedule_bundle_composition() -> CompositionSchema {
                     from_machine: mi_id("schedule"),
                     effect_variant: ev_id("SupersedePendingOccurrences"),
                 },
-                statement: "pending future occurrences are superseded only by the schedule revision route rather than by ad hoc shell mutation".into(),
+                statement: "observed occurrence.Supersede inputs delivered on revision_supersede_enters_occurrence_authority originate from schedule.SupersedePendingOccurrences; this route-scoped provenance invariant neither proves sweep completeness nor excludes other typed Supersede ingress".into(),
                 references_machines: vec![mi_id("schedule"), mi_id("occurrence")],
                 references_actors: vec![act_id("schedule_authority"), act_id("occurrence_authority")],
             },

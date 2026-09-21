@@ -112,13 +112,13 @@ Image generation and web search are independent from general builtins.
     let factory = AgentFactory::new(root)
         .builtins(true)
         .shell(true)
-        .memory(true)
-        .mob(true);
+        .memory(true);
 
     let service = build_ephemeral_service(factory, config, 64); // Queue-only embedded/testing substrate
     let result = service.create_session(CreateSessionRequest {
         model: "gpt-5.6-sol".into(),
         prompt: "List files in /tmp".into(),
+        injected_context: Vec::new(),
         system_prompt: SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,
@@ -128,10 +128,25 @@ Image generation and web search are independent from general builtins.
         labels: None,
     }).await?;
     ```
+
+    This bare ephemeral service does not compose agent-facing mob tools.
+    Those require supported host composition with a `MobToolsFactory` and
+    generated mob authority, not just `.mob(true)`. See
+    [Mob tools](/concepts/tools#mob-tools-meerkat-mob-mcp).
   </Tab>
 </Tabs>
 
 ## Run a durable background shell job
+
+<Note>
+Detached/background shell execution requires a durable realm job store, a
+persistent blob store, and a delivery projector supplied by supported
+runtime-backed host composition. The preceding bare ephemeral Rust service
+does not provide these. Foreground shell availability does not imply detached
+shell availability; without this substrate, background submission fails rather
+than falling back to a process-local job. Use a persistent runtime-backed host
+as described in [Sessions](/concepts/sessions).
+</Note>
 
 Ask the `shell` tool for `background: true` when you need Meerkat-owned job
 truth rather than shell syntax that happens to include `&`:
@@ -413,7 +428,7 @@ struct MathTools;
 impl AgentToolDispatcher for MathTools {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         vec![Arc::new(ToolDef {
-            name: "add".to_string(),
+            name: "add".into(),
             description: "Add two numbers".to_string(),
             input_schema: json!({
                 "type": "object",

@@ -219,11 +219,17 @@ Land the diagnostic surface *before* anything mutates:
   schema-ledger state per database, dual-root twins for the realm being
   resolved, structurally undecodable session documents, transcript-history
   footprint, dangling session→blob references, and orphaned index/lease files.
-- Calls the provider's `StorageMigrator::diagnose` hook so remote deployments
-  get doctor output too, not just disk realms.
-- Repair verbs stay in Phase 6; doctor gains a sanctioned
-  strip-to-placeholder repair for dangling blob refs there (today the only
-  remedy is hand-editing production session JSON).
+- Calls the built-in disk provider's `StorageMigrator::diagnose` hook (or
+  the disk migrator fallback) to inspect filesystem state. An external-backend
+  host must explicitly compose and invoke its provider's diagnosis
+  implementation; implementing the optional hook alone does not route the
+  stock `rkat storage doctor` command to it.
+- The accepted review proposal reserved repair verbs for Phase 6, including a
+  doctor strip-to-placeholder repair for dangling blob refs.
+  **Implementation exception:** that repair did not ship with the Phase 6
+  framework. Current `rkat storage doctor` reports dangling references without
+  modifying session content. For supported recovery procedures, use
+  [Storage Operations](/guides/storage-operations).
 
 ## Phase 2 - Path authority (shipped)
 
@@ -498,10 +504,14 @@ and their naming is documented so external retention tooling
 (state-generation cloning, HomeCore-style prune jobs) can recognize them
 instead of treating them as unknown files that bloat every clone.
 
-**Downstream migration.** The `StorageMigrator` hook gives remote backends
-the same lifecycle: a version ledger in their own medium (for BigQuery, a
-`meerkat_schema` table) and ordered migrations under a provider-supplied
-lock. Meerkat ships the framework and the disk implementation.
+**Downstream migration.** The exported `StorageMigrator` hook currently
+exposes read-only diagnosis only; it does not drive mutation, ordered
+migrations, or provider locking. The shipped migration path is the built-in
+disk implementation; `rkat storage migrate` treats external backends as
+report-only. The original remote-backend design — a version ledger in the
+provider's own medium (for BigQuery, a `meerkat_schema` table) and ordered
+migrations under a provider-supplied lock — remains provider-owned or future
+extension work, not a lifecycle supplied by the current hook.
 
 ## Historical Sequencing, Risk, And Gates
 

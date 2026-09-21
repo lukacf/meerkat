@@ -2,6 +2,15 @@
 
 Flagship browser example: **9 autonomous AI agents** across 3 factions wage a territory war with real-time strategy, diplomacy, and deception — all running in-browser via the Meerkat WASM runtime.
 
+> **Current-runtime compatibility:** The checked-in narrator polling reads the
+> legacy top-level flow status, but raw `mob_flow_status` now returns a JSON
+> envelope `{ run: MobRun | null }`. As a result, the frontend does not display
+> the completed narrative in the **Correspondent** channel / **War Correspondent**
+> panel with the current runtime. A separate consumer migration must read `result.run` and
+> handle `run: null` before examining status and output. That is a necessary
+> migration, not a guarantee that all demo behavior is repaired; the flow
+> engine itself is not shown to have failed by this display mismatch.
+
 ## What it demonstrates
 
 This is primarily a **smoke test for the Meerkat WASM platform**, exercising:
@@ -18,7 +27,7 @@ This is primarily a **smoke test for the Meerkat WASM platform**, exercising:
 
 ### 3 Faction Mobs (9 autonomous agents)
 
-Each faction (North, South, East) is a mob with 3 `autonomous_host` agents:
+Each faction (France, Prussia, Russia) is a mob with 3 `autonomous_host` agents:
 
 | Role | Responsibility | Peers |
 |------|---------------|-------|
@@ -30,16 +39,22 @@ Agents converse freely via comms tools (`send_message`, `peers`). No flows — c
 
 ### 1 Narrator Mob (turn-driven flow)
 
-A separate mob with a single `turn_driven` agent. After each turn resolves, a flow injects the complete conversation logs from all 9 agents and produces dramatic narrative with omniscient perspective.
+A separate mob with a single `turn_driven` agent. After each turn resolves, a
+flow is intended to turn the conversation logs from all 9 agents into dramatic
+narrative with omniscient perspective. The UI labels the channel
+**Correspondent** and the panel **War Correspondent**. The mob ID is
+`diplomacy-narrator`; the member and channel IDs remain `narrator`.
+Displaying completed narrative currently requires the consumer migration noted
+above.
 
 ### 10 DM Channels
 
 | Channel | Agents | Content |
 |---------|--------|---------|
-| N/S/E: Plan↔Op | Planner ↔ Operator | Private strategy debate |
-| N/S/E: Plan↔Amb | Planner ↔ Ambassador | Diplomatic briefing (what to lie about) |
-| N↔S, N↔E, S↔E Diplo | Ambassador ↔ Ambassador | Cross-faction negotiation |
-| #narrator | Narrator | Omniscient dramatic narrative |
+| France / Prussia / Russia (Planner ↔ Operator) | Planner ↔ Operator | Private strategy debate |
+| France / Prussia / Russia (Planner ↔ Ambassador) | Planner ↔ Ambassador | Diplomatic briefing (what to lie about) |
+| Franco-Prussian / Franco-Russian / Prussian-Russian | Ambassador ↔ Ambassador | Cross-faction negotiation |
+| Correspondent (`narrator` internally) | Narrator | Intended dramatic narrative; currently blocked by the polling mismatch above |
 
 ### Turn Flow
 
@@ -121,12 +136,18 @@ the prebuilt runtime and mobpack into the browser bundle.
 3. Click **Start Campaign**
 4. Watch agents deliberate in DM channels — click channels in the sidebar to follow conversations
 5. Territories change color on the map as combat resolves
-6. Narrator channel shows dramatic omniscient narrative after each turn
+6. The **Correspondent** channel is intended to show narrative after each turn;
+   current-runtime display requires the narrator polling migration noted above
 
 ### Controls
 
-- **Pause/Resume** — pause the game loop between turns
-- **Step** — advance exactly one turn
+- **Pause/Resume** — stop/resume progress in the JavaScript host loop. The stop
+  flag is checked during a round, not only between rounds, and does not cancel
+  in-flight autonomous agent work.
+- **Step** — run a host-loop iteration, then clear its running flag. Exact
+  single-round stepping is a current limitation: `tick()` can initiate another
+  iteration before the flag is cleared, so the number of completed rounds is
+  not guaranteed.
 - **Export** — download game state + all messages as JSON
 
 ## Key Files

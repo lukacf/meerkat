@@ -18,7 +18,10 @@ Messages accumulate → auto_compact_threshold exceeded →
 
 ## Preservation Rules
 - System prompt is always preserved
-- The N most recent message pairs are preserved
+- Up to `recent_turn_budget` recent complete conversational turns are retained,
+  including their tool-call/result structure and attached injected context.
+  Fewer turns may be retained to summarize actual old content and fit the
+  retained-history byte budget.
 - Tool call/result pairs are kept together
 - Compaction summaries are themselves compactable
 

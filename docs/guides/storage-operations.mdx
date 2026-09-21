@@ -170,8 +170,22 @@ rkat --state-root /srv/meerkat/realms \
 The bridge is apply-only and supported only when the realm manifest selects
 the `sqlite` backend. It verifies an exact known physical schema and durable
 evidence before importing, then normal strict migration continues under the
-same fence. Unknown, malformed, ambiguous, JSONL, memory, and external-provider
-state is refused without stamping a ledger version.
+same fence. Refusal has three distinct scopes:
+
+- **Whole-bridge preflight:** unsupported backends (JSONL, memory, or external
+  providers), invalid manifests, malformed ledgers, and future-version evidence
+  refuse before bridge imports or ledger stamping begin.
+- **Per-domain transaction:** an unauthenticated source schema or failed schema
+  migration refuses that domain without committing its migration. Domains
+  already committed remain committed; a later refusal does not roll them back.
+- **Per-record admission:** within an authenticated domain, healthy records can
+  migrate and the domain ledger can be stamped even when other records cannot
+  be carried forward. Those refused records remain byte-identical on disk and
+  are reported individually.
+
+Inspect both domain errors and the notes naming records left behind. An
+openable realm or completed domain does not prove that every historical session
+is resumable.
 
 Take an external backup or immutable generation snapshot before this recovery
 path. The bridge is not an authorization to repair by hand or invent missing

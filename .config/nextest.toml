@@ -174,6 +174,22 @@ filter = 'test(~test_resume_restores_missing_sessions_with_tool_wiring)'
 threads-required = "num-cpus"
 
 [[profile.fast.overrides]]
+# Actor-isolation load cases: 48 members and 200 concurrent deliveries on a
+# 4-worker runtime asserting a peer-admission p99 and a sub-second direct
+# turn beside a wedged member. Standalone they pass in seconds; beside the
+# saturated workspace unit lane the assertion budget measures runner load,
+# not isolation. Reserve the lane, matching the other wall-clock-sensitive
+# cases here, and keep each test's internal concurrency intact.
+filter = 'test(~load_one_wedged_member_does_not_page_or_delay_peers) or test(~reconstructed_resume_retire_waits_for_granted_topology_without_blocking_peer_turn)'
+threads-required = "num-cpus"
+
+[[profile.default.overrides]]
+# The workspace unit lane uses the default profile and discovers these lib
+# tests too, and that is where they have actually been failing.
+filter = 'test(~load_one_wedged_member_does_not_page_or_delay_peers) or test(~reconstructed_resume_retire_waits_for_granted_topology_without_blocking_peer_turn)'
+threads-required = "num-cpus"
+
+[[profile.fast.overrides]]
 # Issue #1104: these cases bound a FULL round trip on wall clock - a prompt
 # turn through accept_input_with_completion (10 s), or a MaterializeMember
 # bridge reply (REPLY_TIMEOUT) - and each failed only while a saturated gate

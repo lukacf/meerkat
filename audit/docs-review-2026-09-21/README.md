@@ -12,6 +12,15 @@ This is a point-in-time audit and correction ledger, not a replacement for the c
 
 Content citations through repository-local skill aliases point to versioned canonical content. Explicitly labelled symlink-metadata citations instead point to the one-line Git symlink blob. Displayed excerpts omit trailing whitespace; the linked source retains the original bytes.
 
+## Initial local publication blockers
+
+At audit handoff, the Meerkat correction and ledger commits were local: the normal push was blocked and no PR had been created. Corrected-source GitHub links become accessible once those commits are published; their quoted evidence and Git objects are already available in this checkout.
+
+- The normal `machine-codegen-verify` pre-push hook failed under `TLC2 Version 2026.07.14.071606 (rev: 227f61b)`: `TLC can't handle a number this big: 18446744073709551615`. The offending literal is in the [existing formal model](https://github.com/lukacf/meerkat/blob/56208b9e6cee078f52c43af8f6b36660bc93eeb4/specs/machines/meerkat_machine/model.tla#L21995).
+- The model and `ci.cfg` are byte-identical to the audit baseline: their Git blob IDs are `45d645440590af2711ffa3c21b2d02696e350b39` and `44d0b3f49fd1138342a3b026aaa091126e517c2f`, respectively. The model, verifier, and hook were not changed to evade this failure.
+- Native PR creation was also attempted and returned HTTP 403: `Unauthorized: As an Enterprise Managed User, you cannot access this content`.
+- No hook was bypassed, no fork was created, and no PR number is claimed. Publication requires resolving the formal-verification blocker and using an authorized application GitHub identity.
+
 ## Imported MobKit publication boundary
 
 The 27 confirmed imported-documentation errors are corrected in the canonical source commit [`01435e7ccda5e925fc2cf9f462327bdae9584d07`](https://github.com/lukacf/meerkat-mobkit/commit/01435e7ccda5e925fc2cf9f462327bdae9584d07) on the [pushed correction branch](https://github.com/lukacf/meerkat-mobkit/compare/main...luka-crnkovicfriis-abk-mobkit-documentation-corrections). Native PR creation is blocked by the application's GitHub identity (HTTP 403, Enterprise Managed User); no PR number is claimed. The published `docs/mobkit` snapshot remains pinned to its existing released source. Publishing the corrections here requires the normal upstream release and subsequent verified documentation sync; this audit does not authorize a release or bypass provenance gates.

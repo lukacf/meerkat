@@ -616,6 +616,49 @@ mod tests {
         assert_eq!(state.calls.load(Ordering::SeqCst), 0);
     }
 
+    /// Live qualification against the real endpoint. Ignored by default;
+    /// run with `JEV_API_KEY` set:
+    /// `cargo test -p meerkat-decision live_jev -- --ignored`.
+    #[tokio::test]
+    #[ignore = "requires JEV_API_KEY and network access"]
+    async fn live_jev_evaluation_decodes_real_answers() {
+        let Ok(key) = std::env::var("JEV_API_KEY") else {
+            return;
+        };
+        let config = JevBackendConfig::default();
+        let backend =
+            JevBackend::new(&config, StaticJevCredential::new(JevBearerSecret::new(key))).unwrap();
+        let response = backend
+            .evaluate(&validated(), Deadline::after(Duration::from_secs(30)), 3)
+            .await
+            .unwrap();
+        let answers: BTreeMap<_, _> = response.answers.into_iter().collect();
+        assert!(matches!(
+            answers.get("is_urgent"),
+            Some(RawAnswer::BinaryProbability { yes }) if (0.0..=1.0).contains(yes)
+        ));
+        assert!(matches!(
+            answers.get("department"),
+            Some(RawAnswer::ChoiceSelected { option, distribution: Some(_) })
+                if option == "billing" || option == "technical"
+        ));
+        assert!(matches!(
+            answers.get("frustration"),
+            Some(RawAnswer::GradeWeighted { position, distribution: Some(_) })
+                if (0.0..=2.0).contains(position)
+        ));
+        assert!(matches!(response.route, RouteProvenance::Jev { .. }));
+        assert!(matches!(response.usage, BackendUsage::Reported { .. }));
+        // The service-level interpretation must also accept the live shape.
+        let judgments = crate::validate::validate_answers(
+            &validated(),
+            BackendKind::Jev,
+            answers.into_iter().collect(),
+        )
+        .unwrap();
+        assert_eq!(judgments.len(), 3);
+    }
+
     #[test]
     fn secrets_are_redacted_in_debug_output() {
         let secret = JevBearerSecret::new("very-secret");

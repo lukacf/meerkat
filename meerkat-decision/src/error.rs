@@ -224,11 +224,14 @@ pub enum DecisionError {
     InvalidRequest(RequestValidationError),
     #[error("decision service unavailable: {0}")]
     Unavailable(DecisionUnavailableReason),
-    #[error("decision backend failed: {failure}")]
+    #[error("decision backend failed after {attempts} attempt(s): {failure}")]
     BackendFailure {
         failure: BackendFailure,
         accounting: DecisionAccounting,
         budget: BudgetParticipation,
+        /// Provider attempts issued before the failure (0 when it failed
+        /// before any call).
+        attempts: u32,
     },
     #[error("decision backend returned an invalid answer: {error}")]
     InvalidAnswer {

@@ -43,7 +43,7 @@ pub fn build_decision_service(
     config: &Config,
     route_client: Option<Arc<dyn AgentLlmClient>>,
 ) -> Result<DecisionService, BuildAgentError> {
-    let binding = match (config.decision.backend, route_client) {
+    let binding = match (config.decision_config().backend, route_client) {
         (DecisionBackendSelection::Jev, _) => None,
         (DecisionBackendSelection::Llm, Some(client)) => Some(RouteBinding::Fixed(client)),
         (DecisionBackendSelection::Llm, None) => {
@@ -59,19 +59,19 @@ fn build_decision_service_with_binding(
     config: &Config,
     binding: RouteBinding,
 ) -> Result<DecisionService, BuildAgentError> {
-    config
-        .decision
+    let decision = config.decision_config();
+    decision
         .validate()
         .map_err(|error| BuildAgentError::Config(error.to_string()))?;
-    let limits: DecisionLimitsConfig = config.decision.limits;
-    let backend: Arc<dyn DecisionBackend> = match config.decision.backend {
+    let limits: DecisionLimitsConfig = decision.limits;
+    let backend: Arc<dyn DecisionBackend> = match decision.backend {
         DecisionBackendSelection::Llm => Arc::new(match binding {
             RouteBinding::Fixed(client) => LlmRouteBackend::fixed(client, limits.max_output_tokens),
             RouteBinding::AdmittedSession => {
                 LlmRouteBackend::admitted_session(limits.max_output_tokens)
             }
         }),
-        DecisionBackendSelection::Jev => build_jev_backend(config)?,
+        DecisionBackendSelection::Jev => build_jev_backend(&decision)?,
     };
     Ok(DecisionService::new(backend, limits))
 }
@@ -87,17 +87,17 @@ pub async fn build_host_decision_service(
     factory: &AgentFactory,
     config: &Config,
 ) -> Result<DecisionService, BuildAgentError> {
-    config
-        .decision
+    let decision = config.decision_config();
+    decision
         .validate()
         .map_err(|error| BuildAgentError::Config(error.to_string()))?;
-    let route_client: Option<Arc<dyn AgentLlmClient>> = match config.decision.backend {
+    let route_client: Option<Arc<dyn AgentLlmClient>> = match decision.backend {
         DecisionBackendSelection::Jev => None,
         DecisionBackendSelection::Llm => {
-            let route =
-                config.decision.host_route.as_ref().ok_or_else(|| {
-                    unavailable(DecisionUnavailableReason::HostRouteNotConfigured)
-                })?;
+            let route = decision
+                .host_route
+                .as_ref()
+                .ok_or_else(|| unavailable(DecisionUnavailableReason::HostRouteNotConfigured))?;
             let identity = SessionLlmIdentity {
                 model: route.model.clone(),
                 provider: route.provider,
@@ -129,8 +129,10 @@ fn unavailable(reason: DecisionUnavailableReason) -> BuildAgentError {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn build_jev_backend(config: &Config) -> Result<Arc<dyn DecisionBackend>, BuildAgentError> {
-    let jev = config.decision.jev.as_ref().ok_or_else(|| {
+fn build_jev_backend(
+    decision: &meerkat_core::DecisionConfig,
+) -> Result<Arc<dyn DecisionBackend>, BuildAgentError> {
+    let jev = decision.jev.as_ref().ok_or_else(|| {
         unavailable(DecisionUnavailableReason::BackendNotConfigured {
             backend: BackendKind::Jev,
         })
@@ -145,7 +147,9 @@ fn build_jev_backend(config: &Config) -> Result<Arc<dyn DecisionBackend>, BuildA
 }
 
 #[cfg(target_arch = "wasm32")]
-fn build_jev_backend(_config: &Config) -> Result<Arc<dyn DecisionBackend>, BuildAgentError> {
+fn build_jev_backend(
+    _decision: &meerkat_core::DecisionConfig,
+) -> Result<Arc<dyn DecisionBackend>, BuildAgentError> {
     Err(unavailable(DecisionUnavailableReason::BackendNotCompiled {
         backend: BackendKind::Jev,
     }))
@@ -256,14 +260,19 @@ mod tests {
     async fn host_service_on_jev_backend_needs_no_llm_route() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions"));
-        let mut config = Config::default();
-        config.decision.backend = DecisionBackendSelection::Jev;
-        config.decision.jev = Some(jev_config(
-            CredentialSourceSpec::InlineSecret {
-                secret: "inline".into(),
-            },
-            true,
-        ));
+        let config = Config {
+            decision: Some(meerkat_core::DecisionConfig {
+                backend: DecisionBackendSelection::Jev,
+                jev: Some(jev_config(
+                    CredentialSourceSpec::InlineSecret {
+                        secret: "inline".into(),
+                    },
+                    true,
+                )),
+                ..meerkat_core::DecisionConfig::default()
+            }),
+            ..Config::default()
+        };
         let service = build_host_decision_service(&factory, &config)
             .await
             .unwrap();
@@ -274,36 +283,43 @@ mod tests {
     #[test]
     fn jev_requires_its_table_disclosure_permission_and_a_supported_credential_source() {
         let mut config = Config::default();
-        config.decision.backend = DecisionBackendSelection::Jev;
+        let mut decision = meerkat_core::DecisionConfig {
+            backend: DecisionBackendSelection::Jev,
+            ..meerkat_core::DecisionConfig::default()
+        };
+        config.decision = Some(decision.clone());
         let error = build_decision_service(&config, None).unwrap_err();
         assert!(error.to_string().contains("[decision.jev]"));
 
-        config.decision.jev = Some(jev_config(
+        decision.jev = Some(jev_config(
             CredentialSourceSpec::Env {
                 env: "JEV_API_KEY".into(),
                 fallback: Vec::new(),
             },
             false,
         ));
+        config.decision = Some(decision.clone());
         let error = build_decision_service(&config, None).unwrap_err();
         assert!(
             error.to_string().contains("disclosure"),
             "unexpected: {error}"
         );
 
-        let jev = config.decision.jev.as_mut().unwrap();
+        let jev = decision.jev.as_mut().unwrap();
         jev.allow_disclosure = true;
         jev.credential = CredentialSourceSpec::ManagedStore;
+        config.decision = Some(decision.clone());
         let error = build_decision_service(&config, None).unwrap_err();
         assert!(
             error.to_string().contains("managed_store"),
             "unexpected: {error}"
         );
 
-        let jev = config.decision.jev.as_mut().unwrap();
+        let jev = decision.jev.as_mut().unwrap();
         jev.credential = CredentialSourceSpec::InlineSecret {
             secret: "inline".into(),
         };
+        config.decision = Some(decision);
         let service = build_decision_service(&config, None).unwrap();
         assert_eq!(service.backend().kind(), BackendKind::Jev);
     }

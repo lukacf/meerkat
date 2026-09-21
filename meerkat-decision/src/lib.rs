@@ -35,8 +35,8 @@ pub mod tool;
 pub mod validate;
 
 pub use backend::{
-    BackendResponse, BackendUsage, Deadline, DecisionBackend, FailedEvaluation, RawAnswer,
-    RawDistribution, RawGradeDistribution,
+    AttemptUsage, BackendResponse, BackendUsage, Deadline, DecisionBackend, FailedEvaluation,
+    RawAnswer, RawDistribution, RawGradeDistribution,
 };
 pub use contracts::{
     BackendKind, BinaryAnswer, BinaryCriteria, BinaryJudgment, BudgetParticipation, ChoiceJudgment,

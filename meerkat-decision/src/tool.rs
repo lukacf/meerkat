@@ -211,8 +211,14 @@ impl AgentToolDispatcher for DecisionToolSurface {
             Some(accounting) => BudgetAdmission::Nested(accounting.clone()),
             None => BudgetAdmission::NotIssued,
         });
-        if let Some(route) = context.nested_model_route() {
-            admission = admission.with_session_route(Arc::clone(route));
+        match context.nested_model_route() {
+            meerkat_core::NestedModelRoute::Forked(route) => {
+                admission = admission.with_session_route(route);
+            }
+            meerkat_core::NestedModelRoute::Unavailable(error) => {
+                admission = admission.with_unavailable_route(error.to_string());
+            }
+            meerkat_core::NestedModelRoute::NotIssued => {}
         }
 
         match self.service.evaluate(&admission, request).await {
@@ -322,6 +328,162 @@ mod tests {
             unreachable!("a missing route is a typed backend failure");
         };
         assert_eq!(data["failure"]["reason"], "route_unavailable");
+    }
+
+    /// The loop's client can change identity mid-run (a committed model
+    /// fallback). The context holds the client, not a fork taken at build,
+    /// so each dispatch forks the identity current at that moment.
+    #[tokio::test]
+    async fn route_is_forked_per_dispatch_and_follows_a_mid_run_identity_change() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct SwitchingClient {
+            active: AtomicUsize,
+            routes: Vec<Arc<ScriptedClient>>,
+        }
+
+        #[async_trait::async_trait]
+        impl meerkat_core::AgentLlmClient for SwitchingClient {
+            async fn stream_response(
+                &self,
+                _messages: &[meerkat_core::types::Message],
+                _tools: &[Arc<meerkat_core::types::ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&meerkat_core::ProviderParamsOverride>,
+            ) -> Result<meerkat_core::agent::LlmStreamResult, meerkat_core::error::AgentError>
+            {
+                unreachable!("the loop client itself is never used for the nested call")
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                self.routes[self.active.load(Ordering::SeqCst)].provider
+            }
+
+            fn model(&self) -> &str {
+                &self.routes[self.active.load(Ordering::SeqCst)].model
+            }
+
+            fn fork_noncommitting_live_bridge(
+                &self,
+            ) -> Result<Arc<dyn meerkat_core::AgentLlmClient>, meerkat_core::error::AgentError>
+            {
+                self.routes[self.active.load(Ordering::SeqCst)].fork_noncommitting_live_bridge()
+            }
+        }
+
+        let compliant = r#"{"answers": {"is_urgent": "yes", "department": "billing"}}"#;
+        let loop_client = Arc::new(SwitchingClient {
+            active: AtomicUsize::new(0),
+            routes: vec![
+                ScriptedClient::with_identity(
+                    vec![compliant],
+                    meerkat_core::Provider::Anthropic,
+                    "primary",
+                ),
+                ScriptedClient::with_identity(
+                    vec![compliant],
+                    meerkat_core::Provider::OpenAI,
+                    "fallback",
+                ),
+            ],
+        });
+        let surface = session_surface();
+        let raw = args();
+        // One context for the whole run, exactly as the agent loop builds it.
+        let context =
+            ToolDispatchContext::default().with_nested_model_route(Arc::clone(&loop_client));
+
+        let first = surface
+            .dispatch_with_context(
+                ToolCallView {
+                    id: "c1",
+                    name: "decide",
+                    args: &raw,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&first.result.text_content()).unwrap();
+        assert_eq!(value["route"]["model"], "primary");
+
+        // A fallback commits between two dispatches of the same run.
+        loop_client.active.store(1, Ordering::SeqCst);
+        let second = surface
+            .dispatch_with_context(
+                ToolCallView {
+                    id: "c2",
+                    name: "decide",
+                    args: &raw,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&second.result.text_content()).unwrap();
+        assert_eq!(value["route"]["model"], "fallback");
+        assert_eq!(value["route"]["provider"], "openai");
+        assert!(
+            loop_client.routes[1].requests.lock().unwrap().len() == 1,
+            "the second dispatch reached the fallback route"
+        );
+    }
+
+    /// A client that cannot fork is a typed route failure, never a silent
+    /// use of the committing parent client.
+    #[tokio::test]
+    async fn a_client_that_cannot_fork_is_a_typed_route_unavailability() {
+        struct Unforkable;
+
+        #[async_trait::async_trait]
+        impl meerkat_core::AgentLlmClient for Unforkable {
+            async fn stream_response(
+                &self,
+                _messages: &[meerkat_core::types::Message],
+                _tools: &[Arc<meerkat_core::types::ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&meerkat_core::ProviderParamsOverride>,
+            ) -> Result<meerkat_core::agent::LlmStreamResult, meerkat_core::error::AgentError>
+            {
+                unreachable!("the committing parent client must never serve the nested call")
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "unforkable"
+            }
+        }
+
+        let surface = session_surface();
+        let raw = args();
+        let context = ToolDispatchContext::default().with_nested_model_route(Arc::new(Unforkable));
+        let error = surface
+            .dispatch_with_context(
+                ToolCallView {
+                    id: "c1",
+                    name: "decide",
+                    args: &raw,
+                },
+                &context,
+            )
+            .await
+            .unwrap_err();
+        let ToolError::ExecutionFailedWithData { data, .. } = error else {
+            unreachable!("an unforkable route is a typed backend failure");
+        };
+        assert_eq!(data["failure"]["reason"], "route_unavailable");
+        assert!(
+            data["failure"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("event-isolated fork"),
+            "{data}"
+        );
     }
 
     fn args() -> Box<RawValue> {

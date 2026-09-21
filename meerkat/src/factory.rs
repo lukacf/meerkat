@@ -14465,15 +14465,18 @@ mod tests {
         build.override_builtins = ToolCategoryOverride::Disable;
         let mut config = Config::default();
         config.tools.decision_enabled = true;
-        config.decision.backend = meerkat_core::DecisionBackendSelection::Jev;
-        config.decision.jev = Some(meerkat_core::JevBackendConfig {
-            endpoint: meerkat_decision::DEFAULT_JEV_ENDPOINT.into(),
-            model: meerkat_decision::DEFAULT_JEV_MODEL.into(),
-            credential: meerkat_core::CredentialSourceSpec::Env {
-                env: "JEV_API_KEY".into(),
-                fallback: Vec::new(),
-            },
-            allow_disclosure: false,
+        config.decision = Some(meerkat_core::DecisionConfig {
+            backend: meerkat_core::DecisionBackendSelection::Jev,
+            jev: Some(meerkat_core::JevBackendConfig {
+                endpoint: meerkat_decision::DEFAULT_JEV_ENDPOINT.into(),
+                model: meerkat_decision::DEFAULT_JEV_MODEL.into(),
+                credential: meerkat_core::CredentialSourceSpec::Env {
+                    env: "JEV_API_KEY".into(),
+                    fallback: Vec::new(),
+                },
+                allow_disclosure: false,
+            }),
+            ..meerkat_core::DecisionConfig::default()
         });
 
         let Err(error) = factory.build_agent(build, &config).await else {

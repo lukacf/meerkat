@@ -51,17 +51,30 @@ them.
   tool provenance `ToolSourceKind::Decision` (catalog DSL first), realm-config
   vocabulary `meerkat_core::DecisionConfig`, and facade composition in
   `meerkat::build_decision_service` / `meerkat::build_host_decision_service`.
-  Inside an agent turn the `decide` tool routes over the event-isolated fork
-  of the loop's current client taken from each `ToolDispatchContext`
-  (`nested_model_route`), so it follows hot-swaps and fallbacks and never
-  streams into the session event channel. Hosts with no admitted session
-  route name an explicit `[decision.host_route]` (`provider`, `model`,
-  optional `auth_binding`). The Jev credential resolves through
+  Inside an agent turn the `decide` tool forks an event-isolated route from
+  the loop's *current* client at each call (`ToolDispatchContext::
+  nested_model_route` → `NestedModelRoute::{Forked, NotIssued, Unavailable}`),
+  so it follows a model fallback committed mid-run and never streams into
+  the session event channel; a client that cannot fork is the typed
+  `route_unavailable` failure, never a silent use of the committing client.
+  Hosts with no admitted session route name an explicit
+  `[decision.host_route]` (`provider`, `model`, optional `auth_binding`).
+  `Config.decision` is `Option<DecisionConfig>` (read through
+  `Config::decision_config()`): a declared table replaces the inherited one
+  as a whole, even when it equals the defaults, so a child realm revokes a
+  parent's Jev route by writing `[decision] backend = "llm"`; an undeclared
+  table inherits and is never written back. `decision.jev.endpoint` must be
+  `https://` (plaintext is admitted only for loopback hosts) and response
+  bodies are capped while streaming. The Jev credential resolves through
   `CredentialSourceSpec::Env` / `InlineSecret` only in this release; the
   managed-store and AuthMachine lease paths are refused typed
   (`DecisionUnavailableReason::CredentialSourceUnsupported`) rather than
-  half-wired. Failed evaluations carry the accounting that was still
-  measured (`DecisionError::BackendFailure { failure, accounting, budget }`).
+  half-wired. Every provider attempt is accounted (`AttemptUsage::{Measured,
+  Unmeasured}`): an attempt that spent tokens without reporting them makes
+  the whole evaluation `unmeasured` rather than an undercount, and failed
+  evaluations carry the accounting that was still measured plus the attempt
+  count (`DecisionError::BackendFailure { failure, accounting, budget,
+  attempts }`).
 
 ### Changed
 

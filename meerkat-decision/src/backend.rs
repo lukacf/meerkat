@@ -83,13 +83,25 @@ pub enum RawAnswer {
     },
 }
 
+/// Accounting for one provider attempt on an LLM route.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttemptUsage {
+    /// The stream completed and the adapter reported usage.
+    Measured(meerkat_core::types::Usage),
+    /// The attempt was issued but produced no usage report: the call failed
+    /// before its stream completed, or the deadline dropped it mid-flight.
+    /// Tokens may have been spent; their number is unknown, never zero.
+    Unmeasured,
+}
+
 /// Accounting as the backend reported it, covering every attempt made.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendUsage {
-    /// Raw provider usage from an LLM route, one entry per provider call
-    /// (including bounded repair attempts). Normalized by the service through
-    /// the shared [`meerkat_core::types::TurnUsage`] contract.
-    Provider(Vec<meerkat_core::types::Usage>),
+    /// One entry per provider call on an LLM route (including bounded repair
+    /// attempts), so an attempt that spent tokens without reporting them is
+    /// a typed absence rather than a missing entry. Normalized by the
+    /// service through the shared [`meerkat_core::types::TurnUsage`] contract.
+    Provider(Vec<AttemptUsage>),
     /// Tokens reported by a non-LLM model backend.
     Reported {
         input_tokens: u64,

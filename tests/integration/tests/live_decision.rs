@@ -314,15 +314,18 @@ async fn live_decision_jev_route_via_facade_config_keeps_native_signals() {
     require_jev_key();
     let mut config = Config::default();
     config.tools.decision_enabled = true;
-    config.decision.backend = meerkat_core::DecisionBackendSelection::Jev;
-    config.decision.jev = Some(meerkat_core::JevBackendConfig {
-        endpoint: meerkat_decision::DEFAULT_JEV_ENDPOINT.into(),
-        model: meerkat_decision::DEFAULT_JEV_MODEL.into(),
-        allow_disclosure: true,
-        credential: meerkat_core::CredentialSourceSpec::Env {
-            env: "JEV_API_KEY".into(),
-            fallback: vec!["RKAT_JEV_API_KEY".into()],
-        },
+    config.decision = Some(meerkat_core::DecisionConfig {
+        backend: meerkat_core::DecisionBackendSelection::Jev,
+        jev: Some(meerkat_core::JevBackendConfig {
+            endpoint: meerkat_decision::DEFAULT_JEV_ENDPOINT.into(),
+            model: meerkat_decision::DEFAULT_JEV_MODEL.into(),
+            allow_disclosure: true,
+            credential: meerkat_core::CredentialSourceSpec::Env {
+                env: "JEV_API_KEY".into(),
+                fallback: vec!["RKAT_JEV_API_KEY".into()],
+            },
+        }),
+        ..meerkat_core::DecisionConfig::default()
     });
     let service = meerkat::build_decision_service(&config, None).unwrap();
 

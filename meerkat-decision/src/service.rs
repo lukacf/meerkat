@@ -16,7 +16,7 @@ use meerkat_core::{
     DecisionLimitsConfig, NestedUsageAccounting, NestedUsageMeasurement, NestedUsageReservation,
 };
 
-use crate::backend::{BackendUsage, Deadline, DecisionBackend, FailedEvaluation};
+use crate::backend::{AttemptUsage, BackendUsage, Deadline, DecisionBackend, FailedEvaluation};
 use crate::contracts::{
     BudgetParticipation, DECISION_CONTRACT_VERSION, DecisionAccounting, DecisionRequest,
     DecisionResult,
@@ -54,12 +54,20 @@ pub enum RouteAdmission {
     None,
     /// The caller's current admitted route, event-isolated.
     Session(Arc<dyn AgentLlmClient>),
+    /// The caller has a route but it could not be isolated for a nested
+    /// call; a backend bound to the session reports this typed, a backend
+    /// that needs no route ignores it.
+    Unavailable { message: String },
 }
 
 impl std::fmt::Debug for RouteAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::None => f.write_str("RouteAdmission::None"),
+            Self::Unavailable { message } => f
+                .debug_struct("RouteAdmission::Unavailable")
+                .field("message", message)
+                .finish(),
             Self::Session(client) => f
                 .debug_struct("RouteAdmission::Session")
                 .field("provider", &client.provider())
@@ -97,6 +105,15 @@ impl DecisionAdmission {
     #[must_use]
     pub fn with_session_route(mut self, route: Arc<dyn AgentLlmClient>) -> Self {
         self.route = RouteAdmission::Session(route);
+        self
+    }
+
+    /// Record that the caller's route exists but could not be isolated.
+    #[must_use]
+    pub fn with_unavailable_route(mut self, message: impl Into<String>) -> Self {
+        self.route = RouteAdmission::Unavailable {
+            message: message.into(),
+        };
         self
     }
 
@@ -175,7 +192,11 @@ impl DecisionService {
         .await;
         let response = match evaluation {
             Ok(Ok(response)) => response,
-            Ok(Err(FailedEvaluation { failure, usage, .. })) => {
+            Ok(Err(FailedEvaluation {
+                failure,
+                usage,
+                attempts,
+            })) => {
                 // The backend may have spent tokens before failing; settle
                 // from what it measured, never from an assumed zero.
                 let (accounting, budget) = settle(held, &usage);
@@ -183,6 +204,7 @@ impl DecisionService {
                     failure,
                     accounting,
                     budget,
+                    attempts,
                 });
             }
             Err(_elapsed) => {
@@ -227,20 +249,27 @@ fn settle(
     usage: &BackendUsage,
 ) -> (DecisionAccounting, BudgetParticipation) {
     let (accounting, measurement) = match usage {
-        BackendUsage::Provider(usages) if usages.is_empty() => (
+        BackendUsage::Provider(attempts) if attempts.is_empty() => (
             DecisionAccounting::Unmeasured,
             NestedUsageMeasurement::Unmeasured,
         ),
-        BackendUsage::Provider(usages) => {
+        BackendUsage::Provider(attempts) => {
             // Normalization has one owner: the shared TurnUsage contract.
-            // Every attempt must carry provider accounting evidence for the
-            // evaluation to count as measured; a counter without evidence is
-            // not promoted to a number, because that number could be a
-            // fabricated zero.
-            let turns = usages
+            // Every attempt must have completed with provider accounting
+            // evidence for the evaluation to count as measured; an attempt
+            // that spent tokens without reporting them, or a counter without
+            // evidence, is not promoted to a number, because that number
+            // could be a fabricated zero.
+            let turns = attempts
                 .iter()
-                .map(|usage| meerkat_core::types::TurnUsage::try_from_usage(usage.clone()))
-                .collect::<Result<Vec<_>, _>>();
+                .map(|attempt| match attempt {
+                    AttemptUsage::Measured(usage) => {
+                        meerkat_core::types::TurnUsage::try_from_usage(usage.clone())
+                            .map_err(|_| ())
+                    }
+                    AttemptUsage::Unmeasured => Err(()),
+                })
+                .collect::<Result<Vec<_>, ()>>();
             match turns {
                 Ok(turns) => {
                     let (input_tokens, output_tokens) =
@@ -259,7 +288,7 @@ fn settle(
                         NestedUsageMeasurement::ProviderTurns(turns),
                     )
                 }
-                Err(_) => (
+                Err(()) => (
                     DecisionAccounting::Unmeasured,
                     NestedUsageMeasurement::Unmeasured,
                 ),
@@ -381,7 +410,7 @@ mod tests {
     }
 
     fn provider_usage_with_accounting() -> BackendUsage {
-        BackendUsage::Provider(vec![accounted_usage(120, 30)])
+        BackendUsage::Provider(vec![AttemptUsage::Measured(accounted_usage(120, 30))])
     }
 
     fn nested_admission(budget: &Budget) -> DecisionAdmission {
@@ -422,7 +451,10 @@ mod tests {
     #[tokio::test]
     async fn every_provider_attempt_is_charged_and_reported() {
         let budget = Budget::new(BudgetLimits::default().with_max_tokens(10_000));
-        let usage = BackendUsage::Provider(vec![accounted_usage(40, 12), accounted_usage(45, 10)]);
+        let usage = BackendUsage::Provider(vec![
+            AttemptUsage::Measured(accounted_usage(40, 12)),
+            AttemptUsage::Measured(accounted_usage(45, 10)),
+        ]);
         let service = DecisionService::new(
             ScriptedBackend::once(Ok(valid_response(usage))),
             DecisionLimitsConfig::default(),
@@ -464,13 +496,14 @@ mod tests {
     #[tokio::test]
     async fn unmeasured_usage_releases_the_reservation_and_marks_the_result() {
         let budget = Budget::new(BudgetLimits::default().with_max_tokens(10_000));
-        let raw_without_accounting = BackendUsage::Provider(vec![meerkat_core::types::Usage {
-            input_tokens: 5,
-            output_tokens: 5,
-            cache_creation_tokens: None,
-            cache_read_tokens: None,
-            provider_accounting: None,
-        }]);
+        let raw_without_accounting =
+            BackendUsage::Provider(vec![AttemptUsage::Measured(meerkat_core::types::Usage {
+                input_tokens: 5,
+                output_tokens: 5,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                provider_accounting: None,
+            })]);
         let service = DecisionService::new(
             ScriptedBackend::once(Ok(valid_response(raw_without_accounting))),
             DecisionLimitsConfig::default(),
@@ -491,14 +524,14 @@ mod tests {
     async fn one_unaccounted_attempt_makes_the_whole_evaluation_unmeasured() {
         let budget = Budget::new(BudgetLimits::default().with_max_tokens(10_000));
         let mixed = BackendUsage::Provider(vec![
-            accounted_usage(40, 12),
-            meerkat_core::types::Usage {
+            AttemptUsage::Measured(accounted_usage(40, 12)),
+            AttemptUsage::Measured(meerkat_core::types::Usage {
                 input_tokens: 0,
                 output_tokens: 0,
                 cache_creation_tokens: None,
                 cache_read_tokens: None,
                 provider_accounting: None,
-            },
+            }),
         ]);
         let service = DecisionService::new(
             ScriptedBackend::once(Ok(valid_response(mixed))),
@@ -573,8 +606,8 @@ mod tests {
                     message: "still not json".into(),
                 },
                 usage: BackendUsage::Provider(vec![
-                    accounted_usage(40, 12),
-                    accounted_usage(40, 12),
+                    AttemptUsage::Measured(accounted_usage(40, 12)),
+                    AttemptUsage::Measured(accounted_usage(40, 12)),
                 ]),
                 attempts: 2,
             })),
@@ -594,9 +627,43 @@ mod tests {
                     output_tokens: 24
                 },
                 budget: BudgetParticipation::Charged { tokens: 104 },
+                attempts: 2,
             }
         ));
         assert_eq!(budget.token_usage(), Some((104, 10_000)));
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_spent_without_reporting_makes_the_failure_unmeasured() {
+        // First attempt measured, repair attempt dropped mid-flight: the
+        // earlier counters are not promoted to a total that omits the second
+        // call's unknown spend.
+        let budget = Budget::new(BudgetLimits::default().with_max_tokens(10_000));
+        let service = DecisionService::new(
+            ScriptedBackend::once(Err(FailedEvaluation {
+                failure: BackendFailure::Timeout,
+                usage: BackendUsage::Provider(vec![
+                    AttemptUsage::Measured(accounted_usage(40, 12)),
+                    AttemptUsage::Unmeasured,
+                ]),
+                attempts: 2,
+            })),
+            DecisionLimitsConfig::default(),
+        );
+        let error = service
+            .evaluate(&nested_admission(&budget), sample_request())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DecisionError::BackendFailure {
+                failure: BackendFailure::Timeout,
+                accounting: DecisionAccounting::Unmeasured,
+                budget: BudgetParticipation::Unmeasured,
+                attempts: 2,
+            }
+        ));
+        assert_eq!(budget.token_usage(), Some((0, 10_000)));
     }
 
     #[tokio::test]
@@ -617,6 +684,7 @@ mod tests {
                 failure: BackendFailure::Unauthorized,
                 accounting: DecisionAccounting::Unmeasured,
                 budget: BudgetParticipation::Unmeasured,
+                attempts: 0,
             }
         );
         assert_eq!(budget.token_usage(), Some((0, 10_000)));

@@ -39,11 +39,6 @@ pub struct DecisionConfig {
 }
 
 impl DecisionConfig {
-    /// Whether this table carries no declaration beyond the defaults.
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     /// Validate configuration invariants for this table.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.backend == DecisionBackendSelection::Jev && self.jev.is_none() {
@@ -133,9 +128,29 @@ impl JevBackendConfig {
                 "decision.jev.endpoint must not be empty".into(),
             ));
         }
-        if !(self.endpoint.starts_with("https://") || self.endpoint.starts_with("http://")) {
+        // The bearer credential travels in this request; plaintext is
+        // admitted only to loopback, which exists for local mock servers.
+        let plaintext_loopback = self
+            .endpoint
+            .strip_prefix("http://")
+            .map(|rest| {
+                let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+                let host = authority
+                    .strip_prefix('[')
+                    .and_then(|v6| v6.split(']').next())
+                    .unwrap_or_else(|| {
+                        authority
+                            .rsplit_once(':')
+                            .map_or(authority, |(host, _)| host)
+                    });
+                matches!(host, "127.0.0.1" | "localhost" | "::1")
+            })
+            .unwrap_or(false);
+        if !(self.endpoint.starts_with("https://") || plaintext_loopback) {
             return Err(ConfigError::Validation(
-                "decision.jev.endpoint must be an http(s) URL".into(),
+                "decision.jev.endpoint must be an https:// URL (http:// is admitted only for \
+                 loopback hosts)"
+                    .into(),
             ));
         }
         if self.model.trim().is_empty() {
@@ -248,25 +263,100 @@ mod tests {
         let config = DecisionConfig::default();
         assert_eq!(config.backend, DecisionBackendSelection::Llm);
         assert!(config.jev.is_none());
-        assert!(config.is_default());
         config.validate().unwrap();
     }
 
+    fn jev(allow_disclosure: bool) -> JevBackendConfig {
+        JevBackendConfig {
+            endpoint: "https://jev.example/v1".into(),
+            model: "jev-latest".into(),
+            credential: CredentialSourceSpec::Env {
+                env: "JEV_API_KEY".into(),
+                fallback: Vec::new(),
+            },
+            allow_disclosure,
+        }
+    }
+
     #[test]
-    fn untouched_table_is_not_written_back_but_a_declared_one_round_trips() {
+    fn undeclared_table_is_not_written_back_but_a_declared_one_round_trips() {
         let rendered = toml::to_string(&crate::Config::default()).unwrap();
         assert!(
             !rendered.contains("[decision"),
-            "a default decision table must not be rendered: {rendered}"
+            "an undeclared decision table must not be rendered: {rendered}"
+        );
+        assert_eq!(
+            *crate::Config::default().decision_config(),
+            DecisionConfig::default()
         );
 
-        let mut config = crate::Config::default();
-        config.decision.limits.max_questions = 3;
+        // A declared table round-trips even when it equals the defaults: the
+        // declaration itself is the fact a child uses to revoke inheritance.
+        let config = crate::Config {
+            decision: Some(DecisionConfig::default()),
+            ..crate::Config::default()
+        };
         let rendered = toml::to_string(&config).unwrap();
-        assert!(rendered.contains("[decision.limits]"), "{rendered}");
+        assert!(rendered.contains("[decision"), "{rendered}");
         let parsed: crate::Config = toml::from_str(&rendered).unwrap();
-        assert_eq!(parsed.decision, config.decision);
-        assert!(!parsed.decision.is_default());
+        assert_eq!(parsed.decision, Some(DecisionConfig::default()));
+    }
+
+    #[test]
+    fn a_child_realm_can_revoke_an_inherited_jev_route_by_declaring_the_default() {
+        let jev_parent = || crate::Config {
+            decision: Some(DecisionConfig {
+                backend: DecisionBackendSelection::Jev,
+                jev: Some(jev(true)),
+                ..DecisionConfig::default()
+            }),
+            ..crate::Config::default()
+        };
+        let mut parent = jev_parent();
+        // The child writes only the default backend; that declaration wins.
+        parent
+            .merge_toml_str("[decision]\nbackend = \"llm\"\n")
+            .unwrap();
+        let effective = parent.decision_config();
+        assert_eq!(effective.backend, DecisionBackendSelection::Llm);
+        assert!(
+            effective.jev.is_none(),
+            "the inherited Jev table is revoked"
+        );
+
+        // A child that declares nothing inherits.
+        let mut parent = jev_parent();
+        parent
+            .merge_toml_str("[tools]\ndecision_enabled = true\n")
+            .unwrap();
+        assert_eq!(
+            parent.decision_config().backend,
+            DecisionBackendSelection::Jev
+        );
+    }
+
+    #[test]
+    fn jev_endpoint_must_be_https_except_loopback() {
+        for endpoint in [
+            "https://api.typesafe.ai/v1/systemone",
+            "http://127.0.0.1:8080/v1",
+            "http://localhost/v1",
+            "http://[::1]:9/v1",
+        ] {
+            let mut config = jev(true);
+            config.endpoint = endpoint.into();
+            assert!(config.validate().is_ok(), "{endpoint}");
+        }
+        for endpoint in [
+            "http://api.typesafe.ai/v1/systemone",
+            "http://10.0.0.5/v1",
+            "http://localhost.evil.example/v1",
+            "ftp://api.typesafe.ai/v1",
+        ] {
+            let mut config = jev(true);
+            config.endpoint = endpoint.into();
+            assert!(config.validate().is_err(), "{endpoint}");
+        }
     }
 
     #[test]

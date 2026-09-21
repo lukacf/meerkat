@@ -332,8 +332,10 @@ fn backoff_for(attempt: u32) -> Duration {
     Duration::from_millis(250u64.saturating_mul(1u64 << attempt.min(6)))
 }
 
-/// Read at most [`MAX_RESPONSE_BODY_BYTES`] of the response body.
-async fn read_bounded_body(response: reqwest::Response) -> Result<String, BackendFailure> {
+/// Read at most [`MAX_RESPONSE_BODY_BYTES`] of the response body, aborting
+/// the read as soon as the cap is crossed so a chunked response without a
+/// length header cannot buffer past it.
+async fn read_bounded_body(mut response: reqwest::Response) -> Result<String, BackendFailure> {
     if let Some(length) = response.content_length()
         && length > MAX_RESPONSE_BODY_BYTES as u64
     {
@@ -343,21 +345,22 @@ async fn read_bounded_body(response: reqwest::Response) -> Result<String, Backen
             ),
         });
     }
-    let bytes = response
-        .bytes()
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
         .map_err(|error| BackendFailure::Transport {
             message: error.without_url().to_string(),
-        })?;
-    if bytes.len() > MAX_RESPONSE_BODY_BYTES {
-        return Err(BackendFailure::InvalidResponse {
-            message: format!(
-                "response body of {} bytes exceeds the {MAX_RESPONSE_BODY_BYTES}-byte limit",
-                bytes.len()
-            ),
-        });
+        })?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BODY_BYTES {
+            return Err(BackendFailure::InvalidResponse {
+                message: format!("response body exceeds the {MAX_RESPONSE_BODY_BYTES}-byte limit"),
+            });
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    String::from_utf8(bytes.to_vec()).map_err(|error| BackendFailure::InvalidResponse {
+    String::from_utf8(bytes).map_err(|error| BackendFailure::InvalidResponse {
         message: format!("response body is not UTF-8: {error}"),
     })
 }

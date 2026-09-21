@@ -21,13 +21,14 @@ use meerkat_core::error::{AgentError, LlmFailureReason, LlmProviderErrorKind};
 use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
 use meerkat_core::time_compat::Duration;
 use meerkat_core::types::{
-    AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, SystemMessage, Usage,
+    AssistantBlock, BlockAssistantMessage, Message, OutputSchema, StopReason, SystemMessage,
     UserMessage,
 };
 use serde_json::{Value, json};
 
 use crate::backend::{
-    BackendResponse, BackendUsage, Deadline, DecisionBackend, FailedEvaluation, RawAnswer,
+    AttemptUsage, BackendResponse, BackendUsage, Deadline, DecisionBackend, FailedEvaluation,
+    RawAnswer,
 };
 use crate::contracts::{BackendKind, BinaryAnswer, Question, QuestionId, RouteProvenance};
 use crate::error::BackendFailure;
@@ -111,9 +112,16 @@ impl LlmRouteBackend {
             }
             (RouteBinding::AdmittedSession, RouteAdmission::None) => {
                 Err(BackendFailure::RouteUnavailable {
-                    message: "the dispatching loop admitted no session route; the LLM client \
-                              in use cannot provide an event-isolated fork"
+                    message: "the dispatching context admitted no session route (host or \
+                              standalone invocation)"
                         .to_string(),
+                })
+            }
+            (RouteBinding::AdmittedSession, RouteAdmission::Unavailable { message }) => {
+                Err(BackendFailure::RouteUnavailable {
+                    message: format!(
+                        "the session's LLM client cannot provide an event-isolated fork: {message}"
+                    ),
                 })
             }
         }
@@ -452,23 +460,32 @@ impl DecisionBackend for LlmRouteBackend {
             Message::System(SystemMessage::new(LLM_ROUTE_SYSTEM_PROMPT)),
             Message::User(UserMessage::text(document)),
         ];
-        let mut usages: Vec<Usage> = Vec::new();
+        let mut usages: Vec<AttemptUsage> = Vec::new();
         let mut attempts = 0u32;
         loop {
+            if deadline.is_expired() {
+                // Nothing was issued for this attempt; the count stays.
+                return Err(FailedEvaluation {
+                    failure: BackendFailure::Timeout,
+                    usage: BackendUsage::Provider(usages),
+                    attempts,
+                });
+            }
             attempts += 1;
-            let fail = |failure: BackendFailure, usages: &Vec<Usage>| FailedEvaluation {
+            let fail = |failure: BackendFailure, usages: &Vec<AttemptUsage>| FailedEvaluation {
                 failure,
                 usage: BackendUsage::Provider(usages.clone()),
                 attempts,
             };
-            if deadline.is_expired() {
-                return Err(fail(BackendFailure::Timeout, &usages));
-            }
             let call =
                 client.stream_response(&messages, &[], self.max_output_tokens, None, Some(&params));
             let result = match tokio::time::timeout(deadline.remaining(), call).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(error)) => {
+                    // The request was issued and may have spent tokens the
+                    // adapter could not report: a typed absence, never a
+                    // missing entry.
+                    usages.push(AttemptUsage::Unmeasured);
                     let failure = map_provider_failure(&error);
                     if failure.is_transient() && attempts < max_attempts {
                         let wait = backoff_for(attempts).min(deadline.remaining());
@@ -486,10 +503,14 @@ impl DecisionBackend for LlmRouteBackend {
                     }
                     return Err(fail(failure, &usages));
                 }
-                Err(_elapsed) => return Err(fail(BackendFailure::Timeout, &usages)),
+                Err(_elapsed) => {
+                    // Dropped mid-flight: issued, spend unknown.
+                    usages.push(AttemptUsage::Unmeasured);
+                    return Err(fail(BackendFailure::Timeout, &usages));
+                }
             };
             let (blocks, stop_reason, usage) = result.into_parts();
-            usages.push(usage);
+            usages.push(AttemptUsage::Measured(usage));
             // A cut-off envelope is a budget fact, not a format defect: a
             // repair request would spend the same allowance the same way.
             if matches!(stop_reason, StopReason::MaxTokens) {
@@ -553,7 +574,7 @@ pub(crate) mod tests {
 
     use meerkat_core::agent::LlmStreamResult;
     use meerkat_core::error::AgentError;
-    use meerkat_core::types::ToolDef;
+    use meerkat_core::types::{ToolDef, Usage};
     use meerkat_core::{DecisionLimitsConfig, Provider};
 
     use super::*;
@@ -567,9 +588,12 @@ pub(crate) mod tests {
 
     /// Scripted agent-level client. Records every request so tests can assert
     /// the request is tool-free, schema-bound, and bounded.
+    /// Scripted route. Script and recorded requests are shared with every
+    /// fork, so a test can drive the loop's client and inspect what the
+    /// per-dispatch forks were asked.
     pub(crate) struct ScriptedClient {
-        pub outcomes: Mutex<Vec<ScriptedOutcome>>,
-        pub requests: Mutex<Vec<RecordedRequest>>,
+        pub outcomes: Arc<Mutex<Vec<ScriptedOutcome>>>,
+        pub requests: Arc<Mutex<Vec<RecordedRequest>>>,
         pub stop_reason: StopReason,
         pub provider: Provider,
         pub model: String,
@@ -586,13 +610,13 @@ pub(crate) mod tests {
     impl ScriptedClient {
         pub(crate) fn new(outputs: Vec<&str>) -> Arc<Self> {
             Arc::new(Self {
-                outcomes: Mutex::new(
+                outcomes: Arc::new(Mutex::new(
                     outputs
                         .into_iter()
                         .map(|text| ScriptedOutcome::Text(text.to_string()))
                         .collect(),
-                ),
-                requests: Mutex::new(Vec::new()),
+                )),
+                requests: Arc::new(Mutex::new(Vec::new())),
                 stop_reason: StopReason::EndTurn,
                 provider: Provider::OpenAI,
                 model: "scripted-model".into(),
@@ -605,13 +629,13 @@ pub(crate) mod tests {
             model: &str,
         ) -> Arc<Self> {
             let client = Self {
-                outcomes: Mutex::new(
+                outcomes: Arc::new(Mutex::new(
                     outputs
                         .drain(..)
                         .map(|text| ScriptedOutcome::Text(text.to_string()))
                         .collect(),
-                ),
-                requests: Mutex::new(Vec::new()),
+                )),
+                requests: Arc::new(Mutex::new(Vec::new())),
                 stop_reason: StopReason::EndTurn,
                 provider,
                 model: model.to_string(),
@@ -621,8 +645,8 @@ pub(crate) mod tests {
 
         fn scripted(outcomes: Vec<ScriptedOutcome>) -> Arc<Self> {
             Arc::new(Self {
-                outcomes: Mutex::new(outcomes),
-                requests: Mutex::new(Vec::new()),
+                outcomes: Arc::new(Mutex::new(outcomes)),
+                requests: Arc::new(Mutex::new(Vec::new())),
                 stop_reason: StopReason::EndTurn,
                 provider: Provider::OpenAI,
                 model: "scripted-model".into(),
@@ -631,13 +655,13 @@ pub(crate) mod tests {
 
         fn truncating(outputs: Vec<&str>) -> Arc<Self> {
             Arc::new(Self {
-                outcomes: Mutex::new(
+                outcomes: Arc::new(Mutex::new(
                     outputs
                         .into_iter()
                         .map(|text| ScriptedOutcome::Text(text.to_string()))
                         .collect(),
-                ),
-                requests: Mutex::new(Vec::new()),
+                )),
+                requests: Arc::new(Mutex::new(Vec::new())),
                 stop_reason: StopReason::MaxTokens,
                 provider: Provider::OpenAI,
                 model: "scripted-model".into(),
@@ -683,6 +707,18 @@ pub(crate) mod tests {
 
         fn model(&self) -> &str {
             &self.model
+        }
+
+        // The fork shares the script and the request log, so a test drives
+        // the loop's client and observes the per-dispatch forks.
+        fn fork_noncommitting_live_bridge(&self) -> Result<Arc<dyn AgentLlmClient>, AgentError> {
+            Ok(Arc::new(Self {
+                outcomes: Arc::clone(&self.outcomes),
+                requests: Arc::clone(&self.requests),
+                stop_reason: self.stop_reason,
+                provider: self.provider,
+                model: self.model.clone(),
+            }))
         }
     }
 
@@ -953,9 +989,17 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(response.attempts, 2);
+        // The failed first call is a typed unmeasured attempt, never a
+        // missing entry (which would let the second call's counters pass as
+        // the whole evaluation's spend) and never a fabricated zero.
         assert!(
-            matches!(response.usage, BackendUsage::Provider(ref usages) if usages.len() == 1),
-            "a failed call that returned no usage adds no fabricated entry"
+            matches!(
+                response.usage,
+                BackendUsage::Provider(ref usages)
+                    if matches!(usages.as_slice(), [AttemptUsage::Unmeasured, AttemptUsage::Measured(_)])
+            ),
+            "{:?}",
+            response.usage
         );
 
         let client = ScriptedClient::scripted(vec![ScriptedOutcome::Failure(AgentError::llm(

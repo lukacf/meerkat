@@ -2413,6 +2413,7 @@ mod content_block_tests {
             ToolSourceKind::Callback,
             ToolSourceKind::Mcp,
             ToolSourceKind::RustBundle,
+            ToolSourceKind::Decision,
         ];
         for kind in kinds {
             let prov = ToolProvenance {

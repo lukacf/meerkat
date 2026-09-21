@@ -48,23 +48,7 @@ pub async fn resolve_simple_secret(
     match source {
         CredentialSourceSpec::InlineSecret { secret } => Ok(secret.clone()),
         CredentialSourceSpec::Env { env: var, fallback } => {
-            // Single canonical owner of env-var credential resolution
-            // policy (dogma §1). For each var name (primary + ordered
-            // fallback chain), `RKAT_<VAR>` overrides `<VAR>`. The
-            // factory body no longer encodes this policy inline.
-            let candidates =
-                std::iter::once(var.as_str()).chain(fallback.iter().map(String::as_str));
-            for candidate in candidates {
-                let rkat_override = if candidate.starts_with("RKAT_") {
-                    None
-                } else {
-                    (env.env_lookup)(&format!("RKAT_{candidate}"))
-                };
-                if let Some(value) = rkat_override.or_else(|| (env.env_lookup)(candidate)) {
-                    return Ok(value);
-                }
-            }
-            Err(ProviderAuthError::Auth(AuthError::MissingSecret))
+            resolve_env_secret(var, fallback, &env.env_lookup)
         }
         CredentialSourceSpec::ExternalResolver { handle } => {
             let resolver = env
@@ -121,6 +105,31 @@ pub async fn resolve_simple_secret(
             Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))
         }
     }
+}
+
+/// Single canonical owner of env-var credential resolution policy (dogma §1).
+///
+/// For each var name (primary + ordered fallback chain), `RKAT_<VAR>`
+/// overrides `<VAR>`. Every consumer of an [`CredentialSourceSpec::Env`]
+/// source — LLM provider runtimes and non-LLM backends alike — resolves
+/// through this function so no second copy of the precedence rule exists.
+pub fn resolve_env_secret(
+    var: &str,
+    fallback: &[String],
+    env_lookup: &meerkat_llm_core::provider_runtime::registry::EnvLookup,
+) -> Result<String, ProviderAuthError> {
+    let candidates = std::iter::once(var).chain(fallback.iter().map(String::as_str));
+    for candidate in candidates {
+        let rkat_override = if candidate.starts_with("RKAT_") {
+            None
+        } else {
+            env_lookup(&format!("RKAT_{candidate}"))
+        };
+        if let Some(value) = rkat_override.or_else(|| env_lookup(candidate)) {
+            return Ok(value);
+        }
+    }
+    Err(ProviderAuthError::Auth(AuthError::MissingSecret))
 }
 
 /// Resolve a command-source credential, routing the cached-vs-rerun freshness

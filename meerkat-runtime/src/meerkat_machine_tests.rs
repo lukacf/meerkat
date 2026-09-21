@@ -40872,6 +40872,7 @@ fn runtime_modeled_tool_source_kind_label(kind: &meerkat_core::ToolSourceKind) -
         meerkat_core::ToolSourceKind::Callback => "Callback",
         meerkat_core::ToolSourceKind::Mcp => "Mcp",
         meerkat_core::ToolSourceKind::RustBundle => "RustBundle",
+        meerkat_core::ToolSourceKind::Decision => "Decision",
     }
 }
 
@@ -40887,6 +40888,7 @@ fn runtime_modeled_tool_source_kind_from_label(raw: &str) -> Option<meerkat_core
         "Callback" | "callback" => Some(meerkat_core::ToolSourceKind::Callback),
         "Mcp" | "mcp" => Some(meerkat_core::ToolSourceKind::Mcp),
         "RustBundle" | "rust_bundle" => Some(meerkat_core::ToolSourceKind::RustBundle),
+        "Decision" | "decision" => Some(meerkat_core::ToolSourceKind::Decision),
         _ => None,
     }
 }

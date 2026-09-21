@@ -30,6 +30,28 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat-decision`: a provider-neutral batched semantic decision service.
+  Typed `binary`, `choose_one`, and `grade` questions are evaluated over
+  bounded supplied state in one call and return typed judgments (including
+  explicit abstention), backend-qualified native signals, exact route
+  provenance, and typed accounting. The default backend is one tool-free
+  structured request through the session's already-admitted LLM route; an
+  optional Jev (TypeSafe) adapter is selected only by explicit
+  `[decision] backend = "jev"` with a typed credential source and
+  `allow_disclosure = true`. The agent-callable `decide` tool is composed by
+  the facade only when `tools.decision_enabled = true` (or an explicit
+  `AgentFactory::decision(ToolCategoryOverride::Enable)`); disabled realms
+  build no client, perform no credential lookup, and make no network call.
+  Nested model usage participates once in the owning agent's token budget
+  through `Budget::nested_usage_accounting` (reservation before egress, exact
+  settlement afterwards, typed `Unmeasured`/`NotIssued` markers, never a
+  fabricated zero). Feature-owned capability declaration `CapabilityId::Decision`,
+  tool provenance `ToolSourceKind::Decision` (catalog DSL first), realm-config
+  vocabulary `meerkat_core::DecisionConfig`, and facade composition in
+  `meerkat::build_decision_service`.
+
 ### Changed
 
 - Windows release binaries are cross-compiled from Linux with cargo-xwin

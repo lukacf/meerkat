@@ -28,6 +28,7 @@ meerkat-gemini = { workspace = true, optional = true, default-features = false }
 meerkat-copilot = { workspace = true, optional = true, default-features = false }
 meerkat-schedule = { workspace = true }
 meerkat-workgraph = { workspace = true }
+meerkat-decision = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-runtime = { workspace = true }
 meerkat-tools = { workspace = true }

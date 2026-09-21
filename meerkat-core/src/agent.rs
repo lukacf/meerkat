@@ -684,6 +684,7 @@ pub struct ToolDispatchContext {
     run_id: Option<crate::RunId>,
     streaming: Option<crate::ToolStreamingDispatchContext>,
     live_bridge_admission: Option<LiveBridgeToolDispatchAdmission>,
+    nested_usage: Option<crate::budget::NestedUsageAccounting>,
 }
 
 /// Process-local live bridge authority carried to the last actual tool
@@ -984,6 +985,7 @@ impl ToolDispatchContext {
             run_id: None,
             streaming: None,
             live_bridge_admission: None,
+            nested_usage: None,
         }
     }
 
@@ -1069,6 +1071,32 @@ impl ToolDispatchContext {
     #[must_use]
     pub fn live_bridge_admission(&self) -> Option<&LiveBridgeToolDispatchAdmission> {
         self.live_bridge_admission.as_ref()
+    }
+
+    /// Bind an owner-issued nested-usage accounting handle.
+    ///
+    /// The handle itself is the authority: only [`crate::budget::Budget`]
+    /// mints one, so attaching it here cannot grant participation the owner
+    /// did not issue. The agent loop attaches its own budget's handle; hosts
+    /// composing a standalone dispatch context attach one they own.
+    #[must_use]
+    pub fn with_nested_usage_accounting(
+        mut self,
+        nested_usage: crate::budget::NestedUsageAccounting,
+    ) -> Self {
+        self.nested_usage = Some(nested_usage);
+        self
+    }
+
+    /// Owner-issued handle for nested model usage, when the dispatching loop
+    /// issued one.
+    ///
+    /// Standalone and test contexts carry none. A tool that performs its own
+    /// model call must then report typed non-participation on its outcome
+    /// rather than fabricating accounting or keeping a private counter.
+    #[must_use]
+    pub fn nested_usage_accounting(&self) -> Option<&crate::budget::NestedUsageAccounting> {
+        self.nested_usage.as_ref()
     }
 
     pub fn current_turn_image(

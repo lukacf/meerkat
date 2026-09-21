@@ -19,6 +19,7 @@ printf '%s\n' \
   meerkat-schedule \
   meerkat-jobs \
   meerkat-workgraph \
+  meerkat-decision \
   meerkat-contracts \
   meerkat-store \
   meerkat-llm-core \

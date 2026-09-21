@@ -179,6 +179,8 @@ meerkat-jobs      → Durable detached-job lifecycle, atomic store/outbox contra
 meerkat-mob-mcp   → Shared mob surface orchestration (MobMcpState), public MCP, and agent-facing
                      mob tools including delegate, fork_off, and temporary councils
 meerkat-workgraph → Work graph (work items, dependencies) + agent-facing workgraph tools
+meerkat-decision  → Batched semantic decision service (binary/choose-one/grade judgments, session-LLM
+                     backend, optional Jev adapter, agent-facing `decide` tool, capability declaration)
 meerkat-runtime   → Runtime control plane (MeerkatMachine, ops lifecycle, runtime handles) between surfaces and core
 meerkat-live      → Live multimodal WebSocket transport plus feature-gated WebRTC signaling/media
 meerkat-cli       → CLI binary (produces `rkat`)
@@ -307,6 +309,9 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-schedule/src/machines/` - Schedule and occurrence lifecycle machines (schedule_lifecycle.rs, occurrence_lifecycle.rs)
 - `meerkat-schedule/src/store.rs` - ScheduleStore trait + MemoryScheduleStore
 - `meerkat-schedule/src/tools.rs` - Agent-facing schedule tools
+- `meerkat-decision/src/{contracts,service,llm_backend,jev,tool}.rs` - Decision contracts, shared service, session-LLM and Jev backends, agent-facing `decide` tool
+- `meerkat/src/decision_compose.rs` - Facade route selection and Jev credential seam for the decision service
+- `meerkat-core/src/decision_config.rs` - `[decision]` realm-config vocabulary (backend selection, Jev facts, limits)
 - `meerkat-schedule/src/runnable.rs` - Host-runnable targets (ScheduleRunnableHost trait, HostRunnableRegistry, HostRunnableInvocation)
 - `meerkat/src/surface/schedule_host.rs` - Runtime-backed schedule delivery surface (SharedScheduleTargetAdapter::with_runnable_host wires host runnables)
 - `meerkat-web-runtime/src/lib.rs` - WASM browser deployment (wasm_bindgen exports)
@@ -363,7 +368,7 @@ The former GCP BuildBuddy CI lane (`buildbuddy.yml`) was retired from routing on
 | `publish_github_release` | Tags or manual asset recovery | Downloads artifacts, generates `checksums.sha256` + `index.json`, publishes or repairs the GitHub Release |
 | `update_homebrew` | After GitHub release or asset recovery | Updates the Homebrew tap formula |
 | `publish_semver_baseline` | After GitHub release or asset recovery | Generates rustdoc JSON for every publishable library crate on the release tag and attaches `semver-rustdoc-<version>.tar.zst`, the baseline the next release's semver gate compares against |
-| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 43 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
+| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 44 Rust crates → crates.io, Python SDK → PyPI, TypeScript SDK → npm |
 | `publish_web_sdk` | Tags or manual package/Web recovery | Publishes `@rkat/web` → npm |
 
 **Build matrix:**
@@ -433,7 +438,7 @@ Six files must agree on the same version:
 | `sdks/web/package.json` | `version` |
 | `artifacts/schemas/version.json` | `contract_version` |
 
-Additionally, all internal crate dependencies in `Cargo.toml` (44 path deps) must match the workspace version.
+Additionally, all internal crate dependencies in `Cargo.toml` (45 path deps) must match the workspace version.
 
 **`make verify-version-parity`** runs in CI and fails on any drift. After changing versions or wire types:
 
@@ -489,7 +494,7 @@ make release-preflight       # Full CI + schema freshness + changelog check
 ### Dry-run Publishing
 
 ```bash
-make publish-dry-run              # Parallel dry-run for all 43 publishable Rust crates
+make publish-dry-run              # Parallel dry-run for all 44 publishable Rust crates
 make publish-dry-run-python       # Build + twine check (no upload)
 make publish-dry-run-typescript   # npm publish --dry-run
 make release-dry-run              # Full preflight + all registry dry-runs
@@ -505,8 +510,8 @@ Required GitHub Actions secrets for full release:
 
 ### Crate Publish Order
 
-The canonical publish order lives in `scripts/release-rust-crates.sh` (43 crates, dependency order):
-`meerkat-sqlite` → `meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-atif` → `meerkat-store-conformance` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-jobs` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-runtime` → `meerkat-copilot` → `meerkat-anthropic` → `meerkat-openai` → `meerkat-gemini` → `meerkat-providers` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-adaptive` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
+The canonical publish order lives in `scripts/release-rust-crates.sh` (44 crates, dependency order):
+`meerkat-sqlite` → `meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-atif` → `meerkat-store-conformance` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-jobs` → `meerkat-workgraph` → `meerkat-decision` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-runtime` → `meerkat-copilot` → `meerkat-anthropic` → `meerkat-openai` → `meerkat-gemini` → `meerkat-providers` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-adaptive` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
 
 ### Key Rules for AI Agents
 

@@ -248,6 +248,7 @@ fn core_tool_source_kind(kind: super::dsl::ToolSourceKind) -> meerkat_core::type
         super::dsl::ToolSourceKind::Callback => meerkat_core::types::ToolSourceKind::Callback,
         super::dsl::ToolSourceKind::Mcp => meerkat_core::types::ToolSourceKind::Mcp,
         super::dsl::ToolSourceKind::RustBundle => meerkat_core::types::ToolSourceKind::RustBundle,
+        super::dsl::ToolSourceKind::Decision => meerkat_core::types::ToolSourceKind::Decision,
     }
 }
 

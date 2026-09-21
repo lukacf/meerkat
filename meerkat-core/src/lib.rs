@@ -32,6 +32,11 @@ pub mod config_runtime;
 pub mod config_store;
 pub mod connection;
 pub mod context_budget;
+pub mod decision_config;
+pub use decision_config::{
+    DEFAULT_JEV_ENDPOINT, DEFAULT_JEV_MODEL, DecisionBackendSelection, DecisionConfig,
+    DecisionLimitsConfig, JevBackendConfig,
+};
 mod digest_observability;
 pub mod error;
 pub mod event;
@@ -144,6 +149,7 @@ pub use blob::{
 };
 pub use budget::{
     Budget, BudgetDimension, BudgetExceeded, BudgetLimits, BudgetObservation, BudgetPool,
+    NestedUsageAccounting, NestedUsageMeasurement, NestedUsageReservation, NestedUsageSettlement,
 };
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,

@@ -59,6 +59,9 @@ pub struct Config {
     pub self_hosted: SelfHostedConfig,
     pub provider_tools: ProviderToolsConfig,
     pub model_fallback: ModelFallbackConfig,
+    /// Optional decision service route and limits (`[decision]`). The
+    /// agent-callable tool is switched separately by `tools.decision_enabled`.
+    pub decision: crate::decision_config::DecisionConfig,
     pub presentation: PresentationConfig,
     /// Realm-scoped connection sets (backend profiles, auth profiles,
     /// bindings). TOML keys use the singular `[realm.<id>.*]` namespace
@@ -96,6 +99,7 @@ impl Default for Config {
             self_hosted: SelfHostedConfig::default(),
             provider_tools: ProviderToolsConfig::default(),
             model_fallback: ModelFallbackConfig::default(),
+            decision: crate::decision_config::DecisionConfig::default(),
             presentation: PresentationConfig::default(),
             realm: BTreeMap::new(),
         }
@@ -437,6 +441,11 @@ impl Config {
         if other.model_fallback != ModelFallbackConfig::default() {
             self.model_fallback = other.model_fallback;
         }
+        // The decision table replaces the inherited table as a whole, like
+        // model_fallback: a child that writes any decision key owns the route.
+        if other.decision != crate::decision_config::DecisionConfig::default() {
+            self.decision = other.decision;
+        }
 
         // Skills: scalar toggles and health policy are child-wins when
         // non-default. Identity-governance records are an append-only overlay:
@@ -561,6 +570,9 @@ impl Config {
         if other.workgraph_enabled != defaults.workgraph_enabled {
             self.tools.workgraph_enabled = other.workgraph_enabled;
         }
+        if other.decision_enabled != defaults.decision_enabled {
+            self.tools.decision_enabled = other.decision_enabled;
+        }
     }
 
     fn merge_tools_from_toml_presence(&mut self, parsed: &toml::Value, layer: &ToolsConfig) {
@@ -599,6 +611,9 @@ impl Config {
         }
         if tools.contains_key("workgraph_enabled") {
             self.tools.workgraph_enabled = layer.workgraph_enabled;
+        }
+        if tools.contains_key("decision_enabled") {
+            self.tools.decision_enabled = layer.decision_enabled;
         }
     }
 
@@ -918,6 +933,7 @@ impl Config {
     pub fn validate(&self, catalog: crate::model_profile::ModelCatalog) -> Result<(), ConfigError> {
         self.reject_unwired_agent_provider_params()?;
         self.model_fallback.validate()?;
+        self.decision.validate()?;
         if self.max_tokens == Some(0) {
             return Err(ConfigError::Validation(
                 "max_tokens must be greater than 0 when set".to_string(),
@@ -2386,6 +2402,9 @@ pub struct ToolsConfig {
     pub schedule_enabled: bool,
     /// WorkGraph tools enabled
     pub workgraph_enabled: bool,
+    /// Decision service `decide` tool enabled. Off by default: no decision
+    /// client, credential lookup, or network call exists until a realm opts in.
+    pub decision_enabled: bool,
 }
 
 impl Default for ToolsConfig {
@@ -2401,6 +2420,7 @@ impl Default for ToolsConfig {
             mob_enabled: false,
             schedule_enabled: true,
             workgraph_enabled: false,
+            decision_enabled: false,
         }
     }
 }

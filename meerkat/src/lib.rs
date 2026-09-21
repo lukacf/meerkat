@@ -311,6 +311,20 @@ pub use meerkat_workgraph::{
 
 // AgentFactory and build_agent types
 mod factory;
+
+// Optional decision service composition (route selection, credential seam,
+// `decide` tool wiring). The feature crate owns the semantics.
+mod decision_compose;
+pub use decision_compose::build_decision_service;
+pub use meerkat_decision::{
+    BackendKind as DecisionBackendKind, BinaryAnswer, BinaryCriteria, BinaryJudgment,
+    BudgetAdmission as DecisionBudgetAdmission, BudgetParticipation as DecisionBudgetParticipation,
+    ChoiceJudgment, ChoiceOption, DECIDE_TOOL_NAME, DecisionAccounting, DecisionAdmission,
+    DecisionError, DecisionErrorCode, DecisionRequest, DecisionResult, DecisionService,
+    DecisionState, GradeJudgment, GradeLevel, GradeLevelIndex,
+    Instructions as DecisionInstructions, Judgment, NativeSignal, OptionId, Question, QuestionId,
+    QuestionJudgment, QuestionKind, RouteProvenance as DecisionRouteProvenance, UnitInterval,
+};
 #[cfg(not(target_arch = "wasm32"))]
 mod host_auth;
 mod model_fallback;

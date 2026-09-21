@@ -744,6 +744,7 @@ mod generated_visibility_test_owner {
             crate::types::ToolSourceKind::Callback => "Callback",
             crate::types::ToolSourceKind::Mcp => "Mcp",
             crate::types::ToolSourceKind::RustBundle => "RustBundle",
+            crate::types::ToolSourceKind::Decision => "Decision",
         }
     }
 
@@ -759,6 +760,7 @@ mod generated_visibility_test_owner {
             "Callback" => crate::types::ToolSourceKind::Callback,
             "Mcp" => crate::types::ToolSourceKind::Mcp,
             "RustBundle" => crate::types::ToolSourceKind::RustBundle,
+            "Decision" => crate::types::ToolSourceKind::Decision,
             _ => return None,
         })
     }

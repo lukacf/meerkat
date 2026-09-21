@@ -67,5 +67,5 @@ pub use meerkat_core::auth::{
     RefreshCoordinator, RefreshError, RefreshFailureObservation, TokenStore,
 };
 
-pub use resolver::{resolve_external_authorizer, resolve_simple_secret};
+pub use resolver::{resolve_env_secret, resolve_external_authorizer, resolve_simple_secret};
 pub use self_hosted::SelfHostedProviderRuntime;

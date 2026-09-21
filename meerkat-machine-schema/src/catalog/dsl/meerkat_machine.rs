@@ -459,6 +459,7 @@ pub enum ToolSourceKind {
     Callback,
     Mcp,
     RustBundle,
+    Decision,
 }
 
 /// Typed mirror of [`meerkat_core::types::ToolProvenance`] — structural

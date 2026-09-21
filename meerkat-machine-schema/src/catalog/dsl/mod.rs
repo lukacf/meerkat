@@ -2590,6 +2590,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Callback",
                     "Mcp",
                     "RustBundle",
+                    "Decision",
                 ],
             ),
             NamedTypeBinding::string_enum("TurnCancellationReason", &["Observed"]),

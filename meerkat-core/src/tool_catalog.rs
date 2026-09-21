@@ -206,6 +206,7 @@ fn stable_tool_source_kind_key(kind: &ToolSourceKind) -> &'static str {
         ToolSourceKind::Callback => "callback",
         ToolSourceKind::Mcp => "mcp",
         ToolSourceKind::RustBundle => "rust_bundle",
+        ToolSourceKind::Decision => "decision",
     }
 }
 

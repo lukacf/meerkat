@@ -3285,8 +3285,17 @@ mod orchestrator {
                     }
                 }
             }
+            // An explicit owner close converges on its first request: it
+            // settles when the provider confirms and otherwise retires the
+            // transport locally at the confirmation bound. Recovery-driven
+            // closes keep their single-slice observation and retry custody.
+            let convergence = if matches!(purpose, ExperimentalLiveClosePurpose::Explicit) {
+                crate::experimental_gpt_live::ExperimentalLiveCloseConvergence::WithinBound
+            } else {
+                crate::experimental_gpt_live::ExperimentalLiveCloseConvergence::SingleSlice
+            };
             let physical = authority
-                .close_physical_if_bound(channel, &session)
+                .close_physical_if_bound_with(channel, &session, convergence)
                 .await
                 .map_err(ExperimentalLiveChannelCloseError::PhysicalAuthority)?;
             if matches!(physical, ExperimentalLivePhysicalClose::NotBound) {

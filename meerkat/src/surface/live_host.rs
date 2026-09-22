@@ -2490,7 +2490,11 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         }
         if close_custody.already_closed() {
             let physical = authority
-                .close_physical_if_bound(channel_id, &session_id)
+                .close_physical_if_bound_with(
+                    channel_id,
+                    &session_id,
+                    crate::experimental_gpt_live::ExperimentalLiveCloseConvergence::WithinBound,
+                )
                 .await
                 .map_err(ExperimentalLiveChannelCloseError::PhysicalAuthority)?;
             physical

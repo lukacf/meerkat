@@ -163,6 +163,13 @@ const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 const QUIET: std::time::Duration = std::time::Duration::from_millis(1500);
 
 async fn fixture(with_workgraph: bool) -> Fixture {
+    fixture_with_policy(with_workgraph, LiveDelegationExecutionPolicy::DurableFork).await
+}
+
+async fn fixture_with_policy(
+    with_workgraph: bool,
+    policy: LiveDelegationExecutionPolicy,
+) -> Fixture {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -245,10 +252,10 @@ async fn fixture(with_workgraph: bool) -> Fixture {
         .resolve_bridge_session_id(&identity)
         .await
         .expect("source session");
-    let coordinator = Arc::new(ExperimentalLiveDelegationCoordinator::new(
-        Arc::clone(&runtime),
-        mobs,
-    ));
+    let coordinator = Arc::new(
+        ExperimentalLiveDelegationCoordinator::new(Arc::clone(&runtime), mobs)
+            .with_execution_policy(policy),
+    );
     let control = Arc::new(ExactProjectionControl::default());
     let binding = runtime
         .__test_open_live_delegation_channel(&session_id)
@@ -927,4 +934,60 @@ async fn busy_source_member_defers_the_fork_narrates_and_retries_without_droppin
     fx.wait_for_completed(&[operation]).await;
     fx.assert_nothing_cancelled();
     fx.close().await;
+}
+
+/// Bug 1 (S107): closing the channel while a delegation runs must not wait
+/// for the worker. The control consumer finishes at once, so the provider
+/// drain can settle inside its bound, and an existing member's result stays
+/// in its own canonical session (no merge turn is queued).
+#[tokio::test]
+async fn channel_close_returns_without_awaiting_a_running_existing_member_turn() {
+    let mut fx = fixture_with_policy(true, LiveDelegationExecutionPolicy::ExistingMember).await;
+    let operation = fx.delegate("em", "existing member task").await;
+    let running = fx.next_call().await;
+    assert!(running.user_text.contains("existing member task"));
+
+    let close_started = std::time::Instant::now();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fx.coordinator.cancel_channel_binding(&fx.provider_binding),
+    )
+    .await
+    .expect("close never waits for the running turn");
+    assert!(close_started.elapsed() < std::time::Duration::from_secs(2));
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel closes");
+    fx.assert_nothing_cancelled();
+    assert_eq!(
+        fx.schedule_state(&operation).await,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Running),
+        "the running turn keeps its custody through the close"
+    );
+
+    fx.client.release(running.index);
+    fx.wait_for_retired(1).await;
+    let snapshots = fx
+        .runtime
+        .live_delegation_recovery_snapshots(&fx.session_id)
+        .await
+        .expect("snapshots");
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(
+        snapshots[0].worker_ownership(),
+        LiveDelegationWorkerOwnership::ExistingMember
+    );
+    assert_eq!(
+        snapshots[0].terminal(),
+        Some(LiveDelegationWorkerTerminalKind::Completed)
+    );
+    // The member's own turn already carries the result: no merge turn.
+    fx.expect_no_call().await;
+    assert_eq!(
+        fx.handle.resolve_bridge_session_id(&fx.identity).await,
+        Some(fx.session_id.clone()),
+        "an existing member is never retired by the post-close path"
+    );
+    fx.handle.shutdown().await.expect("shutdown");
 }

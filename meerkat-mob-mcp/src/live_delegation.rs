@@ -4120,7 +4120,12 @@ impl ExperimentalLiveDelegationCoordinator {
                 self.remove_retained_delegation(retained).await;
             }
             LiveDelegationWorkerTerminalKind::Completed if terminal.channel_closed => {
-                if let Some(text) = terminal.result_text.as_deref() {
+                // An existing member executed the turn in its own canonical
+                // session; only an owned fork's result needs merging back.
+                if retained.admission.worker_ownership()
+                    == LiveDelegationWorkerOwnership::OwnedMember
+                    && let Some(text) = terminal.result_text.as_deref()
+                {
                     self.merge_result_into_source(retained, text).await;
                 }
                 self.remove_retained_delegation(retained).await;
@@ -4700,7 +4705,9 @@ impl ExperimentalLiveDelegationCoordinator {
             };
             self.settle_result_delivery_task(retained.operation.operation_id())
                 .await;
-            if let Some(text) = undelivered {
+            if retained.admission.worker_ownership() == LiveDelegationWorkerOwnership::OwnedMember
+                && let Some(text) = undelivered
+            {
                 self.merge_result_into_source(&retained, &text).await;
             }
             self.remove_retained_delegation(&retained).await;

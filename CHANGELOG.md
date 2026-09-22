@@ -194,6 +194,12 @@ them.
   for every read racing a head-canonical writer. It still never waits for a
   turn.
 
+- `ExperimentalLiveCloseConvergence` selects how long one physical live close
+  observes the closing drain (`WithinBound` for explicit owner closes,
+  `SingleSlice` for recovery-driven closes);
+  `ExperimentalLiveOpenAuthorityProvider::close_physical_if_bound_with` and
+  `ExperimentalGptLiveWebrtcTransport::close_physical_if_bound_with` take it
+  (the provider trait method has a delegating default).
 - Public GPT Live client delegations run in parallel. Every client
   delegation becomes an item in the mob's shared WorkGraph (labels `voice`
   and `live-channel:<id>`, evidence naming the provider delegation, channel,
@@ -300,6 +306,28 @@ them.
   continues an existing conversation and that the model should wait for the
   user to speak. The instructions also allow the model to keep conversing while
   a delegated request runs.
+- Closing a live channel while a client delegation is running now converges
+  like an idle close. The channel's control consumer finished only after the
+  running worker's bounded turn, so the provider drain timed out, the close
+  failed with `experimental live channel binding failed`, and a later open
+  was refused with `session already has an active live channel`; the close
+  now releases the channel at once, the worker keeps its generated custody,
+  an owned fork's result is queued on the source member as internal work,
+  and an existing member's result stays in its own canonical session. A
+  close on a channel whose remote already hung up also converges on its
+  first request: one request observes the closing drain for the whole
+  `LIVE_CLOSE_CONFIRMATION_BOUND` (now 15 s, counted from the first close
+  request as well as from an accepted `session.close`), settles gracefully
+  the moment the provider confirms, and otherwise retires the transport
+  locally and reports `Closed` instead of failing every retry with
+  `remote_close_unavailable` while the session stayed bound.
+- A refused live lifecycle fact (for example a cancellation outcome that
+  arrives after the worker's own terminal was recorded) no longer ends the
+  provider stream for the whole channel: the fact fails closed on its own,
+  transcript projection and delivery receipts still flow, and
+  `ResolveLiveDelegationCancellation` is now accepted after the terminal
+  (`ResolveLiveDelegationCancellationAfterTerminal`) as evidence about an
+  already-settled worker.
 - A live delegation arriving while the backing member is mid-turn no longer
   fails with `ForkSourceUnavailable { cause: Running }`. The persistent fork
   owner waits, bounded, for the member's turn-finalization boundary and forks
@@ -475,7 +503,8 @@ them.
   `live_delegation_items_are_channel_bound_and_capped`; the transition
   `AbandonLiveInteractionPreservingEarlierDelegation` is removed and
   `RequeueBlockedLiveDelegation`, `RequeueUnstartedLiveDelegation`,
-  `CancelQueuedLiveDelegation`, and `AuthorizeLiveDelegationNarration` are added (`TransitionId::*`
+  `CancelQueuedLiveDelegation`, `AuthorizeLiveDelegationNarration`, and
+  `ResolveLiveDelegationCancellationAfterTerminal` are added (`TransitionId::*`
   discriminants move); the inputs `RequeueLiveDelegation`,
   `CancelQueuedLiveDelegation`, and `AuthorizeLiveDelegationNarration` are
   added (`MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`, and

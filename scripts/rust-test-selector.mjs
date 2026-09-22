@@ -1,6 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
 export const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -122,12 +131,66 @@ export function packageDirs(packages) {
     .sort((a, b) => b[0].length - a[0].length);
 }
 
-export function packageForFile(file, dirs) {
-  const normalized = normalizePath(file);
+function crateDirPackageForPath(normalized, dirs) {
   for (const [dir, pkg] of dirs) {
     if (dir === ".") continue;
     if (normalized === `${dir}/Cargo.toml` || normalized.startsWith(`${dir}/`)) {
       return pkg;
+    }
+  }
+  return null;
+}
+
+const embeddedInputCache = new WeakMap();
+
+// A crate can embed repo-owned documents through tracked symlinks, for example
+// `meerkat/embedded_skills/**` -> `.claude/skills/**` behind `include_str!`.
+// Git records the link, not its target, so an edit to the target never shows
+// up under the crate directory and a directory-prefix match alone classifies
+// it as docs-only. Resolve every tracked symlink inside a crate directory and
+// treat its target as an input of that crate. The mapping is derived from the
+// symlinks themselves so new embedded documents need no selector change.
+export function embeddedInputs(dirs) {
+  let inputs = embeddedInputCache.get(dirs);
+  if (inputs) return inputs;
+  inputs = [];
+  const crateDirs = dirs.map(([dir]) => dir).filter((dir) => dir !== ".");
+  const entries = crateDirs.length ? gitLines(["ls-files", "-s", "--", ...crateDirs]) : [];
+  for (const entry of entries) {
+    const match = entry.match(/^120000 \S+ \d+\t(.+)$/);
+    if (!match) continue;
+    const link = normalizePath(match[1]);
+    const pkg = crateDirPackageForPath(link, dirs);
+    if (!pkg) continue;
+    let target;
+    try {
+      target = readlinkSync(resolve(root, link));
+    } catch {
+      continue;
+    }
+    const path = normalizePath(relative(root, resolve(root, dirname(link), target)));
+    if (!path || path === ".." || path.startsWith("../") || path.startsWith("/")) continue;
+    if (crateDirPackageForPath(path, dirs)) continue;
+    let isDirectory = false;
+    try {
+      isDirectory = statSync(resolve(root, path)).isDirectory();
+    } catch {
+      // A dangling link still names an exact input path.
+    }
+    inputs.push({ path, pkg, isDirectory });
+  }
+  inputs.sort((a, b) => a.path.localeCompare(b.path));
+  embeddedInputCache.set(dirs, inputs);
+  return inputs;
+}
+
+export function packageForFile(file, dirs) {
+  const normalized = normalizePath(file);
+  const owner = crateDirPackageForPath(normalized, dirs);
+  if (owner) return owner;
+  for (const input of embeddedInputs(dirs)) {
+    if (normalized === input.path || (input.isDirectory && normalized.startsWith(`${input.path}/`))) {
+      return input.pkg;
     }
   }
   return null;

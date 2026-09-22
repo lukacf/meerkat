@@ -138,6 +138,9 @@ is_rust_relevant_path() {
       return 0
       ;;
     *)
+      if embedded_input_package_for_path "$1" >/dev/null; then
+        return 0
+      fi
       return 1
       ;;
   esac
@@ -195,6 +198,40 @@ array_contains() {
   local item
   for item in "$@"; do
     if [[ "${item}" == "${needle}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# A crate can embed repo-owned documents through tracked symlinks (for
+# example `meerkat/embedded_skills/**` -> `.claude/skills/**` behind
+# `include_str!`). Those target paths never fall under a crate directory, so
+# the extension/path filters below would drop them as docs-only even though
+# the crate's tests read them. The selector derives the mapping from the
+# symlinks themselves; see scripts/rust-embedded-inputs.mjs.
+embedded_input_paths=()
+embedded_input_packages=()
+embedded_input_kinds=()
+while IFS=$'\t' read -r embedded_path embedded_package embedded_kind; do
+  if [[ -z "${embedded_path}" || -z "${embedded_package}" ]]; then
+    continue
+  fi
+  embedded_input_paths+=("${embedded_path}")
+  embedded_input_packages+=("${embedded_package}")
+  embedded_input_kinds+=("${embedded_kind}")
+done < <(./scripts/rust-embedded-inputs.mjs 2>/dev/null || true)
+
+embedded_input_package_for_path() {
+  local path="${1#./}"
+  local i
+  if [[ "${#embedded_input_paths[@]}" -eq 0 ]]; then
+    return 1
+  fi
+  for i in "${!embedded_input_paths[@]}"; do
+    if [[ "${path}" == "${embedded_input_paths[$i]}" ]] ||
+      [[ "${embedded_input_kinds[$i]}" == "dir" && "${path}" == "${embedded_input_paths[$i]}"/* ]]; then
+      printf '%s\n' "${embedded_input_packages[$i]}"
       return 0
     fi
   done
@@ -321,6 +358,12 @@ fi
 
 package_names=()
 for path in "${relevant[@]}"; do
+  if embedded_pkg="$(embedded_input_package_for_path "${path}")"; then
+    if ! array_contains "${embedded_pkg}" ${package_names[@]+"${package_names[@]}"}; then
+      package_names+=("${embedded_pkg}")
+    fi
+    continue
+  fi
   if [[ "${path}" == */* ]]; then
     dir="${path%/*}"
   else

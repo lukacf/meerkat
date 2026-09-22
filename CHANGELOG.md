@@ -212,6 +212,10 @@ them.
   `meerkat_mob_mcp::live_delegation::LiveDelegationStartFailure`.
 - `DelegationExecutionError` gains the variant `SourceBusy`
   (`DelegationExecutionError::*` discriminants move).
+- `LiveContextPreparationFailure` (generated `MeerkatMachine` vocabulary,
+  re-exported through `meerkat_runtime::live_execution`) gains the variant
+  `AuthorityRejected` (`LiveContextPreparationFailure::*` discriminants move;
+  exhaustive matches must add the arm).
 - `DelegationExecutionService` gains the associated constant
   `SOURCE_TURN_BOUNDARY_WAIT`.
 - `LIVE_CONTEXT_BOOTSTRAP_FRAMING` is reworded (consumers matching the old

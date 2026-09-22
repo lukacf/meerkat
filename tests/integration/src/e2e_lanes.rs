@@ -222,6 +222,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s97_gpt_live_public_client_context_vertical, 97);
             scenario(e2e_smoke_s98_gpt_live_public_playback_settlement_and_reopen, 98);
             scenario(e2e_smoke_s99_gpt_live_public_concurrent_context, 99);
+            scenario(e2e_smoke_s100_gpt_live_public_morning_standup, 100);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
@@ -2768,7 +2769,7 @@ fn strict_prereqs_for(spec: &Spec) -> bool {
     // These public-Live scenarios promise real provider audio. Selecting one
     // cannot become a successful readiness-only run when credentials or the
     // browser toolchain are missing.
-    matches!(spec.id, Some(97..=99)) || strict_prereqs_enabled()
+    matches!(spec.id, Some(97..=100)) || strict_prereqs_enabled()
 }
 
 fn clean_e2e_scenario_targets_enabled() -> bool {
@@ -4189,6 +4190,28 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 package: "meerkat-integration-tests",
                 test_target: "gpt_live_public_e2e",
                 test_name: "e2e_scenario_99_gpt_live_public_concurrent_context",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
+        100 => Some(&Spec {
+            id: Some(100),
+            lane: Lane::Smoke,
+            title: "GPT Live public real-audio morning standup (timed multi-turn, delegation, barge-in, close)",
+            timeout_secs: 1200,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_100_gpt_live_public_morning_standup",
                 features: &["openai-live-e2e"],
                 all_features: false,
             },
@@ -6511,6 +6534,41 @@ mod tests {
                 assert!(!all_features);
             }
             _ => panic!("S99 must use the existing public Live test binary"),
+        }
+    }
+
+    #[test]
+    fn gpt_live_public_morning_standup_shares_the_public_live_shard_composition() {
+        let spec = scenario_spec(100).unwrap();
+        let sibling = scenario_spec(99).unwrap();
+        assert_eq!(spec.lane, Lane::Smoke);
+        assert!(super::strict_prereqs_for(spec));
+        assert_eq!(spec.required_env, sibling.required_env);
+        assert_eq!(spec.cwd, sibling.cwd);
+        assert_eq!(spec.env, sibling.env);
+        assert_eq!(spec.pre_commands, sibling.pre_commands);
+        assert_eq!(
+            super::smoke_test_filter_for_selection(&E2eSelection::Scenario(100)).unwrap(),
+            Some("e2e_smoke_s100_".to_string())
+        );
+        match spec.command {
+            CommandSpec::CargoTest {
+                package,
+                test_target,
+                test_name,
+                features,
+                all_features,
+            } => {
+                assert_eq!(package, "meerkat-integration-tests");
+                assert_eq!(test_target, "gpt_live_public_e2e");
+                assert_eq!(
+                    test_name,
+                    "e2e_scenario_100_gpt_live_public_morning_standup"
+                );
+                assert_eq!(features, &["openai-live-e2e"]);
+                assert!(!all_features);
+            }
+            _ => panic!("S100 must use the existing public Live test binary"),
         }
     }
 

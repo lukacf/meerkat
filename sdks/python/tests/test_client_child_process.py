@@ -27,7 +27,7 @@ import pytest
 from meerkat import client as client_module
 from meerkat.client import MeerkatClient
 from meerkat.errors import MeerkatError
-from meerkat.streaming import STDERR_TAIL_LIMIT_BYTES, _StderrTail
+from meerkat.streaming import STDERR_TAIL_LIMIT_BYTES, _StderrTail, _StdoutDispatcher
 
 REFUSAL_LINE = (
     "Error: session-store has objects outside the meerkat_schema ledger; "
@@ -100,6 +100,44 @@ def _client_with(process: _FakeProcess) -> MeerkatClient:
     client = MeerkatClient()
     client._process = process  # type: ignore[assignment]
     return client
+
+
+class _ResettingStdin(_FakeStdin):
+    """stdin of a child that exited: the write pipe reports the reset first."""
+
+    def write(self, data: bytes) -> None:
+        pass
+
+    async def drain(self) -> None:
+        raise ConnectionResetError("Connection lost")
+
+
+@pytest.mark.asyncio
+async def test_write_side_reset_yields_connection_closed_not_oserror() -> None:
+    """The child exits while a request is being written. Whether the caller
+    sees the stdin reset or the stdout EOF first is a scheduling race; either
+    way the result must be the read loop's typed CONNECTION_CLOSED, never the
+    raw ConnectionResetError from ``drain()`` (the 2026-09-16 SDK-suites lane
+    lost this race on ``test_connect_failure_survives_close_in_finally``)."""
+    process = _FakeProcess(returncode=1)
+    process.stdin = _ResettingStdin()
+    client = _client_with(process)
+    stdout = asyncio.StreamReader()
+    dispatcher = _StdoutDispatcher(stdout)
+    client._dispatcher = dispatcher
+    dispatcher.start()
+
+    async def stdout_reaches_eof_after_the_reset() -> None:
+        await asyncio.sleep(0.05)
+        stdout.feed_eof()
+
+    eof = asyncio.ensure_future(stdout_reaches_eof_after_the_reset())
+    with pytest.raises(MeerkatError) as excinfo:
+        await client._request_impl("initialize", {})
+    await eof
+    await dispatcher.stop()
+
+    assert excinfo.value.code == "CONNECTION_CLOSED"
 
 
 @pytest.mark.asyncio

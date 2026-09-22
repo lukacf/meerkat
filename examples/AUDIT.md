@@ -21,12 +21,13 @@ Candidate findings: **104**. Adjudication: **88 confirmed**, **16 partial**.
 | `RUST_LANE_ID=examples-wasm CARGO_BUILD_JOBS=2 BINARYEN_CORES=2 make -C examples web` | Passed | Fresh source-fingerprinted WASM/SDK build; raw real-WASM comms contract; strict diplomacy/WebCM startup; all browser builds; real WebCM guest with 12 file and four terminal cases; Office's 17 deterministic groups and real ten-member, 26-edge, ten-subscription lifecycle with all 52 admitted kickoff inputs accounted and zero fixture errors. |
 | `make -C examples shell realtime` | Passed | Shell syntax, literal-path/retry cleanup, actual CLI/MCP deferred search/load and both real tool results, signed mobpack packaging, nine actual WASM skill-role runs, 12 Python playback tests, 21 browser/Node lifecycle tests, strict TypeScript/build and native HTTP/RPC host cleanup pass. |
 | `make docs-check; make verify-lock-consistency; bash scripts/test-lock-consistency-gate.sh` | Passed | Final documentation checks and root/standalone lock validation pass. Real offline Cargo fixtures prove stale/missing example locks fail without healing and release refresh stages only owned example locks. Root Cargo.lock and MODULE.bazel.lock are unchanged. |
+| `make machine-verify; generated-authority boundary tests; existing TLA-render regression` | Passed | Publication follow-up corrects one decimal spelling to the existing u64::MAX DSL vocabulary. The unchanged canonical lane passes 23 TLC checks. All 46 native generated-authority tests, the render regression, six standalone lifecycle cases, strict owner Clippy and drift checks pass. No generator policy, model bounds, invariants or hooks were changed; see the publication appendix. |
 
 ## Verification limits
 
 - These are deterministic local-provider, real-runtime and component tests, not a claim that every model-backed scenario was run against a live external provider. The actual Gemini branch of example 021 passed separately; OpenAI/Anthropic environment credentials were absent and stored OAuth was not inspected.
 - Physical microphone/speaker/camera operation, external device control and a real-provider WebRTC/media session were not exercised. No physical-device permission was sought. The ledger distinguishes those limits from passed synthetic media/lifecycle tests.
-- Supplemental platform checks exposed pre-existing issues outside the accepted example corrections: eight missing live-context typed-inventory entries and a TLC-unsupported uint64 literal. Their historical evidence remains in the ROOT02 chapter; no formal model-exploration pass is claimed.
+- The first normal push exposed a pre-existing TLC-unsupported decimal uint64 literal. The publication follow-up now resolves it with the existing explicit boundary vocabulary and passes the unchanged bounded canonical model-checking lane; this is not an exhaustive native state-space claim. Eight separate pre-existing live-context typed-inventory omissions remain outside this repair. Historical failures remain in the ROOT02 chapter.
 - A supplemental Config.agent.max_turns=1 experiment exposed a separate pre-existing factory configuration-plumbing gap. It is recorded outside this change; the standalone lifecycle regression deliberately exercises the real canonical default cap and preserves the failing configuration experiment as evidence.
 - An ancillary Web SDK baseline test has a stale error-message assertion and retains timer handles. Example/browser acceptance uses its dedicated strict suites, not that failing baseline test. Canonical skill provenance is verified through domain history and actual provider bytes; the existing lossy RPC SkillContext wire projection was not redesigned.
 
@@ -184,3 +185,7 @@ Every ID links to its original proof, independent challenge, accepted correction
 ## Final-review follow-ups
 
 [Preserved reviewer counterexamples and their resolutions](audit/review-followups.md).
+
+## Publication follow-up
+
+[Exact formal-bound correction and unchanged-hook verification](audit/publication.md).

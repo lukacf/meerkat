@@ -2,6 +2,8 @@
 
 [Audit index](../AUDIT.md)
 
+The historical oversized-integer model-checking blocker recorded below was subsequently resolved; see the [publication follow-up](publication.md).
+
 <a id="root01"></a>
 
 ### ROOT01: WASM mob member readiness silently skips the required machine-owned comms drain

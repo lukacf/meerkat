@@ -4,7 +4,7 @@ description: "Why the gateways bind loopback, how to publish them behind a rever
 icon: "server"
 ---
 
-*This page documents MobKit v0.8.35 (mirrored from [v0.8.35](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.35)).*
+*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
 
 Both bundled gateways, the console/admin `mobkit_gateway` and the SDK-facing
 `rpc_gateway`, bind `127.0.0.1` on an ephemeral port unless the launch selects
@@ -179,6 +179,29 @@ at ERROR, including at boot, rather than claiming health or attributing a
 stall to inactive work. A mixed report retains unresolved evidence alongside
 any known active backlog. Executor owner and fencing-token observations explain
 an active backlog only; they never grant firing authority.
+
+## Building with `openai-live`: link the system Opus
+
+The `openai-live` feature pulls Meerkat's WebRTC transport, whose `opus`
+dependency builds bundled Opus with CMake when `pkg-config` finds no system
+library. Install the system library in the build stage so the build links it
+and never runs CMake (which also avoids the CMake 4 incompatibility of the
+bundled sources):
+
+```dockerfile
+# build stage
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libopus-dev pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+
+# runtime stage (dynamic link)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libopus0 \
+ && rm -rf /var/lib/apt/lists/*
+```
+
+For a static link with no runtime package, set `OPUS_STATIC=1` in the build
+stage alongside `libopus-dev`.
 
 ## Docker sketch
 

@@ -4,7 +4,7 @@ description: "Combine a Meerkat mob with MobKit modules into a single managed ru
 icon: "layer-group"
 ---
 
-*This page documents MobKit v0.8.35 (mirrored from [v0.8.35](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.35)).*
+*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
 
 The unified runtime is the production entry point for MobKit. It bootstraps a Meerkat mob and MobKit's module subsystems together, merges their event streams, and manages the combined lifecycle through a single handle.
 
@@ -184,6 +184,84 @@ Key routes in the reference app include:
 | `/mobkit/mob_events/stream` | GET | Structural mob-events SSE |
 | `/flow-editor` | GET | Visual mobpack editor |
 | `/flow-editor/rpc` | POST | Mobpack-authoring JSON-RPC |
+
+## Console voice and live from the builder
+
+A library embedder that fronts the console with its own authentication (for
+example Google sign-in in front of MobKit) can register the same live doors
+the gateway binaries expose, without building a session service by hand:
+
+```rust
+use meerkat_mobkit::console_auth_config::parse_console_auth_config;
+use meerkat_mobkit::public_live_config::PublicLiveRegistration;
+use meerkat_mobkit::unified_runtime::live_compose::LiveOptions;
+use serde_json::json;
+use std::sync::Arc;
+
+let registration = PublicLiveRegistration::parse(&json!({
+    "principal": "alice@example.com",          // the authenticated console subject
+    "realm": "default",
+    "auth_binding": { "realm": "default", "binding": "openai" },
+    "voice": "marin"
+}))?;
+
+let runtime = meerkat_mobkit::UnifiedRuntime::builder()
+    .definition(definition)
+    .session_store(session_store)                 // persistent sessions are required
+    .meerkat_config(host_config)                  // carries the realm's openai binding
+    .console_voice(registration)                  // gpt-live-1 through the console
+    // external mobkit/live/* over /live/ws; the public origin is required
+    // because only the embedder knows where it serves the router
+    .live(LiveOptions::new("wss://mobkit.example.com"))
+    .build()
+    .await?;
+let runtime = Arc::new(runtime);
+
+// Console voice serves only authenticated principals, so the decision state
+// must require app auth. Trust your identity provider's keys directly:
+let decisions = parse_console_auth_config(&json!({
+    "provider": "oidc",
+    "issuer": "https://accounts.google.com",
+    "audience": "<your OAuth client id>.apps.googleusercontent.com",
+    "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+    "email_allowlist": ["alice@example.com"]
+}))?;
+
+let app = runtime.build_reference_app_router_with_live(decisions).await?;
+// Serve `app` on your own listener: the console, `/console/rpc` voice
+// methods, and `/live/ws` all ride the same router.
+```
+
+What happens at build and at router time:
+
+- `session_store` (or `continuity_from_state_dir`) is required. Registering a
+  live door on an ephemeral runtime fails `build()` closed with
+  `UnifiedRuntimeBuilderError::LiveCompose(LiveRequiresPersistentSessions)`;
+  `live(...)` with an empty `public_base_url` fails with
+  `LiveRequiresPublicBaseUrl`. Console voice alone needs no URL: its transport
+  is negotiated over WebRTC.
+- The doors compose once, after the runtime is shared:
+  `UnifiedRuntime::compose_live` builds one live context (one adapter host,
+  one WebSocket state, one voice-path arbiter) and, over it, the console voice
+  controller and the external `mobkit/live/*` handler. A success is bound once;
+  an error is not cached, so a failing registration is retried on the next
+  call. With both registered,
+  they take turns on the voice path ("latest engaged wins") exactly as in the
+  gateway binaries; see the console guide for the typed reasons.
+- `build_reference_app_router_with_live` composes, layers the controller the
+  console RPC reads, and merges the live WebSocket router when `live(...)` was
+  registered. It refuses with `LiveComposeError::ConsoleVoiceRequiresAppAuth`
+  when voice is composed but `console.require_app_auth` is false. The plain
+  `build_reference_app_router` keeps working unchanged for hosts without live
+  doors.
+- Accessors after composition: `console_voice_controller()`, `live_context()`,
+  and `live_rpc_handler()` (dispatch `mobkit/live/*` from your own transport,
+  for example an embodiment daemon).
+
+Two deployment notes for hosts that build with the `openai-live` feature: link
+the system Opus library so the build never falls back to compiling bundled Opus
+through CMake (see the deployment guide), and expect the browser transport to
+be WebRTC, so the console needs HTTPS or localhost.
 
 ## Error hook and logging
 

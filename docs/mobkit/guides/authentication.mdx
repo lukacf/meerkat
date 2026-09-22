@@ -4,7 +4,7 @@ description: "JWT validation, OIDC discovery, provider configuration, and email 
 icon: "lock"
 ---
 
-*This page documents MobKit v0.8.35 (mirrored from [v0.8.35](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.35)).*
+*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
 
 MobKit authenticates protected console, REST, JSON-RPC, Flow Editor, and SSE
 requests with JWTs. Signature and claim validation establishes a principal;
@@ -103,6 +103,49 @@ in this order:
 builds an HMAC key from `JwtValidationConfig.shared_secret`; it is not the
 general RS256 or ES256 entry point.
 
+### `auth_config` with an external issuer (`provider: "oidc"`)
+
+`parse_console_auth_config` builds a `RuntimeDecisionState` with
+`require_app_auth: true` from a small JSON object. `provider: "jwt"` trusts an
+HS256 shared secret (the gateway binaries' development shape). `provider:
+"oidc"` trusts an external issuer's published RS256/ES256 keys, which is the
+right shape for a console fronted by Google sign-in:
+
+```json
+{
+  "provider": "oidc",
+  "issuer": "https://accounts.google.com",
+  "audience": "<your OAuth client id>.apps.googleusercontent.com",
+  "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+  "email_allowlist": ["alice@example.com"]
+}
+```
+
+`issuer` must equal the token's `iss` exactly and `audience` its `aud`
+(Google issues ID tokens with `aud` set to the OAuth client id).
+`email_allowlist` is required and must name at least one address: console
+access is allowlist-gated, so trusting a public issuer without one would
+configure a console that admits nobody. Supply exactly one of `jwks_uri` (fetched once while parsing, over HTTPS, with a 10 second
+bound; any error fails configuration closed) or `jwks_json` (the JWKS document
+inline, as an object or a string). Symmetric (`oct`) keys are refused under
+`provider: "oidc"`; use `provider: "jwt"` for a shared secret.
+
+Under `provider: "oidc"` the console admits a token only when its
+`email_verified` claim is the boolean `true` (a missing claim counts as
+unverified, refused as `email_not_verified`) and never lets `sub` stand in
+for a missing `email`: a public issuer mints tokens for unverified addresses
+too, and the allowlist compares addresses. The `jwt` development path keeps
+its historical behaviour. The recorded discovery document names the real key
+source (the fetched `jwks_uri`, or `inline` for `jwks_json`), so a public
+issuer's host can never read as the HS256 development host.
+
+The result is the fixed trusted snapshot described next: the console does not
+refetch the JWKS, so an issuer key rotation needs a restart of the host (or a
+refreshable `JwksCache` on the host's own front, see below). Google rotates its
+signing keys on the order of days and keeps the previous key valid during the
+overlap, so a host that restarts on deploys is usually current; a long-lived
+host should schedule a restart or front the console with a refreshing cache.
+
 ### Fixed trusted OIDC snapshot
 
 The reference console auth path reads a fixed, host-trusted snapshot from
@@ -113,6 +156,7 @@ TrustedOidcRuntimeConfig {
     discovery_json: discovery_json_text,
     jwks_json: jwks_json_text,
     audience: "meerkat-console".to_string(),
+    require_verified_email: false,
 }
 ```
 

@@ -436,6 +436,22 @@ impl Budget {
             .map(|(elapsed, limit)| limit.saturating_sub(elapsed))
     }
 
+    /// Issue the handle through which nested model work participates in this
+    /// agent's aggregate token accounting.
+    ///
+    /// A tool that performs its own bounded model call (for example the
+    /// decision service's `decide` tool) must not clone [`Budget`], keep a
+    /// private counter, or read `max_tokens` off an HTTP request. It reserves
+    /// through this owner-issued handle before egress and settles exactly once
+    /// afterwards, so the aggregate token axis is charged once for the nested
+    /// call and never advanced from a fabricated reading.
+    pub fn nested_usage_accounting(&self) -> NestedUsageAccounting {
+        NestedUsageAccounting {
+            accounting: Arc::clone(&self.accounting),
+            max_tokens: self.limits.max_tokens,
+        }
+    }
+
     /// Fork an operation-local turn clock while retaining this agent's exact
     /// lifetime token and tool-call accounting.
     ///
@@ -464,6 +480,181 @@ impl Clone for Budget {
             }),
             start_time: self.start_time,
             turn_start: self.turn_start,
+        }
+    }
+}
+
+/// Owner-issued participation handle for nested model usage.
+///
+/// Issued only by [`Budget::nested_usage_accounting`]; there is no other
+/// constructor, so a nested call can participate in the aggregate token axis
+/// only through the agent that owns it. The handle shares the owner's live
+/// accounting and never copies it.
+#[derive(Debug, Clone)]
+pub struct NestedUsageAccounting {
+    accounting: Arc<BudgetAccounting>,
+    max_tokens: Option<u64>,
+}
+
+/// One admitted nested token reservation.
+///
+/// The estimate is charged to the aggregate axis at reservation time so two
+/// concurrent nested calls cannot both fit in the same remaining allowance.
+/// It must be settled exactly once through
+/// [`NestedUsageAccounting::settle`]; a reservation dropped without
+/// settlement (cancelled work) releases its estimate so abandoned work never
+/// leaves a phantom charge behind.
+#[derive(Debug)]
+#[must_use = "settle the reservation with the measured usage; dropping it releases the estimate"]
+pub struct NestedUsageReservation {
+    accounting: Arc<BudgetAccounting>,
+    reserved_tokens: u64,
+    settled: bool,
+}
+
+/// What the nested call measured, as reported by its backend seam.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NestedUsageMeasurement {
+    /// Provider-authored normalized accounting for every provider call the
+    /// nested operation made (one entry per attempt, including bounded
+    /// repair attempts). Every attempt counts; none is dropped.
+    ProviderTurns(Vec<crate::types::TurnUsage>),
+    /// Total tokens reported by a non-LLM model backend. Such a backend has no
+    /// presented-token convention to normalize and must not be dressed up as
+    /// an LLM provider to fit [`crate::types::TurnUsage`].
+    BackendReported { total_tokens: u64 },
+    /// Nobody produced accounting. The axis must not advance from an invented
+    /// value; the reservation is released.
+    Unmeasured,
+}
+
+/// Typed settlement marker carried on the nested call's outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NestedUsageSettlement {
+    /// The aggregate axis was charged exactly this many normalized tokens.
+    Charged { tokens: u64 },
+    /// No accounting was measured; the reservation was released and the axis
+    /// did not advance. This is a degrade marker, not a claim of zero usage.
+    Unmeasured,
+}
+
+impl NestedUsageAccounting {
+    /// Reserve an estimated allowance for one nested call.
+    ///
+    /// Fails closed with the same [`BudgetExceeded`] fact the agent loop
+    /// enforces when the estimate does not fit the remaining aggregate token
+    /// allowance. Unlimited budgets admit every reservation.
+    pub fn reserve(&self, estimated_tokens: u64) -> Result<NestedUsageReservation, BudgetExceeded> {
+        let mut used = self.accounting.tokens_used.load(Ordering::Acquire);
+        loop {
+            let after = used.saturating_add(estimated_tokens);
+            if let Some(limit) = self.max_tokens
+                && after > limit
+            {
+                return Err(BudgetExceeded {
+                    dimension: BudgetDimension::Tokens,
+                    used,
+                    limit,
+                });
+            }
+            match self.accounting.tokens_used.compare_exchange_weak(
+                used,
+                after,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(NestedUsageReservation {
+                        accounting: Arc::clone(&self.accounting),
+                        reserved_tokens: estimated_tokens,
+                        settled: false,
+                    });
+                }
+                Err(current) => used = current,
+            }
+        }
+    }
+
+    /// Settle a reservation exactly once against what the nested call measured.
+    ///
+    /// Measured usage replaces the estimate so the axis carries the exact
+    /// normalized total; an unmeasured call releases the estimate entirely.
+    /// Settlement always lands on the accounting the reservation was minted
+    /// from, so a handle for another budget cannot move a charge between
+    /// owners.
+    pub fn settle(
+        &self,
+        reservation: NestedUsageReservation,
+        measurement: NestedUsageMeasurement,
+    ) -> NestedUsageSettlement {
+        debug_assert!(
+            Arc::ptr_eq(&self.accounting, &reservation.accounting),
+            "nested usage reservation settled through a handle for another budget"
+        );
+        reservation.settle(measurement)
+    }
+
+    /// Remaining aggregate token allowance, if the owner is limited.
+    pub fn remaining_tokens(&self) -> Option<u64> {
+        self.max_tokens
+            .map(|limit| limit.saturating_sub(self.accounting.tokens_used.load(Ordering::Acquire)))
+    }
+}
+
+fn release_reserved_tokens(accounting: &BudgetAccounting, tokens: u64) {
+    let mut used = accounting.tokens_used.load(Ordering::Acquire);
+    loop {
+        let after = used.saturating_sub(tokens);
+        match accounting.tokens_used.compare_exchange_weak(
+            used,
+            after,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return,
+            Err(current) => used = current,
+        }
+    }
+}
+
+impl NestedUsageReservation {
+    /// Tokens charged to the aggregate axis by this reservation.
+    pub fn reserved_tokens(&self) -> u64 {
+        self.reserved_tokens
+    }
+
+    /// Settle against the owning accounting exactly once.
+    pub fn settle(mut self, measurement: NestedUsageMeasurement) -> NestedUsageSettlement {
+        self.settled = true;
+        let reserved = self.reserved_tokens;
+        let actual = match measurement {
+            NestedUsageMeasurement::ProviderTurns(turns) => {
+                turns.iter().fold(0u64, |total, turn| {
+                    total.saturating_add(turn.normalized_total_tokens())
+                })
+            }
+            NestedUsageMeasurement::BackendReported { total_tokens } => total_tokens,
+            NestedUsageMeasurement::Unmeasured => {
+                release_reserved_tokens(&self.accounting, reserved);
+                return NestedUsageSettlement::Unmeasured;
+            }
+        };
+        if actual >= reserved {
+            self.accounting
+                .tokens_used
+                .fetch_add(actual - reserved, Ordering::AcqRel);
+        } else {
+            release_reserved_tokens(&self.accounting, reserved - actual);
+        }
+        NestedUsageSettlement::Charged { tokens: actual }
+    }
+}
+
+impl Drop for NestedUsageReservation {
+    fn drop(&mut self) {
+        if !self.settled {
+            release_reserved_tokens(&self.accounting, self.reserved_tokens);
         }
     }
 }
@@ -781,5 +972,141 @@ mod tests {
 
         // 100 should be returned
         assert_eq!(pool.available_tokens(), Some(800));
+    }
+
+    fn measured(input_tokens: u64, output_tokens: u64) -> NestedUsageMeasurement {
+        NestedUsageMeasurement::ProviderTurns(vec![crate::types::TurnUsage::host_declared(
+            crate::Provider::Other,
+            "nested-test-model",
+            crate::types::Usage {
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                provider_accounting: None,
+            },
+        )])
+    }
+
+    #[test]
+    fn nested_settlement_sums_every_provider_attempt() {
+        let budget = Budget::new(BudgetLimits::default().with_max_tokens(10_000));
+        let nested = budget.nested_usage_accounting();
+        let reservation = nested.reserve(10).unwrap();
+        let turn = |input: u64, output: u64| {
+            crate::types::TurnUsage::host_declared(
+                crate::Provider::Other,
+                "nested-test-model",
+                crate::types::Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_creation_tokens: None,
+                    cache_read_tokens: None,
+                    provider_accounting: None,
+                },
+            )
+        };
+        let settlement = nested.settle(
+            reservation,
+            NestedUsageMeasurement::ProviderTurns(vec![turn(40, 12), turn(40, 12)]),
+        );
+        assert_eq!(settlement, NestedUsageSettlement::Charged { tokens: 104 });
+        assert_eq!(budget.token_usage(), Some((104, 10_000)));
+    }
+
+    #[test]
+    fn nested_settlement_lands_on_the_reservation_owner_not_the_settling_handle() {
+        let owner = Budget::new(BudgetLimits::default().with_max_tokens(1_000));
+        let other = Budget::new(BudgetLimits::default().with_max_tokens(1_000));
+        let reservation = owner.nested_usage_accounting().reserve(100).unwrap();
+        assert_eq!(owner.token_usage(), Some((100, 1_000)));
+        let settlement = reservation.settle(measured(30, 20));
+        assert_eq!(settlement, NestedUsageSettlement::Charged { tokens: 50 });
+        assert_eq!(owner.token_usage(), Some((50, 1_000)));
+        assert_eq!(other.token_usage(), Some((0, 1_000)));
+    }
+
+    #[test]
+    fn nested_reservation_charges_estimate_then_settles_to_exact_usage() {
+        let budget = Budget::new(BudgetLimits::default().with_max_tokens(1_000));
+        let nested = budget.nested_usage_accounting();
+
+        let reservation = nested.reserve(400).unwrap();
+        assert_eq!(budget.token_usage(), Some((400, 1_000)));
+
+        let settlement = nested.settle(reservation, measured(100, 50));
+        assert_eq!(settlement, NestedUsageSettlement::Charged { tokens: 150 });
+        assert_eq!(budget.token_usage(), Some((150, 1_000)));
+    }
+
+    #[test]
+    fn nested_settlement_above_estimate_charges_the_difference() {
+        let budget = Budget::new(BudgetLimits::default().with_max_tokens(1_000));
+        let nested = budget.nested_usage_accounting();
+
+        let reservation = nested.reserve(100).unwrap();
+        let settlement = nested.settle(reservation, measured(300, 100));
+        assert_eq!(settlement, NestedUsageSettlement::Charged { tokens: 400 });
+        assert_eq!(budget.token_usage(), Some((400, 1_000)));
+    }
+
+    #[test]
+    fn nested_reservation_fails_closed_when_estimate_exceeds_remaining_allowance() {
+        let budget = Budget::new(BudgetLimits::default().with_max_tokens(500));
+        budget.record_tokens(450);
+        let nested = budget.nested_usage_accounting();
+
+        let refused = nested.reserve(100).unwrap_err();
+        assert_eq!(refused.dimension, BudgetDimension::Tokens);
+        assert_eq!(refused.used, 450);
+        assert_eq!(refused.limit, 500);
+        assert_eq!(budget.token_usage(), Some((450, 500)));
+    }
+
+    #[test]
+    fn nested_unmeasured_settlement_releases_estimate_and_marks_degrade() {
+        let budget = Budget::new(BudgetLimits::default().with_max_tokens(1_000));
+        let nested = budget.nested_usage_accounting();
+
+        let reservation = nested.reserve(400).unwrap();
+        let settlement = nested.settle(reservation, NestedUsageMeasurement::Unmeasured);
+        assert_eq!(settlement, NestedUsageSettlement::Unmeasured);
+        assert_eq!(budget.token_usage(), Some((0, 1_000)));
+    }
+
+    #[test]
+    fn nested_reservation_dropped_without_settlement_releases_estimate() {
+        let budget = Budget::new(BudgetLimits::default().with_max_tokens(1_000));
+        let nested = budget.nested_usage_accounting();
+
+        {
+            let _reservation = nested.reserve(400).unwrap();
+            assert_eq!(budget.token_usage(), Some((400, 1_000)));
+        }
+        assert_eq!(budget.token_usage(), Some((0, 1_000)));
+    }
+
+    #[test]
+    fn nested_backend_reported_total_settles_without_provider_accounting() {
+        let budget = Budget::new(BudgetLimits::default().with_max_tokens(1_000));
+        let nested = budget.nested_usage_accounting();
+
+        let reservation = nested.reserve(50).unwrap();
+        let settlement = nested.settle(
+            reservation,
+            NestedUsageMeasurement::BackendReported { total_tokens: 320 },
+        );
+        assert_eq!(settlement, NestedUsageSettlement::Charged { tokens: 320 });
+        assert_eq!(budget.token_usage(), Some((320, 1_000)));
+    }
+
+    #[test]
+    fn nested_accounting_on_unlimited_budget_admits_every_reservation() {
+        let budget = Budget::unlimited();
+        let nested = budget.nested_usage_accounting();
+        assert!(nested.remaining_tokens().is_none());
+        let reservation = nested.reserve(u64::MAX / 2).unwrap();
+        nested.settle(reservation, measured(10, 10));
+        assert!(budget.token_usage().is_none());
     }
 }

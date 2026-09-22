@@ -46,6 +46,9 @@ pub enum CapabilityId {
     /// declares an `[adaptive]` section, so hosts that do not know this
     /// capability fail closed instead of silently downgrading the pack.
     AdaptiveFlow,
+    /// Batched semantic decision service (`decide` tool and shared
+    /// evaluation), declared by the `meerkat-decision` feature crate.
+    Decision,
 }
 
 /// A mobpack manifest capability token paired with its typed classification.

@@ -2223,6 +2223,11 @@ pub struct AgentFactory {
     pub enable_memory: bool,
     pub enable_schedule: bool,
     pub enable_workgraph: bool,
+    /// Host intent for the decision `decide` tool. `Inherit` follows the
+    /// realm's `tools.decision_enabled`; `Enable`/`Disable` is an explicit host
+    /// override. Tri-state on purpose: inherit, disable, and set are
+    /// different facts.
+    pub decision: ToolCategoryOverride,
     pub enable_mob: bool,
     /// Optional skill source override. When set, bypasses config-driven
     /// repository resolution. For SDK users who wire sources programmatically.
@@ -2294,6 +2299,7 @@ impl std::fmt::Debug for AgentFactory {
             .field("enable_memory", &self.enable_memory)
             .field("enable_schedule", &self.enable_schedule)
             .field("enable_workgraph", &self.enable_workgraph)
+            .field("decision", &self.decision)
             .field("enable_mob", &self.enable_mob);
         #[cfg(feature = "comms")]
         d.field("enable_comms", &self.enable_comms);
@@ -3269,6 +3275,7 @@ impl AgentFactory {
             enable_memory: false,
             enable_schedule: false,
             enable_workgraph: false,
+            decision: ToolCategoryOverride::Inherit,
             enable_mob: false,
             #[cfg(feature = "skills")]
             skill_source: None,
@@ -3315,6 +3322,7 @@ impl AgentFactory {
             enable_memory: false,
             enable_schedule: false,
             enable_workgraph: false,
+            decision: ToolCategoryOverride::Inherit,
             enable_mob: false,
             #[cfg(feature = "skills")]
             skill_source: None,
@@ -3508,6 +3516,16 @@ impl AgentFactory {
     /// Enable or disable WorkGraph tools.
     pub fn workgraph(mut self, enabled: bool) -> Self {
         self.enable_workgraph = enabled;
+        self
+    }
+
+    /// Declare host intent for the decision `decide` tool.
+    ///
+    /// `Inherit` (the default) follows the effective realm config's
+    /// `tools.decision_enabled`; an explicit `Enable` or `Disable` overrides it
+    /// for every agent this factory builds.
+    pub fn decision(mut self, intent: ToolCategoryOverride) -> Self {
+        self.decision = intent;
         self
     }
 
@@ -5530,6 +5548,10 @@ impl AgentFactory {
                     BuildAgentError::Config(format!("session LLM capability hydration: {err}"))
                 })?;
         }
+        // Decision route: the `decide` tool takes the event-isolated fork of
+        // the loop's *current* client from each dispatch context, so it follows
+        // hot-swaps and fallbacks; nothing is captured at build time.
+        let effective_decision = self.decision.resolve(config.tools.decision_enabled);
         let event_tap = meerkat_core::new_event_tap();
         let llm_adapter: Arc<dyn AgentLlmClient> = if let Some(agent_client) =
             build_config.agent_llm_client_override.take()
@@ -6362,6 +6384,29 @@ impl AgentFactory {
             tool_count_after_workgraph = tools.tools().len(),
             effective_workgraph,
             "tool composition: after workgraph gateway"
+        );
+
+        // 9c2. Compose tools with the decision surface (after WorkGraph, before
+        // mob). Disabled means no service, no client, no credential lookup.
+        if effective_decision {
+            let decision_dispatcher = crate::decision_compose::wire_decision_tools(config)?;
+            let decision_usage = render_tool_usage_instructions(decision_dispatcher.as_ref());
+            tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
+                tools,
+                decision_dispatcher,
+            ]));
+            if !decision_usage.is_empty() {
+                if !tool_usage_instructions.is_empty() {
+                    tool_usage_instructions.push_str("\n\n");
+                }
+                tool_usage_instructions.push_str(&decision_usage);
+            }
+        }
+
+        tracing::debug!(
+            tool_count_after_decision = tools.tools().len(),
+            effective_decision,
+            "tool composition: after decision surface"
         );
 
         // 9d. Compose tools with mob surface (after comms/scheduler/WorkGraph, so mob
@@ -14315,6 +14360,131 @@ mod tests {
             image_executor_builds.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "same-provider image setup should reuse the already-authorized active LLM connection"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn decision_tool_is_absent_unless_the_realm_enables_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .unwrap();
+        let visible_names = agent.tool_scope().visible_tool_names().unwrap();
+        assert!(
+            !visible_names.contains(meerkat_decision::DECIDE_TOOL_NAME),
+            "decision is off by default: no decide tool may appear"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn decision_tool_composes_on_the_admitted_route_when_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.override_builtins = ToolCategoryOverride::Disable;
+        let mut config = Config::default();
+        config.tools.decision_enabled = true;
+
+        let agent = factory.build_agent(build, &config).await.unwrap();
+        let visible_names = agent.tool_scope().visible_tool_names().unwrap();
+        assert!(
+            visible_names.contains(meerkat_decision::DECIDE_TOOL_NAME),
+            "tools.decision_enabled must compose the decide tool"
+        );
+        assert!(
+            !visible_names.contains("task_list"),
+            "enabling decision must not expose general task builtins"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn factory_decision_intent_overrides_the_realm_switch_in_both_directions() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .decision(ToolCategoryOverride::Enable);
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.override_builtins = ToolCategoryOverride::Disable;
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .unwrap();
+        assert!(
+            agent
+                .tool_scope()
+                .visible_tool_names()
+                .unwrap()
+                .contains(meerkat_decision::DECIDE_TOOL_NAME)
+        );
+
+        let factory = AgentFactory::new(temp.path().join("sessions-2"))
+            .builtins(false)
+            .decision(ToolCategoryOverride::Disable);
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.override_builtins = ToolCategoryOverride::Disable;
+        let mut config = Config::default();
+        config.tools.decision_enabled = true;
+        let agent = factory.build_agent(build, &config).await.unwrap();
+        assert!(
+            !agent
+                .tool_scope()
+                .visible_tool_names()
+                .unwrap()
+                .contains(meerkat_decision::DECIDE_TOOL_NAME)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn decision_jev_route_fails_closed_without_disclosure_permission() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.override_builtins = ToolCategoryOverride::Disable;
+        let mut config = Config::default();
+        config.tools.decision_enabled = true;
+        config.decision = Some(meerkat_core::DecisionConfig {
+            backend: meerkat_core::DecisionBackendSelection::Jev,
+            jev: Some(meerkat_core::JevBackendConfig {
+                endpoint: meerkat_decision::DEFAULT_JEV_ENDPOINT.into(),
+                model: meerkat_decision::DEFAULT_JEV_MODEL.into(),
+                credential: meerkat_core::CredentialSourceSpec::Env {
+                    env: "JEV_API_KEY".into(),
+                    fallback: Vec::new(),
+                },
+                allow_disclosure: false,
+            }),
+            ..meerkat_core::DecisionConfig::default()
+        });
+
+        let Err(error) = factory.build_agent(build, &config).await else {
+            unreachable!("Jev without host disclosure permission must fail closed");
+        };
+        assert!(
+            error.to_string().contains("disclosure"),
+            "Jev without host disclosure permission must fail closed: {error}"
         );
     }
 

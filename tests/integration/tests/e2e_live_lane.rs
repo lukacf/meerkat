@@ -76,6 +76,7 @@ live_scenario!(
 );
 live_scenario!(e2e_live_s70_realtime_tool_continuation_failure_path, 70);
 live_suite!(e2e_live_agent_mob_tools_suite, "agent-mob-tools");
+live_suite!(e2e_live_decision_suite, "decision-live");
 live_suite!(
     e2e_live_cli_mob_rpc_state_machine_probe,
     "cli-mob-rpc-state-machine-probe"

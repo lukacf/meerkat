@@ -669,6 +669,47 @@ impl CancelAfterBoundaryCommand {
 /// cancellation without holding a reference to the agent.
 pub type CancelAfterBoundarySender = tokio::sync::mpsc::UnboundedSender<CancelAfterBoundaryCommand>;
 
+/// Source of per-call event-isolated model routes: the loop's current
+/// client, kept behind its own generic so an unsized `Arc<C>` can be carried
+/// without coercion.
+pub trait NestedRouteSource: Send + Sync {
+    fn fork_noncommitting_route(&self) -> Result<Arc<dyn AgentLlmClient>, AgentError>;
+}
+
+impl<C: AgentLlmClient + ?Sized> NestedRouteSource for Arc<C> {
+    fn fork_noncommitting_route(&self) -> Result<Arc<dyn AgentLlmClient>, AgentError> {
+        self.fork_noncommitting_live_bridge()
+    }
+}
+
+/// Outcome of asking a dispatch context for an event-isolated model route.
+pub enum NestedModelRoute {
+    /// The dispatching context carries no model client (standalone or host
+    /// invocation).
+    NotIssued,
+    /// A fresh event-isolated fork of the loop's current client.
+    Forked(Arc<dyn AgentLlmClient>),
+    /// The loop's client cannot provide an event-isolated fork.
+    Unavailable(AgentError),
+}
+
+impl std::fmt::Debug for NestedModelRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotIssued => f.write_str("NestedModelRoute::NotIssued"),
+            Self::Forked(route) => f
+                .debug_struct("NestedModelRoute::Forked")
+                .field("provider", &route.provider())
+                .field("model", &route.model())
+                .finish(),
+            Self::Unavailable(error) => f
+                .debug_tuple("NestedModelRoute::Unavailable")
+                .field(error)
+                .finish(),
+        }
+    }
+}
+
 /// Typed context supplied by the agent loop when dispatching a tool call.
 ///
 /// This is a dispatch-time projection of the already-admitted turn input. It
@@ -684,6 +725,8 @@ pub struct ToolDispatchContext {
     run_id: Option<crate::RunId>,
     streaming: Option<crate::ToolStreamingDispatchContext>,
     live_bridge_admission: Option<LiveBridgeToolDispatchAdmission>,
+    nested_usage: Option<crate::budget::NestedUsageAccounting>,
+    nested_model_route: Option<Arc<dyn NestedRouteSource>>,
 }
 
 /// Process-local live bridge authority carried to the last actual tool
@@ -984,6 +1027,8 @@ impl ToolDispatchContext {
             run_id: None,
             streaming: None,
             live_bridge_admission: None,
+            nested_usage: None,
+            nested_model_route: None,
         }
     }
 
@@ -1069,6 +1114,68 @@ impl ToolDispatchContext {
     #[must_use]
     pub fn live_bridge_admission(&self) -> Option<&LiveBridgeToolDispatchAdmission> {
         self.live_bridge_admission.as_ref()
+    }
+
+    /// Bind an owner-issued nested-usage accounting handle.
+    ///
+    /// The handle itself is the authority: only [`crate::budget::Budget`]
+    /// mints one, so attaching it here cannot grant participation the owner
+    /// did not issue. The agent loop attaches its own budget's handle; hosts
+    /// composing a standalone dispatch context attach one they own.
+    #[must_use]
+    pub fn with_nested_usage_accounting(
+        mut self,
+        nested_usage: crate::budget::NestedUsageAccounting,
+    ) -> Self {
+        self.nested_usage = Some(nested_usage);
+        self
+    }
+
+    /// Owner-issued handle for nested model usage, when the dispatching loop
+    /// issued one.
+    ///
+    /// Standalone and test contexts carry none. A tool that performs its own
+    /// model call must then report typed non-participation on its outcome
+    /// rather than fabricating accounting or keeping a private counter.
+    #[must_use]
+    pub fn nested_usage_accounting(&self) -> Option<&crate::budget::NestedUsageAccounting> {
+        self.nested_usage.as_ref()
+    }
+
+    /// Bind the loop's current LLM client as the source of nested model
+    /// routes.
+    ///
+    /// The agent loop attaches the client it is using for this run. A tool
+    /// making its own bounded model call forks an event-isolated route from
+    /// it at call time ([`Self::nested_model_route`]), so the route follows
+    /// the session identity as it stands then — including a model fallback
+    /// committed after this context was built — instead of a copy taken
+    /// earlier.
+    #[must_use]
+    pub fn with_nested_model_route<C: AgentLlmClient + ?Sized + 'static>(
+        mut self,
+        client: Arc<C>,
+    ) -> Self {
+        self.nested_model_route = Some(Arc::new(client));
+        self
+    }
+
+    /// A fresh event-isolated fork of the current admitted LLM route.
+    ///
+    /// Forked per call from the loop's current client. Standalone contexts
+    /// carry no source ([`NestedModelRoute::NotIssued`]); a client that
+    /// cannot fork an event-isolated route reports
+    /// [`NestedModelRoute::Unavailable`], and a tool needing a route then
+    /// reports typed unavailability rather than electing a route of its own.
+    #[must_use]
+    pub fn nested_model_route(&self) -> NestedModelRoute {
+        match self.nested_model_route.as_ref() {
+            None => NestedModelRoute::NotIssued,
+            Some(source) => match source.fork_noncommitting_route() {
+                Ok(route) => NestedModelRoute::Forked(route),
+                Err(error) => NestedModelRoute::Unavailable(error),
+            },
+        }
     }
 
     pub fn current_turn_image(

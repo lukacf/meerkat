@@ -35,6 +35,52 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat-decision`: a provider-neutral batched semantic decision service.
+  Typed `binary`, `choose_one`, and `grade` questions are evaluated over
+  bounded supplied state in one call and return typed judgments (including
+  explicit abstention), backend-qualified native signals, exact route
+  provenance, and typed accounting. The default backend is one tool-free
+  structured request through the session's already-admitted LLM route; an
+  optional Jev (TypeSafe) adapter is selected only by explicit
+  `[decision] backend = "jev"` with a typed credential source and
+  `allow_disclosure = true`. The agent-callable `decide` tool is composed by
+  the facade only when `tools.decision_enabled = true` (or an explicit
+  `AgentFactory::decision(ToolCategoryOverride::Enable)`); disabled realms
+  build no client, perform no credential lookup, and make no network call.
+  Nested model usage participates once in the owning agent's token budget
+  through `Budget::nested_usage_accounting` (reservation before egress, exact
+  settlement afterwards, typed `Unmeasured`/`NotIssued` markers, never a
+  fabricated zero). Feature-owned capability declaration `CapabilityId::Decision`,
+  tool provenance `ToolSourceKind::Decision` (catalog DSL first), realm-config
+  vocabulary `meerkat_core::DecisionConfig`, and facade composition in
+  `meerkat::build_decision_service` / `meerkat::build_host_decision_service`.
+  Inside an agent turn the `decide` tool forks an event-isolated route from
+  the loop's *current* client at each call (`ToolDispatchContext::
+  nested_model_route` → `NestedModelRoute::{Forked, NotIssued, Unavailable}`),
+  so it follows a model fallback committed mid-run and never streams into
+  the session event channel; a client that cannot fork is the typed
+  `route_unavailable` failure, never a silent use of the committing client.
+  Hosts with no admitted session route name an explicit
+  `[decision.host_route]` (`provider`, `model`, optional `auth_binding`).
+  `Config.decision` is `Option<DecisionConfig>` (read through
+  `Config::decision_config()`): a declared table replaces the inherited one
+  as a whole, even when it equals the defaults, so a child realm revokes a
+  parent's Jev route by writing `[decision] backend = "llm"`; an undeclared
+  table inherits and is never written back. `decision.jev.endpoint` must be
+  `https://` (plaintext is admitted only for loopback hosts) and response
+  bodies are capped while streaming. The Jev credential resolves through
+  `CredentialSourceSpec::Env` / `InlineSecret` only in this release; the
+  managed-store and AuthMachine lease paths are refused typed
+  (`DecisionUnavailableReason::CredentialSourceUnsupported`) rather than
+  half-wired. Every provider attempt is accounted (`AttemptUsage::{Measured,
+  Unmeasured}`): an attempt that spent tokens without reporting them makes
+  the whole evaluation `unmeasured` rather than an undercount, and failed
+  evaluations carry the accounting that was still measured plus the attempt
+  count (`DecisionError::BackendFailure { failure, accounting, budget,
+  attempts }`).
+
 ### Changed
 
 - Windows release binaries are cross-compiled from Linux with cargo-xwin

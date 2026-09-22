@@ -204,6 +204,7 @@ The complete `CapabilityId` vocabulary is:
 | `skills` | Compiled skills support plus `skills.enabled` | Skill discovery, resolution, and injection |
 | `mcp_live` | Compiled `mcp` support | Add, remove, or reload MCP servers on a live session |
 | `adaptive_flow` | Known mobpack requirement token | Adaptive FlowMaster execution; not an automatically registered inventory row |
+| `decision` | Decision crate plus `tools.decision_enabled` | Batched semantic decision service (`decide` tool and shared evaluation) |
 
 WorkGraph's companion skill uses the same canonical `work_graph` token as the
 public inventory. Adaptive mobpacks stamp `adaptive_flow` into their
@@ -215,7 +216,8 @@ Optional capability bundles are declared by the owning feature crate.
 contracts and facades may project those declarations into `CapabilityStatus`,
 but they must not invent feature policy or translate aliases. For example,
 `meerkat-schedule` owns Schedule policy, `meerkat-workgraph` owns WorkGraph
-policy and registration, and `meerkat-skills` owns Skills policy.
+policy and registration, `meerkat-decision` owns Decision policy and the
+`decide` tool, and `meerkat-skills` owns Skills policy.
 
 ### Runtime host feature flags
 

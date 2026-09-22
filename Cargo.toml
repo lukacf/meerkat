@@ -19,6 +19,7 @@ members = [
     "meerkat-schedule",
     "meerkat-jobs",
     "meerkat-workgraph",
+    "meerkat-decision",
     "meerkat-store",
     "meerkat-store-conformance",
     "meerkat-tools",
@@ -155,6 +156,7 @@ meerkat-copilot = { version = "0.8.40", path = "meerkat-copilot", default-featur
 meerkat-schedule = { version = "0.8.40", path = "meerkat-schedule" }
 meerkat-jobs = { version = "0.8.40", path = "meerkat-jobs" }
 meerkat-workgraph = { version = "0.8.40", path = "meerkat-workgraph" }
+meerkat-decision = { version = "0.8.40", path = "meerkat-decision" }
 meerkat-tools = { version = "0.8.40", path = "meerkat-tools", default-features = false }
 meerkat-mcp = { version = "0.8.40", path = "meerkat-mcp" }
 meerkat-mcp-server = { version = "0.8.40", path = "meerkat-mcp-server" }

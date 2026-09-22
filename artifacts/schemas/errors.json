@@ -27,6 +27,11 @@
             "const": "adaptive_flow",
             "description": "Adaptive mobpack flow execution (FlowMaster planning loop, layer\ncompilation, policy composition). Stamped into a mobpack's\n`[requires]` section by the pack builder whenever the manifest\ndeclares an `[adaptive]` section, so hosts that do not know this\ncapability fail closed instead of silently downgrading the pack.",
             "type": "string"
+          },
+          {
+            "const": "decision",
+            "description": "Batched semantic decision service (`decide` tool and shared\nevaluation), declared by the `meerkat-decision` feature crate.",
+            "type": "string"
           }
         ]
       }
@@ -168,6 +173,11 @@
           {
             "const": "adaptive_flow",
             "description": "Adaptive mobpack flow execution (FlowMaster planning loop, layer\ncompilation, policy composition). Stamped into a mobpack's\n`[requires]` section by the pack builder whenever the manifest\ndeclares an `[adaptive]` section, so hosts that do not know this\ncapability fail closed instead of silently downgrading the pack.",
+            "type": "string"
+          },
+          {
+            "const": "decision",
+            "description": "Batched semantic decision service (`decide` tool and shared\nevaluation), declared by the `meerkat-decision` feature crate.",
             "type": "string"
           }
         ]

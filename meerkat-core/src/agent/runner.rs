@@ -2208,7 +2208,9 @@ where
                 self.active_transcript_identity
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
-            );
+            )
+            .with_nested_usage_accounting(self.budget.nested_usage_accounting())
+            .with_nested_model_route(Arc::clone(&self.client));
         if let Some(admission) = self.live_bridge_dispatch_admission.clone() {
             self.tool_dispatch_context = self
                 .tool_dispatch_context
@@ -2379,7 +2381,9 @@ where
                 self.active_transcript_identity
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
-            );
+            )
+            .with_nested_usage_accounting(self.budget.nested_usage_accounting())
+            .with_nested_model_route(Arc::clone(&self.client));
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 

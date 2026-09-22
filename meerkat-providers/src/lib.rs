@@ -13,6 +13,7 @@
 //! (2026-04-18).
 
 pub mod runtime {
+    pub use meerkat_auth_core::resolver::resolve_env_secret;
     #[cfg(not(target_arch = "wasm32"))]
     pub use meerkat_auth_core::resolver::resolve_external_authorizer;
     pub use meerkat_auth_core::resolver::resolve_simple_secret;

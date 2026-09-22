@@ -794,6 +794,7 @@ pub enum ToolSourceKind {
     Callback,
     Mcp,
     RustBundle,
+    Decision,
 }
 
 impl From<&meerkat_core::types::ToolSourceKind> for ToolSourceKind {
@@ -809,6 +810,7 @@ impl From<&meerkat_core::types::ToolSourceKind> for ToolSourceKind {
             meerkat_core::types::ToolSourceKind::Callback => Self::Callback,
             meerkat_core::types::ToolSourceKind::Mcp => Self::Mcp,
             meerkat_core::types::ToolSourceKind::RustBundle => Self::RustBundle,
+            meerkat_core::types::ToolSourceKind::Decision => Self::Decision,
         }
     }
 }

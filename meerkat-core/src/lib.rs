@@ -32,6 +32,11 @@ pub mod config_runtime;
 pub mod config_store;
 pub mod connection;
 pub mod context_budget;
+pub mod decision_config;
+pub use decision_config::{
+    DecisionBackendSelection, DecisionConfig, DecisionHostRoute, DecisionLimitsConfig,
+    JevBackendConfig,
+};
 mod digest_observability;
 pub mod error;
 pub mod event;
@@ -114,10 +119,10 @@ pub use agent::{
     CurrentTurnContent, CurrentTurnImageRef, DefaultSystemPromptPolicy, DispatcherCapabilities,
     ExternalToolUpdate, FilteredToolDispatcher, LiveBridgeNoncommittingRunPermit,
     LiveBridgePreparedOperation, LiveBridgeToolDispatchAdmission, LlmStreamResult,
-    ObservedCommsSender, RequestAttemptAuthority, SnapshotProjectionError,
-    StickyModelFallbackActivationProof, ToolDispatchContext, dispatch_tool_execution_plan_fenced,
-    resolve_tool_execution_plan_fenced, select_tool_catalog_mode,
-    should_compose_tool_catalog_control_plane,
+    NestedModelRoute, NestedRouteSource, ObservedCommsSender, RequestAttemptAuthority,
+    SnapshotProjectionError, StickyModelFallbackActivationProof, ToolDispatchContext,
+    dispatch_tool_execution_plan_fenced, resolve_tool_execution_plan_fenced,
+    select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
 };
 pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,
@@ -144,6 +149,7 @@ pub use blob::{
 };
 pub use budget::{
     Budget, BudgetDimension, BudgetExceeded, BudgetLimits, BudgetObservation, BudgetPool,
+    NestedUsageAccounting, NestedUsageMeasurement, NestedUsageReservation, NestedUsageSettlement,
 };
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,

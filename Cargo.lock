@@ -2846,6 +2846,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-copilot",
  "meerkat-core",
+ "meerkat-decision",
  "meerkat-gemini",
  "meerkat-hooks",
  "meerkat-jobs",
@@ -3114,6 +3115,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-decision"
+version = "0.8.40"
+dependencies = [
+ "async-trait",
+ "axum",
+ "indexmap",
+ "inventory",
+ "meerkat-capabilities",
+ "meerkat-core",
+ "reqwest 0.12.28",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio_with_wasm",
+ "tracing",
+]
+
+[[package]]
 name = "meerkat-gemini"
 version = "0.8.40"
 dependencies = [
@@ -3177,6 +3198,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-copilot",
  "meerkat-core",
+ "meerkat-decision",
  "meerkat-live",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
@@ -5278,6 +5300,7 @@ checksum = "687274d293b6cdc6e73e0fee520bf2049650090d7164f87672d212a3c530cf4a"
 dependencies = [
  "chrono",
  "dyn-clone",
+ "indexmap",
  "ref-cast",
  "schemars_derive 1.2.2",
  "serde",

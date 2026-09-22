@@ -3367,6 +3367,8 @@ pub enum ToolSourceKind {
     Callback,
     Mcp,
     RustBundle,
+    /// Feature-owned semantic decision service (`decide`).
+    Decision,
 }
 
 /// Provenance metadata for a tool definition.

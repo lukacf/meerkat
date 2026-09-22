@@ -70,6 +70,23 @@ them.
 
 ### Fixed
 
+- Public GPT Live client delegations no longer start the executor on a
+  truncated request, and the spoken request is one canonical user row. The
+  provider emits `session.delegation.created {offset_ms}` at the model's
+  decision point on the session timeline, which is not the end of the
+  utterance: measured against gpt-live-1, the user's final word starts
+  exactly at `offset_ms`. The broker froze only the transcript that started
+  before the offset, so the final word (`" named it"`, `" testing"`) was
+  missing from the executor input and was committed as a second spoken user
+  row (8 rows for 6 exchanges). The join now carries the whole open user
+  turn at the moment `session.delegation.created` arrives. The public
+  protocol carries no per-utterance transcript completion, item lifecycle,
+  or speech start/stop event, so the join is defined by arrival: a
+  transcript delta arriving after the join is a separate utterance and opens
+  a new user turn like any other (its words always reach the durable
+  transcript; a following delegation takes that turn as its input). In every
+  measured delegation the transcript was complete before the delegation
+  arrived. The broker logs each input delta's timeline span (numbers only).
 - Public GPT Live no longer opens a call with a fresh greeting. The startup
   factual summary and the pending-context notice were seeded as a user-role
   input item, which the provider answered like a first utterance; they now ride

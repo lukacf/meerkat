@@ -4,7 +4,7 @@ description: "Understand MobKit's lightweight roster projection, deep member sta
 icon: "users"
 ---
 
-*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
+*This page documents MobKit v0.8.40 (mirrored from [v0.8.40](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.40)).*
 
 The mob roster is the operational view of the members known to a mob. Roster
 reads return lightweight `MobMemberListEntry` projections. Deep execution
@@ -41,17 +41,26 @@ spawn anywhere is `mobkit_gateway`'s no-config fallback, which ensures a single
 `definition.json` exists; a workspace definition with an empty
 `identity_roster` boots with no members at all.
 
-The roster callback does not hand you the definition. On `rpc_gateway` the
-gateway sends `callback/roster_provider/roster` with the serialized
-`RosterContext` (`mob_definition`, always the definition the gateway booted
-with, and `previous_identities`) as the request params, but the Python and
-TypeScript SDK dispatchers pass the provider `params["context"]`, a key the
-gateway does not send. The `context` argument your `roster(context)` receives
-is therefore an empty dict or object on both SDKs, and
-`context["mob_definition"]` raises `KeyError`. A host that wants a
-profile-shaped crew derives it from the definition it already holds, the same
-`mob.toml` text it passes to `.mob_inline(...)` (HomeCore builds its roster the
-same way, from its own parsed config, and ignores `context`):
+The roster callback receives a typed `RosterContext`. On `rpc_gateway`, the
+gateway sends `callback/roster_provider/roster` with the serialized context
+nested under `params.context`, and both SDK dispatchers pass the parsed
+context to the provider:
+
+- Python: `context.mob_definition` and `context.previous_identities`.
+- TypeScript: `context.mobDefinition` and `context.previousIdentities`.
+
+The bundled gateway supplies its booted, compiled definition as a JSON object,
+including `profiles`. The definition is optional for custom hosts and test
+harnesses (`None` in Python, `null` in TypeScript). The `previous_identities`
+list depends on the callback path: topology-query/edge-reconciliation
+snapshots supply registered identities, while bootstrap, full roster
+refresh/reconcile, and reset-time roster adoption currently pass an empty
+list. An empty list is not proof that no identities are registered, and the
+context does not instruct the host to spawn one member per profile.
+
+A host can derive its roster from that context. If it already owns the source
+`mob.toml`, it can instead use its own parsed configuration, as in this
+optional profile-shaped roster strategy:
 
 ```python
 import tomllib
@@ -456,7 +465,7 @@ under `context` (the same envelope the topology and customizer callbacks use):
 | Field | Meaning |
 |-------|---------|
 | `mob_definition` | The booted mob's compiled definition. Always present behind the bundled `rpc_gateway`; `null` only when an in-process Rust embedder or test harness resolves a roster without a mob definition. |
-| `previous_identities` | Identities the identity runtime has registered at the time of the call. Empty on the bootstrap resolves (nothing is registered yet), populated on later re-derivations such as `mobkit/topology/query` or an edge reconcile. |
+| `previous_identities` | Call-site-dependent context, not a complete membership snapshot. Topology-query/edge-reconciliation snapshots supply registered identities; bootstrap, full roster refresh/reconcile, and reset-time roster adoption currently pass an empty list, even if identities are already registered. |
 
 The Python SDK delivers this as `RosterContext` from
 `meerkat_mobkit.identity_first_models`; the TypeScript SDK as the exported

@@ -4,7 +4,7 @@ description: "Bootstrap a MobKit runtime with modules and a Meerkat mob. Single 
 icon: "rocket"
 ---
 
-*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
+*This page documents MobKit v0.8.40 (mirrored from [v0.8.40](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.40)).*
 
 ## Install
 
@@ -12,7 +12,7 @@ icon: "rocket"
   <Tab title="Rust crate">
     ```toml Cargo.toml
     [dependencies]
-    meerkat-mobkit = "0.8.39"
+    meerkat-mobkit = "0.8.40"
     tokio = { version = "1", features = ["full"] }
     ```
   </Tab>
@@ -188,10 +188,11 @@ await luka.send_and_wait("What's happening today?", timeout=60)
 **Profiles are templates; members are declared.** The `[profiles.*]` tables in
 `MOB_TOML` produce no members on their own: the identities your roster returns
 (or `ensure_member` names) are the only members that exist, and nothing spawns
-one member per profile for you. The roster callback's `context` argument is
-empty on both SDKs (the gateway sends the definition, the SDK dispatchers do
-not pass it through), so a profile-shaped crew is one loop over the
-`[profiles.*]` of your own parsed `MOB_TOML`; see
+one member per profile for you. The roster callback receives a typed
+`RosterContext`: Python exposes `mob_definition` and `previous_identities`;
+TypeScript exposes `mobDefinition` and `previousIdentities`. The bundled
+`rpc_gateway` supplies its booted definition, while custom hosts may omit it.
+Use that context or your own parsed `MOB_TOML` to declare a profile-shaped crew; see
 [Profiles are templates](/mobkit/concepts/roster#profiles-are-templates-and-members-are-declared).
 If the definition declares `[wiring]` (`auto_wire_orchestrator` or
 `role_wiring`), call `rt.mob_handle().reconcile_edges()` after boot and after

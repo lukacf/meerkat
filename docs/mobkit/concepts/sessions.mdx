@@ -4,7 +4,7 @@ description: "How MobKit's session-store adapters relate to Meerkat's canonical 
 icon: "database"
 ---
 
-*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
+*This page documents MobKit v0.8.40 (mirrored from [v0.8.40](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.40)).*
 
 Meerkat owns the canonical session and runtime lifecycle: input acceptance, turn execution, deduplication, retire/reset semantics, and durable recovery. MobKit adds session-store adapters that support MobKit's operational workflows, console views, and integration surfaces.
 
@@ -16,33 +16,49 @@ This page describes MobKit-specific storage adapters. It does not replace Meerka
 
 | Backend | Use case | Description |
 |---------|----------|-------------|
-| `JsonFileSessionStore` | Local development | JSON files on disk with lock-based concurrency |
+| `JsonFileSessionStore` | Local development | One JSON array file per adapter, with file-level locking |
 | `BigQuerySessionStoreAdapter` | Production | Cloud persistence via BigQuery |
 
 ### JSON file store
 
-The default adapter writes session state snapshots as JSON files to a local directory. Each session gets its own file, and concurrent access is managed through lock files.
+This adapter stores rows for all sessions in one JSON array at the configured
+file path. Appending rows reads the existing array and atomically replaces the
+shared data file.
 
 ```rust
-JsonFileSessionStore {
-    base_dir: "/var/mobkit/sessions",
-}
+use meerkat_mobkit::JsonFileSessionStore;
+
+let store = JsonFileSessionStore::new(".mobkit/session-rows.json");
 ```
 
-**Lock-based concurrency.** Before writing, the store acquires a lock file (`{session_id}.lock`). The lock contains a `JsonStoreLockRecord` with the process ID and acquisition timestamp.
+**Lock-based concurrency.** Before appending, the store acquires one file-level
+lock. By default, `new` replaces the data path's extension with `.lock`
+(`.mobkit/session-rows.lock` above); `with_lock_path(...)` overrides that path.
+The lock contains a `JsonStoreLockRecord` with `owner_pid` and `created_at_ms`.
 
-**Stale lock recovery.** If a process crashes while holding a lock, the lock becomes stale. On the next access attempt, the store checks whether the PID in the lock record is still alive. Dead PIDs trigger automatic lock recovery -- the stale lock is removed and a new one is acquired.
+**Stale lock recovery.** Recovery is attempted during lock acquisition, not on
+every read or immediately after a crash. A valid lock record must first reach
+the stale-age threshold (30 seconds by default, configurable with
+`with_stale_lock_threshold(Duration)`). Only then is its PID probed: a dead
+owner allows the lock to be removed and acquisition retried, while a live owner
+retains it. If the liveness probe cannot be executed, the lock is conservatively
+retained. Malformed lock records use the lock file's modification age instead
+of a PID test. A lock that cannot yet be recovered returns `LockHeld`.
 
 ### BigQuery adapter
 
 For production-oriented deployments, the BigQuery adapter writes session rows to a configured dataset and table:
 
 ```rust
-BigQuerySessionStoreAdapter {
-    dataset: "mobkit_sessions",
-    table: "session_rows",
-}
+use meerkat_mobkit::BigQuerySessionStoreAdapter;
+
+let store = BigQuerySessionStoreAdapter::new_native("mobkit_sessions", "session_rows");
 ```
+
+Constructing the adapter does not provision the table or credentials. Remote
+row operations need a project from `with_project_id(...)` or
+`BIGQUERY_PROJECT_ID`, and a token from `with_access_token(...)` or one of
+`BIGQUERY_ACCESS_TOKEN`, `GOOGLE_OAUTH_ACCESS_TOKEN`, and `GOOGLE_ACCESS_TOKEN`.
 
 BigQuery naming is validated:
 - Dataset and table names must be non-empty
@@ -56,24 +72,46 @@ BigQuery naming validation rejects special characters to prevent injection. Name
 
 Session state is serialized as `SessionPersistenceRow` records:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `session_id` | `String` | Unique session identifier |
-| `turn_number` | `u64` | Current turn count |
-| `state` | `Value` | Serialized session state (messages, tool results, context) |
-| `created_at_ms` | `u64` | Creation timestamp |
-| `updated_at_ms` | `u64` | Last update timestamp |
+| Field | Type | Serde default | Description |
+|-------|------|---------------|-------------|
+| `session_id` | `String` | `""` | Session identifier |
+| `updated_at_ms` | `u64` | `0` | Timestamp used to choose the latest row for a session |
+| `deleted` | `bool` | `false` | Tombstone flag |
+| `payload` | `serde_json::Value` | `null` | Serialized session content |
+| `labels` | `BTreeMap<String, String>` | `{}` | String key-value metadata |
+
+Every field is `#[serde(default)]`: an omitted field receives the default
+above when the row is deserialized.
 
 ## Session store contracts
 
-The `SessionStoreContract` defines the operations every backend must implement:
+`SessionStoreContract` is serializable capability and guarantee metadata, not
+a CRUD trait. `session_store_contracts(&decisions)` returns these descriptors
+for the BigQuery and JSON-file adapters:
 
-| Operation | Description |
-|-----------|-------------|
-| `write` | Persist a session row (create or update) |
-| `read` | Load a session row by ID |
-| `list` | List all session IDs |
-| `delete` | Remove a session row |
+| Field | Type | Meaning |
+|-------|------|---------|
+| `store` | `SessionStoreKind` | Backend kind |
+| `latest_row_per_session` | `bool` | Supports latest-row materialization |
+| `tombstones_supported` | `bool` | Supports rows marked deleted |
+| `dedup_read_path` | `bool` | Supports deduplicated session reads |
+| `file_locking` | `bool` | Uses file-level locking |
+| `crash_recovery` | `bool` | Supports stale-lock recovery |
+| `bigquery_dataset` | `Option<String>` | Configured dataset for the BigQuery descriptor |
+| `bigquery_table` | `Option<String>` | Configured table for the BigQuery descriptor |
+
+The concrete adapters expose row-oriented methods (BigQuery's are async):
+
+| Method | Description |
+|--------|-------------|
+| JSON `append_rows` / BigQuery `stream_insert_rows` | Append session rows |
+| `read_rows` | Read stored rows, including older versions and tombstones |
+| `read_latest_rows` | Read the latest row per session |
+| `read_live_rows` | Read latest rows whose `deleted` flag is false |
+
+Logical deletion appends a newer row for the same `session_id` with
+`deleted: true`. Live-row materialization omits that session; the tombstone
+does not itself erase historical rows.
 
 Contracts are verified by integration tests that run the same test suite against every backend implementation.
 

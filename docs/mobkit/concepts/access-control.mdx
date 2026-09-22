@@ -4,7 +4,7 @@ description: "Optional ABAC for the console: control which users can see which a
 icon: "lock"
 ---
 
-*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
+*This page documents MobKit v0.8.40 (mirrored from [v0.8.40](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.40)).*
 
 MobKit ships an optional attribute-based access control (ABAC) layer for everything that flows through the console and observation surfaces. When it is off — the default — nothing changes. When it is on, every console caller only sees and operates exactly what their attributes grant: the agent sidebar, roster, topology, timeline, event streams, sends, and lifecycle actions are all filtered or gated per principal, invisibly. A restricted user doesn't see denied agents or disabled buttons explained; they just get a console shaped to what they're allowed.
 
@@ -115,11 +115,17 @@ let runtime = UnifiedRuntime::builder()
 ```
 
 ```typescript
+import { MobKit } from "@rkat/mobkit-sdk";
+
 const mobkit = await MobKit.builder()
-  .mobConfig("config/mob.toml")
+  .mob("config/mob.toml")
   .accessControl("config/access.toml") // auto-discovered if the file exists
-  .start();
+  .gateway("/path/to/rpc_gateway")
+  .build();
 ```
+
+Use the downloaded or locally built gateway binary as described in the
+[quickstart](/mobkit/quickstart#install).
 
 ```python
 mobkit = await (

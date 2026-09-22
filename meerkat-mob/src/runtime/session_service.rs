@@ -1291,6 +1291,39 @@ pub trait MobSessionService:
         ))
     }
 
+    /// Wait, bounded, for the source's turn-finalization boundary and fork
+    /// while still holding it.
+    ///
+    /// The default acquires the boundary through
+    /// [`Self::acquire_runtime_turn_finalization_guard`] and forks under it
+    /// with [`Self::fork_persisted_session`]. Services whose fork authority
+    /// takes that same boundary itself (the persistent store owner) override
+    /// this so the held guard is handed over instead of re-locked.
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, SessionError> {
+        let started = std::time::Instant::now();
+        let Ok(guard) = tokio::time::timeout(
+            bound,
+            self.acquire_runtime_turn_finalization_guard(source_session_id),
+        )
+        .await
+        else {
+            return Ok(meerkat_core::DurableForkAtTurnBoundary::SourceBusy {
+                waited: started.elapsed(),
+            });
+        };
+        let _turn_finalization_guard = guard?;
+        self.fork_persisted_session(source_session_id, message_count, tool_access_policy, target)
+            .await
+            .map(meerkat_core::DurableForkAtTurnBoundary::Forked)
+    }
+
     /// Load an archived session only for an explicit resume/revival operation.
     /// Ordinary reads remain archive-filtered.
     ///
@@ -2627,6 +2660,25 @@ where
             message_count,
             tool_access_policy,
             Some(target),
+        )
+        .await
+    }
+
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::fork_durable_session_at_turn_boundary(
+            self,
+            source_session_id,
+            message_count,
+            tool_access_policy,
+            target,
+            bound,
         )
         .await
     }

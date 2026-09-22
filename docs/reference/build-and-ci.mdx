@@ -203,10 +203,16 @@ need the unbounded verification set.
 The active `.github/workflows/ci.yml` calls two reusable workflows for PRs,
 pushes to `main`, `ci/**`, `feat/**`, and `feature/**`, and manual dispatches:
 
-- `gcp-buildbuddy` calls `buildbuddy.yml` in `changed-paths` mode. It starts the
-  GCP control plane/executors and runs static and native checks, unit and
-  integration-fast tests, and authority governance. SDK, WASM, minimal-feature,
-  feature-matrix, and audit work are selected by their change classifiers.
+- `gcp-buildbuddy` calls `buildbuddy.yml` in `full-fresh` mode. It starts the
+  GCP control plane/executors and runs every Bazel lane on fresh output roots:
+  the prebuild, static checks, the native lanes (all-features clippy, unit,
+  integration-fast), and authority governance (seam inventory, RMAT audit,
+  machine authority). SDK suites, WASM check, minimal-feature, feature-matrix,
+  and audit jobs are still selected by their change classifiers, but a
+  selected lane always runs for real. `scripts/buildbuddy-ci-lane` refuses any
+  mode it does not implement: from 2026-08-28 to 2026-09-16 the workflow
+  passed `changed-paths`, which the script treated as "skip", so every code
+  lane exited 0 without compiling anything while the gate reported green.
   Machine-authority classification fails closed when the diff cannot be
   established. The reusable workflow has its own `GCP BuildBuddy gate`.
 - `github-hosted-dense-topology` calls `mob-dense-topology.yml`: it builds a

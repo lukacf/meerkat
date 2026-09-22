@@ -345,9 +345,12 @@ list.
 **CI** (`.github/workflows/ci.yml`) — runs on pushes to `main`, `ci/**`,
 `feat/**`, and `feature/**`, PRs, and manual dispatch. Its required components
 are:
-- `gcp-buildbuddy` — calls `buildbuddy.yml` in `changed-paths` mode for the
-  broad GCP BuildBuddy lane: static/native checks and tests, authority
-  governance, and path-selected SDK, WASM, feature-matrix, and audit work.
+- `gcp-buildbuddy` - calls `buildbuddy.yml` in `full-fresh` mode for the
+  broad GCP BuildBuddy lane: every Bazel lane runs on fresh output roots
+  (prebuild, static, all-features clippy, unit, integration-fast, authority
+  governance); SDK, WASM, feature-matrix, and audit jobs are path-selected but
+  always run for real once selected. `scripts/buildbuddy-ci-lane` fails on any
+  mode it does not implement instead of skipping the lane.
 - `github-hosted-dense-topology` — calls `mob-dense-topology.yml` to build a
   Mob unit-test archive and run the 300-member/150-peer stress on hosted Linux.
 - `gate` (`CI gate`) — requires both component results to be `success` and

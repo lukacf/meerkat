@@ -170,6 +170,40 @@ them.
   "WholeBlob body is not a valid current Session: live transcript does not
   preserve the graph-proved audited endpoint". Sessions already wedged in that
   state are recovered with the sanctioned repair above.
+- CI: the GCP BuildBuddy lane was called with `mode: changed-paths`, a mode
+  `scripts/buildbuddy-ci-lane` never implemented and treated as "skip", so from
+  2026-08-28 every code lane (clippy, unit, integration-fast, wasm-check) exited
+  0 without compiling anything while the CI gate reported green. CI now runs
+  `full-fresh`, and an unimplemented mode fails the lane instead of skipping it.
+  Found because the Turbo S smoke lane hit a wasm32 build break that CI had
+  passed twice.
+  Running the lanes for real then surfaced what the skipped months had hidden;
+  each fix is listed below and none narrows a lane: the Bazel unit test for
+  `meerkat-mob` now compiles the `#[path]`-included placement fixture the
+  `src/**` glob missed; `render_contracts_test` is sized `medium` (it renders
+  the whole machine catalog 36 times, 52s on a 192-core host); the
+  cargo-equivalent Bazel lanes export `MEERKAT_WORKSPACE_ROOT` like
+  `scripts/repo-cargo` so source-level parity tests read the workspace instead
+  of the crate directory; and a failing SDK job now prints its log tail, not
+  only its head.
+- Machine codegen: the MeerkatMachine `observation_counter_available` guard
+  spelled `u64::MAX` as the literal `18446744073709551615`, which the DSL
+  lowers as a plain integer, so the rendered TLA model carried a literal TLC
+  cannot evaluate instead of the `RustU64Max` boundary constant
+  (`tla_renderer_abstracts_u64_max_literals_for_tlc` failed). The guard uses
+  `u64::MAX`; the meerkat machine and mob seam models are regenerated.
+- `xtask machine-verify` and the bounded adaptive TLC witness give the JVM
+  launcher's main thread the deep stack through `JDK_JAVA_OPTIONS`. `-Xss` in
+  `JAVA_TOOL_OPTIONS` sizes only JVM-created threads; TLC parses the module and
+  computes the initial states on the main thread, which the `java` launcher
+  sizes from its own options, so the generated initial predicate overflowed the
+  default stack (`StackOverflowError` while "Computing initial states") no
+  matter how large the `JAVA_TOOL_OPTIONS` value was. An explicit caller `-Xss`
+  now governs both layers.
+- Python SDK: a request written while `rkat-rpc` exits could surface the raw
+  `ConnectionResetError` from `stdin.drain()` instead of the read loop's typed
+  `CONNECTION_CLOSED` (with the stderr tail). The client now treats the
+  write-side reset as the same event and returns the read loop's fault.
 - Public GPT Live client delegations no longer start the executor on a
   truncated request, and the spoken request is one canonical user row. The
   provider emits `session.delegation.created {offset_ms}` at the model's
@@ -760,13 +794,6 @@ them.
   `JsFuture` handles), so the wasm32 form and the new `OwnFrameFuture` alias drop
   it; call sites are unchanged. The break shipped in 0.8.38's stack fixes and
   reached main because CI's wasm check was not running (see the CI entry).
-- CI: the GCP BuildBuddy lane was called with `mode: changed-paths`, a mode
-  `scripts/buildbuddy-ci-lane` never implemented and treated as "skip", so from
-  2026-08-28 every code lane (clippy, unit, integration-fast, wasm-check) exited
-  0 without compiling anything while the CI gate reported green. CI now runs
-  `full-fresh`, and an unimplemented mode fails the lane instead of skipping it.
-  Found because the Turbo S smoke lane hit a wasm32 build break that CI had
-  passed twice.
 - Public GPT Live preserves one assistant output identity across long pauses
   and delayed delegated-result readouts instead of rejecting the continuation
   as an unsolicited new turn.

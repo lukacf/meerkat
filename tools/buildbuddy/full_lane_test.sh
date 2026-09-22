@@ -235,13 +235,27 @@ wait_parallel_jobs() {
     fi
     failed=1
     echo "FAIL ${name}; log follows:" >&2
-    sed -n '1,220p' "${log_file}" >&2 || true
+    # Keep the head (tool versions, install output) and always the tail: the
+    # failing compiler error or test summary of a long build sits at the end,
+    # and the 09-16 web-sdk failure was undiagnosable from the head alone.
+    local total_lines
+    total_lines="$(wc -l <"${log_file}" || echo 0)"
+    if ((total_lines <= 340)); then
+      cat "${log_file}" >&2 || true
+    else
+      sed -n '1,220p' "${log_file}" >&2 || true
+      echo "... (${total_lines} lines total; last 120 follow)" >&2
+      tail -n 120 "${log_file}" >&2 || true
+    fi
   done <"${parallel_jobs_file}"
   return "${failed}"
 }
 
 copy_workspace
 cd "${work_root}"
+# Parity with scripts/repo-cargo: source-level tests resolve the workspace
+# from this variable instead of the crate directory Cargo runs them from.
+export MEERKAT_WORKSPACE_ROOT="${work_root}"
 
 run_wasm_contract_test() {
   local test_name="$1"

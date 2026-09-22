@@ -21357,6 +21357,134 @@ async fn delegation_execution_service_runs_on_a_real_durable_fork_and_retires_on
 }
 
 #[tokio::test]
+async fn durable_fork_delegation_waits_for_a_busy_source_turn_boundary_then_forks() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let source_identity = AgentIdentity::from("delegation-busy-source");
+    let source = handle
+        .spawn(ProfileName::from("worker"), source_identity.clone(), None)
+        .await
+        .expect("spawn busy delegation source");
+    let source_session_id = source
+        .bridge_session_id()
+        .expect("source bridge session")
+        .clone();
+    // Hold the source's turn-finalization boundary: this is what a running
+    // turn does, and what made a live delegation fail with `Running`.
+    let gate = Arc::new(TestRuntimeControlBarrier::new());
+    service
+        .turn_finalization_entry_gates
+        .write()
+        .await
+        .insert(source_session_id.clone(), Arc::clone(&gate));
+    let child_identity = AgentIdentity::from("delegation-busy-child");
+    let request = DelegationExecutionRequest::new(
+        child_identity.clone(),
+        "bounded child task after the boundary",
+        BoundedResultSpec::new("delegation-busy-result", 256).expect("valid result spec"),
+    )
+    .with_durable_fork(source_identity.clone(), None);
+    let delegation_service = DelegationExecutionService::new(handle.clone());
+    let start = tokio::spawn({
+        let delegation_service = delegation_service.clone();
+        async move { delegation_service.start(request).await }
+    });
+    // While the boundary is held the delegation must not have forked.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !start.is_finished(),
+        "delegation must wait for the source turn boundary"
+    );
+    assert!(
+        handle
+            .get_member(&child_identity)
+            .await
+            .expect("child roster lookup")
+            .is_none(),
+        "no fork may exist before the source boundary is released"
+    );
+    gate.release_all();
+    let execution = tokio::time::timeout(Duration::from_secs(10), start)
+        .await
+        .expect("delegation resumes once the boundary is released")
+        .expect("join")
+        .expect("durable-fork delegation starts after the boundary");
+    let terminalized = execution.await_terminal().await;
+    match terminalized.terminal() {
+        DelegationTurnTerminal::Completed(turn) => {
+            assert_eq!(
+                turn.result().result().text(),
+                "bounded child task after the boundary"
+            );
+        }
+        terminal => panic!("child must complete: {terminal:?}"),
+    }
+    delegation_service
+        .retire_terminalized(&terminalized)
+        .await
+        .expect("retire busy-source child");
+}
+
+#[tokio::test]
+async fn durable_fork_delegation_reports_source_busy_after_the_bounded_wait() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let source_identity = AgentIdentity::from("delegation-stuck-source");
+    let source = handle
+        .spawn(ProfileName::from("worker"), source_identity.clone(), None)
+        .await
+        .expect("spawn stuck delegation source");
+    let source_session_id = source
+        .bridge_session_id()
+        .expect("source bridge session")
+        .clone();
+    let gate = Arc::new(TestRuntimeControlBarrier::new());
+    struct ReleaseOnDrop(Arc<TestRuntimeControlBarrier>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release_all();
+        }
+    }
+    let _release = ReleaseOnDrop(Arc::clone(&gate));
+    service
+        .turn_finalization_entry_gates
+        .write()
+        .await
+        .insert(source_session_id.clone(), Arc::clone(&gate));
+    let request = DelegationExecutionRequest::new(
+        AgentIdentity::from("delegation-stuck-child"),
+        "never starts",
+        BoundedResultSpec::new("delegation-stuck-result", 256).expect("valid result spec"),
+    )
+    .with_durable_fork(source_identity.clone(), None);
+    let delegation_service = DelegationExecutionService::new(handle.clone())
+        .with_source_turn_boundary_wait(Duration::from_millis(300));
+    let error = delegation_service
+        .start(request)
+        .await
+        .err()
+        .expect("a source still running after the bound is a typed busy result");
+    match error {
+        DelegationExecutionError::SourceBusy {
+            source_identity: busy,
+            waited_ms,
+        } => {
+            assert_eq!(busy, source_identity);
+            assert!(waited_ms >= 300, "waited {waited_ms} ms");
+        }
+        other => panic!("expected SourceBusy, got {other:?}"),
+    }
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("delegation-stuck-child"))
+            .await
+            .expect("child roster lookup")
+            .is_none(),
+        "a busy source must not leave a half-forked child"
+    );
+}
+
+#[tokio::test]
 async fn durable_bounded_work_recovery_preserves_exact_terminal_after_child_retirement() {
     let definition = with_unique_mob_id(sample_definition(), "durable-bounded-recovery-terminal");
     let (handle, service) = create_persistent_runtime_test_mob(definition).await;

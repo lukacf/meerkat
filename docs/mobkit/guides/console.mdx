@@ -4,7 +4,7 @@ description: "Embedded MobKit console with configurable branding, grouped roster
 icon: "desktop"
 ---
 
-*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [fc242fe9ddd7](https://github.com/lukacf/meerkat-mobkit/commit/fc242fe9ddd7cc3ca488afd5e1ee9434f2f59c3c) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 MobKit ships a web-based operator console through its HTTP composition. The
 console/admin `mobkit_gateway` serves it directly. A persistent, SDK-driven
@@ -151,9 +151,36 @@ your `auth_config` and enable `persistent_sessions`:
     "principal": "alice@example.com",
     "realm": "ops",
     "auth_binding": { "realm": "ops", "binding": "openai" },
-    "voice": "marin"
+    "voice": "marin",
+    "summary": { "model": "gpt-5.4-mini", "max_input_bytes": 65536, "max_output_bytes": 4096 }
   }
 }
+```
+
+The optional `summary` block bounds the concurrent context summary (see
+"Context preparation" below). Every field is optional: `model` defaults to
+the background agent's own text model, `max_input_bytes` to 65536 (64 KiB)
+and `max_output_bytes` to 4096 (4 KiB); zero is rejected. The input bound
+degrades rather than fails: when the newest message alone exceeds it (a
+large tool result, say), that one whole message is summarised; only
+Meerkat's 4 MiB capture ceiling refuses a snapshot outright. In Rust the
+same knobs are `PublicLiveRegistration.summary` (`ConsoleVoiceSummaryConfig`);
+the SDK builders take them on `OpenAiLiveGatewayConfig`:
+
+```ts
+gateway.consoleVoice({
+  principal: "alice@example.com", realm: "ops",
+  authBinding: { realm: "ops", binding: "openai" }, voice: "marin",
+  summary: { model: "gpt-5.4-mini", maxInputBytes: 65536, maxOutputBytes: 4096 },
+});
+```
+
+```python
+gateway.console_voice(OpenAiLiveGatewayConfig(
+    principal="alice@example.com", realm="ops",
+    auth_binding=LiveAuthBindingRef(realm="ops", binding="openai"), voice="marin",
+    summary=OpenAiLiveSummaryConfig(model="gpt-5.4-mini", max_input_bytes=65536, max_output_bytes=4096),
+))
 ```
 
 The binding must already be configured in the gateway's Meerkat host config.
@@ -178,21 +205,40 @@ summary of that agent's context; it does not change the background agent's text 
 The voice strip above the composer names the voice agent and shows separate
 waveforms for your microphone and the live model's audio.
 
-Startup distinguishes **Starting voice** from **Connecting audio**. Once audio
-is active, the strip separately shows **Reading context**, **Preparing context**,
-or **Sending context** while the initial summary is prepared and supplied.
-You can speak, mute, and send text during preparation. **Context supplied** means
-the provider acknowledged it, not that the model has recalled or spoken it.
-Context failures stay visible without disabling the connected audio; a failed
-status read is shown separately and retried.
+The microphone is requested during the click, alongside the gateway readiness
+check (**Allow microphone access**); a negative readiness releases it again
+without opening a channel. Startup then distinguishes **Starting voice** from
+**Connecting audio**. As soon as the microphone is open the primary status reads
+**Listening, you can talk**; nothing about context gates it. Context
+preparation is a secondary hint beside that status: **Context arriving** while
+the initial summary is read, generated, and sent (the tooltip names the stage),
+then **Context supplied** once the provider acknowledged it, which does not
+mean the model has recalled or spoken it. Context failures stay visible
+without disabling the connected audio; a failed status read is shown separately
+and retried.
 
 Context preparation is a separate, tool-free summary request using the background
-agent's model and credentials; it does not change that agent's model or
-reasoning settings. The summary targets compact notes rather than replaying
-logs, and uses low or disabled OpenAI reasoning where the model catalog supports
-it. Meerkat orders the captured history and newer conversation updates, and
-cancels or fences context work when the call closes or changes. A context job
-from an old call cannot update a replacement call.
+agent's credentials; it does not change that agent's model or reasoning
+settings. It reads the most recent 64 KiB of the serialized transcript (older
+turns are dropped whole; a size bound, not a content heuristic; a newest
+message larger than the window is kept whole), asks for
+compact notes rather than replayed logs, uses low or disabled OpenAI reasoning
+where the model catalog supports it, and caps the result at 4 KiB. The public
+GPT Live transport delivers the summary in UTF-8 fragments of at most 500
+bytes, each waiting for its own provider receipt, so the 4 KiB cap bounds
+delivery at nine fragments; the prompt itself aims for about 200 words. The
+summary model defaults to the background agent's own model because Meerkat's
+catalog exposes a support tier, not a speed tier; set `summary.model` to a
+faster model on the same provider when the agent's model is slow to first
+token. A produced summary is cached per member, keyed by the source session's
+transcript cursor and a digest of the exact summarised window, so reopening
+voice on an unchanged transcript reuses it without another model call. The
+defaults come from measurement: with the previous 4 MiB input and 16 KiB
+output bounds a 40-turn session took 4 to 6 seconds to summarise; the 64 KiB
+window keeps that cost flat as histories grow. Meerkat orders the captured
+history and newer conversation updates, and cancels or fences context work
+when the call closes or changes. A context job from an old call cannot update
+a replacement call.
 
 The microphone and speaker controls are independent. Muting speakers silences
 local playback, not the conversation; the model's output waveform continues

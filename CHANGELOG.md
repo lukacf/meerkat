@@ -99,6 +99,26 @@ them.
 - The public Live instructions preface host runs on its own task: a host
   that panics loses its preface for that open like a slow host does, and the
   open proceeds.
+- Closing a live channel whose remote side is already gone now converges
+  instead of failing on every retry. `ExperimentalGptLiveWebrtcTransport`
+  retired an unconfirmed closure only when the provider had accepted
+  `session.close` at least `LIVE_CLOSE_CONFIRMATION_BOUND` (20 s) earlier;
+  when the remote had hung up the close request itself was rejected, the
+  clock never started, and every `live/close` failed with
+  `remote_close_unavailable` (surfaced by MobKit as "experimental live
+  channel binding failed") while the transport stayed bound. The bound now
+  also counts from the first close request, so a dead remote is retired
+  locally within it and the close reports `Closed`. Repeating an explicit
+  close of a channel that already completed its close reports `Closed`
+  instead of a binding error; a channel that was never opened is still the
+  typed `BindingMismatch`.
+- `MobCommand::ValidateLiveDurableSourceAvailability` no longer loads the
+  persisted session body inline on the mob actor. The roster and binding
+  checks stay on the actor; the body load runs in a detached task that
+  replies through the same oneshot, so a slow durable source (5 to 8 s on
+  large members) no longer exceeds the actor's inline step budget or queues
+  every later mob command behind one voice status poll.
+
 
 ### Breaking
 

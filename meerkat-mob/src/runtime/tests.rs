@@ -8639,6 +8639,46 @@ async fn callback_bearing_member_is_available_as_durable_fork_source_but_not_dir
 
 #[cfg(feature = "openai-live")]
 #[tokio::test]
+async fn live_durable_source_validation_loads_the_source_body_off_the_mob_actor() {
+    // The durable-source body load is store I/O that took seconds on large
+    // members. Run inline it queued every later mob command behind one voice
+    // status poll; the actor must stay free while the body loads, and the
+    // reply contract must be unchanged.
+    let definition = with_unique_mob_id(sample_definition(), "live-durable-source-off-actor");
+    let (handle, service) = create_test_mob(definition).await;
+    let identity = AgentIdentity::from("slow-durable-source");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), identity.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn durable source member");
+    let member = handle
+        .member(&identity)
+        .await
+        .expect("current durable source member");
+
+    service.set_load_persisted_session_delay_ms(1_500);
+    let validation =
+        tokio::spawn(async move { member.validate_live_durable_source_availability().await });
+    service.load_persisted_session_started.notified().await;
+    let listed = tokio::time::timeout(Duration::from_millis(500), handle.list_members())
+        .await
+        .expect("an ordinary mob command completes while the durable source body is still loading");
+    assert!(
+        listed.iter().any(|entry| entry.agent_identity == identity),
+        "the validated member is listed"
+    );
+    validation
+        .await
+        .expect("validation task")
+        .expect("the reply arrives once the body has loaded");
+
+    handle.shutdown().await.expect("shutdown test mob");
+}
+
+#[cfg(feature = "openai-live")]
+#[tokio::test]
 async fn live_bridge_cancellation_keeps_exact_member_incarnation_and_allows_ordinary_turn() {
     struct AdmitDispatch;
 

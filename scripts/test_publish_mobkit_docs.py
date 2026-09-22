@@ -84,7 +84,12 @@ class PublishMobKitDocsWorkflowTests(unittest.TestCase):
         self.assertIn("GH_TOKEN: ${{ github.token }}", self.workflow[pull_request:])
         self.assertIn("gh pr create", self.workflow[pull_request:])
         self.assertIn("event=pull_request", self.workflow[pull_request:])
-        self.assertIn('if [[ "$status" == "action_required" ]]', self.workflow[pull_request:])
+        # GitHub reports a run awaiting approval as status "completed" with
+        # conclusion "action_required"; the check must read the conclusion,
+        # not only the status, and must confirm the approval took.
+        self.assertIn('(.status // "") + "/" + (.conclusion // "")', self.workflow[pull_request:])
+        self.assertIn('if [[ "$run_state" == *action_required* ]]', self.workflow[pull_request:])
+        self.assertIn("still awaits approval after the approve call", self.workflow[pull_request:])
         self.assertIn(
             'gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/approve"',
             self.workflow[pull_request:],

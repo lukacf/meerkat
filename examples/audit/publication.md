@@ -55,5 +55,34 @@ those obligations.
 
 Evidence is retained in the session's `formal-publication-fix.json`,
 `formal-parent-native-review.log`, and `publication-blocker/` artifacts. The
-eight separately observed pre-existing runtime-internal manifest omissions were
-not changed, because they did not block the required canonical TLC lane.
+eight separately observed runtime-internal manifest omissions were initially
+left unchanged because they did not block the canonical TLC lane.
+
+## Subsequent full-workspace gate
+
+The next normal push passed the formal hook and all static checks. Its full
+workspace unit lane passed all 11,243 tests. The integration lane then exposed
+three baseline failures: two typed-input parity checks for those eight omissions,
+and a release test expecting six pinned Rust jobs where the workflow already had
+seven.
+
+[Commit `b4b6825f9`](https://github.com/lukacf/meerkat/commit/b4b6825f9)
+corrects only the declarations and test contract:
+
+- The eight already-existing generated live-context input variants are classified
+  in the existing `LiveExecutionLifecycle` group. No input, transition, reason
+  enum, dispatch behavior, or public surface is added.
+- The release test explicitly checks all seven existing Rust jobs, including the
+  Windows cross-build. It derives the total from that list and requires exactly
+  one pinned setup action in each job. No workflow is modified.
+
+An independent reviewer matched every classification to its existing canonical
+input and dispatch site, and every named job to the real workflow. In-memory
+negative controls rejected missing, duplicated, misplaced, and extra setup steps.
+
+The complete targeted suites pass: 13 alphabet tests, 19 schema tests (two
+pre-existing ignored cases), and eight release-contract tests. Strict runtime
+and test Clippy also passes. Evidence is retained in
+`publication-followup-review.json`, `final-publication-parity.log`, and
+`final-publication-parity-clippy.log`. The normal hooked push is retried after
+these corrections; none of its failing checks is skipped or bypassed.

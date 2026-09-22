@@ -2,7 +2,7 @@
 
 [Audit index](../AUDIT.md)
 
-The historical oversized-integer model-checking blocker recorded below was subsequently resolved; see the [publication follow-up](publication.md).
+The historical numeric-model and typed-inventory publication blockers recorded below were subsequently resolved; see the [publication follow-up](publication.md).
 
 <a id="root01"></a>
 

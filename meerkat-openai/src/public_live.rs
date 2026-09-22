@@ -1128,21 +1128,12 @@ struct PendingReceiptIndex(usize);
 struct OpenTurn {
     provider_ref: String,
     role: GptLiveTurnRole,
-    /// Transcript deltas with their session-relative start offsets, so a
-    /// delegation can freeze exactly the prefix observed before its offset.
-    segments: Vec<TranscriptSegment>,
+    /// Transcript deltas in arrival order.
+    segments: Vec<String>,
 }
 
-struct TranscriptSegment {
-    start_ms: f64,
-    text: String,
-}
-
-fn join_segments<'a>(segments: impl IntoIterator<Item = &'a TranscriptSegment>) -> String {
-    segments
-        .into_iter()
-        .map(|segment| segment.text.as_str())
-        .collect()
+fn join_segments<'a>(segments: impl IntoIterator<Item = &'a String>) -> String {
+    segments.into_iter().map(String::as_str).collect()
 }
 
 struct FinishedUserTurn {
@@ -1288,14 +1279,17 @@ impl SessionState {
                 )?;
             }
             ServerEvent::InputTranscriptDelta {
-                delta, start_ms, ..
+                delta,
+                start_ms,
+                end_ms,
+                ..
             } => {
-                self.record_transcript_delta(GptLiveTurnRole::User, start_ms, delta);
+                // Timeline span only; the text never reaches the log.
+                tracing::debug!(start_ms, end_ms, "public Live input transcript delta span");
+                self.record_transcript_delta(GptLiveTurnRole::User, delta);
             }
-            ServerEvent::OutputTranscriptDelta {
-                delta, start_ms, ..
-            } => {
-                self.record_transcript_delta(GptLiveTurnRole::Assistant, start_ms, delta);
+            ServerEvent::OutputTranscriptDelta { delta, .. } => {
+                self.record_transcript_delta(GptLiveTurnRole::Assistant, delta);
             }
             ServerEvent::DelegationCreated {
                 delegation,
@@ -1450,17 +1444,34 @@ impl SessionState {
         Ok(())
     }
 
-    fn record_transcript_delta(&mut self, role: GptLiveTurnRole, start_ms: f64, delta: String) {
+    fn record_transcript_delta(&mut self, role: GptLiveTurnRole, delta: String) {
         let turn = self.ensure_open_turn(role);
+        self.queue_transcript_fragment(role, turn, delta.clone());
+        if let Some(open) = self.open_turn.as_mut() {
+            open.segments.push(delta);
+        }
+    }
+
+    fn mint_transcript_item(&mut self, role: GptLiveTurnRole) -> GptLiveTranscriptItemRef {
         self.next_transcript_item = self.next_transcript_item.saturating_add(1);
-        let item = GptLiveTranscriptItemRef(format!(
+        GptLiveTranscriptItemRef(format!(
             "{}:{}",
             match role {
                 GptLiveTurnRole::User => "input",
                 GptLiveTurnRole::Assistant | GptLiveTurnRole::Unknown => "output",
             },
             self.next_transcript_item
-        ));
+        ))
+    }
+
+    /// Announce one transcript delta as a fragment of `turn`.
+    fn queue_transcript_fragment(
+        &mut self,
+        role: GptLiveTurnRole,
+        turn: GptLiveTurnRef,
+        delta: String,
+    ) {
+        let item = self.mint_transcript_item(role);
         self.queued_observations.push_back(match role {
             GptLiveTurnRole::User => GptLiveBrokerObservation::UserTranscriptFragment {
                 item,
@@ -1474,16 +1485,7 @@ impl SessionState {
             }
         });
         self.queued_observations
-            .push_back(GptLiveBrokerObservation::TurnSnapshotDelta {
-                turn,
-                delta: delta.clone(),
-            });
-        if let Some(open) = self.open_turn.as_mut() {
-            open.segments.push(TranscriptSegment {
-                start_ms,
-                text: delta,
-            });
-        }
+            .push_back(GptLiveBrokerObservation::TurnSnapshotDelta { turn, delta });
     }
 
     /// Return the open turn for `role`, finishing a different-role turn and
@@ -1561,26 +1563,26 @@ impl SessionState {
             return Ok(());
         }
         // Join the delegation to the open user turn, which it terminates. The
-        // joined request is exactly the transcript prefix observed before the
-        // delegation offset; speech that started at or after the offset is
-        // not part of this request and continues as a fresh user turn. A
-        // delegation arriving after the user stopped speaking (or while the
-        // assistant speaks) re-presents the most recent frozen user transcript
-        // under a fresh detached turn so the facade's start/finish pairing
-        // stays exact and any open assistant turn continues undisturbed.
-        let mut continued_segments = Vec::new();
-        let (turn, transcript) = match self.open_turn.take() {
+        // joined request is the whole turn: `offset_ms` is the model's
+        // decision point on the session timeline, not the end of the
+        // utterance (measured against gpt-live-1, the final word starts at
+        // the offset), so speech at and after the offset stays part of the
+        // request. A delegation arriving after the user turn already closed
+        // (the assistant spoke) re-presents the most recent frozen user
+        // transcript under a fresh detached turn so the facade's
+        // start/finish pairing stays exact and any open assistant turn
+        // continues undisturbed.
+        //
+        // The join is defined by arrival: a transcript delta arriving after
+        // it is a separate utterance and opens a new user turn like any
+        // other, so its words always reach the durable transcript (a
+        // following delegation takes that turn as its input). The public
+        // protocol carries no per-utterance completion, item lifecycle, or
+        // speech start/stop event that could say otherwise.
+        let (turn_ref, transcript) = match self.open_turn.take() {
             Some(open) if open.role == GptLiveTurnRole::User => {
-                let (before, after): (Vec<_>, Vec<_>) = open
-                    .segments
-                    .into_iter()
-                    .partition(|segment| segment.start_ms < offset_ms);
-                let transcript = join_segments(&before);
-                self.last_user_turn = Some(FinishedUserTurn {
-                    transcript: transcript.clone(),
-                });
-                continued_segments = after;
-                (GptLiveTurnRef(open.provider_ref), transcript)
+                let transcript = join_segments(&open.segments);
+                (open.provider_ref, transcript)
             }
             other => {
                 self.open_turn = other;
@@ -1594,23 +1596,23 @@ impl SessionState {
                     return Ok(());
                 };
                 let transcript = last.transcript.clone();
-                (self.mint_turn(GptLiveTurnRole::User), transcript)
+                (self.mint_turn(GptLiveTurnRole::User).0, transcript)
             }
         };
+        tracing::debug!(
+            offset_ms,
+            "public Live client delegation joined its user turn"
+        );
+        self.last_user_turn = Some(FinishedUserTurn {
+            transcript: transcript.clone(),
+        });
         self.queued_observations
             .push_back(GptLiveBrokerObservation::ClientDelegationFinal {
                 delegation: reference,
                 target: GptLiveDelegationTarget::Client,
-                turn,
+                turn: GptLiveTurnRef(turn_ref),
                 transcript,
             });
-        if !continued_segments.is_empty() {
-            // Speech that started at or after the offset is a new user turn.
-            self.start_turn(GptLiveTurnRole::User);
-            if let Some(open) = self.open_turn.as_mut() {
-                open.segments = continued_segments;
-            }
-        }
         Ok(())
     }
 }
@@ -1756,7 +1758,11 @@ mod tests {
     }
 
     fn input_delta_at(text: &str, start_ms: f64) -> Value {
-        json!({"type":"session.input_transcript.delta","event_id":"i","delta":text,"start_ms":start_ms,"end_ms":start_ms + 1.0})
+        input_delta_span(text, start_ms, start_ms + 1.0)
+    }
+
+    fn input_delta_span(text: &str, start_ms: f64, end_ms: f64) -> Value {
+        json!({"type":"session.input_transcript.delta","event_id":"i","delta":text,"start_ms":start_ms,"end_ms":end_ms})
     }
 
     fn ack(client_event_id: Option<&str>) -> Value {
@@ -1791,12 +1797,25 @@ mod tests {
         })
     }
 
+    /// An assistant response starting where the fixture input span ends
+    /// (`input_delta` covers 0.0..1.0), so the joined transcript already
+    /// reaches the response start.
     fn output_delta(text: &str) -> Value {
-        json!({"type":"session.output_transcript.delta","event_id":"o","delta":text,"start_ms":1.0,"end_ms":2.0})
+        output_delta_span(text, 1.0, 2.0)
     }
 
+    fn output_delta_span(text: &str, start_ms: f64, end_ms: f64) -> Value {
+        json!({"type":"session.output_transcript.delta","event_id":"o","delta":text,"start_ms":start_ms,"end_ms":end_ms})
+    }
+
+    /// A delegation decided inside the fixture input span (`input_delta`
+    /// covers 0.0..1.0).
     fn delegation_created(id: &str, target: &str) -> Value {
-        json!({"type":"session.delegation.created","event_id":"d","offset_ms":1.5,
+        delegation_created_at(id, target, 0.5)
+    }
+
+    fn delegation_created_at(id: &str, target: &str, offset_ms: f64) -> Value {
+        json!({"type":"session.delegation.created","event_id":"d","offset_ms":offset_ms,
             "delegation":{"type":"delegation","id":id,"target":target}})
     }
 
@@ -2250,6 +2269,71 @@ mod tests {
     }
 
     #[test]
+    fn late_utterance_speech_after_the_join_opens_a_new_turn_and_is_not_lost() {
+        // The public protocol has no utterance-complete event. A transcript
+        // delta the transcriber delivers after the join is a separate
+        // utterance: it opens a new user turn, so its words reach the
+        // durable transcript, and a following delegation takes that turn.
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(input_delta_at("tell me what you", 9600.0)))
+            .unwrap();
+        let started = drain(&mut state);
+        let GptLiveBrokerObservation::TurnStarted {
+            turn: user_turn, ..
+        } = &started[0]
+        else {
+            panic!("user turn start");
+        };
+        state
+            .apply_frame(frame(delegation_created_at("dlg_early", "client", 10400.0)))
+            .unwrap();
+        assert!(matches!(
+            drain(&mut state).as_slice(),
+            [GptLiveBrokerObservation::ClientDelegationFinal { transcript, .. }]
+                if transcript == "tell me what you"
+        ));
+        state
+            .apply_frame(frame(input_delta_at(" named it", 10400.0)))
+            .unwrap();
+        let late = drain(&mut state);
+        assert!(matches!(
+            &late[0],
+            GptLiveBrokerObservation::TurnStarted { role: GptLiveTurnRole::User, turn }
+                if turn != user_turn
+        ));
+        assert!(matches!(
+            &late[1],
+            GptLiveBrokerObservation::UserTranscriptFragment { text, .. } if text == " named it"
+        ));
+        // The assistant reply finishes that turn as a plain user turn: the
+        // tail is a committed row, not a lost fragment.
+        state
+            .apply_frame(frame(output_delta_span("Sure,", 10600.0, 10800.0)))
+            .unwrap();
+        let finished = drain(&mut state);
+        assert!(matches!(
+            &finished[0],
+            GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::User, transcript, .. }
+                if transcript == " named it"
+        ));
+        // A following detached delegation takes the latest user turn.
+        state
+            .apply_frame(frame(delegation_created_at("dlg_again", "client", 11000.0)))
+            .unwrap();
+        assert!(matches!(
+            drain(&mut state).as_slice(),
+            [
+                GptLiveBrokerObservation::TurnStarted {
+                    role: GptLiveTurnRole::User,
+                    ..
+                },
+                GptLiveBrokerObservation::ClientDelegationFinal { transcript, .. },
+            ] if transcript == " named it"
+        ));
+    }
+
+    #[test]
     fn append_acknowledgements_correlate_by_client_event_id_not_position() {
         let mut state = SessionState::default();
         let session_token = state.reserve_append(PendingAppendLane::Session).unwrap();
@@ -2626,16 +2710,16 @@ mod tests {
     }
 
     #[test]
-    fn delegation_freezes_only_the_transcript_prefix_before_its_offset() {
+    fn client_delegation_joins_speech_after_its_decision_offset() {
+        // The delegation offset is the model's decision point, not the end
+        // of the utterance: speech at and after it belongs to the request.
+        // Measured against gpt-live-1, the final word starts at the offset.
         let mut state = SessionState::default();
         state
-            .apply_frame(frame(input_delta_at("book a table ", 0.0)))
+            .apply_frame(frame(input_delta_at("tell me what you", 10000.0)))
             .unwrap();
         state
-            .apply_frame(frame(input_delta_at("for two", 1.0)))
-            .unwrap();
-        state
-            .apply_frame(frame(input_delta_at(" and also", 9.0)))
+            .apply_frame(frame(input_delta_at(" named it", 10400.0)))
             .unwrap();
         let started = drain(&mut state);
         let GptLiveBrokerObservation::TurnStarted {
@@ -2645,30 +2729,22 @@ mod tests {
             panic!("user turn start");
         };
         state
-            .apply_frame(frame(
-                json!({"type":"session.delegation.created","event_id":"d","offset_ms":4.2,
-                "delegation":{"type":"delegation","id":"dlg_prefix","target":"client"}}),
-            ))
+            .apply_frame(frame(delegation_created_at(
+                "dlg_offset",
+                "client",
+                10400.0,
+            )))
             .unwrap();
         let joined = drain(&mut state);
         assert!(matches!(
-            &joined[0],
-            GptLiveBrokerObservation::ClientDelegationFinal { turn, transcript, .. }
-                if turn == first_turn && transcript == "book a table for two"
+            joined.as_slice(),
+            [GptLiveBrokerObservation::ClientDelegationFinal { turn, transcript, .. }]
+                if turn == first_turn && transcript == "tell me what you named it"
         ));
-        // Speech that started after the offset continues as a fresh user turn.
-        assert!(matches!(
-            &joined[1],
-            GptLiveBrokerObservation::TurnStarted { role: GptLiveTurnRole::User, turn } if turn != first_turn
-        ));
-        assert_eq!(joined.len(), 2);
-        state.apply_frame(frame(output_delta("sure"))).unwrap();
-        let next = drain(&mut state);
-        assert!(matches!(
-            &next[0],
-            GptLiveBrokerObservation::TurnFinished { role: GptLiveTurnRole::User, transcript, .. }
-                if transcript == " and also"
-        ));
+        assert!(
+            state.open_turn.is_none(),
+            "no second user turn for the final word"
+        );
     }
 
     #[test]

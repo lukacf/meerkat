@@ -8900,12 +8900,19 @@ mod tests {
         use serde_json::{Value, json};
 
         pub(super) const USER_TRANSCRIPT: &str = "book a table";
+        /// The late-tail sequence splits the same utterance around the
+        /// delegation: the head is transcribed before `session.delegation.created`,
+        /// the tail after it (and after the assistant acknowledgement starts).
+        pub(super) const USER_TRANSCRIPT_HEAD: &str = "book a";
+        pub(super) const USER_TRANSCRIPT_TAIL: &str = " table";
         pub(super) const ASSISTANT_TRANSCRIPT: &str = "one moment";
         pub(super) const DELEGATION_ID: &str = "dlg_public";
         pub(super) const ANSWER_SDP: &str = "v=0\r\nPUBLIC_ANSWER_SDP";
 
         #[derive(Default)]
         pub(super) struct Capture {
+            /// Serve the delegation before the last input transcript delta.
+            pub(super) late_tail: bool,
             pub(super) create_body: Option<Value>,
             pub(super) create_authorization: Option<String>,
             pub(super) attach_authorization: Option<String>,
@@ -8914,15 +8921,30 @@ mod tests {
         pub(super) type SharedCapture = Arc<std::sync::Mutex<Capture>>;
 
         fn input_delta(text: &str) -> Value {
-            json!({"type":"session.input_transcript.delta","event_id":"i","delta":text,"start_ms":0.0,"end_ms":1.0})
+            input_delta_span(text, 0.0, 1.0)
         }
 
+        fn input_delta_span(text: &str, start_ms: f64, end_ms: f64) -> Value {
+            json!({"type":"session.input_transcript.delta","event_id":"i","delta":text,"start_ms":start_ms,"end_ms":end_ms})
+        }
+
+        /// An assistant response starting where the fixture input span ends
+        /// (`input_delta` covers 0.0..1.0).
         fn output_delta(text: &str) -> Value {
-            json!({"type":"session.output_transcript.delta","event_id":"o","delta":text,"start_ms":1.0,"end_ms":2.0})
+            output_delta_span(text, 1.0, 2.0)
         }
 
+        fn output_delta_span(text: &str, start_ms: f64, end_ms: f64) -> Value {
+            json!({"type":"session.output_transcript.delta","event_id":"o","delta":text,"start_ms":start_ms,"end_ms":end_ms})
+        }
+
+        /// A delegation decided inside the fixture input span (0.0..1.0).
         fn delegation_created(id: &str, target: &str) -> Value {
-            json!({"type":"session.delegation.created","event_id":"d","offset_ms":1.5,
+            delegation_created_at(id, target, 0.5)
+        }
+
+        fn delegation_created_at(id: &str, target: &str, offset_ms: f64) -> Value {
+            json!({"type":"session.delegation.created","event_id":"d","offset_ms":offset_ms,
                 "delegation":{"type":"delegation","id":id,"target":target}})
         }
 
@@ -8997,9 +9019,36 @@ mod tests {
                 json!({"type":"session.input_audio.append","audio":"AAAA"}),
             )
             .await;
-            send_json(&mut socket, input_delta(USER_TRANSCRIPT)).await;
-            send_json(&mut socket, delegation_created(DELEGATION_ID, "client")).await;
-            send_json(&mut socket, output_delta(ASSISTANT_TRANSCRIPT)).await;
+            let late_tail = capture.lock().expect("capture lock").late_tail;
+            if late_tail {
+                // The transcriber delivers the tail of the utterance after the
+                // delegation and after the assistant acknowledgement started,
+                // although the tail's speech began before the response.
+                send_json(
+                    &mut socket,
+                    input_delta_span(USER_TRANSCRIPT_HEAD, 0.0, 500.0),
+                )
+                .await;
+                send_json(
+                    &mut socket,
+                    delegation_created_at(DELEGATION_ID, "client", 600.0),
+                )
+                .await;
+                send_json(
+                    &mut socket,
+                    output_delta_span(ASSISTANT_TRANSCRIPT, 900.0, 1500.0),
+                )
+                .await;
+                send_json(
+                    &mut socket,
+                    input_delta_span(USER_TRANSCRIPT_TAIL, 600.0, 1200.0),
+                )
+                .await;
+            } else {
+                send_json(&mut socket, input_delta(USER_TRANSCRIPT)).await;
+                send_json(&mut socket, delegation_created(DELEGATION_ID, "client")).await;
+                send_json(&mut socket, output_delta(ASSISTANT_TRANSCRIPT)).await;
+            }
             let release = recv_json(&mut socket, &capture).await;
             assert_eq!(release["type"], "session.commentary.append");
             assert_eq!(release["delegation_id"], DELEGATION_ID);
@@ -9013,7 +9062,16 @@ mod tests {
         }
 
         pub(super) async fn local_server() -> (String, SharedCapture, tokio::task::JoinHandle<()>) {
-            let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+            local_server_with(false).await
+        }
+
+        pub(super) async fn local_server_with(
+            late_tail: bool,
+        ) -> (String, SharedCapture, tokio::task::JoinHandle<()>) {
+            let capture = Arc::new(std::sync::Mutex::new(Capture {
+                late_tail,
+                ..Capture::default()
+            }));
             let app = Router::new()
                 .route("/v1/live/sessions", post(create_session))
                 .route("/v1/live/sessions/{session_id}/attach", get(attach))
@@ -9111,13 +9169,22 @@ mod tests {
     #[cfg(feature = "test-realtime-fixtures")]
     #[tokio::test]
     async fn public_broker_answers_offer_and_lowers_public_events_end_to_end() {
-        run_public_broker_seed_end_to_end(false).await;
+        run_public_broker_seed_end_to_end(false, false).await;
     }
 
     #[cfg(feature = "test-realtime-fixtures")]
     #[tokio::test]
     async fn public_broker_seeds_generated_summary_with_exact_canonical_cursor_end_to_end() {
-        run_public_broker_seed_end_to_end(true).await;
+        run_public_broker_seed_end_to_end(true, false).await;
+    }
+
+    /// A transcript delta the transcriber delivers after the delegation join
+    /// is a separate utterance: it opens a new user turn whose words reach
+    /// the durable transcript instead of being lost.
+    #[cfg(feature = "test-realtime-fixtures")]
+    #[tokio::test]
+    async fn public_broker_lowers_a_late_utterance_tail_as_a_new_user_turn() {
+        run_public_broker_seed_end_to_end(false, true).await;
     }
 
     #[cfg(feature = "test-realtime-fixtures")]
@@ -9158,8 +9225,8 @@ mod tests {
     }
 
     #[cfg(feature = "test-realtime-fixtures")]
-    async fn run_public_broker_seed_end_to_end(summarized: bool) {
-        let (base_url, capture, server) = public_wire::local_server().await;
+    async fn run_public_broker_seed_end_to_end(summarized: bool, late_tail: bool) {
+        let (base_url, capture, server) = public_wire::local_server_with(late_tail).await;
         let realm = meerkat_core::RealmId::parse("voice").expect("realm");
         let target = public_fixture_target(&realm);
         let identity = target.identity().clone();
@@ -9314,49 +9381,91 @@ mod tests {
             ready.kind(),
             LiveSidebandObservationKind::SessionReady
         ));
-        assert!(matches!(
-            next().await.kind(),
+        let user_turn = match next().await.into_kind() {
             LiveSidebandObservationKind::TurnStarted {
                 role: LiveSidebandTurnRole::User,
-                ..
-            }
-        ));
+                turn,
+            } => turn,
+            other => panic!("expected the user turn start, got {other:?}"),
+        };
+        let head = if late_tail {
+            public_wire::USER_TRANSCRIPT_HEAD
+        } else {
+            public_wire::USER_TRANSCRIPT
+        };
         assert!(matches!(
             next().await.kind(),
-            LiveSidebandObservationKind::UserTranscriptFragment { text, .. }
-                if text == public_wire::USER_TRANSCRIPT
+            LiveSidebandObservationKind::UserTranscriptFragment { text, .. } if text == head
         ));
         assert!(matches!(
             next().await.kind(),
             LiveSidebandObservationKind::TurnSnapshotDelta { .. }
         ));
+        async fn expect_assistant_start(sideband: &dyn ProviderWebrtcSidebandSession) {
+            let next = || async {
+                sideband
+                    .next_observation()
+                    .await
+                    .expect("provider observation")
+                    .expect("provider observation present")
+            };
+            assert!(matches!(
+                next().await.kind(),
+                LiveSidebandObservationKind::TurnStarted {
+                    role: LiveSidebandTurnRole::Assistant,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                next().await.kind(),
+                LiveSidebandObservationKind::AssistantTranscriptFragment { text, .. }
+                    if text == public_wire::ASSISTANT_TRANSCRIPT
+            ));
+            assert!(matches!(
+                next().await.kind(),
+                LiveSidebandObservationKind::TurnSnapshotDelta { .. }
+            ));
+        }
         let delegation = match next().await.into_kind() {
             LiveSidebandObservationKind::DelegationRequested {
                 delegation,
+                turn,
                 final_transcript,
-                ..
             } => {
-                assert_eq!(final_transcript, public_wire::USER_TRANSCRIPT);
+                assert_eq!(turn, user_turn, "the join terminates the one user turn");
+                assert_eq!(final_transcript, head);
                 delegation
             }
             other => panic!("expected the joined client delegation, got {other:?}"),
         };
-        assert!(matches!(
-            next().await.kind(),
-            LiveSidebandObservationKind::TurnStarted {
-                role: LiveSidebandTurnRole::Assistant,
-                ..
-            }
-        ));
-        assert!(matches!(
-            next().await.kind(),
-            LiveSidebandObservationKind::AssistantTranscriptFragment { text, .. }
-                if text == public_wire::ASSISTANT_TRANSCRIPT
-        ));
-        assert!(matches!(
-            next().await.kind(),
-            LiveSidebandObservationKind::TurnSnapshotDelta { .. }
-        ));
+        expect_assistant_start(sideband.as_ref()).await;
+        if late_tail {
+            // The tail finishes the assistant turn and opens a new user turn.
+            assert!(matches!(
+                next().await.kind(),
+                LiveSidebandObservationKind::TurnFinished {
+                    role: LiveSidebandTurnRole::Assistant,
+                    transcript,
+                    ..
+                } if transcript == public_wire::ASSISTANT_TRANSCRIPT
+            ));
+            assert!(matches!(
+                next().await.kind(),
+                LiveSidebandObservationKind::TurnStarted {
+                    role: LiveSidebandTurnRole::User,
+                    turn,
+                } if *turn != user_turn
+            ));
+            assert!(matches!(
+                next().await.kind(),
+                LiveSidebandObservationKind::UserTranscriptFragment { text, .. }
+                    if text == public_wire::USER_TRANSCRIPT_TAIL
+            ));
+            assert!(matches!(
+                next().await.kind(),
+                LiveSidebandObservationKind::TurnSnapshotDelta { .. }
+            ));
+        }
 
         // Releasing executor context for the delegation lowers to one
         // delegation-scoped commentary append and its exact acknowledgement.
@@ -9389,14 +9498,26 @@ mod tests {
         ));
 
         sideband.close().await.expect("close requested");
-        assert!(matches!(
-            next().await.kind(),
-            LiveSidebandObservationKind::TurnFinished {
-                role: LiveSidebandTurnRole::Assistant,
-                transcript,
-                ..
-            } if transcript == public_wire::ASSISTANT_TRANSCRIPT
-        ));
+        if late_tail {
+            // Stream end flushes the open tail turn as a committed user row.
+            assert!(matches!(
+                next().await.kind(),
+                LiveSidebandObservationKind::TurnFinished {
+                    role: LiveSidebandTurnRole::User,
+                    transcript,
+                    ..
+                } if transcript == public_wire::USER_TRANSCRIPT_TAIL
+            ));
+        } else {
+            assert!(matches!(
+                next().await.kind(),
+                LiveSidebandObservationKind::TurnFinished {
+                    role: LiveSidebandTurnRole::Assistant,
+                    transcript,
+                    ..
+                } if transcript == public_wire::ASSISTANT_TRANSCRIPT
+            ));
+        }
         assert!(
             sideband
                 .next_observation()

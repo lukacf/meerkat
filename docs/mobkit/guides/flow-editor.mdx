@@ -4,7 +4,7 @@ description: "Embedded visual mobpack authoring studio with Basic and Graph edit
 icon: "sitemap"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 MobKit ships a web-based Flow Editor for authoring mobpacks — flows, member definitions, tools, skills, and structured-output schemas — embedded directly in the Rust binaries via `include_str!`. The editor is a thin client: every edit round-trips through the mobpack-authoring JSON-RPC surface, and the server-rendered document is what you see.
 
@@ -102,11 +102,13 @@ The mobpack-authoring methods:
 
 ### SDK access
 
-The same JSON-RPC surface is exposed as typed wrappers in both gateway SDKs: `mobpackCreate` / `mobpackValidate` / `mobpackDeploy` and friends on the TypeScript `MobHandle`, and snake_case equivalents (`mobpack_create`, `mobpack_validate`, `mobpack_deploy`, …) in Python. That makes the full authoring loop — create, edit via `apply_operation`, validate, export, deploy — scriptable without the editor UI, under the same capabilities and access-control gates. See [TypeScript SDK](/mobkit/sdks/typescript) and [Python SDK](/mobkit/sdks/python).
+The same authoring operations are exposed as typed wrappers in both gateway SDKs: `mobpackCreate` / `mobpackValidate` / `mobpackDeploy` and friends on the TypeScript `MobHandle`, and snake_case equivalents (`mobpack_create`, `mobpack_validate`, `mobpack_deploy`, …) in Python. That makes the full authoring loop — create, edit via `apply_operation`, validate, export, deploy — scriptable without the editor UI. See [TypeScript SDK](/mobkit/sdks/typescript) and [Python SDK](/mobkit/sdks/python).
+
+The authorization boundaries differ: standard gateway `MobHandle` wrappers use trusted host stdio RPC, not `/flow-editor/rpc`. The runtime HTTP route applies HTTP authentication and configured ABAC; standalone HTTP applies its host-deploy opt-in. These HTTP gates are not inherited by the SDK wrappers. Hosts exposing SDK authoring operations to untrusted callers must enforce their own admission policy.
 
 ## Authoring model
 
-The top rail switches between **FLOWS** and **AGENTS** views and carries the IMPORT, VALIDATE, PUBLISH, DEPLOY PLAN, DEPLOY, and `⚙ SETTINGS` actions.
+The editor starts in the mob library unless a deep link opens a mob. An opened mob has **FLOW**, **AGENTS**, and **SETTINGS** section tabs; the library has no section tabs. The top rail also carries the IMPORT, VALIDATE, PUBLISH, DEPLOY PLAN, and DEPLOY authoring actions.
 
 - **Basic mode** — a vertical step builder for the current flow.
 - **Graph mode** — an advanced canvas; node and edge edits sync through `graph_projection` / `graph_to_flow`.
@@ -114,7 +116,7 @@ The top rail switches between **FLOWS** and **AGENTS** views and carries the IMP
 - **Validation sheet** — opened by VALIDATE; shows passed/warning/blocking rows and hosts the deploy-plan and deploy-run buttons.
 - **Source preview** — renders the generated `mob.toml` and sibling source files via `mobkit/mobpacks/source`, without exporting an archive.
 - **Export / import** — PUBLISH exports the document and downloads it as a `.mobpack` archive; IMPORT accepts `.mobpack`, `.json`, and `.toml`.
-- **`⚙ SETTINGS`** — editor tweaks plus mob settings (orchestrator wiring, backend, topology) and deploy settings (command, surface, trust policy, model, limits).
+- **SETTINGS section** — editor tweaks plus mob settings (orchestrator wiring, backend, topology) and deploy settings (command, surface, trust policy, model, limits).
 
 Authoring is server-authoritative: the client never mutates the document locally. Every edit is sent as `mobkit/mobpacks/apply_operation`, and the editor re-renders from the document the server returns.
 
@@ -140,7 +142,11 @@ requires `mobpack.deploy`; without it the call is denied with error `-32030`.
 After admission, a missing `rkat` executable produces a warning row
 (`rkat mob validate skipped`) instead of failing the structural result.
 
-Deploys are plans by default. `mobkit/mobpacks/deploy` without `execute` returns the `rkat mob run …` argv plus a `plan_trace` the editor replays step by step; `mobkit/mobpacks/deploy_command` previews the exact shell command. Only with `execute: true` — and only when the surface allows it — does the server write the archive and run `rkat mob run` on the host. The run validates the input params, provisions the flow's members, blocks until the run is terminal, and prints the result envelope on stdout; the server parses that envelope and surfaces the flow's run output (status, run id, and the result payload) as deploy display rows, so the editor shows what the flow actually produced. The deploy `prompt` setting becomes the `--prompt` run input:
+Deploys are plans by default. `mobkit/mobpacks/deploy` without `execute` returns the `rkat mob run …` argv plus a `plan_trace` the editor replays step by step; `mobkit/mobpacks/deploy_command` previews the exact shell command. Only with `execute: true` — and only when the surface allows it — does the server write the archive and run `rkat mob run` on the host. The run validates the input params, provisions the flow's members, blocks until the run is terminal, and prints the result envelope on stdout; the server parses that envelope and surfaces the flow's run output (status, run id, and the result payload) as deploy display rows, so the editor shows what the flow actually produced.
+
+RPC `input_params` values are forwarded as repeated `--param key=<json>` bindings. The deploy `prompt` setting supplies the fallback `--prompt=<text>` only when the generated input schema permits `prompt` (including packs without typed input parameters) and `input_params` has not already bound `prompt`. It does not override an explicit binding.
+
+HTTP host-mutation gates:
 
 - **Standalone binary** - `rkat_validate: true` and deploy `execute: true` both require `--allow-host-deploy` (or the env flag). Without it, validation stays structural and execute-deploy fails with a pointer to manual deploy.
 - **Runtime-mounted editor** - both host-mutating operations require the caller's `mobpack.deploy` grant when access control is enforced; open otherwise.
@@ -205,7 +211,7 @@ make test-flow-editor-rkat         # live export/import checks against rkat mob 
 make test-flow-editor-rkat-deploy  # live checks including rkat mob run
 ```
 
-`npm run typecheck` covers both packages and the shell; `test/package-boundaries.test.cjs` keeps `@flow-editor-core` window/React/DOM-free and `@flow-editor-components` network-free; `test/controller-export-keys.test.cjs` pins the facade's 384-key manifest.
+`npm run typecheck` covers both packages and the shell; `test/package-boundaries.test.cjs` keeps `@flow-editor-core` window/React/DOM-free and `@flow-editor-components` network-free; `test/controller-export-keys.test.cjs` pins the facade's ordinary and test-only exports against `test/controller-export-manifest.json`.
 
 ## See also
 

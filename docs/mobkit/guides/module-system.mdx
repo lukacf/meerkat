@@ -4,7 +4,7 @@ description: "Route module calls, select MCP or event-line boundaries, and inspe
 icon: "diagram-project"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 MobKit modules are subprocesses declared in `MobKitConfig`. The runtime resolves
 each discovered module, selects its process boundary, records startup health,
@@ -70,8 +70,9 @@ There is no event-line fallback for those core flows.
 
 ## Event-line boundary
 
-A module without the MCP marker uses the event-line boundary. The process must
-write a JSON event as its first stdout line. For example:
+A module without the MCP marker uses the event-line boundary. For a routed
+call, the process must write a JSON event as its first stdout line and then
+terminate. For example:
 
 ```json
 {
@@ -86,11 +87,22 @@ write a JSON event as its first stdout line. For example:
 
 The runtime normalizes that line into `EventEnvelope<UnifiedEvent>`. On this
 boundary, `route_module_call` launches the module and returns the first
-normalized module event's `payload` field as `ModuleRouteResponse.payload`. It
-does not include the event envelope metadata or the normalized event's `module`
+normalized module event's `payload` field as `ModuleRouteResponse.payload`
+after the subprocess exits. It does not include the event envelope metadata
+or the normalized event's `module`
 and `event_type` fields in that payload. It also does not write
 `request.method` or `request.params` to the module's stdin. Use MCP when the
 subprocess needs a request/response tool-call contract.
+
+<Warning>
+Event-line `route_module_call` and `run_module_boundary_once` are one-shot
+execution paths. Their timeout bounds first-line arrival, not the subsequent
+wait for child exit. A subprocess that emits a readiness line and stays alive
+can leave the call waiting indefinitely. This differs from startup
+supervision, which can retain the final healthy child. Prefer MCP for
+request/response servers; each MCP routed call still connects and closes its
+own connection rather than reusing the startup connection.
+</Warning>
 
 For a discovered one-shot module that emits one event and exits, use the public
 configuration-aware helper:

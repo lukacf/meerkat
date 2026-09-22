@@ -4,7 +4,7 @@ description: "Combine a Meerkat mob with MobKit modules into a single managed ru
 icon: "layer-group"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 The unified runtime is the production entry point for MobKit. It bootstraps a Meerkat mob and MobKit's module subsystems together, merges their event streams, and manages the combined lifecycle through a single handle.
 
@@ -55,21 +55,30 @@ If neither definition source nor `mob_spec` is present, the builder returns
 ## Bootstrap sequence
 
 <Steps>
-  <Step title="Mob bootstrap">
-    The Meerkat mob runtime starts first. Members are provisioned, wiring is established, and the mob reaches an operational state. If this fails, the builder returns `UnifiedRuntimeBootstrapError::Mob`.
+  <Step title="Mob preparation">
+    The runtime first prepares the Meerkat mob. This does not unconditionally provision members or finish wiring. A persistent identity-first resume can remain staged in `Stopped` until continuity owners are registered and activation can proceed. A mob preparation failure returns `UnifiedRuntimeBootstrapError::Mob`.
   </Step>
   <Step title="Module startup">
-    The supervisor attempts each discovered module and records its startup transitions. A module that exhausts its restart policy remains unloaded and emits a supervisor warning. A module-runtime initialization error or startup-thread panic rolls back the already-started mob before the builder returns an error.
+    After mob preparation, the supervisor attempts each discovered module and records its startup transitions. A module that exhausts its restart policy remains unloaded and emits a supervisor warning. A module-runtime initialization error or startup-thread panic rolls back the prepared mob before the builder returns an error.
+  </Step>
+  <Step title="Configured member materialization and wiring">
+    Later in builder construction, configured identity roster bootstrap or classic `Discovery` spawning materializes the desired members. The builder then performs final edge reconciliation when configured. Modules must not assume an already-populated, fully wired, `Running` mob at startup.
   </Step>
   <Step title="Event merging">
     Agent and module events feed the unified event transport. Hosts read the public snapshot and subscription APIs rather than accessing the internal event vector.
   </Step>
 </Steps>
 
+Profiles are templates, not member declarations. A fresh definition-only
+runtime without a roster or `Discovery` can have no members; hosts must
+declare or explicitly create them. Persistent resumes can already have
+members, so this is not a guarantee that every bootstrap starts empty. See
+[Roster and member lifecycle](/mobkit/concepts/roster).
+
 ## Rollback on failure
 
-If module-runtime initialization fails or its startup thread panics after the
-mob has already started, the runtime performs a coordinated rollback:
+If module-runtime initialization fails or its startup thread panics after
+mob preparation, the runtime performs a coordinated rollback:
 
 1. Attempt to shut down the mob runtime
 2. If rollback succeeds, return the original module startup error
@@ -171,7 +180,7 @@ Key routes in the reference app include:
 | `/console/assets/console-app.js` | GET | React bundle |
 | `/console/assets/console-app.css` | GET | Stylesheet |
 | `/console/experience` | GET | Experience metadata JSON |
-| `/console/modules` | GET | Configured module IDs from `RuntimeDecisionState` (JSON), not startup or health confirmation |
+| `/console/modules` | GET | Configured module IDs (JSON) |
 | `/console/identities` | GET | Identity records |
 | `/console/timeline` | GET | Replayable timeline page |
 | `/console/timeline/stream` | GET | Timeline replay/live SSE |
@@ -184,6 +193,11 @@ Key routes in the reference app include:
 | `/mobkit/mob_events/stream` | GET | Structural mob-events SSE |
 | `/flow-editor` | GET | Visual mobpack editor |
 | `/flow-editor/rpc` | POST | Mobpack-authoring JSON-RPC |
+
+`GET /console/modules` lists IDs from `RuntimeDecisionState.modules`.
+It is a configuration inventory, not confirmation of successful startup,
+current liveness, or health. Startup results are available separately through
+`loaded_modules().await` and `module_health_transitions().await`.
 
 ## Console voice and live from the builder
 
@@ -307,11 +321,18 @@ let runtime = UnifiedRuntime::builder()
 | `compaction_persistence_rejected` | `identity`, `session_id`, `error`, `preserved_history?`, `attempted_entries?` | a member's compaction handoff was refused durably; `preserved_history` says whether the member can still send |
 | `actor_loop_stalled` | `probe_waited_secs`, `detail`, `stall_id?`, `prior_resolved_stalls?` | the actor-loop probe's round trip went unanswered past its budget |
 | `actor_loop_recovered` | `stall_id`, `stalled_for_secs` | that stall resolved; the one non-failure variant, correlated by `stall_id` |
+| `actor_loop_terminated` | `detail`, `stall_id?` | the probe observed the actor's command or reply channel closing; the actor is gone |
 | `host_loop_crash` | `member_id`, `error` | a member emitted `run_failed` during event drain |
 | `rediscover_failure` | `error` | `rediscover` failed |
 | `event_log_flush_failure` | `error` | the operational event log could not flush |
 | `identity_materialization_failure` | `identity`, `initiator?`, `operation`, `error` | identity-first hydration skipped a member |
 | `mob_stop_proceeded_without_interrupt` | `waited_ms`, `member?`, `error` | teardown gave up waiting for runtime-attach readiness and continued without interrupting the member |
+
+`actor_loop_terminated` is terminal, not an `actor_loop_recovered` event.
+It can occur without a prior stall (`stall_id` is then absent). The probe
+ends, guarded deliveries fail fast with `ActorTerminated`, and there is no
+in-process actor recovery. The operator must restart the process rather than
+wait for a recovery notification.
 
 **Default sink (since 0.8.18).** Every `ErrorEvent` is also logged through
 `tracing` whether or not a hook is registered: at ERROR, or at INFO for

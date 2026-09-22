@@ -4,7 +4,7 @@ description: "Bootstrap a MobKit runtime with modules and a Meerkat mob. Single 
 icon: "rocket"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 ## Install
 
@@ -137,6 +137,16 @@ The bundled gateways bind an available loopback port and return the exact
 `http_base_url` in the initialization result. A library host may choose its own
 address.
 
+For an SDK-launched `rpc_gateway`, protected console APIs are **auth-closed by
+default**: without configured auth, the gateway trusts no signing key. Configure
+`.auth(...)` and the matching bearer-token or authenticated-proxy handling
+described in [Authentication](/mobkit/guides/authentication). Alternatively, for a
+loopback-only or authenticated-proxy-protected demo, explicitly add
+`.console_auth_required(False)` in Python or `.consoleAuthRequired(false)` in
+TypeScript before `.build()`. These are deliberate opt-outs, not production
+defaults. Keep the runtime alive while browsing; the status-only examples above
+shut it down when finished, and a console host should retain that cleanup on exit.
+
 The console shows the agent sidebar, conversation workspace, signals rail, topology, logs, and health overview. The bundled app seeds from REST, sends through JSON-RPC, and tails replayable timeline frames over SSE.
 
 ## Identity-first (household apps)
@@ -188,19 +198,30 @@ await luka.send_and_wait("What's happening today?", timeout=60)
 **Profiles are templates; members are declared.** The `[profiles.*]` tables in
 `MOB_TOML` produce no members on their own: the identities your roster returns
 (or `ensure_member` names) are the only members that exist, and nothing spawns
-one member per profile for you. The roster callback receives a typed
-`RosterContext`: Python exposes `mob_definition` and `previous_identities`;
-TypeScript exposes `mobDefinition` and `previousIdentities`. The bundled
-`rpc_gateway` supplies its booted definition, while custom hosts may omit it.
-Use that context or your own parsed `MOB_TOML` to declare a profile-shaped crew; see
+one member per profile for you. Both SDKs pass a typed `RosterContext` to the
+roster callback: Python exposes `context.mob_definition` and
+`context.previous_identities`; TypeScript exposes `context.mobDefinition` and
+`context.previousIdentities`. The stock gateway supplies its compiled mob
+definition, so a profile-shaped roster can derive members from that definition's
+profiles. Custom or older hosts may omit the definition (`None`/`null`), and
+missing prior identities default to an empty list. See
 [Profiles are templates](/mobkit/concepts/roster#profiles-are-templates-and-members-are-declared).
+
+The prior-identity list is call-site-dependent, not an authoritative membership
+snapshot on every callback. Topology-query and edge-reconciliation snapshots
+supply registered identities; bootstrap, full roster refresh/reconcile, and
+reset-time spec adoption currently pass an empty list. An empty list does not
+establish that no identities are registered.
+
 If the definition declares `[wiring]` (`auto_wire_orchestrator` or
 `role_wiring`), call `rt.mob_handle().reconcile_edges()` after boot and after
 each `rt.reconcile()`; `ensure_member` reconciles on its own. Pin
 `runtime_mode = "turn_driven"` on profiles that back addressable identities:
 meerkat defaults to `autonomous_host`, which runs a kickoff turn at spawn and
-cannot receive ambient per-turn memory (see
-[Runtime modes](/mobkit/concepts/roster#runtime-modes)).
+skips ambient per-turn recall for generic SDK/work delivery. Non-steer local
+canonical console-human input can carry configured typed injected context even
+for `autonomous_host`; that exception does not cover arbitrary external
+bindings. See [Runtime modes](/mobkit/concepts/roster#runtime-modes).
 </Note>
 
 Use `respawn()` for non-destructive recovery that keeps continuity, and `reset()` only when the app intentionally wants a destructive new generation and session.

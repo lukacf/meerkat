@@ -4,7 +4,7 @@ description: "Why the gateways bind loopback, how to publish them behind a rever
 icon: "server"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 Both bundled gateways, the console/admin `mobkit_gateway` and the SDK-facing
 `rpc_gateway`, bind `127.0.0.1` on an ephemeral port unless the launch selects
@@ -15,13 +15,15 @@ publish a gateway, and the exposure gate a non-loopback bind has to pass.
 
 Everything a gateway serves over HTTP hangs off one listener: the bundled
 console, console JSON-RPC, blobs, SSE event streams, and (when enabled) the
-live WebSocket transport. `mobkit_gateway` serves that console **open**: it has
-no `auth_config` ingress and builds its decision state with
-`require_app_auth = false`, so the loopback bind is its only access boundary.
-`rpc_gateway` is fail-closed by default (it trusts no signing key and refuses
-every console request until the host passes `auth_config` or opts out with
-`console_require_app_auth = false`), and the common host choice is the opt-out,
-which again makes loopback the boundary.
+live WebSocket transport. `mobkit_gateway` serves its protected console
+surfaces **open by default when top-level `auth_config` is absent**. Supplying
+that init parameter installs the shared JWT/OIDC configuration and requires
+app auth on those surfaces. `rpc_gateway` is fail-closed by default: it trusts
+no signing key and refuses protected console requests until the host passes
+`runtime_options.auth_config` or explicitly opts out with
+`runtime_options.console_require_app_auth = false`. Without gateway auth,
+loopback or an authenticating front proxy must provide the access boundary.
+See [Authentication](/mobkit/guides/authentication) for the shared auth shape.
 
 Loopback is therefore a security posture, not an oversight. The SDK process that
 spawns a gateway shares its network namespace and reads the exact
@@ -111,7 +113,7 @@ The init result then carries two base URLs:
 
 | Field | Value | Use it for |
 |-------|-------|------------|
-| `http_base_url` | The same-host form: the bound port at `127.0.0.1` for `0.0.0.0` / `::` binds, otherwise the bound address itself | The SDK's own SSE, multipart and console RPC calls; same-host proxies |
+| `http_base_url` | The same-host form, preserving the bound port and address family: `0.0.0.0:PORT` becomes `http://127.0.0.1:PORT`; `[::]:PORT` becomes `http://[::1]:PORT`. Concrete bound addresses are unchanged | The SDK's own SSE, multipart and console RPC calls; same-host proxies |
 | `http_public_base_url` | Exactly the `http_public_base_url` the launch declared, trailing `/` removed; `null` when none was declared | Links handed to browsers and off-host clients; the base a proxy in another container publishes |
 
 The public base is advertised, never bound: it is the operator's statement of
@@ -129,8 +131,8 @@ decision; run `validate_http_bind_policy` if you want the same gate.
 
 ## The exposure gate: auth or acknowledgement
 
-A non-loopback `http_listen` is refused at init, before any runtime is
-bootstrapped, unless one of two things is true:
+The shared gate refuses a non-loopback `http_listen` at init, before any runtime
+is bootstrapped, unless one of two things is true in its admission-time state:
 
 1. **The console enforces app auth.** `require_app_auth` is on AND the trusted
    JWKS carries at least one key, which is what `auth_config` (Python
@@ -144,10 +146,14 @@ bootstrapped, unless one of two things is true:
    opt-in, not an auth mechanism. Pass it only when an authenticating proxy
    fronts the listener.
 
-`mobkit_gateway` has no auth ingress, so on that binary only `allow_remote`
-(init param, `--allow-remote`, or `MOBKIT_HTTP_ALLOW_REMOTE=1`) can open the
-gate. On both binaries a refused bind answers `mobkit/init` with a `-32602`
-error on the request id whose message names the address and every way out.
+`rpc_gateway` applies its `runtime_options.auth_config` before this check.
+`mobkit_gateway` accepts the same JWT/OIDC shape as top-level `auth_config`,
+but its earlier exposure gate currently uses the open default decision state,
+not the later auth overlay used by the HTTP router. On that binary a
+non-loopback bind therefore still requires `allow_remote` (init param,
+`--allow-remote`, or `MOBKIT_HTTP_ALLOW_REMOTE=1`), even when auth is configured.
+On both binaries a refused bind answers `mobkit/init` with a `-32602` error on
+the request id whose message names the address and every way out.
 
 The listener is bound right behind the gate, before any bootstrap. A fixed
 `http_listen` port makes "address already in use" a realistic init failure,
@@ -156,13 +162,20 @@ address, with nothing built behind it (no runtime, no session store, and no
 schedule executor lease that a process exit would leave held for its full
 duration).
 
-Every non-loopback bind that does pass logs one WARN line on stderr naming the
-bound address and whether the console on it is authenticated or open. It cannot
-be silenced below WARN by the default filter.
+At serving startup, every admitted non-loopback listener logs one WARN line on
+stderr naming the bound address and the final serving auth posture. On
+`mobkit_gateway` this includes any configured `auth_config` overlay, unlike the
+open decision state used by its earlier exposure gate. It cannot be silenced
+below WARN by the default filter.
 
 ## Reading schedule watchdog diagnostics
 
-Both gateways probe the shared schedule service at boot and every 60 seconds.
+Both gateways install a resident watchdog that probes every 60 seconds when
+persistent schedule-service inputs are available. Ephemeral launches and
+launches whose schedule store is unavailable do not install it. An immediate
+boot probe runs after the firing host successfully starts; if host startup
+fails, startup logs that failure and the resident watchdog still runs.
+
 Only Pending occurrences more than 120 seconds overdue under an authoritative
 Active parent contribute to a firing-pipeline stall, its count, and its oldest
 due time. A boot backlog logs WARN; a new or changed periodic stall logs ERROR,

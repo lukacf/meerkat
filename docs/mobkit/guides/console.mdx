@@ -4,7 +4,7 @@ description: "Embedded MobKit console with configurable branding, grouped roster
 icon: "desktop"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 MobKit ships a web-based operator console through its HTTP composition. The
 console/admin `mobkit_gateway` serves it directly. A persistent, SDK-driven
@@ -29,9 +29,9 @@ Both gateway binaries bind an available loopback port and report the exact
 address. `http://localhost:8080/console` is correct only when your host or
 reverse proxy explicitly publishes MobKit there.
 
-The HTML, JavaScript, and CSS are compiled into the binary via `include_str!`, with no external CDN or build step at deployment time.
+The HTML, JavaScript, and CSS are compiled into the binary via `include_str!`, so no build step is required at deployment time. The stock CSS requests optional Google Fonts; when those requests are unavailable or blocked, it uses the configured local/system fallback fonts.
 
-For development with instant hot-reload:
+For development with instant hot-reload, see the [development workflow](#development-workflow), including the current Vite proxy limitations:
 
 ```bash
 cd console
@@ -45,7 +45,7 @@ The bundled console uses a small set of stable protocol surfaces:
 | Surface | Purpose |
 |---------|---------|
 | `GET /console/experience` | Initial runtime snapshot, affordances, topology, health, and `console_config`. |
-| `GET /console/modules` | Configured module IDs from `RuntimeDecisionState`, not startup or health confirmation. |
+| `GET /console/modules` | Configured module-ID summary. |
 | `GET /console/identities` | Identity-first list and inspection summary. |
 | `GET /console/timeline` | Replayable console frames for initial load and older-history paging. |
 | `GET /console/timeline/stream` | Bounded replay followed by live timeline frames. |
@@ -53,6 +53,8 @@ The bundled console uses a small set of stable protocol surfaces:
 | `POST /console/rpc` | JSON-RPC 2.0 endpoint for console commands. |
 | `POST /console/rpc/multipart` | Multipart JSON-RPC for image send/upload. |
 | `GET /blobs/{blob_id}` | Blob/image retrieval for rendered media. |
+
+`/console/modules` returns IDs from `RuntimeDecisionState.modules`. It is a configuration inventory, not confirmation of successful startup, current liveness, or health.
 
 The console contract version is `0.5.0` in `console/src/lib/contract.ts` and `docs/rct/console-rest-sse-contract-v0.5.0.json`. The runtime JSON-RPC contract is separately versioned by `MOBKIT_CONTRACT_VERSION`.
 
@@ -415,22 +417,22 @@ The console uses the shared `@console-components` stylesheet with `--cc-*` CSS c
 
 ### Key tokens
 
-| Token | Default | Purpose |
+| Token | Stock console host default | Purpose |
 |-------|---------|---------|
 | `--cc-workbench-sidebar-width` | `260px` | Sidebar column width |
-| `--cc-workbench-activity-width` | `280px` | Activity rail column width |
-| `--cc-sidebar-safe-top` | `8px` | Top padding in the sidebar |
-| `--cc-sidebar-pad-left` | `14px` | Left padding in the sidebar |
-| `--cc-sidebar-pad-right` | `14px` | Right padding in the sidebar |
+| `--cc-workbench-activity-width` | `300px` | Activity rail column width |
+| `--cc-sidebar-safe-top` | `6px` | Top padding in the sidebar |
+| `--cc-sidebar-pad-left` | `0` | Left padding in the sidebar |
+| `--cc-sidebar-pad-right` | `0` | Right padding in the sidebar |
 | `--cc-content-width` | `768px` | Max width for conversation content |
 | `--cc-composer-width` | `784px` | Max width for the composer |
 | `--cc-window-scale` | `1` | DPI scaling factor |
 
 ### Theming
 
-The console defaults to dark mode. Set `data-cc-theme="light"` on the root to switch to light mode. The shared components respond to both themes.
+Without configuration or saved preferences, the stock console defaults to light mode and the Rams variant. `console_config.appearance` can supply different defaults; saved user preferences take precedence. Shared-component hosts select light or dark mode with `data-cc-theme="light"` or `"dark"` on their `.cc-theme-scope` root.
 
-The sidebar uses a panel surface background (`rgba(21, 22, 27, 0.82)`) to differentiate from the main area. The body background is `#131316`.
+The visible console canvas and sidebar surfaces use theme/variant tokens rather than fixed colors. For example, `#131316` is the graphite-dark canvas color, not a universal body background. The shared stylesheet's fallback sidebar safe-top and left/right padding are `10px` and `12px`/`12px`; the stock host overrides them with the values in the table.
 
 ## Resizable panels
 
@@ -488,19 +490,27 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
     Returns `{ "interaction_id": "...", "identity": "..." }`.
 
     `idempotency_key` must be unique per send; the stock console mints one
-    UUID per send. Reusing a key with different content is rejected with HTTP
-    `409` / JSON-RPC `-32009 idempotency_conflict`. Reusing a key with
-    identical content is a replay: the original acceptance is returned and the
-    turn is not run again.
+    UUID per send. An idempotent retry reuses the same key in the same
+    runtime/identity/origin namespace with identical content and effective
+    `handling_mode` (default `queue`). The original acceptance is returned
+    and the turn is not run again. Changed content or handling mode in that
+    namespace is rejected with HTTP `409` / JSON-RPC
+    `-32009 idempotency_conflict`. A different identity or origin is a
+    different send namespace, not a guaranteed replay.
 
     The legacy `POST /console/send` route still exists for compatibility. New console clients should prefer JSON-RPC.
   </Step>
   <Step title="Receive response frames">
     The timeline stream delivers canonical console frames:
     ```
-    event: text_delta
-    data: {"id":"frame-1","cursor":"console:241","identity":"identity:luka","event":"text_delta","data":{"text":"done"}}
+    id: console:241
+    event: console_frame
+    data: {"type":"console_frame","frame":{"id":"frame-1","cursor":"console:241","dedupe_key":"example:frame-1","timestamp_ms":1750000000000,"runtime_key":"example","identity":"identity:luka","kind":"text_delta","status":"delivered","frame_version":1,"payload":{"text":"done"},"source":{"kind":"console_event"},"interaction_id":"example-interaction"}}
     ```
+    This is the SSE wire envelope: `type` wraps a `frame` with `kind` and
+    `payload`. The frontend normalizes these into its internal `event`/`data`
+    representation; that normalized object is not the SSE wire shape.
+
     Correlate a send with its terminal by `interaction_id` on frames whose
     `source.kind` is `console_event`. Session-history backfill re-emits past
     turns as frames with `source.kind = "session_history"`; they carry the
@@ -521,7 +531,7 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
 | `/console/assets/console-app.js` | GET | React bundle (JavaScript) |
 | `/console/assets/console-app.css` | GET | Stylesheet (CSS) |
 | `/console/experience` | GET | Experience metadata (JSON) |
-| `/console/modules` | GET | Configured module IDs (JSON), not a loaded-runtime inventory |
+| `/console/modules` | GET | Configured module IDs (JSON), not startup/liveness/health confirmation |
 | `/console/identities` | GET | Identity-first records |
 | `/console/timeline` | GET | Replayable console timeline page |
 | `/console/timeline/stream` | GET | Timeline SSE replay and live continuation |
@@ -531,10 +541,9 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
 | `/console/rpc/multipart` | POST | Multipart JSON-RPC for images/blobs |
 | `/blobs/{blob_id}` | GET | Blob/image retrieval |
 
-Primary RPC methods:
+Primary RPC methods on `/console/rpc`:
 
 - `mobkit/console/send` - identity-addressed console send
-- `mobkit/interact` - identity-addressed interaction that returns a `/console/identity/{identity}/stream` route
 - `mobkit/console/query_timeline` - timeline replay query
 - `mobkit/console/list_identities` and `mobkit/console/inspect_identity` - identity-first inspection
 - `mobkit/blob/upload` - multipart blob upload
@@ -667,14 +676,21 @@ The production build resolves `@console-core` and `@console-components` as local
 
 ```bash
 # Terminal 1: start the gateway
-MOBKIT_REF_ADDR=127.0.0.1:63210 MOBKIT_REF_HTTP_MODE=serve \
+MOBKIT_REF_ADDR=127.0.0.1:63220 MOBKIT_REF_HTTP_MODE=serve \
   ./scripts/repo-cargo run -p meerkat-mobkit --example library_mode_reference
 
 # Terminal 2: start the Vite dev server (proxies API calls to gateway)
 cd console && npm run dev
 ```
 
-Edit any file in `console/src/` or `packages/` — changes appear instantly in the browser.
+The checked-in Vite proxy targets port `63220`, but currently omits
+`/console/timeline` (including `/stream`), `/console/identities`, and `/blobs`.
+Full-contract development through Vite requires adding proxy entries for
+those paths to the same backend. Alternatively, use the embedded console at
+`http://127.0.0.1:63220/console` for full-contract validation; rebuild the
+production console assets and Rust host to test frontend changes there.
+
+When using Vite, edits in `console/src/` or `packages/` appear instantly in the browser.
 
 ## Architecture
 
@@ -713,7 +729,7 @@ console/
 └── smoke.cjs                 # JSDOM smoke test
 ```
 
-The shared packages (`console-core` and `console-components`) are designed to be consumed by any application — MobKit, meerkat-app, or other hosts. They never import app stores, network code, or platform-specific APIs.
+The shared packages (`console-core` and `console-components`) avoid app-store and Electron/Desktop-bridge coupling. `console-components` owns presentation; `console-core` includes a MobKit HTTP/SSE transport using web APIs and a controller that accepts injected host transports. These are private workspace packages, not independently published npm API promises.
 
 ## See also
 

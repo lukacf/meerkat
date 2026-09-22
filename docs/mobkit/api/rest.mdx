@@ -4,7 +4,7 @@ description: "HTTP endpoints for console access, experience metadata, module ins
 icon: "globe"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 MobKit serves a REST API over HTTP using Axum. The API provides console access, runtime inspection, timeline replay, JSON-RPC ingress, legacy console send compatibility, multipart upload/send, and blob retrieval.
 
@@ -109,9 +109,18 @@ does not contain per-module health or startup state.
 
 ### `GET /console/identities`
 
-Returns identity-first records and inspection metadata when an identity runtime is configured.
+Returns visibility-filtered identities from the console aggregator, including
+ordinary runtime/worker identities; an identity-first runtime is not required.
+Without a console aggregator, this route returns `404` with
+`error: "unavailable"`.
 
-**Response:** JSON object containing identity records and affordances.
+**Response:** `{identities: ConsoleIdentityRecord[]}`. Each record carries
+`identity`, `display_name`, `runtime_key`, `runtime_member_id`, optional
+`session_id`, `visibility`, `addressable`, `health`, `labels`, and
+`topology_peers` when non-empty. Use
+[`mobkit/console/inspect_identity`](/mobkit/api/rpc#mobkit%2Fconsole%2Finspect_identity)
+for identity/peer inspection and `/console/experience` for affordances;
+neither identities nor inspection records contain an affordances field.
 
 ### `GET /console/timeline`
 
@@ -141,7 +150,14 @@ Response frames are visibility-filtered and returned in display order. `next_cur
 
 ### `GET /console/timeline/stream`
 
-Streams a bounded timeline replay followed by live console frames. It accepts the same query parameters as `GET /console/timeline` and returns `text/event-stream`.
+Streams timeline replay followed by live console frames (`text/event-stream`).
+It accepts the same query parameters as `GET /console/timeline`, but `limit`
+does not always bound the whole replay: `recent` produces one bounded seed,
+while anchored `since` drains all retained matching backlog in pages of up
+to `limit` frames. Without `after`, `since` switches to `recent`. A non-empty
+`Last-Event-ID` header overrides the URL's `after` parameter. See the
+[timeline SSE contract](/mobkit/api/sse#console-timeline-stream) for event envelopes
+and snapshot markers.
 
 If the requested cursor can no longer be replayed, the route returns HTTP **409** with `{"error":"replay_unavailable"}` and cursor context. Clients should refetch a recent page and resume from `latest_cursor`.
 
@@ -166,7 +182,35 @@ Multipart JSON-RPC endpoint. Supported methods:
 | `mobkit/console/send` | Send console content with image upload placeholders. |
 | `mobkit/blob/upload` | Store a single blob/image and return a blob ID. |
 
-Multipart image uploads are bounded by the server-side image count and byte limits.
+For `mobkit/blob/upload`, send a `payload` part containing this JSON-RPC
+request, plus exactly one binary part named `file:upload-1` with
+`Content-Type: image/png`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "upload-1",
+  "method": "mobkit/blob/upload",
+  "params": {
+    "upload": {
+      "upload_id": "upload-1",
+      "type": "image_upload",
+      "media_type": "image/png"
+    }
+  }
+}
+```
+
+The upload fields may instead be directly in `params`. `part_name` is an
+alias for `upload_id`; both identify the suffix after `file:`, with
+`upload_id` taking precedence if both are present. `type` is optional and,
+when supplied as a string, must be `image_upload`. Optional `media_type`
+must match the file part's MIME type. Supported types are `image/png`,
+`image/jpeg`, `image/webp`, and `image/gif`, with a **25 MiB per-file** limit.
+The result contains `blob_id`, `media_type`, and `size` in bytes, not `url`
+or `content_type`. Fetch the bytes through `GET /blobs/{blob_id}`.
+Console sends with image placeholders remain subject to the multipart
+image-count and per-file byte limits.
 
 ### `GET /blobs/{blob_id}`
 
@@ -227,9 +271,21 @@ API errors return standard HTTP status codes with a JSON body:
 | `200` | Success |
 | `400` | Bad request (invalid parameters) |
 | `401` | Unauthorized (missing or invalid token) |
-| `403` | Forbidden (valid token, insufficient permissions) |
+| `403` | Forbidden (read-only policy or insufficient access grants) |
 | `404` | Not found |
+| `409` | Console timeline replay unavailable or console-send conflict/refusal |
+| `429` | Console-send admission backlog full (`admission_backlog_full`) |
 | `500` | Internal server error |
+| `503` | Console-send actor probe unhealthy or reload refused |
+| `504` | Console-send admission or reload timed out |
+
+Structured `/console/send` admission failures carry `{error, message, data}`:
+`429` uses `admission_backlog_full`, `503` uses `actor_probe_unhealthy` or
+`reload_refused`, and `504` uses `admission_timeout` or `reload_timed_out`.
+Preserve `data` when reporting these failures; a timeout does not by itself
+establish execution fate or retryability. These REST status mappings are
+distinct from the JSON-RPC policy codes documented in the
+[RPC reference](/mobkit/api/rpc#mobkit-specific-error-codes).
 
 ## See also
 

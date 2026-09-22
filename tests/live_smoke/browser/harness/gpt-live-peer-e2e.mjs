@@ -59,9 +59,6 @@ async function prepare(command) {
     // The assistant is "quiet" for timeline purposes after this much
     // continuous sub-threshold audio (intra-sentence pauses are shorter).
     end_hysteresis_ms: 600,
-    // Input transcript deltas are final once nothing more arrives for this
-    // long (the public protocol has no explicit input-final event).
-    input_final_quiet_ms: 1000,
     // Amplitude below which fixture samples count as silence when locating
     // the end of the spoken part of a fixture (100/32768).
     fixture_silence: 0.0031,
@@ -207,7 +204,16 @@ async function prepare(command) {
         first_assistant_audio_ms: [],
         timer: null,
       },
-      inputTranscript: { pending: false, last_delta_ms: null, text: '', finals: [], first_delta_ms: null },
+      // Protocol-anchored user input finals. Public Live carries user speech
+      // only as session.input_transcript.delta {start_ms,end_ms}; there is no
+      // item-done or speech_started/stopped. A user utterance is final at the
+      // role alternation on the provider timeline: the deltas whose start_ms
+      // lies below the first output_transcript.delta start_ms of the following
+      // response. A delta starting at or after that boundary is a new user
+      // row (the model answered before the last word). `pending` holds the
+      // deltas of the open utterance; `boundary` the response start that
+      // closes it once the fixture's spoken part has ended.
+      inputTranscript: { pending: [], boundary: null, finals: [], first_delta_ms: null },
       firstAudioPacketMs: null,
       lastFixtureStartMs: -1,
       response: { text: '', started_ms: null, index: 0 },
@@ -343,13 +349,33 @@ async function prepare(command) {
     // its spoken part. Transcript deltas pausing mid-utterance, or assistant
     // output arriving during a barge-in, must not finalize the input early.
     state.userSpeaking = (t) => [...state.playing.values()].some((play) => t - play.started_ms <= play.speech_ms);
-    state.finalizeInput = () => {
+    // Close the open utterance at `boundary` (a response's first output
+    // transcript start_ms): the deltas below it become one final whose t_ms
+    // is the arrival of its last delta and end_ms that delta's provider end;
+    // deltas at or above it stay pending as the next utterance. Never while
+    // the fixture's spoken part is still playing (the peer owns that floor).
+    state.finalizeInput = (t) => {
       const input = state.inputTranscript;
-      if (!input.pending) return;
-      input.pending = false;
-      input.finals.push({ t_ms: input.last_delta_ms, text: input.text });
-      state.pushTimeline('input_final', { t_ms: input.last_delta_ms, text: input.text.slice(0, 400), index: input.finals.length - 1 });
-      input.text = '';
+      if (input.boundary === null || state.userSpeaking(t)) return;
+      const closed = input.pending.filter((d) => d.start_ms === null || d.start_ms < input.boundary);
+      const rest = input.pending.filter((d) => d.start_ms !== null && d.start_ms >= input.boundary);
+      if (closed.length > 0) {
+        const last = closed[closed.length - 1];
+        const final = {
+          t_ms: last.t,
+          start_ms: closed[0].start_ms,
+          end_ms: last.end_ms,
+          closed_by: input.boundary,
+          text: closed.map((d) => d.text).join(''),
+        };
+        input.finals.push(final);
+        state.pushTimeline('input_final', {
+          t_ms: final.t_ms, start_ms: final.start_ms, end_ms: final.end_ms, closed_by: final.closed_by,
+          text: final.text.slice(0, 400), index: input.finals.length - 1,
+        });
+      }
+      input.pending = rest;
+      input.boundary = null;
     };
     // ---- scheduling ----------------------------------------------------
     state.armSchedule = (item) => {
@@ -465,10 +491,7 @@ async function prepare(command) {
         energy.assistant_active = false;
         state.pushTimeline('assistant_audio_end', { last_active_ms: energy.last_active_ms, started_ms: energy.active_since_ms, response: state.response.index });
       }
-      const input = state.inputTranscript;
-      if (input.pending && !state.userSpeaking(t) && t - input.last_delta_ms >= energyConfig.input_final_quiet_ms) {
-        state.finalizeInput();
-      }
+      state.finalizeInput(t);
       state.checkScheduled(t);
     }, energyConfig.window_ms);
     // ---- media path up: first outbound user audio packet -----------------
@@ -535,21 +558,27 @@ async function prepare(command) {
           state.pushTimeline('first_input_delta', { event_index: state.events.length - 1 });
         }
         const delta = typeof parsed.delta === 'string' ? parsed.delta : typeof parsed.text === 'string' ? parsed.text : '';
-        const finals = state.inputTranscript.finals;
-        const lastFinal = finals[finals.length - 1];
-        if (!state.inputTranscript.pending && lastFinal && t - lastFinal.t_ms < 4000
-          && state.lastFixtureStartMs < lastFinal.t_ms && !state.userSpeaking(t)) {
-          // The peer owns the user's speech: no fixture has started since the
-          // previous utterance was finalized, so a late-trickling transcript
-          // delta belongs to that utterance, not a new one.
+        const input = state.inputTranscript;
+        const start_ms = typeof parsed.start_ms === 'number' ? parsed.start_ms : null;
+        const end_ms = typeof parsed.end_ms === 'number' ? parsed.end_ms : null;
+        const lastFinal = input.finals[input.finals.length - 1];
+        if (protocol !== 'public') {
+          input.finals.push({ t_ms: t, start_ms, end_ms, closed_by: null, text: delta });
+          state.pushTimeline('input_final', { t_ms: t, text: delta.slice(0, 400), index: input.finals.length - 1 });
+        } else if (input.pending.length === 0 && lastFinal && lastFinal.closed_by !== null
+          && start_ms !== null && start_ms < lastFinal.closed_by) {
+          // Protocol-anchored: a delta that starts before the response that
+          // closed the previous utterance belongs to that utterance, however
+          // late it arrives.
           lastFinal.text += delta;
+          lastFinal.t_ms = t;
+          lastFinal.end_ms = end_ms;
+          const entry = state.timeline.findLast?.((e) => e.kind === 'input_final' && e.detail.index === input.finals.length - 1);
+          if (entry) { entry.detail.text = lastFinal.text.slice(0, 400); entry.detail.end_ms = end_ms; entry.detail.late_ms = t; }
         } else {
           // A new user utterance closes the previous assistant response.
-          if (state.response.text && !state.inputTranscript.pending) state.finishResponse();
-          state.inputTranscript.pending = true;
-          state.inputTranscript.last_delta_ms = t;
-          if (state.inputTranscript.text.length < 4000) state.inputTranscript.text += delta;
-          if (protocol !== 'public') state.finalizeInput();
+          if (state.response.text && input.pending.length === 0) state.finishResponse();
+          if (input.pending.length < 400) input.pending.push({ t, start_ms, end_ms, text: delta });
         }
       }
       // Assistant-start boundary used to fire an armed barge-in. The private
@@ -564,7 +593,13 @@ async function prepare(command) {
         if (state.response.text.length < 20000) state.response.text += delta;
       }
       if (parsed?.type === 'session.delegation.created') {
-        state.pushTimeline('delegation_created', { target: parsed?.delegation?.target ?? null, event_index: state.events.length - 1 });
+        // offset_ms is the model's decision point on the provider timeline
+        // (the user's final word starts at that offset); t_ms is arrival.
+        state.pushTimeline('delegation_created', {
+          target: parsed?.delegation?.target ?? null,
+          offset_ms: typeof parsed?.offset_ms === 'number' ? parsed.offset_ms : null,
+          event_index: state.events.length - 1,
+        });
       }
       // Every provider event that is not a transcript/audio delta lands on
       // the timeline by type, so barge-in and close breakdowns can be read
@@ -576,7 +611,13 @@ async function prepare(command) {
       if (parsed?.type === 'session.commentary.appended') {
         state.pushTimeline('commentary_appended', { event_index: state.events.length - 1 });
       }
-      if (assistantStarted && state.inputTranscript.pending && !state.userSpeaking(t)) state.finalizeInput();
+      // Role alternation: the first output transcript delta of a response
+      // fixes the boundary that closes the open user utterance.
+      if (parsed?.type === 'session.output_transcript.delta' && state.inputTranscript.boundary === null
+        && state.inputTranscript.pending.length > 0 && typeof parsed.start_ms === 'number') {
+        state.inputTranscript.boundary = parsed.start_ms;
+        state.finalizeInput(t);
+      }
       if (assistantStarted && state.bargeIn.armedFixture) {
         const fixtureName = state.bargeIn.armedFixture;
         state.bargeIn.armedFixture = null;

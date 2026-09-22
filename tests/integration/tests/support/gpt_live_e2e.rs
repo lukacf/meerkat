@@ -792,6 +792,9 @@ impl TimelineEntry {
     pub fn detail_u64(&self, key: &str) -> Option<u64> {
         self.detail.get(key).and_then(Value::as_u64)
     }
+    pub fn detail_f64(&self, key: &str) -> Option<f64> {
+        self.detail.get(key).and_then(Value::as_f64)
+    }
     pub fn detail_str(&self, key: &str) -> Option<&str> {
         self.detail.get(key).and_then(Value::as_str)
     }
@@ -835,10 +838,17 @@ pub struct EnergySummary {
     pub first_assistant_audio_ms: Vec<u64>,
 }
 
+/// One protocol-anchored user input final (see the browser harness).
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct InputFinal {
     pub t_ms: u64,
     pub text: String,
+    #[serde(default)]
+    pub start_ms: Option<f64>,
+    #[serde(default)]
+    pub end_ms: Option<f64>,
+    #[serde(default)]
+    pub closed_by: Option<f64>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]

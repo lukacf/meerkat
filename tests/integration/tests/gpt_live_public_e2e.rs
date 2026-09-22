@@ -2814,7 +2814,10 @@ const S100_DELEGATION_CONTEXT_PREFIX: &str = "Live delegation execution context:
 #[derive(Debug)]
 struct SpokenTurn {
     speech_end_ms: u64,
+    /// Arrival of the protocol-anchored input final (role alternation).
     input_final_ms: Option<u64>,
+    /// Provider `end_ms` of the final's last delta.
+    input_final_end_ms: Option<f64>,
     input_text: String,
     first_audio_ms: Option<u64>,
 }
@@ -2836,7 +2839,11 @@ impl SpokenTurn {
             .map(|entry| entry.t_ms);
         Some(Self {
             speech_end_ms,
-            input_final_ms: input_final.map(|entry| entry.t_ms),
+            // The entry is pushed when the role alternation closes the
+            // utterance; the final itself is the arrival of its last delta
+            // (detail `t_ms`), which is what latencies are measured from.
+            input_final_ms: input_final.map(|entry| entry.detail_u64("t_ms").unwrap_or(entry.t_ms)),
+            input_final_end_ms: input_final.and_then(|entry| entry.detail_f64("end_ms")),
             input_text: input_final
                 .and_then(|entry| entry.detail_str("text"))
                 .unwrap_or_default()
@@ -2851,6 +2858,27 @@ impl SpokenTurn {
 
     fn speech_end_to_audio_ms(&self) -> Option<i64> {
         Some(self.first_audio_ms? as i64 - self.speech_end_ms as i64)
+    }
+
+    /// `Record::Latency` for this turn; `delegation_created_ms` when the
+    /// turn produced a client delegation (arrival on the browser clock).
+    fn latency_record(
+        &self,
+        channel: u32,
+        turn: u32,
+        delegation_created_ms: Option<u64>,
+    ) -> EvidenceRecord {
+        EvidenceRecord::Latency {
+            channel,
+            turn,
+            input_final_to_audio_ms: self.input_final_to_audio_ms(),
+            speech_end_to_audio_ms: self.speech_end_to_audio_ms(),
+            input_final_end_ms: self.input_final_end_ms,
+            input_final_to_delegation_ms: match (delegation_created_ms, self.input_final_ms) {
+                (Some(created), Some(final_ms)) => Some(created as i64 - final_ms as i64),
+                _ => None,
+            },
+        }
     }
 }
 
@@ -2962,6 +2990,7 @@ fn s100_markdown_headings(text: &str) -> Vec<String> {
 #[derive(Debug)]
 struct DelegatedRequest {
     fixture_start_ms: u64,
+    delegation_created_ms: u64,
     commentary_audio_ms: u64,
     executor_done_at_ms: u128,
     timing: SpokenTurn,
@@ -3156,6 +3185,7 @@ async fn delegated_request(
     );
     Ok(DelegatedRequest {
         fixture_start_ms,
+        delegation_created_ms,
         commentary_audio_ms,
         executor_done_at_ms,
         timing,
@@ -3201,7 +3231,8 @@ async fn answer_window(
 ///     after the assistant goes quiet, each resolving "that file" / "the
 ///     second one" through the previous exchange; exactly one client
 ///     delegation per request, executor input equal to the user's final
-///     transcript, files on disk with two headings;
+///     transcript (protocol-anchored: the deltas below the following
+///     response's first output start_ms), files on disk with two headings;
 /// (c) a barge-in 600 ms into the second commentary readout: overlap beyond
 ///     the bound is a fault and the answer must be re-issued;
 /// (d) a spoken goodbye, a graceful client disconnect, host close converging
@@ -3332,12 +3363,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             })?;
         live.record_time_to_talk("S100", &mut tolerant_failures).await?;
         let answer1 = answer_window(&mut live, "request 1", &request1).await?;
-        evidence.record(EvidenceRecord::Latency {
-            channel,
-            turn: 1,
-            input_final_to_audio_ms: request1.timing.input_final_to_audio_ms(),
-            speech_end_to_audio_ms: request1.timing.speech_end_to_audio_ms(),
-        })?;
+        evidence.record(request1.timing.latency_record(channel, 1, Some(request1.delegation_created_ms)))?;
         let plan_stem = plan_file
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -3390,12 +3416,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             headings.len() >= 2,
             "the plan file must hold two headings after request 2; file={plan_file:?} headings={headings:?} text={plan_text:?}"
         );
-        evidence.record(EvidenceRecord::Latency {
-            channel,
-            turn: 2,
-            input_final_to_audio_ms: request2.timing.input_final_to_audio_ms(),
-            speech_end_to_audio_ms: request2.timing.speech_end_to_audio_ms(),
-        })?;
+        evidence.record(request2.timing.latency_record(channel, 2, Some(request2.delegation_created_ms)))?;
 
         // (c) Barge-in: overlap and re-issued answer.
         evidence.stage(EvidenceStage::StandupBargeIn)?;
@@ -3438,12 +3459,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             })
             .map(|e| format!("+{} {}", e.t_ms - barge_in_start_ms, e.detail_str("type").unwrap_or("?")))
             .collect();
-        evidence.record(EvidenceRecord::Latency {
-            channel,
-            turn: 3,
-            input_final_to_audio_ms: barge_in_timing.input_final_to_audio_ms(),
-            speech_end_to_audio_ms: barge_in_timing.speech_end_to_audio_ms(),
-        })?;
+        evidence.record(barge_in_timing.latency_record(channel, 3, None))?;
         let events = live.peer.events().await?;
         let first_input_delta_after_onset_ms = events[request2.events_before..]
             .iter()
@@ -3503,12 +3519,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         )
         .await?;
         let answer3 = answer_window(&mut live, "request 3", &request3).await?;
-        evidence.record(EvidenceRecord::Latency {
-            channel,
-            turn: 4,
-            input_final_to_audio_ms: request3.timing.input_final_to_audio_ms(),
-            speech_end_to_audio_ms: request3.timing.speech_end_to_audio_ms(),
-        })?;
+        evidence.record(request3.timing.latency_record(channel, 4, Some(request3.delegation_created_ms)))?;
         record_tolerant(
             &evidence,
             channel,
@@ -3548,12 +3559,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             )
             .await?;
         let goodbye_timing = SpokenTurn::from_timeline(&timeline, goodbye).ok_or("goodbye timing")?;
-        evidence.record(EvidenceRecord::Latency {
-            channel,
-            turn: 5,
-            input_final_to_audio_ms: goodbye_timing.input_final_to_audio_ms(),
-            speech_end_to_audio_ms: goodbye_timing.speech_end_to_audio_ms(),
-        })?;
+        evidence.record(goodbye_timing.latency_record(channel, 5, None))?;
         let events = live.peer.events().await?;
         println!(
             "GPT_LIVE_S100_GOODBYE input_final_to_audio_ms={:?} heard={:?} goodbye={:?}",
@@ -3581,7 +3587,20 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             .iter()
             .map(|r| normalize_words(&r.timing.input_text))
             .collect();
-        let exchanges = 1 + requests.len() + 2; // seed, requests, barge-in, goodbye
+        // Protocol-anchored row expectation: one canonical user row per
+        // user role alternation on the provider timeline (the browser's
+        // input finals), plus the typed seed. A user delta arriving after the
+        // assistant's response start is legitimately a new row.
+        let finals = live.peer.energy().await?.input_finals;
+        let user_alternations = finals.len();
+        let exchanges = 1 + user_alternations;
+        println!(
+            "GPT_LIVE_S100_ALTERNATIONS user_alternations={user_alternations} spoken_fixtures=5 finals={:?}",
+            finals
+                .iter()
+                .map(|f| (f.t_ms, f.start_ms, f.end_ms, f.closed_by, f.text.chars().take(60).collect::<String>()))
+                .collect::<Vec<_>>()
+        );
         let history_deadline = Instant::now() + Duration::from_secs(20);
         let history = loop {
             let history = live
@@ -3627,7 +3646,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         }
         if rows.spoken.len() != exchanges {
             deterministic_failures.push(format!(
-                "canonical spoken user rows at close ({}) differ from the exchange count ({exchanges}: typed seed + 5 spoken utterances); spoken rows: {:?}",
+                "canonical spoken user rows at close ({}) differ from the exchange count ({exchanges}: typed seed + {user_alternations} user role alternations); spoken rows: {:?}",
                 rows.spoken.len(),
                 rows.spoken
             ));
@@ -3891,12 +3910,7 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
         )
         .await?;
         live.record_time_to_talk("S102", &mut tolerant_failures).await?;
-        evidence.record(EvidenceRecord::Latency {
-            channel,
-            turn: 1,
-            input_final_to_audio_ms: q1.input_final_to_audio_ms(),
-            speech_end_to_audio_ms: q1.speech_end_to_audio_ms(),
-        })?;
+        evidence.record(q1.latency_record(channel, 1, None))?;
         let lower1 = answer1.to_lowercase();
         record_tolerant(
             &evidence,
@@ -3919,12 +3933,7 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
                 .require_speech(false),
         )
         .await?;
-        evidence.record(EvidenceRecord::Latency {
-            channel,
-            turn: 2,
-            input_final_to_audio_ms: q2.input_final_to_audio_ms(),
-            speech_end_to_audio_ms: q2.speech_end_to_audio_ms(),
-        })?;
+        evidence.record(q2.latency_record(channel, 2, None))?;
         record_tolerant(
             &evidence,
             channel,
@@ -3950,12 +3959,7 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
         )
         .await?;
         let answer3 = answer_window(&mut live, "question 3", &request3).await?;
-        evidence.record(EvidenceRecord::Latency {
-            channel,
-            turn: 3,
-            input_final_to_audio_ms: request3.timing.input_final_to_audio_ms(),
-            speech_end_to_audio_ms: request3.timing.speech_end_to_audio_ms(),
-        })?;
+        evidence.record(request3.timing.latency_record(channel, 3, Some(request3.delegation_created_ms)))?;
         println!("GPT_LIVE_S102_ANSWER3 answer={:?}", answer3.trim());
         record_tolerant(
             &evidence,
@@ -4248,12 +4252,7 @@ async fn run_s103_interrupt_and_recover(
             monologue_timing.input_final_ms.map(|f| commentary_ms as i64 - f as i64),
             monologue_timing.input_text
         );
-        evidence.record(EvidenceRecord::Latency {
-            channel,
-            turn: 1,
-            input_final_to_audio_ms: monologue_timing.input_final_to_audio_ms(),
-            speech_end_to_audio_ms: monologue_timing.speech_end_to_audio_ms(),
-        })?;
+        evidence.record(monologue_timing.latency_record(channel, 1, None))?;
 
         let timeline = live
             .peer
@@ -4308,20 +4307,10 @@ async fn run_s103_interrupt_and_recover(
         let barge_in_timing = SpokenTurn::from_timeline(&timeline, barge_in);
         let correction_timing = SpokenTurn::from_timeline(&timeline, correction);
         if let Some(timing) = &barge_in_timing {
-            evidence.record(EvidenceRecord::Latency {
-                channel,
-                turn: 2,
-                input_final_to_audio_ms: timing.input_final_to_audio_ms(),
-                speech_end_to_audio_ms: timing.speech_end_to_audio_ms(),
-            })?;
+            evidence.record(timing.latency_record(channel, 2, None))?;
         }
         if let Some(timing) = &correction_timing {
-            evidence.record(EvidenceRecord::Latency {
-                channel,
-                turn: 3,
-                input_final_to_audio_ms: timing.input_final_to_audio_ms(),
-                speech_end_to_audio_ms: timing.speech_end_to_audio_ms(),
-            })?;
+            evidence.record(timing.latency_record(channel, 3, None))?;
         }
         println!(
             "GPT_LIVE_S103_BARGE_IN onset_ms={barge_in_start_ms} overlap_ms={barge_in_overlap_ms} onset_to_assistant_quiet_ms={assistant_quiet_after_onset_ms:?} onset_to_input_final_ms={first_input_delta_after_onset_ms:?} provider_events={provider_events:?} heard={:?} correction_start_ms={correction_start_ms} correction_overlap_ms={correction_overlap_ms} correction_heard={:?}",
@@ -4756,12 +4745,7 @@ async fn run_s107_stuck_close_convergence(
         )
         .await?;
         live.record_time_to_talk("S107", &mut tolerant_failures).await?;
-        evidence.record(EvidenceRecord::Latency {
-            channel: channel2,
-            turn: 1,
-            input_final_to_audio_ms: back.input_final_to_audio_ms(),
-            speech_end_to_audio_ms: back.speech_end_to_audio_ms(),
-        })?;
+        evidence.record(back.latency_record(channel2, 1, None))?;
         if answer_back.trim().is_empty() {
             deterministic_failures.push("the reopened channel produced no spoken answer".to_owned());
         }
@@ -5121,12 +5105,7 @@ async fn run_s104_handoff_voice_typed_voice(
         )
         .await?;
         live.record_time_to_talk("S104", &mut tolerant_failures).await?;
-        evidence.record(EvidenceRecord::Latency {
-            channel: channel2,
-            turn: 1,
-            input_final_to_audio_ms: back.input_final_to_audio_ms(),
-            speech_end_to_audio_ms: back.speech_end_to_audio_ms(),
-        })?;
+        evidence.record(back.latency_record(channel2, 1, None))?;
         let lower = answer_back.to_lowercase();
         record_tolerant(
             &evidence,

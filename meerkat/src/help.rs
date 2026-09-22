@@ -145,7 +145,19 @@ pub fn render_help_prompt_at(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+
+    /// Facade features that exist in the manifest but are deliberately not
+    /// part of the documented shipping inventory: test-only support and the
+    /// deprecated private GPT Live path plus its non-shipping harness.
+    const NON_SHIPPING_FACADE_FEATURES: [&str; 4] = [
+        "experimental-gpt-live",
+        "experimental-gpt-live-gate0-harness",
+        "integration-real-tests",
+        "test-realtime-fixtures",
+    ];
 
     #[test]
     fn platform_skill_is_compile_embedded() {
@@ -267,9 +279,33 @@ mod tests {
             MEERKAT_PLATFORM_SKILL_BODY.contains(&exact_facade_pin),
             "facade examples must exact-pin the current release"
         );
-        assert!(
-            MEERKAT_PLATFORM_SKILL_BODY.contains("Available facade features: `anthropic`, `openai`, `openai-realtime`, `gemini`, `all-providers`, `native-keyring`, `jsonl-store`, `memory-store`, `sqlite-store`, `session-store`, `session-compaction`, `memory-store-session`, `atif`, `comms`, `mcp`, `skills`, `schedule`, `workgraph`, `live`, and `live-webrtc`."),
-            "facade feature inventory must include the current facade features"
+        // The facade feature inventory is pinned to the crate manifest, not to a
+        // literal copy of the sentence, so the skill cannot drift from the
+        // shipping `[features]` table in either direction.
+        let facade_manifest: toml::Value =
+            toml::from_str(include_str!("../Cargo.toml")).expect("facade Cargo.toml must parse");
+        let declared_shipping_features: BTreeSet<&str> = facade_manifest
+            .get("features")
+            .and_then(toml::Value::as_table)
+            .expect("facade Cargo.toml must declare [features]")
+            .keys()
+            .map(String::as_str)
+            .filter(|feature| {
+                *feature != "default" && !NON_SHIPPING_FACADE_FEATURES.contains(feature)
+            })
+            .collect();
+        let inventory_start = MEERKAT_PLATFORM_SKILL_BODY
+            .find("facade features:")
+            .expect("help skill must carry the facade feature inventory sentence");
+        let inventory_sentence = &MEERKAT_PLATFORM_SKILL_BODY[inventory_start..];
+        let inventory_sentence = inventory_sentence
+            .split_once('.')
+            .map_or(inventory_sentence, |(sentence, _)| sentence);
+        let documented_features: BTreeSet<&str> =
+            inventory_sentence.split('`').skip(1).step_by(2).collect();
+        assert_eq!(
+            documented_features, declared_shipping_features,
+            "facade feature inventory must list exactly the shipping features declared in meerkat/Cargo.toml"
         );
         assert!(
             MEERKAT_PLATFORM_API_REFERENCE.contains("rkat help <QUESTION>"),

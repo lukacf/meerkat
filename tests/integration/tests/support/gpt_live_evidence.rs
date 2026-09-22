@@ -12,7 +12,7 @@ use std::time::Instant;
 use meerkat::experimental_gpt_live::thinking_capture;
 use serde::{Deserialize, Serialize};
 
-use super::AudioEvidence;
+use super::{AudioEvidence, TimelineEntry};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +34,11 @@ pub enum Stage {
     ReplacementUnknown,
     ReplacementRecall,
     Finished,
+    // S100 morning standup.
+    StandupOpen,
+    StandupDelegation,
+    StandupBargeIn,
+    StandupFarewell,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -142,15 +147,42 @@ pub enum NativeRecord {
     },
     Fault {
         fault: BrowserFault,
+        /// Soft faults are sampled through the evidence chain and carry the
+        /// media snapshot; hard faults are written directly without one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<AudioEvidence>,
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserFault {
+    // Hard: the browser evidence stream is no longer trustworthy.
     QueueLimit,
     StringLimit,
     CaptureFailure,
+    // Soft: architecture observations the scenario asserts on.
+    /// The assistant kept speaking over a playing fixture for `ms` beyond
+    /// the fixture's overlap bound (talk-over / late barge-in cancel).
+    Overlap {
+        ms: u64,
+        fixture: String,
+        bound_ms: u64,
+    },
+    /// The same assistant sentence was delivered twice within one response.
+    DuplicateReadout {
+        text: String,
+        response: u32,
+    },
+}
+
+impl BrowserFault {
+    pub fn is_hard(&self) -> bool {
+        matches!(
+            self,
+            Self::QueueLimit | Self::StringLimit | Self::CaptureFailure
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -243,6 +275,37 @@ pub enum Record {
         outcome: Outcome,
         last_stage: Stage,
     },
+    /// Downsampled assistant energy windows (t_ms, rms) for one channel.
+    Energy {
+        channel: u32,
+        windows: Vec<(u32, f32)>,
+    },
+    /// The browser peer's ordered timeline for one channel.
+    Timeline {
+        channel: u32,
+        entries: Vec<TimelineEntry>,
+    },
+    /// Per-turn response latency: user input final to first assistant
+    /// audio, and end of user speech to first assistant audio.
+    Latency {
+        channel: u32,
+        turn: u32,
+        input_final_to_audio_ms: Option<i64>,
+        speech_end_to_audio_ms: Option<i64>,
+    },
+    /// Whether the first assistant transcript of a continuing conversation
+    /// opened with a fresh greeting (measurement, not a gate).
+    Greeting {
+        channel: u32,
+        greeted: bool,
+        transcript: String,
+    },
+    /// Client-side disconnect to host-observed Closed.
+    CloseConvergence {
+        channel: u32,
+        converged_before_host_close: bool,
+        ms: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -275,6 +338,8 @@ struct State {
     /// channel ordinal and the append token shared by every fragment's client
     /// event id (`meerkat-instructions-<token>-<index>`).
     instructions_appends: HashMap<String, InstructionsAppendReassembly>,
+    /// Soft browser faults (overlap, duplicate readout); never invalidate.
+    browser_faults: Vec<BrowserFault>,
 }
 
 #[derive(Default)]
@@ -303,6 +368,7 @@ struct Inner {
     state: Mutex<State>,
     started: Instant,
     path: PathBuf,
+    label: &'static str,
     expected_phrase: String,
     secrets: Vec<String>,
     limits: Limits,
@@ -314,8 +380,14 @@ pub struct Journal(Arc<Inner>);
 
 impl Journal {
     pub fn create(expected_phrase: String) -> Result<Self, Fault> {
+        Self::create_for("S99", expected_phrase)
+    }
+
+    /// One journal under `target/e2e-live-audio-artifacts/<label>/<uuid>`.
+    pub fn create_for(label: &'static str, expected_phrase: String) -> Result<Self, Fault> {
         let directory = super::workspace_root()
-            .join("target/e2e-live-audio-artifacts/s99")
+            .join("target/e2e-live-audio-artifacts")
+            .join(label.to_ascii_lowercase())
             .join(uuid::Uuid::new_v4().to_string());
         let secrets = [
             "OPENAI_API_KEY",
@@ -326,11 +398,27 @@ impl Journal {
         .filter_map(|name| std::env::var(name).ok())
         .filter(|secret| !secret.is_empty())
         .collect();
-        Self::at(&directory, expected_phrase, secrets, Limits::default())
+        Self::at_labeled(
+            &directory,
+            label,
+            expected_phrase,
+            secrets,
+            Limits::default(),
+        )
     }
 
     fn at(
         directory: &Path,
+        expected_phrase: String,
+        secrets: Vec<String>,
+        limits: Limits,
+    ) -> Result<Self, Fault> {
+        Self::at_labeled(directory, "S99", expected_phrase, secrets, limits)
+    }
+
+    fn at_labeled(
+        directory: &Path,
+        label: &'static str,
         expected_phrase: String,
         mut secrets: Vec<String>,
         limits: Limits,
@@ -366,9 +454,11 @@ impl Journal {
                 instructions_append_attempts: 0,
                 framed_summary_attempts: 0,
                 instructions_appends: HashMap::new(),
+                browser_faults: Vec::new(),
             }),
             started: Instant::now(),
             path,
+            label,
             expected_phrase: expected_phrase.clone(),
             secrets,
             limits,
@@ -387,7 +477,7 @@ impl Journal {
                 provider_id_bytes: thinking_capture::Capture::MAX_ID_BYTES,
             },
         })?;
-        println!("S99_EVIDENCE_JOURNAL path={}", journal.path().display());
+        println!("{label}_EVIDENCE_JOURNAL path={}", journal.path().display());
         Ok(journal)
     }
 
@@ -472,14 +562,34 @@ impl Journal {
     }
 
     pub fn native(&self, channel: u32, record: NativeRecord) -> Result<(), Fault> {
-        if let NativeRecord::Fault { fault } = record {
-            return self.fail(match fault {
-                BrowserFault::QueueLimit => Fault::BrowserQueueLimit,
-                BrowserFault::StringLimit => Fault::BrowserStringLimit,
-                BrowserFault::CaptureFailure => Fault::InvalidBrowserEvidence,
-            });
+        if let NativeRecord::Fault { fault, .. } = &record {
+            match fault {
+                BrowserFault::QueueLimit => return self.fail(Fault::BrowserQueueLimit),
+                BrowserFault::StringLimit => return self.fail(Fault::BrowserStringLimit),
+                BrowserFault::CaptureFailure => return self.fail(Fault::InvalidBrowserEvidence),
+                BrowserFault::Overlap { .. } | BrowserFault::DuplicateReadout { .. } => {
+                    self.0
+                        .state
+                        .lock()
+                        .map_err(|_| Fault::Poisoned)?
+                        .browser_faults
+                        .push(fault.clone());
+                }
+            }
         }
         self.record(Record::Native { channel, record })
+    }
+
+    /// Soft browser faults recorded so far. Scenarios assert on this; the
+    /// journal itself stays valid.
+    pub fn faults(&self) -> Result<Vec<BrowserFault>, Fault> {
+        Ok(self
+            .0
+            .state
+            .lock()
+            .map_err(|_| Fault::Poisoned)?
+            .browser_faults
+            .clone())
     }
 
     pub fn flush_wire(&self) -> Result<(), Fault> {
@@ -677,10 +787,15 @@ impl Journal {
                 .encode(state.count, &Record::Fault { fault }, false)
                 .and_then(|bytes| self.write_locked(state, &bytes));
             if result.is_err() {
-                eprintln!("S99_EVIDENCE_WRITE_FAILURE path={}", self.path().display());
+                eprintln!(
+                    "{}_EVIDENCE_WRITE_FAILURE path={}",
+                    self.0.label,
+                    self.path().display()
+                );
             }
             eprintln!(
-                "S99_EVIDENCE_FAULT fault={fault:?} path={}",
+                "{}_EVIDENCE_FAULT fault={fault:?} path={}",
+                self.0.label,
                 self.path().display()
             );
         }
@@ -721,7 +836,7 @@ impl Journal {
 
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "S99 evidence failure: {self:?}")
+        write!(f, "live evidence failure: {self:?}")
     }
 }
 impl std::error::Error for Fault {}
@@ -1134,7 +1249,8 @@ mod tests {
             journal.native(
                 1,
                 NativeRecord::Fault {
-                    fault: BrowserFault::QueueLimit
+                    fault: BrowserFault::QueueLimit,
+                    audio: None,
                 }
             ),
             Err(Fault::BrowserQueueLimit)
@@ -1159,6 +1275,68 @@ mod tests {
             Err(Fault::AfterFinish)
         );
         assert_eq!(journal.check(), Err(Fault::AfterFinish));
+    }
+
+    #[test]
+    fn soft_browser_faults_are_collected_without_invalidating_the_journal() {
+        let root = root();
+        let journal = Journal::at(
+            root.path(),
+            "amber otter copper".into(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let overlap: NativeRecord = serde_json::from_value(serde_json::json!({
+            "kind": "fault",
+            "fault": {"overlap": {"ms": 700, "fixture": "standup_barge_in", "bound_ms": 300}},
+            "audio": {
+                "decoded_non_silent_frames": 1, "decoded_non_silent_seconds": 0.1,
+                "non_silent_frames": 1, "total_audio_energy": null,
+                "total_samples_received": null, "total_samples_duration": null,
+                "bytes_received": 1, "packets_received": 1
+            }
+        }))
+        .unwrap();
+        journal.native(1, overlap).unwrap();
+        let duplicate: NativeRecord = serde_json::from_value(serde_json::json!({
+            "kind": "fault",
+            "fault": {"duplicate_readout": {"text": "the first line is ready", "response": 3}}
+        }))
+        .unwrap();
+        journal.native(1, duplicate).unwrap();
+        assert_eq!(journal.faults().unwrap().len(), 2);
+        assert!(
+            journal
+                .faults()
+                .unwrap()
+                .iter()
+                .all(|fault| !fault.is_hard())
+        );
+        assert!(matches!(
+            &journal.faults().unwrap()[0],
+            BrowserFault::Overlap {
+                ms: 700,
+                bound_ms: 300,
+                ..
+            }
+        ));
+        let hard: NativeRecord =
+            serde_json::from_value(serde_json::json!({"kind": "fault", "fault": "queue_limit"}))
+                .unwrap();
+        assert_eq!(journal.native(1, hard), Err(Fault::BrowserQueueLimit));
+        journal
+            .record(Record::Latency {
+                channel: 1,
+                turn: 1,
+                input_final_to_audio_ms: Some(850),
+                speech_end_to_audio_ms: Some(1400),
+            })
+            .unwrap_err();
+        assert_eq!(
+            journal.finish(Outcome::Passed),
+            Err(Fault::BrowserQueueLimit)
+        );
     }
 
     #[test]

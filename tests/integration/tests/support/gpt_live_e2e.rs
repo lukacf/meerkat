@@ -580,6 +580,270 @@ impl BrowserPeer {
             Ok(())
         }
     }
+
+    /// Schedule a fixture against a timeline anchor. Returns at once with the
+    /// schedule id; the browser records `scheduled`, `anchor_fired`,
+    /// `fixture_start`, and `fixture_end` timeline entries as it happens.
+    pub async fn play_at(&mut self, spec: &PlayAt) -> Result<u64, Box<dyn std::error::Error>> {
+        let mut command = serde_json::to_value(spec)?;
+        command["type"] = json!("play_at");
+        let result = self.call(command).await?;
+        result["scheduled"]
+            .as_u64()
+            .ok_or_else(|| "browser peer returned no schedule id".into())
+    }
+
+    /// Ordered sequence: each item is armed only after the previous fixture
+    /// finished playing, then waits for its own anchor.
+    pub async fn queue(
+        &mut self,
+        items: &[PlayAt],
+    ) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+        let result = self.call(json!({"type":"queue","items":items})).await?;
+        Ok(serde_json::from_value(result["scheduled"].clone())?)
+    }
+
+    /// Inject exactly `ms` of digital silence into the microphone track.
+    pub async fn silence(&mut self, ms: u64) -> Result<(), Box<dyn std::error::Error>> {
+        self.call(json!({"type":"silence","ms":ms})).await?;
+        Ok(())
+    }
+
+    /// Tear down the client transport. `Hard` destroys the RTCPeerConnection
+    /// without any goodbye; `Graceful` stops the track and closes the data
+    /// channel first.
+    pub async fn disconnect(
+        &mut self,
+        mode: DisconnectMode,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        self.call(json!({"type":"disconnect","mode":mode})).await
+    }
+
+    pub async fn timeline(&mut self) -> Result<Vec<TimelineEntry>, Box<dyn std::error::Error>> {
+        let result = self.call(json!({"type":"timeline"})).await?;
+        Ok(serde_json::from_value(result["timeline"].clone())?)
+    }
+
+    pub async fn energy(&mut self) -> Result<EnergyReport, Box<dyn std::error::Error>> {
+        let result = self.call(json!({"type":"energy"})).await?;
+        Ok(serde_json::from_value(result)?)
+    }
+
+    /// Soft browser faults (overlap, duplicate readout) observed so far.
+    pub async fn faults(
+        &mut self,
+    ) -> Result<Vec<evidence::BrowserFault>, Box<dyn std::error::Error>> {
+        let snapshot = self.snapshot().await?;
+        Ok(serde_json::from_value(snapshot["faults"].clone())?)
+    }
+
+    /// Poll the timeline until `predicate` yields a value or `bound` expires.
+    /// The failure names what was awaited and dumps the whole timeline.
+    pub async fn wait_for_timeline<T>(
+        &mut self,
+        bound: Duration,
+        waiting_for: &str,
+        predicate: impl Fn(&[TimelineEntry]) -> Option<T>,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        let deadline = Instant::now() + bound;
+        loop {
+            let timeline = self.timeline().await?;
+            if let Some(value) = predicate(&timeline) {
+                return Ok(value);
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out after {} ms waiting for {waiting_for}; timeline:\n{}",
+                    bound.as_millis(),
+                    format_timeline(&timeline)
+                )
+                .into());
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
+/// Timeline anchor a scheduled fixture waits for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Anchor {
+    Now,
+    /// Next assistant energy onset (or immediately when `allow_active` and
+    /// the assistant is already speaking at arm time).
+    FirstAssistantAudio,
+    /// Assistant energy below threshold for a continuous `quiet_ms`; by
+    /// default the assistant must have spoken since arming.
+    AssistantQuiet,
+    /// Next input-transcript final (public protocol: transcript deltas quiet
+    /// for 700 ms or the assistant starting to answer).
+    InputFinal,
+    /// Next data-channel event of `event_type`.
+    Event,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PlayAt {
+    pub name: String,
+    pub anchor: Anchor,
+    pub offset_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quiet_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_speech: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_active: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap_bound_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
+}
+
+impl PlayAt {
+    pub fn new(name: &str, anchor: Anchor, offset_ms: u64) -> Self {
+        Self {
+            name: name.to_owned(),
+            anchor,
+            offset_ms,
+            quiet_ms: None,
+            require_speech: None,
+            allow_active: None,
+            overlap_bound_ms: None,
+            event_type: None,
+        }
+    }
+    pub fn quiet_ms(mut self, quiet_ms: u64) -> Self {
+        self.quiet_ms = Some(quiet_ms);
+        self
+    }
+    pub fn require_speech(mut self, require: bool) -> Self {
+        self.require_speech = Some(require);
+        self
+    }
+    pub fn allow_active(mut self, allow: bool) -> Self {
+        self.allow_active = Some(allow);
+        self
+    }
+    pub fn overlap_bound_ms(mut self, bound: u64) -> Self {
+        self.overlap_bound_ms = Some(bound);
+        self
+    }
+    pub fn event_type(mut self, event_type: &str) -> Self {
+        self.event_type = Some(event_type.to_owned());
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisconnectMode {
+    Hard,
+    Graceful,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineKind {
+    FixtureStart,
+    FixtureEnd,
+    FixtureFailed,
+    AssistantAudioStart,
+    AssistantAudioEnd,
+    InputFinal,
+    ResponseEnd,
+    Scheduled,
+    AnchorFired,
+    Disconnect,
+    DelegationCreated,
+    CommentaryAppended,
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct TimelineEntry {
+    pub t_ms: u64,
+    pub kind: TimelineKind,
+    #[serde(default)]
+    pub detail: Value,
+}
+
+impl TimelineEntry {
+    pub fn detail_u64(&self, key: &str) -> Option<u64> {
+        self.detail.get(key).and_then(Value::as_u64)
+    }
+    pub fn detail_str(&self, key: &str) -> Option<&str> {
+        self.detail.get(key).and_then(Value::as_str)
+    }
+    /// Scheduled fixture id (`id`) when this entry belongs to a fixture.
+    pub fn schedule_id(&self) -> Option<u64> {
+        self.detail_u64("id")
+    }
+}
+
+pub fn format_timeline(timeline: &[TimelineEntry]) -> String {
+    let mut out = String::new();
+    for entry in timeline {
+        let detail = entry.detail.to_string();
+        let detail = if detail.len() > 240 {
+            format!("{}...", &detail[..240])
+        } else {
+            detail
+        };
+        out.push_str(&format!(
+            "  {:>8} ms  {:<22} {detail}\n",
+            entry.t_ms,
+            format!("{:?}", entry.kind)
+        ));
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+pub struct EnergyWindow {
+    pub t_ms: u64,
+    pub rms: f32,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EnergySummary {
+    pub threshold: f32,
+    pub window_ms: u64,
+    pub windows: Vec<EnergyWindow>,
+    pub assistant_active: bool,
+    pub overlap_ms: u64,
+    pub first_assistant_audio_ms: Vec<u64>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct InputFinal {
+    pub t_ms: u64,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EnergyReport {
+    pub energy: EnergySummary,
+    pub input_finals: Vec<InputFinal>,
+}
+
+impl EnergyReport {
+    /// Evidence-sized copy of the windows: at most `max` (t_ms, rms) pairs,
+    /// keeping the per-bucket maximum so speech onsets survive downsampling.
+    pub fn downsampled_windows(&self, max: usize) -> Vec<(u32, f32)> {
+        let windows = &self.energy.windows;
+        if windows.is_empty() || max == 0 {
+            return Vec::new();
+        }
+        let bucket = windows.len().div_ceil(max).max(1);
+        windows
+            .chunks(bucket)
+            .map(|chunk| {
+                let peak = chunk.iter().map(|w| w.rms).fold(0.0f32, f32::max);
+                (u32::try_from(chunk[0].t_ms).unwrap_or(u32::MAX), peak)
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize)]

@@ -105,6 +105,9 @@ export interface RuntimeModule {
   mob_append_system_context: (mobId: string, agentIdentity: string, requestJson: string) => Promise<string>;
   mob_member_send: (mobId: string, agentIdentity: string, requestJson: string) => Promise<string>;
   mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<string>;
+  mob_member_peer_target: (mobId: string, agentIdentity: string) => Promise<string>;
+  mob_lifecycle: (mobId: string, action: "stop" | "resume" | "destroy") => Promise<string>;
+  destroy_runtime: () => void;
   poll_subscription: (handle: string) => string;
   close_subscription: (handle: string) => void;
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<unknown>;
@@ -125,5 +128,4 @@ export interface OfficeSession {
   agents: Map<AgentId, AgentState>;
   incidents: Incident[];
   running: boolean;
-  seenToolCallIds: Set<string>;
 }

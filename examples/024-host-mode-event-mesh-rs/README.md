@@ -44,3 +44,19 @@ long-lived operational agents.
 ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat \
   --example 024-host-mode-event-mesh --features jsonl-store
 ```
+
+## Deterministic behavior tests
+
+```bash
+./scripts/repo-cargo test -p meerkat --example 024-host-mode-event-mesh \
+  --features jsonl-store
+```
+
+Tests inject a scripted client into the same async workflow invoked by `main`.
+They require three distinct streamed replies, start/completion events for each
+turn, prior user/assistant history in subsequent requests, and the final
+seven-message transcript. Owner-level service checks verify archive cleanup
+after success and failures on any turn. Later-turn failures still archive the
+session, while the original typed error propagates. No external transport or
+credentials are used; production retains the normal Anthropic client and
+`claude-sonnet-4-6`.

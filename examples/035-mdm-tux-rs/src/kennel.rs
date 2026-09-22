@@ -71,6 +71,7 @@ pub enum TargetRegistrationRejectReason {
 pub enum LeaseTerminationReason {
     ReleasedByTux,
     ClaimAckTimeout,
+    LeaseExpired,
     RecoveryExpired,
     TuxDisconnected,
 }
@@ -114,6 +115,7 @@ pub enum KennelPayload {
         attached_target_ids: Vec<String>,
     },
     TuxRegistered {
+        broker_incarnation: String,
         /// RPC address for the kennel-resident hive agent (if available).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hive_rpc_addr: Option<String>,
@@ -135,6 +137,10 @@ pub enum KennelPayload {
     },
     ClaimGranted {
         claims: Vec<ClaimGrant>,
+    },
+    ClaimRequestCompleted {
+        in_reply_to: String,
+        refused_target_ids: Vec<String>,
     },
     ClaimAck {
         lease_ids: Vec<String>,
@@ -220,6 +226,7 @@ impl std::fmt::Display for LeaseTerminationReason {
         let text = match self {
             LeaseTerminationReason::ReleasedByTux => "released_by_tux",
             LeaseTerminationReason::ClaimAckTimeout => "claim_ack_timeout",
+            LeaseTerminationReason::LeaseExpired => "lease_expired",
             LeaseTerminationReason::RecoveryExpired => "recovery_expired",
             LeaseTerminationReason::TuxDisconnected => "tux_disconnected",
         };

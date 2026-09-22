@@ -5,7 +5,7 @@
 ## What it demonstrates
 
 - **10 autonomous agents** in a single mob, each with distinct personality and responsibilities
-- **Comms-based coordination** — agents call each other via the `send_message` tool, visualized as glowing phone arcs
+- **Comms-based coordination** — canonical `peer_id` send requests are visualized as phone arcs (requests, not delivery confirmations)
 - **Event-driven architecture** — external events flow through triage, fan out to specialists, accumulate knowledge
 - **Human-in-the-loop** — the Gate agent routes high-risk actions to a human approval popup
 - **Knowledge base** — the Archivist stores facts, viewable as an interactive force-directed graph
@@ -64,20 +64,59 @@ repo-local `sdks/web` package, or from an installed `@rkat/web` package, into
 
 ## Usage
 
-1. Open settings (gear icon), enter an API key (Anthropic, OpenAI, or Gemini)
-2. Select a model
-3. Click **Start** to initialize the 10-agent office
-4. Click **+ Event** to inject a scenario (server alert, client escalation, etc.)
+1. Click **PRESS START**. If no key is configured, enter a key in the dialog and click **SAVE & START**.
+2. To select a model first, cancel the dialog, open **Settings** (gear), enter a key and select a model, then close Settings.
+3. Click the top-bar **Start** (or **Retry** after a startup failure). **LIVE** requires all 10 members, canonical peer targets, 26 comms wires and 10 event subscriptions. **Restart** tears down and recreates the office with the current settings.
+4. Click one of the six named scenario buttons to inject an event.
 5. Watch phone arcs light up as agents coordinate
 6. Read speech bubbles for real-time agent communication
-7. Check the Incidents panel for the full message tree
-8. When the Gate agent flags a high-risk action, an approval popup appears
-9. Click the filing cabinet in the Archive zone to view the knowledge graph
-10. Type messages to any agent via the chat input bar
+7. Read **LOG** for chronological headline previews, not a full-message tree. Initial inputs identify their scenario/chat; agent replies and host effects are explicitly **UNCORRELATED ACTIVITY**, not assigned to the newest scenario.
+8. When Gate requests approval, expand its item and choose **APPROVE** or **DENY**. Failed delivery stays visible for retry of the same decision; an accepted inbox receipt is not proof of execution. Requests from a destroyed office remain marked expired and cannot be sent to a new Gate.
+9. Click the filing cabinet in the Archive zone (or **RECORDS**) to view records; click **GRAPH** for the knowledge graph. Both visible views refresh after archive writes.
+10. Choose an agent via the agent-name button and use the chat input and **Send**.
+11. **Pause agents** awaits runtime stop and blocks new scenario/chat/approval work; **Resume agents** resumes the mob and renews peer targets and subscriptions. A failed transition displays an error and requires **Restart**; it is never reported as a successful pause.
 
 The approval popup is a demo protocol implemented with a JavaScript tool and
 agent instructions. It is not a security or authorization boundary. Archive
 records also live only in browser memory and disappear on page reload.
+The static Boss-mode policy is included in every initial role skill, before the
+first turn. Startup does not append it as a later System message; support for
+mid-conversation System messages depends on the selected model.
+IT's access tools change this demo's in-memory comms topology, not credentials.
+Partial/failed topology operations are reported rather than labelled successful.
+Restoring one endpoint never reconnects another endpoint still marked disconnected.
+Archive records remain visible across an office restart; pending approval requests
+belong to the old runtime and expire. Event-stream lag is reported because missing
+host tool effects cannot be reconstructed safely.
+Replay protection retains the most recent 4,096 canonical event identities per
+runtime; it never uses provider tool-call IDs or approval wording.
+
+### Local regression checks
+
+```bash
+cd web
+npm run typecheck
+npm run build
+npm test
+npm run test:offline
+```
+
+The tests use Chrome (`CHROME_BIN` may override its path), actual compiled
+TypeScript/DOM handlers and real Cytoscape. The separate `test:offline` lane
+requires a healthy built-page WASM bootstrap, stop/admission and resume.
+It also verifies the unchanged admin policy in all ten initial role skills and
+in each role's actual initial provider request.
+The offline lane serves complete synthetic Anthropic responses only at the
+expected messages endpoint. Its finite request bound is derived from the ten
+initial turns and 52 possible directed terminal-kickoff notices, each with at most
+one structured extraction, plus one isolated lifecycle control call: 125 requests
+within three minutes. Per-role/phase checks reject repeated notice deliveries,
+unexpected work and extra extraction calls, and teardown must leave no pending
+fixture responses;
+all other external traffic is blocked and synthetic keys are used. These checks
+do not prove provider-backed comms delivery or an autonomous end-to-end scenario.
+The strict offline lane intentionally fails if the runtime cannot establish the
+required topology/subscriptions; roster size alone is not a healthy bootstrap.
 
 ### Server/Proxy Mode
 

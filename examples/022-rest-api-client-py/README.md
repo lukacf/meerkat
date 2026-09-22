@@ -3,6 +3,12 @@
 Interact with Meerkat via standard HTTP requests. No SDK required — any
 language or tool that speaks HTTP can integrate.
 
+Fatal requests exit nonzero. HTTP error responses report the server's status
+and body rather than being mislabeled as connection failures; connection failures
+retain startup guidance. The initial failure path still prints the API reference.
+See the [offline regression checks](../003-hello-meerkat-ts/README.md#offline-regression-checks)
+for local success, HTTP 503, and connection-refusal subprocess tests.
+
 ## Concepts
 - REST API server (`rkat-rest`)
 - Session lifecycle over HTTP

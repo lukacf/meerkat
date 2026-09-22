@@ -41,7 +41,7 @@ Lead a coding swarm. Break down complex tasks, spawn workers for each subtask,
 and coordinate their work.
 
 ## Available Tools
-Use mob tools (mob.spawn, mob.retire, mob.wire, mob.status) to manage the team.
+Use mob tools (spawn_member, retire_member, wire_members, member_status) to manage the team.
 
 ## Communication
 Use peers() for discovery and send_message() for directed messages.
@@ -52,7 +52,7 @@ Handle mob.peer_added and mob.peer_retired events.
 2. Spawn workers and assign work directly
 3. Monitor progress and unblock workers
 4. Review and synthesize results
-5. Call mob.complete() when done
+5. Report completion and the synthesized result to the host/caller
 
 ## Worker Lifecycle
 Prefer reusing existing workers. Spawn only for uncovered skill gaps.

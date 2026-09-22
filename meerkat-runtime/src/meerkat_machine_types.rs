@@ -957,6 +957,7 @@ meerkat_machine_runtime_internal_inputs!(
         RunCompleted,
         RunFailed,
         RuntimeExecutorExited,
+        CloseStandaloneTurn,
         ServiceTurnCommitted,
         TimeBudgetExceeded,
         ToolCallsResolved,

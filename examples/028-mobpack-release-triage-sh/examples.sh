@@ -41,6 +41,12 @@ resolve_rkat() {
 }
 
 RKAT="$(resolve_rkat)"
+BASE_ARGS=(
+  --state-root "$WORK/state"
+  --context-root "$WORK/project"
+  --user-config-root "$WORK/user"
+)
+mkdir -p "$WORK/project/.rkat" "$WORK/user"
 
 rm -rf "$MOB_DIR"
 mkdir -p "$MOB_DIR/skills" "$MOB_DIR/config" "$WORK"
@@ -238,18 +244,18 @@ printf '0707070707070707070707070707070707070707070707070707070707070707' > "$KE
 
 echo ""
 echo "==> Packing and signing portable artifact"
-"$RKAT" mob pack "$MOB_DIR" -o "$PACK" --sign "$KEY" --signer-id "$SIGNER_ID"
+"$RKAT" "${BASE_ARGS[@]}" mob pack "$MOB_DIR" -o "$PACK" --sign "$KEY" --signer-id "$SIGNER_ID"
 
 echo ""
 echo "==> Inspecting artifact contents"
-"$RKAT" mob inspect "$PACK"
+"$RKAT" "${BASE_ARGS[@]}" mob inspect "$PACK"
 
 echo ""
 echo "==> Validating artifact contract"
-"$RKAT" mob validate "$PACK" --trust-policy permissive
+"$RKAT" "${BASE_ARGS[@]}" mob validate "$PACK" --trust-policy permissive
 
 echo ""
-echo "==> Deploying the exact signed artifact for a realistic incident prompt"
-"$RKAT" mob deploy "$PACK" \
-  "You are triaging release 2026.03.13-rc4. Five minutes after rollout, checkout error rate jumped from 0.4% to 7.8%, p95 latency doubled for EU traffic, and support has 14 fresh tickets from enterprise tenants. Determine severity, probable blast radius, whether to halt or roll back, and draft the first stakeholder update." \
-  --trust-policy permissive
+echo "==> Signed artifact ready: $PACK"
+echo "Packaging only: no members are spawned and no incident prompt is executed."
+echo "CLI mob deploy currently bootstraps an empty mob; 'deployed' is not a triage result."
+echo "A host must create members and deliver work, or author and run a callable flow."

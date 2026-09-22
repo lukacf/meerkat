@@ -25,6 +25,7 @@ from typing import Any
 from uuid import uuid4
 
 from meerkat import MeerkatClient, LiveChannel
+from playback import Playback
 
 
 DEFAULT_LIVE_MODEL = "gpt-realtime-2"
@@ -447,13 +448,12 @@ async def microphone_sender(
 
 async def speaker_player(
     audio_format: AudioFormat | None,
-    output_queue: "asyncio.Queue[bytes | None]",
+    playback: Playback,
     args: argparse.Namespace,
     printer: TranscriptPrinter,
 ) -> None:
     if args.no_speaker or args.text_probe:
-        while await output_queue.get() is not None:
-            pass
+        await playback.run()
         return
 
     try:
@@ -467,22 +467,18 @@ async def speaker_player(
         raise RuntimeError("speaker playback requires live audio output capabilities")
 
     printer.status(f"speaker open: {audio_format.sample_rate_hz} Hz, {audio_format.channels} channel(s)")
-    with sd.RawOutputStream(
+    stream = sd.RawOutputStream(
         samplerate=audio_format.sample_rate_hz,
         channels=audio_format.channels,
         dtype="int16",
         device=args.output_device,
-    ) as stream:
-        while True:
-            chunk = await output_queue.get()
-            if chunk is None:
-                return
-            await asyncio.to_thread(stream.write, chunk)
+    )
+    await playback.run(stream)
 
 
 async def live_receiver(
     connection: Any,
-    output_queue: "asyncio.Queue[bytes | None]",
+    playback: Playback,
     printer: TranscriptPrinter,
     stop_event: asyncio.Event,
     text_probe_signals: TextProbeSignals | None = None,
@@ -508,14 +504,18 @@ async def live_receiver(
             elif kind == "assistant_audio_chunk":
                 data = obs.get("data", "")
                 if data:
-                    await output_queue.put(base64.b64decode(data))
+                    playback.enqueue(base64.b64decode(data), obs)
             elif kind == "turn_completed":
                 printer.turn_completed()
                 printer.status("turn completed")
                 if text_probe_signals is not None:
                     text_probe_signals.turn_completed.set()
             elif kind == "turn_interrupted":
+                await playback.interrupt(obs)
                 printer.status("interrupted")
+            elif kind == "assistant_transcript_truncated":
+                await playback.interrupt(obs)
+                printer.status("assistant transcript truncated")
             elif kind == "tool_call_requested":
                 printer.tool(f"requested {obs.get('tool_name')} ({obs.get('provider_call_id')})")
                 if text_probe_signals is not None:
@@ -536,7 +536,7 @@ async def live_receiver(
             elif kind == "ready":
                 printer.status("adapter ready")
     finally:
-        await output_queue.put(None)
+        await playback.close()
 
 
 async def wait_for_first_event(
@@ -803,7 +803,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         "isolated": args.realm is None,
         "live_ws": True,
     }
-    output_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    playback = Playback(enabled=not (args.no_speaker or args.text_probe))
     connection = None
     channel: LiveChannel | None = None
     tasks: list[asyncio.Task[Any]] = []
@@ -830,13 +830,13 @@ async def async_main(argv: list[str] | None = None) -> int:
 
         tasks.append(
             asyncio.create_task(
-                live_receiver(connection, output_queue, printer, stop_event, text_probe_signals),
+                live_receiver(connection, playback, printer, stop_event, text_probe_signals),
                 name="live receiver",
             )
         )
         tasks.append(
             asyncio.create_task(
-                speaker_player(output_audio, output_queue, args, printer),
+                speaker_player(output_audio, playback, args, printer),
                 name="speaker",
             )
         )
@@ -872,7 +872,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         if channel is not None:
             with contextlib.suppress(Exception):
                 await channel.close()
-        await output_queue.put(None)
+        await playback.close()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

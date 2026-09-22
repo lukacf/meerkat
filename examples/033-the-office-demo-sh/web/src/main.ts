@@ -20,11 +20,12 @@ import { setupBridge } from "./llm-bridge";
 import { initCanvas, setOnSelectAgent, loadBackground, setOnFilingCabinetClick } from "./office/canvas";
 import { initCharacters, setAgentState } from "./office/characters";
 import { loadSprites } from "./office/sprites";
-import { initBubbles, showSpeechBubble, showThinkBubble, hideThinkBubble } from "./office/bubbles";
-import { initPhoneLines, startCall, endCall, triggerEnvelopeArrival } from "./office/phonelines";
+import { initBubbles, showSpeechBubble, hideSpeechBubble, showThinkBubble, hideThinkBubble } from "./office/bubbles";
+import { initPhoneLines, startCall, endCall, endCallsForAgent, triggerEnvelopeArrival } from "./office/phonelines";
 import { buildOfficeDefinition, WIRING_PAIRS, PROFILE_NAMES } from "./agents";
 import { SCENARIOS } from "./scenarios";
-import { drainAllEvents, setOnMessage, setOnApprovalNeeded, setOnAccessControl, setOnUpsertRecord } from "./events";
+import { drainAllEvents, resetEventState, resolvePeerAgents, setOnMessage, setOnApprovalNeeded, setOnAccessControl, setOnUpsertRecord } from "./events";
+import { OfficeTopology } from "./topology";
 import { createIncident, addMessage, renderIncidentPanel, setRenderCallback } from "./incidents";
 import { upsertRecord, showCaseFiles, showGraph, hideKnowledgeBase } from "./knowledge";
 
@@ -38,7 +39,8 @@ app.innerHTML = `
   <span class="top-title">The Office</span>
   <span class="top-badge" id="statusBadge">READY</span>
   <span class="top-spacer"></span>
-  <button class="top-btn" id="pauseBtn">Pause</button>
+  <button class="top-btn" id="startBtn">Start</button>
+  <button class="top-btn" id="pauseBtn" disabled>Pause agents</button>
   <span class="top-events" id="eventCounter">0 events</span>
   <button class="top-gear" id="gearBtn" title="Settings">\u2699</button>
 </div>
@@ -142,7 +144,7 @@ app.innerHTML = `
       <p>Watch them call each other on desk phones, coordinate responses, and route actions through a <strong>compliance gate</strong> that asks for your approval on high-risk decisions.</p>
     </div>
     <button class="start-big-btn" id="startBigBtn">PRESS START</button>
-    <p class="start-hint">CONFIGURE API KEYS VIA GEAR AND PRESS START</p>
+    <p class="start-hint">PRESS START TO ENTER API KEYS</p>
   </div>
 </div>
 
@@ -226,6 +228,11 @@ let runtime: RuntimeModule | null = null;
 let mobId: string | null = null;
 let subs: AgentSub[] = [];
 let running = false;
+let starting = false;
+let lifecycleBusy = false;
+let stopped = false;
+let epoch = 0;
+let topology: OfficeTopology | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let eventCount = 0;
 interface PendingApproval {
@@ -234,6 +241,11 @@ interface PendingApproval {
   action_description: string;
   risk_level: string;
   proposed_by: string;
+  request_id: string;
+  epoch: number;
+  state: "pending" | "sending" | "failed" | "expired";
+  decision?: boolean;
+  error?: string;
 }
 const pendingApprovals: PendingApproval[] = [];
 let nextApprovalId = 0;
@@ -312,44 +324,32 @@ setOnApprovalNeeded((data) => {
     action_description: data.action_description,
     risk_level: data.risk_level,
     proposed_by: data.proposed_by,
+    request_id: data.request_id,
+    epoch,
+    state: "pending",
   });
   renderApprovalFloat();
 });
 
 // Wire IT access control
-const revokedAgents = new Set<string>();
-
 setOnAccessControl(async (action, target, reason) => {
-  if (!runtime || !mobId) return;
+  if (!topology) {
+    addMessage(null, "system", null, "Topology is unavailable.", "Topology request not applied", "error");
+    return;
+  }
   const targetId = target as AgentId;
   if (!AGENT_IDS.includes(targetId)) {
     console.warn("[ACCESS CONTROL] Unknown target:", target);
     return;
   }
 
-  if (action === "revoke" && !revokedAgents.has(target)) {
-    // Unwire target from all peers
-    for (const [a, b] of WIRING_PAIRS) {
-      if (a === target || b === target) {
-        try { await runtime.mob_unwire(mobId, a, b); } catch { /* already unwired */ }
-      }
-    }
-    revokedAgents.add(target);
-    showSpeechBubble("it-dept" as AgentId, `ACCESS REVOKED: ${AGENTS[targetId].name}`, 5000);
-    addMessage(null, "it-dept" as AgentId, targetId, `Access revoked: ${reason}`, `Access revoked for ${AGENTS[targetId].name}`, "action");
-    setStatus(`IT revoked network access for ${AGENTS[targetId].name}: ${reason}`);
-  } else if (action === "restore" && revokedAgents.has(target)) {
-    // Rewire target to all original peers
-    for (const [a, b] of WIRING_PAIRS) {
-      if (a === target || b === target) {
-        try { await runtime.mob_wire(mobId, a, b); } catch { /* already wired */ }
-      }
-    }
-    revokedAgents.delete(target);
-    showSpeechBubble("it-dept" as AgentId, `ACCESS RESTORED: ${AGENTS[targetId].name}`, 5000);
-    addMessage(null, "it-dept" as AgentId, targetId, `Access restored: ${reason}`, `Access restored for ${AGENTS[targetId].name}`, "action");
-    setStatus(`IT restored network access for ${AGENTS[targetId].name}: ${reason}`);
-  }
+  const result = await topology.change(action, targetId);
+  const message = `${AGENTS[targetId].name} topology ${action}: ${result.state}. ${reason}` +
+    (result.blocked.length ? ` Disconnected endpoints requested: ${result.blocked.join(", ")}.` : "") +
+    (result.errors.length ? ` Retry the request. ${result.errors.join("; ")}` : "");
+  showSpeechBubble("it-dept", `${action}: ${result.state}`, 5000);
+  addMessage(null, "it-dept", targetId, message, message, "action");
+  setStatus(message);
 });
 
 // Agent selection from canvas
@@ -452,19 +452,107 @@ async function loadRuntime(): Promise<RuntimeModule> {
 // Start Office
 // =====================================================================
 
+function updateControls(): void {
+  $<HTMLButtonElement>("startBtn").disabled = starting || lifecycleBusy;
+  $<HTMLButtonElement>("startBigBtn").disabled = starting || lifecycleBusy;
+  $<HTMLButtonElement>("keyDialogSave").disabled = starting || lifecycleBusy;
+  $<HTMLButtonElement>("pauseBtn").disabled = starting || lifecycleBusy || !mobId || (!running && !stopped);
+  $<HTMLButtonElement>("pauseBtn").textContent = stopped ? "Resume agents" : "Pause agents";
+  $<HTMLButtonElement>("chatSend").disabled = !running || starting || lifecycleBusy;
+  document.querySelectorAll<HTMLButtonElement>(".scenario-btn").forEach(button => {
+    button.disabled = !running || starting || lifecycleBusy;
+  });
+  renderApprovalFloat();
+}
+
+async function teardownOffice(): Promise<void> {
+  running = false;
+  stopped = false;
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+  await topology?.settled();
+  topology = null;
+  const errors: string[] = [];
+  for (const sub of subs) {
+    try { runtime?.close_subscription(sub.handle); }
+    catch (error) { errors.push(`Close ${sub.agentId}: ${String(error)}`); }
+  }
+  subs = [];
+  try {
+    if (runtime && mobId) await runtime.mob_lifecycle(mobId, "destroy");
+  } catch (error) {
+    errors.push(`Destroy mob: ${String(error)}`);
+  } finally {
+    runtime?.destroy_runtime();
+    mobId = null;
+    epoch++;
+    resetEventState();
+    for (const id of AGENT_IDS) {
+      hideThinkBubble(id);
+      hideSpeechBubble(id);
+      endCallsForAgent(id);
+      setAgentState(id, "idle");
+    }
+    for (const item of pendingApprovals) {
+      item.state = "expired";
+      item.error = "Office restarted/destroyed. This request cannot be sent to the new Gate.";
+    }
+    renderApprovalFloat();
+  }
+  if (errors.length) throw new Error(`Cleanup: ${errors.join("; ")}`);
+}
+
+async function subscribeOffice(mod: RuntimeModule, id: string): Promise<void> {
+  for (const sub of subs) mod.close_subscription(sub.handle);
+  subs = [];
+  for (const agentId of AGENT_IDS) {
+    try {
+      const handle = await mod.mob_member_subscribe(id, agentId);
+      if (!handle) throw new Error("empty subscription handle");
+      subs.push({ agentId, handle });
+    } catch (error) {
+      throw new Error(`Subscribe ${agentId}: ${String(error)}`);
+    }
+  }
+}
+
+async function pauseOffice(): Promise<void> {
+  if (!runtime || !mobId || starting || lifecycleBusy || (!running && !stopped)) return;
+  const resume = stopped;
+  lifecycleBusy = true;
+  running = false;
+  updateControls();
+  setBadge(resume ? "RESUMING" : "STOPPING", true);
+  try {
+    await topology?.settled();
+    const receipt = JSON.parse(await runtime.mob_lifecycle(mobId, resume ? "resume" : "stop"));
+    if (!receipt.ok) throw new Error("Lifecycle command was not acknowledged");
+    stopped = !resume;
+    if (resume) {
+      await resolvePeerAgents(runtime, mobId);
+      await subscribeOffice(runtime, mobId);
+      running = true;
+    }
+    setBadge(resume ? "LIVE" : "STOPPED");
+    setStatus(resume ? "Office running." : "Agents stopped. Resume agents to admit new work.");
+  } catch (error) {
+    // A failed transition is not evidence that the runtime is stopped or live.
+    stopped = false;
+    setBadge("ERROR");
+    setStatus(`Lifecycle failed: ${String(error)}. Use Restart; new work is blocked.`);
+    $<HTMLButtonElement>("startBtn").textContent = "Restart";
+  } finally {
+    lifecycleBusy = false;
+    updateControls();
+  }
+}
+
 async function startOffice(): Promise<void> {
+  if (starting || lifecycleBusy) return;
+  starting = true;
+  updateControls();
   try {
     providerIssuePromptShown = false;
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
-    for (const sub of subs) {
-      try { runtime?.close_subscription(sub.handle); }
-      catch { /* ignore stale handles during restart */ }
-    }
-    subs = [];
-    running = false;
 
     const keys = getApiKeys();
     if (!keys.anthropic && !keys.openai && !keys.gemini) {
@@ -483,6 +571,7 @@ async function startOffice(): Promise<void> {
       return;
     }
 
+    await teardownOffice();
     setBadge("LOADING", true);
     setStatus("Loading WASM runtime...");
     const mod = await loadRuntime();
@@ -534,7 +623,7 @@ async function startOffice(): Promise<void> {
         required: ["id", "title", "type", "summary", "entities", "relationships"],
       }));
     mod.register_js_tool("revoke_access",
-      "Revoke an agent's network access. IT security use only.",
+      "Request disconnection of an agent's in-memory office comms edges. Not credential revocation; acknowledgement is not completion.",
       JSON.stringify({
         type: "object",
         properties: {
@@ -544,7 +633,7 @@ async function startOffice(): Promise<void> {
         required: ["target", "reason"],
       }));
     mod.register_js_tool("restore_access",
-      "Restore a previously revoked agent's network access. IT security use only.",
+      "Request reconnection of an agent's office comms edges, only where both endpoints permit it. Not credential restoration.",
       JSON.stringify({
         type: "object",
         properties: {
@@ -564,44 +653,32 @@ async function startOffice(): Promise<void> {
       agent_identity: id,
       runtime_mode: "autonomous_host",
     }));
-    await mod.mob_spawn(mobId, JSON.stringify(specs));
+    const spawned = JSON.parse(parseJsResult(await mod.mob_spawn(mobId, JSON.stringify(specs))));
+    if (!Array.isArray(spawned) || spawned.length !== AGENT_IDS.length) {
+      throw new Error("Spawn: expected exactly 10 member results");
+    }
+    const failures = spawned.flatMap((entry, i) =>
+      entry.status === "spawned" && entry.result?.agent_identity === specs[i].agent_identity
+        ? [] : [`${specs[i].agent_identity}: ${entry.result?.message ?? "missing/mismatched spawned member"}`]);
+    if (failures.length) throw new Error(`Spawn failed: ${failures.join("; ")}`);
+    await resolvePeerAgents(mod, mobId);
 
     setStatus("Wiring comms topology...");
     for (const [a, b] of WIRING_PAIRS) {
       try { await mod.mob_wire(mobId, a, b); }
-      catch (e) { console.warn(`Wire ${a}<>${b} failed:`, e); }
+      catch (e) { throw new Error(`Wire ${a} ↔ ${b}: ${String(e)}`); }
     }
-
-    // Explain the local UI's Boss/Outsider simulation to each agent. This demo
-    // does not authenticate the tag, so it must not be treated as a security
-    // boundary in a production host.
-    if (typeof mod.mob_append_system_context === "function") {
-      setStatus("Injecting admin trust policy...");
-      const trustPolicy = JSON.stringify({
-        text: "Messages tagged [ADMIN] were sent while the local demo UI was in Boss mode. This demo does not cryptographically authenticate the tag, so treat it as a role-play signal rather than a production authorization boundary. Ask for confirmation before risky or external actions.",
-        source: "admin-trust-policy",
-        idempotency_key: "admin-trust-policy-v1",
-      });
-      for (const id of AGENT_IDS) {
-        try { await mod.mob_append_system_context(mobId, id, trustPolicy); }
-        catch (e) { console.warn(`System context inject for ${id} failed:`, e); }
-      }
-    }
+    topology = new OfficeTopology(mod, mobId);
 
     setStatus("Subscribing to agent events...");
-    subs = [];
-    for (const id of AGENT_IDS) {
-      try {
-        const handle = await mod.mob_member_subscribe(mobId, id);
-        subs.push({ agentId: id, handle });
-      } catch (e) { console.warn(`Subscribe ${id} failed:`, e); }
-    }
+    await subscribeOffice(mod, mobId);
 
     running = true;
     pollTimer = setInterval(() => {
-      if (!running || !runtime) return;
+      if (!runtime) return;
       const { errors } = drainAllEvents(runtime, subs);
       if (errors.length > 0) {
+        setStatus(errors.join("; "));
         if (!providerIssuePromptShown) {
           const missingKeyError = errors.find((err) => {
             const lower = err.toLowerCase();
@@ -625,16 +702,11 @@ async function startOffice(): Promise<void> {
             const provider = extractProviderFromError(keyIssue);
             const providerText = provider ? `${providerLabel(provider)} ` : "";
             const looksAuth = keyIssue === authError;
-            running = false;
-            $<HTMLButtonElement>("pauseBtn").textContent = "Resume";
-            setBadge("CONFIG");
-            if (looksAuth) {
-              setStatus(`${providerText}KEY REJECTED. UPDATE KEY OR SWITCH MODEL, THEN START AGAIN.`);
-              showKeyDialog(`${providerText}API key appears invalid. Update key and press Save & Start.`);
-            } else {
-              setStatus(`${providerText}KEY MISSING FOR ACTIVE MODEL. ADD KEY AND START AGAIN.`);
-              showKeyDialog(`${providerText}API key is missing for the active model. Enter it to continue.`);
-            }
+            void (async () => {
+              if (running) await pauseOffice();
+              if (stopped) setBadge("CONFIG");
+              showKeyDialog(`${providerText}API key ${looksAuth ? "appears invalid" : "is missing"}. Update key and press Save & Start (restarts the office).`);
+            })();
           }
         }
         for (const e of errors) console.warn("Agent error:", e);
@@ -642,13 +714,20 @@ async function startOffice(): Promise<void> {
     }, 300);
 
     setBadge("LIVE");
+    $<HTMLButtonElement>("startBtn").textContent = "Restart";
     setStatus("Office running. Inject an event or talk to an agent.");
     $<HTMLDivElement>("settingsOverlay").classList.add("hidden");
     showOnboardingHints();
   } catch (e) {
+    let cleanup = "";
+    try { await teardownOffice(); } catch (error) { cleanup = ` ${String(error)}`; }
     setBadge("ERROR");
-    setStatus(`FAILED: ${e instanceof Error ? e.message : String(e)}`);
+    setStatus(`FAILED: ${e instanceof Error ? e.message : String(e)}${cleanup}. Press Retry.`);
+    $<HTMLButtonElement>("startBtn").textContent = "Retry";
     console.error("Start failed:", e);
+  } finally {
+    starting = false;
+    updateControls();
   }
 }
 
@@ -657,15 +736,15 @@ async function startOffice(): Promise<void> {
 // =====================================================================
 
 async function injectEvent(scenarioId: string): Promise<void> {
-  if (!runtime || !mobId) { setStatus("Start the office first."); return; }
+  if (!runtime || !mobId || !running || starting || lifecycleBusy) { setStatus("Start or resume agents before sending work."); return; }
   const scenario = SCENARIOS.find(s => s.id === scenarioId);
   if (!scenario) return;
 
   eventCount++;
   $<HTMLSpanElement>("eventCounter").textContent = `${eventCount} event${eventCount !== 1 ? "s" : ""}`;
 
-  createIncident(scenario.title, scenario.icon);
-  addMessage(null, "system", "triage", scenario.text, `New event: ${scenario.title}`, "routing");
+  const incident = createIncident(scenario.title, scenario.icon);
+  addMessage(incident, "system", "triage", scenario.text, `New event requested: ${scenario.title}`, "routing");
 
   triggerEnvelopeArrival("triage");
   setBadge("PROCESSING", true);
@@ -691,7 +770,7 @@ let adminMode = true;
 function isAdminMode(): boolean { return adminMode; }
 
 async function chatWithAgent(agentId: AgentId, message: string): Promise<void> {
-  if (!runtime || !mobId) { setStatus("Start the office first."); return; }
+  if (!runtime || !mobId || !running || starting || lifecycleBusy) { setStatus("Start or resume agents before sending work."); return; }
 
   const admin = isAdminMode();
   const tag = admin
@@ -700,8 +779,8 @@ async function chatWithAgent(agentId: AgentId, message: string): Promise<void> {
   const taggedMessage = `${tag}\n${message}`;
 
   const label = admin ? "Admin" : "External";
-  createIncident(`${label} > ${AGENTS[agentId].name}: ${message.slice(0, 30)}...`, admin ? ">" : "?");
-  addMessage(null, "user", agentId, message, message.slice(0, 50), "response");
+  const incident = createIncident(`${label} > ${AGENTS[agentId].name}: ${message.slice(0, 30)}...`, admin ? ">" : "?");
+  addMessage(incident, "user", agentId, message, message.slice(0, 50), "response");
 
   showSpeechBubble(agentId, "Incoming call...", 2000);
 
@@ -721,6 +800,7 @@ async function chatWithAgent(agentId: AgentId, message: string): Promise<void> {
 // =====================================================================
 
 function showOnboardingHints(): void {
+  dismissOnboardingHints();
   const grid = document.querySelector(".scenario-grid") as HTMLElement | null;
   const chat = document.querySelector(".chat-frame") as HTMLElement | null;
   if (!grid || !chat) return;
@@ -754,12 +834,17 @@ document.getElementById("startBigBtn")!.addEventListener("click", () => {
   $<HTMLDivElement>("startOverlay").classList.add("hidden");
   void startOffice();
 });
+document.getElementById("startBtn")!.addEventListener("click", () => {
+  $<HTMLDivElement>("startOverlay").classList.add("hidden");
+  void startOffice();
+});
 
 
 // Key dialog
 document.getElementById("keyDialogCancel")!.addEventListener("click", () => {
   hideKeyDialog();
-  setStatus("Start is blocked until at least one API key is provided.");
+  setStatus("Setup cancelled. Use Settings, then Start/Restart when ready.");
+  updateControls();
 });
 document.getElementById("keyDialogSave")!.addEventListener("click", () => {
   if (applyDialogKeys()) {
@@ -781,16 +866,7 @@ for (const id of ["keyDialogAnthropic", "keyDialogOpenai", "keyDialogGemini"] as
 
 // Pause
 document.getElementById("pauseBtn")!.addEventListener("click", () => {
-  if (!running && pollTimer === null) return;
-  running = !running;
-  $<HTMLButtonElement>("pauseBtn").textContent = running ? "Pause" : "Resume";
-  if (running) {
-    setBadge("LIVE");
-    setStatus("Office running.");
-  } else {
-    setBadge("PAUSED");
-    setStatus("Office paused.");
-  }
+  void pauseOffice();
 });
 
 // Scenario buttons
@@ -804,6 +880,7 @@ document.querySelector(".scenario-grid")!.addEventListener("click", (e) => {
 
 // Chat
 document.getElementById("chatSend")!.addEventListener("click", () => {
+  if (!running || starting || lifecycleBusy) return;
   const input = $<HTMLTextAreaElement>("chatInput");
   const msg = input.value.trim();
   if (!msg) return;
@@ -850,10 +927,17 @@ function renderApprovalFloat(): void {
     if (!item) { expandedApprovalId = null; renderApprovalFloat(); return; }
     list.classList.add("hidden");
     detail.classList.remove("hidden");
+    const risk = ["low", "medium", "high"].includes(item.risk_level) ? item.risk_level : "unknown";
     $<HTMLDivElement>("approvalDetailBody").innerHTML = `
-      <p><strong>${item.action_description}</strong></p>
-      <p>Risk: <span class="risk-${item.risk_level}">${item.risk_level.toUpperCase()}</span> &middot; By: ${item.proposed_by}</p>
+      <p><strong>${escapeHtmlApproval(item.action_description)}</strong></p>
+      <p>Risk: <span class="risk-${risk}">${risk.toUpperCase()}</span> &middot; By: ${escapeHtmlApproval(item.proposed_by)}</p>
+      <p role="status">${escapeHtmlApproval(approvalStatus(item))}</p>
     `;
+    for (const [button, approved] of [["approveBtn", true], ["denyBtn", false]] as const) {
+      const el = $<HTMLButtonElement>(button);
+      el.disabled = !canDecide(item, approved);
+      el.textContent = `${item.state === "failed" ? "RETRY " : ""}${approved ? "APPROVE" : "DENY"}`;
+    }
   } else {
     // Show compact list
     detail.classList.add("hidden");
@@ -861,34 +945,60 @@ function renderApprovalFloat(): void {
     list.innerHTML = pendingApprovals.map(a =>
       `<div class="approval-item" data-id="${a.id}">
         <span class="approval-item-text">${escapeHtmlApproval(a.short_summary)}</span>
-        <button class="approve-mini" data-id="${a.id}" title="Approve">\u2713</button>
-        <button class="deny-mini" data-id="${a.id}" title="Deny">\u2717</button>
+        <span role="status">${escapeHtmlApproval(approvalStatus(a))}</span>
+        <button class="approve-mini" data-id="${a.id}" title="Approve / retry approval"${canDecide(a, true) ? "" : " disabled"}>\u2713</button>
+        <button class="deny-mini" data-id="${a.id}" title="Deny / retry denial"${canDecide(a, false) ? "" : " disabled"}>\u2717</button>
       </div>`
     ).join("");
   }
 }
 
-function resolveApproval(id: number, approved: boolean): void {
-  const idx = pendingApprovals.findIndex(a => a.id === id);
-  if (idx < 0) return;
-  const item = pendingApprovals[idx];
-  pendingApprovals.splice(idx, 1);
-  expandedApprovalId = null;
+function canDecide(item: PendingApproval, approved: boolean): boolean {
+  return running && !starting && !lifecycleBusy && item.epoch === epoch
+    && (item.state === "pending" || item.state === "failed")
+    && (item.decision === undefined || item.decision === approved);
+}
 
-  if (runtime && mobId) {
+function approvalStatus(item: PendingApproval): string {
+  if (item.error) return item.error;
+  if (item.state === "sending") return "Sending decision…";
+  return running ? "Awaiting decision" : "Start/resume agents to send a decision";
+}
+
+async function resolveApproval(id: number, approved: boolean): Promise<void> {
+  const item = pendingApprovals.find(a => a.id === id);
+  if (!item || !canDecide(item, approved)) return;
+  item.decision = approved;
+  item.state = "sending";
+  item.error = undefined;
+  renderApprovalFloat();
+  try {
+    if (!runtime || !mobId) throw new Error("Runtime unavailable; restart the office.");
+    const sentEpoch = epoch;
+    const sentMob = mobId;
     const decision = approved ? "APPROVED" : "DENIED";
-    runtime.mob_member_send(
-      mobId,
+    const receipt = JSON.parse(await runtime.mob_member_send(
+      sentMob,
       "gate",
       JSON.stringify({
-        content: `HUMAN DECISION: ${decision} -- ${item.action_description}`,
+        content: `HUMAN DECISION: ${decision} -- ${item.action_description}\nRequest: ${item.request_id}`,
         handling_mode: "queue",
       }),
-    );
-    addMessage(null, "user", "gate", `${decision}: ${item.action_description}`, `Human ${decision.toLowerCase()}`, "approval");
-    showSpeechBubble("gate", decision, 3000);
+    ));
+    if (sentEpoch !== epoch) return;
+    if (receipt.mob_id !== sentMob || receipt.agent_identity !== "gate") throw new Error("Unexpected delivery receipt");
+    pendingApprovals.splice(pendingApprovals.indexOf(item), 1);
+    expandedApprovalId = null;
+    addMessage(null, "user", "gate", `${decision}: ${item.action_description}`, `${decision} decision accepted by Gate inbox`, "approval");
+    showSpeechBubble("gate", `${decision} queued`, 3000);
+  } catch (error) {
+    if (item.epoch === epoch) {
+      item.state = "failed";
+      item.error = `Decision not delivered: ${String(error)}. Retry the same decision.`;
+    }
+  } finally {
+    renderApprovalFloat();
   }
-  renderApprovalFloat();
 }
 
 function escapeHtmlApproval(s: string): string {
@@ -903,9 +1013,9 @@ document.getElementById("approvalFloat")!.addEventListener("click", (e) => {
   const item = target.closest(".approval-item") as HTMLElement | null;
 
   if (approveMini) {
-    resolveApproval(Number(approveMini.dataset.id), true);
+    void resolveApproval(Number(approveMini.dataset.id), true);
   } else if (denyMini) {
-    resolveApproval(Number(denyMini.dataset.id), false);
+    void resolveApproval(Number(denyMini.dataset.id), false);
   } else if (item && expandedApprovalId === null) {
     expandedApprovalId = Number(item.dataset.id);
     renderApprovalFloat();
@@ -913,10 +1023,10 @@ document.getElementById("approvalFloat")!.addEventListener("click", (e) => {
 });
 
 document.getElementById("approveBtn")!.addEventListener("click", () => {
-  if (expandedApprovalId !== null) resolveApproval(expandedApprovalId, true);
+  if (expandedApprovalId !== null) void resolveApproval(expandedApprovalId, true);
 });
 document.getElementById("denyBtn")!.addEventListener("click", () => {
-  if (expandedApprovalId !== null) resolveApproval(expandedApprovalId, false);
+  if (expandedApprovalId !== null) void resolveApproval(expandedApprovalId, false);
 });
 document.getElementById("approvalBack")!.addEventListener("click", () => {
   expandedApprovalId = null;
@@ -939,6 +1049,7 @@ document.getElementById("settingsOverlay")!.addEventListener("click", (e) => {
 });
 
 // Server mode: skip overlay and auto-start
+updateControls();
 if (isServerMode()) {
   $<HTMLDivElement>("startOverlay").classList.add("hidden");
   void startOffice();

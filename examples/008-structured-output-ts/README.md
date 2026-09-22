@@ -14,6 +14,13 @@ Without it, LLM output is free-form text. With `outputSchema`, Meerkat
 validates the response against your schema, retries on failure, and exposes the
 validated value through `session.structuredOutput`.
 
+The confidence field encodes its inclusive 0–1 range with JSON Schema
+`minimum` and `maximum`, not just a prose description. Fatal failures exit
+nonzero; the runtime is closed even if its initialization handshake fails.
+
+The [offline SDK regression checks](../003-hello-meerkat-ts/README.md#offline-regression-checks)
+capture the actual emitted schema and verify rejected and accepted boundary values.
+
 ## Schema Format
 Standard JSON Schema. Meerkat validates and auto-retries:
 ```json

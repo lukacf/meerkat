@@ -2,11 +2,23 @@
 // Event Streaming → DM Channels + Narrator Context
 // ═══════════════════════════════════════════════════════════
 
-import type { ArenaState, ChannelId, MatchSession, RuntimeModule, Team, TurnDecision } from "./types";
+import type { ArenaState, ChannelId, MatchSession, RuntimeModule, Team, OrderOutcome } from "./types";
 import { CHANNELS, TEAMS, TEAM_LABELS } from "./types";
 import { pushMessage, pushStructuredSummary, dmChannel } from "./ui";
 
 export interface DrainResult { events: number; errors: string[] }
+
+export function sourceSortKey(source: unknown): string | null {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return null;
+  const record = source as Record<string, unknown>;
+  const field = {
+    session: "session_id", runtime: "runtime_id", interaction: "interaction_id", external: "source_id",
+  }[record.type as string];
+  if (record.type === "callback") return Object.keys(record).length === 1 ? "callback" : null;
+  if (!field || Object.keys(record).some(key => key !== "type" && key !== field)) return null;
+  const id = record[field];
+  return typeof id === "string" && id.length > 0 ? `${record.type}:${id}` : null;
+}
 
 function agentFallbackChannel(agentIdentity: string, team: Team): ChannelId {
   if (agentIdentity.includes("ambassador")) return `${team[0]}-plan-amb` as ChannelId;
@@ -26,7 +38,7 @@ export function drainAllEvents(mod: RuntimeModule, session: MatchSession, turn: 
         if (
           event == null
           || typeof event.timestamp_ms !== "number"
-          || typeof event.source_id !== "string"
+          || sourceSortKey(event.source) === null
           || typeof event.seq !== "number"
           || typeof event.event_id !== "string"
           || event.payload == null
@@ -45,8 +57,8 @@ export function drainAllEvents(mod: RuntimeModule, session: MatchSession, turn: 
     const ta = a.env.timestamp_ms;
     const tb = b.env.timestamp_ms;
     if (ta !== tb) return ta - tb;
-    const sa = a.env.source_id;
-    const sb = b.env.source_id;
+    const sa = sourceSortKey(a.env.source)!;
+    const sb = sourceSortKey(b.env.source)!;
     if (sa !== sb) return sa < sb ? -1 : 1;
     const qa = a.env.seq;
     const qb = b.env.seq;
@@ -56,20 +68,26 @@ export function drainAllEvents(mod: RuntimeModule, session: MatchSession, turn: 
     return ia < ib ? -1 : ia > ib ? 1 : 0;
   });
   for (const { sub, env } of buffered) {
+    if (session.seenEventIds.has(env.event_id)) continue;
+    session.seenEventIds.add(env.event_id);
     const event = env.payload;
     events++;
-    if (event.type === "run_failed" && event.error) {
-      errors.push(`${sub.agentIdentity}: ${event.error}`);
+    if (event.type === "run_failed") {
+      if (event.error_report) session.failures.push({ agentIdentity: sub.agentIdentity, turn, report: event.error_report });
+      errors.push(`${sub.agentIdentity}: ${event.error_report?.message ?? "Run failed without a diagnostic"}`);
+    }
+    if (event.type === "extraction_failed") {
+      errors.push(`${sub.agentIdentity}: Extraction failed: ${event.reason}`);
+    }
+    if (event.type === "run_started") {
+      session.summarizedRuns.delete(sub.agentIdentity);
     }
 
     // Comms: agent used send_message/send tool → route raw message to DM channel
     if (event.type === "tool_call_requested" && (event.name === "send_message" || event.name === "send")) {
-      const callId = event.id;
-      if (callId && session.seenToolCallIds.has(callId)) continue;
-      if (callId) session.seenToolCallIds.add(callId);
       try {
         const args = typeof event.args === "string" ? JSON.parse(event.args) : event.args;
-        const to = args.to || "";
+        const to = session.peerMembers.get(args.peer_id);
         const body = args.body || "";
         if (to && body) {
           const ch = dmChannel(sub.agentIdentity, to);
@@ -81,15 +99,18 @@ export function drainAllEvents(mod: RuntimeModule, session: MatchSession, turn: 
     }
 
     // Structured output: agent completed a wake cycle.
-    if (event.type === "run_completed" && event.result) {
+    if ((event.type === "run_completed" || event.type === "extraction_succeeded") && event.structured_output) {
+      if (session.summarizedRuns.has(sub.agentIdentity)) continue;
       try {
-        const structured = JSON.parse(event.result);
+        const structured = event.structured_output;
         if (structured.headline) {
+          session.summarizedRuns.add(sub.agentIdentity);
           const dispatches: { peer: string; summary: string }[] = structured.dispatches || [];
           const routed = new Set<ChannelId>();
 
           for (const dispatch of dispatches) {
-            const ch = dmChannel(sub.agentIdentity, dispatch.peer);
+            const peer = session.peerMembers.get(dispatch.peer);
+            const ch = peer ? dmChannel(sub.agentIdentity, peer) : null;
             if (!ch || routed.has(ch)) continue;
             routed.add(ch);
             pushStructuredSummary({
@@ -119,16 +140,15 @@ export function drainAllEvents(mod: RuntimeModule, session: MatchSession, turn: 
 }
 
 export function buildNarratorSummary(
-  sess: MatchSession, turn: number, decisions: TurnDecision[],
+  sess: MatchSession, turn: number, outcomes: OrderOutcome[],
   captures: Set<string>, newState: ArenaState,
 ): string {
   const turnMsgs = sess.messages.filter(m => m.turn === turn);
   const sections: string[] = [];
 
   sections.push("=== BATTLE OUTCOMES ===");
-  for (const d of decisions) {
-    const hit = captures.has(d.order.target_region) ? "CAPTURED" : "REPELLED";
-    sections.push(`${TEAM_LABELS[d.order.team]} attacked ${d.order.target_region.replace(/-/g, " ")} (aggression ${d.order.aggression}) \u2192 ${hit}`);
+  for (const { order, result } of outcomes) {
+    sections.push(`${TEAM_LABELS[order.team]} attacked ${order.target_region.replace(/-/g, " ")} (aggression ${order.aggression}) \u2192 ${result.toUpperCase()}`);
   }
   if (captures.size > 0) sections.push(`Territories changed hands: ${[...captures].map(id => id.replace(/-/g, " ")).join(", ")}`);
   sections.push(`Scores: ${TEAMS.map(t => `${TEAM_LABELS[t]}=${newState.scores[t]}`).join(", ")}. Turn ${turn} of ${newState.max_turns}.`);

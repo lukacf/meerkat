@@ -29,13 +29,9 @@ impl Pack for ReviewPack {
 
     fn definition(
         &self,
-        task: &str,
-        context: &str,
         overrides: &BTreeMap<String, String>,
         pp: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
-        let ctx = format_context(context);
-
         // Different models per reviewer for diverse perspectives
         let agents = [
             (
@@ -98,7 +94,7 @@ impl Pack for ReviewPack {
             },
         );
 
-        let review_msg = format!("Review the following:\n\n{task}{ctx}");
+        let review_msg = format!("Review the following:\n\n{TASK_TEMPLATE}");
 
         let mut steps = IndexMap::new();
         steps.insert(
@@ -109,7 +105,7 @@ impl Pack for ReviewPack {
             StepId::from("security_review"),
             flow_step(
                 "security",
-                format!("Focus on security aspects:\n\n{task}{ctx}"),
+                format!("Focus on security aspects:\n\n{TASK_TEMPLATE}"),
                 &[],
                 300_000,
             ),
@@ -118,7 +114,7 @@ impl Pack for ReviewPack {
             StepId::from("perf_review"),
             flow_step(
                 "perf",
-                format!("Focus on performance aspects:\n\n{task}{ctx}"),
+                format!("Focus on performance aspects:\n\n{TASK_TEMPLATE}"),
                 &[],
                 300_000,
             ),
@@ -131,7 +127,11 @@ impl Pack for ReviewPack {
         let mut flows = BTreeMap::new();
         flows.insert(
             FlowId::from("main"),
-            FlowSpec::new(Some("Parallel code review with synthesis".into()), steps, None),
+            FlowSpec::new(
+                Some("Parallel code review with synthesis".into()),
+                steps,
+                None,
+            ),
         );
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();

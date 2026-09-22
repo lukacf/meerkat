@@ -28,17 +28,8 @@ fi
 
 # ── Download WebCM WASM bundle ──────────────────────────────────────────────
 
-if [[ ! -f "${PUBLIC_DIR}/webcm.mjs" ]]; then
-  echo "Downloading WebCM (~30 MB)..."
-  mkdir -p "${PUBLIC_DIR}"
-
-  curl -fSL "${WEBCM_BASE}/webcm.mjs" -o "${PUBLIC_DIR}/webcm.mjs"
-  curl -fSL "${WEBCM_BASE}/webcm.wasm" -o "${PUBLIC_DIR}/webcm.wasm"
-
-  echo "WebCM downloaded to ${PUBLIC_DIR}/"
-else
-  echo "WebCM already downloaded"
-fi
+source ./download-webcm.sh
+download_webcm "$WEBCM_BASE" "$PUBLIC_DIR"
 
 # ── Build and sync current meerkat WASM runtime (for mob mode) ───────────────
 

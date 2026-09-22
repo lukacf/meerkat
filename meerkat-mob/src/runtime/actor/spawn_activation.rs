@@ -365,7 +365,7 @@ impl SpawnActivationWorkerContext {
         agent_identity: &AgentIdentity,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
-        #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
+        #[cfg(feature = "runtime-adapter")]
         {
             let (Some(adapter), Some(bridge_session_id)) =
                 (self.runtime_adapter.clone(), member_ref.bridge_session_id())
@@ -398,7 +398,7 @@ impl SpawnActivationWorkerContext {
                     })?;
             }
         }
-        #[cfg(any(target_arch = "wasm32", not(feature = "runtime-adapter")))]
+        #[cfg(not(feature = "runtime-adapter"))]
         {
             let _ = (agent_identity, member_ref);
         }

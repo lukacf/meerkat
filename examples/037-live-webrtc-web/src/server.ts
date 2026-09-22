@@ -88,6 +88,7 @@ interface AppRuntime {
 
 let runtimePromise: Promise<AppRuntime> | undefined;
 let activeLive: ActiveLiveSession | undefined;
+let startQueue: Promise<unknown> = Promise.resolve();
 
 const CALLBACK_TOOL_DEFS: ToolDefinition[] = [
   {
@@ -234,16 +235,23 @@ async function ensureRuntime(): Promise<AppRuntime> {
   runtimePromise = (async () => {
     const rkatPath = process.env.RKAT_RPC ?? process.env.MEERKAT_BIN_PATH ?? "rkat-rpc";
     const client = new MeerkatClient(rkatPath);
-    registerCallbackTools(client);
-    await client.connect({
-      contextRoot: EXAMPLE_ROOT,
-      realmId: process.env.MEERKAT_REALM,
-      isolated: process.env.MEERKAT_REALM == null,
-      liveWebrtc: true,
-      liveToolTimeoutMs: Number(process.env.MEERKAT_LIVE_TOOL_TIMEOUT_MS ?? 180_000),
-    });
-    client.requireCapability("mob");
-    return { client };
+    try {
+      registerCallbackTools(client);
+      await client.connect({
+        contextRoot: EXAMPLE_ROOT,
+        realmId: process.env.MEERKAT_REALM,
+        isolated: process.env.MEERKAT_REALM == null,
+        liveWebrtc: true,
+        liveToolTimeoutMs: Number(process.env.MEERKAT_LIVE_TOOL_TIMEOUT_MS ?? 180_000),
+      });
+      client.requireCapability("mob");
+      return { client };
+    } catch (error) {
+      await client.close().catch((cleanupError: unknown) => {
+        console.warn("Failed to close rejected RPC client:", cleanupError);
+      });
+      throw error;
+    }
   })().catch((error) => {
     runtimePromise = undefined;
     throw error;
@@ -313,7 +321,7 @@ async function pollMobs(): Promise<DisplayMob[]> {
   return result;
 }
 
-async function startLive(body: StartRequest): Promise<unknown> {
+async function startLive(body: StartRequest) {
   const { client } = await ensureRuntime();
   if (activeLive) {
     await activeLive.channel.close().catch(() => undefined);
@@ -370,6 +378,7 @@ async function startLive(body: StartRequest): Promise<unknown> {
   });
   const openResult = await channel.open();
   if (!isLiveWebrtcBootstrap(openResult.transport)) {
+    await channel.close().catch((error: unknown) => console.warn("Channel cleanup failed:", error));
     throw new Error(`live/open returned ${openResult.transport.transport}, expected webrtc`);
   }
   activeLive = {
@@ -444,7 +453,7 @@ async function liveControl(channelId: string, action: string, body: Record<strin
   }
   if (action === "close") {
     await live.channel.close();
-    activeLive = undefined;
+    if (activeLive === live) activeLive = undefined;
     return { ok: true };
   }
   throw Object.assign(new Error(`Unknown live action: ${action}`), { statusCode: 404 });
@@ -532,7 +541,18 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: 
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   if (req.method === "POST" && url.pathname === "/api/start") {
-    return sendJson(res, 200, await startLive(await readJson<StartRequest>(req)));
+    const body = await readJson<StartRequest>(req);
+    const pending = startQueue.then(() => startLive(body));
+    startQueue = pending.catch(() => undefined);
+    const opened = await pending;
+    if (res.destroyed) {
+      // The browser may have gone away while the uncancellable RPC open ran.
+      const { client } = await ensureRuntime();
+      await client.liveClose({ channel_id: opened.channel_id });
+      if (activeLive?.channelId === opened.channel_id) activeLive = undefined;
+      return;
+    }
+    return sendJson(res, 200, opened);
   }
   if (req.method === "POST" && url.pathname === "/api/webrtc/answer") {
     return sendJson(res, 200, await answerWebrtc(await readJson<WebrtcAnswerRequest>(req)));
@@ -572,6 +592,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     if (activeLive) {
       await activeLive.channel.close().catch(() => undefined);
     }
+    const runtime = await runtimePromise?.catch(() => undefined);
+    await runtime?.client.close();
     server.close();
     process.exit(signal === "SIGINT" ? 130 : 0);
   });

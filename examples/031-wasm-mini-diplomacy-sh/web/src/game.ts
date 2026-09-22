@@ -2,7 +2,7 @@
 // Game Engine
 // ═══════════════════════════════════════════════════════════
 
-import type { ArenaState, Team, TurnDecision } from "./types";
+import type { ArenaState, Team, TurnDecision, OrderOutcome } from "./types";
 import { TEAMS } from "./types";
 
 export function defaultState(): ArenaState {
@@ -26,18 +26,24 @@ export function defaultState(): ArenaState {
   };
 }
 
-export function resolveOrders(state: ArenaState, orders: TurnDecision[]): ArenaState {
+export function resolveOrders(state: ArenaState, orders: TurnDecision[]): { state: ArenaState; outcomes: OrderOutcome[] } {
   const newRegions = state.regions.map(r => ({ ...r }));
+  const outcomes: OrderOutcome[] = [];
   for (const decision of orders) {
     const { order } = decision;
     const target = newRegions.find(r => r.id === order.target_region);
-    if (!target || target.controller === order.team) continue;
+    if (!target || target.controller === order.team) {
+      outcomes.push({ order, result: "skipped" });
+      continue;
+    }
     const atkNoise = Math.floor(Math.random() * 12);
     const defNoise = Math.floor(Math.random() * 8);
     if (order.aggression + atkNoise > target.defense + defNoise) {
+      outcomes.push({ order, result: "captured" });
       target.controller = order.team;
       target.defense = Math.max(25, Math.floor(target.defense * 0.5) + Math.floor(order.fortify / 8));
     } else {
+      outcomes.push({ order, result: "repelled" });
       target.defense = Math.min(100, target.defense + 2);
     }
     for (const r of newRegions) {
@@ -52,5 +58,5 @@ export function resolveOrders(state: ArenaState, orders: TurnDecision[]): ArenaS
     const sorted = TEAMS.slice().sort((a, b) => scores[b] - scores[a]);
     winner = scores[sorted[0]] > scores[sorted[1]] ? sorted[0] : "draw";
   }
-  return { turn, max_turns: state.max_turns, regions: newRegions, scores, winner };
+  return { state: { turn, max_turns: state.max_turns, regions: newRegions, scores, winner }, outcomes };
 }

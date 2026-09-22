@@ -191,12 +191,13 @@ wait_for_log() {
   local service="$1"
   local pattern="$2"
   local timeout_sec="${3:-90}"
+  local since="${4:-0}"
   local start
   local logs
   start="$(date +%s)"
 
   while true; do
-    logs="$("${compose[@]}" logs --no-color "$service" 2>&1 || true)"
+    logs="$("${compose[@]}" logs --no-color --since "$since" "$service" 2>&1 || true)"
     if [[ "$logs" =~ $pattern ]]; then
       return 0
     fi
@@ -212,9 +213,18 @@ wait_for_log() {
 restart_target_b() {
   echo "restarting target-b to force kennel/peer churn"
   "${compose[@]}" restart target-b
-  wait_for_log target-b 'session ready' "$restart_wait"
-  wait_for_log target-b 'added hive as trusted peer' "$restart_wait"
+  local container_id started_at
+  container_id="$("${compose[@]}" ps -q target-b)"
+  test -n "$container_id"
+  started_at="$(docker inspect --format '{{.State.StartedAt}}' "$container_id")"
+  test -n "$started_at"
+  wait_for_log target-b 'session ready' "$restart_wait" "$started_at"
+  wait_for_log target-b 'added hive as trusted peer' "$restart_wait" "$started_at"
 }
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return
+fi
 
 require docker
 require tmux

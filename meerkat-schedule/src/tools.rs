@@ -142,6 +142,13 @@ impl AgentToolDispatcher for ScheduleToolDispatcher {
         Arc::clone(&self.tool_defs)
     }
 
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: false,
+        }
+    }
+
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         if !self.tool_defs.iter().any(|tool| tool.name == call.name) {
             return Err(ToolError::not_found(call.name));

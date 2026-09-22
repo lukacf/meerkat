@@ -5,7 +5,7 @@
 //!
 //! ## What you'll learn
 //! - Loading config and building a `SessionService`
-//! - Using `build_ephemeral_service` (in-memory substrate for testing/embedded use)
+//! - Separating volatile service lifecycle from a scoped JSONL transcript store
 //! - Running a single-turn session and reading the result
 //!
 //! Note: Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path
@@ -24,18 +24,34 @@ use meerkat::{
     AgentFactory, Config, CreateSessionRequest, SessionService, build_ephemeral_service,
 };
 use meerkat_core::service::InitialTurnPolicy;
-use meerkat_store::realm_paths_in;
+use meerkat_store::JsonlStore;
+use std::{path::Path, sync::Arc};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+type ExampleError = Box<dyn std::error::Error + Send + Sync>;
+
+fn main() -> Result<(), ExampleError> {
+    meerkat_runtime::host_stack::run_host("hello-meerkat", run)?
+}
+
+async fn scoped_factory(root: &Path) -> Result<AgentFactory, ExampleError> {
+    let store = Arc::new(JsonlStore::new(root.join("sessions")));
+    store.init().await?;
+    Ok(AgentFactory::new(root.to_path_buf())
+        .runtime_root(root.to_path_buf())
+        .session_store(store))
+}
+
+async fn run() -> Result<(), ExampleError> {
     let config = Config::load().await?;
-    // Explicit state root (the ambient default-root helper is deprecated):
-    // the example keeps its realm under the user-global data-dir root.
-    let realm = realm_paths_in(
-        &meerkat_core::default_state_root(),
-        "examples/hello-meerkat",
+    // Keep the guard until the service has dropped, including on error returns.
+    let scratch = tempfile::Builder::new()
+        .prefix(".hello-meerkat-")
+        .tempdir_in(std::env::current_dir()?)?;
+    println!(
+        "Temporary JSONL transcripts: {}",
+        scratch.path().join("sessions").display()
     );
-    let factory = AgentFactory::new(realm.root.clone()).runtime_root(realm.root);
+    let factory = scoped_factory(scratch.path()).await?;
     let service = build_ephemeral_service(factory, config, 16);
 
     let result = service
@@ -63,3 +79,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

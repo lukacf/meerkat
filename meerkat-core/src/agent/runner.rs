@@ -114,6 +114,54 @@ fn injected_context_message_from_operator_renderable(
     }
 }
 
+fn lower_skill_context_into_turn_appends(
+    appends: &mut Vec<ConversationAppend>,
+    mut skill_blocks: Vec<crate::types::ContentBlock>,
+) -> Result<(), AgentError> {
+    if skill_blocks.is_empty() {
+        return Ok(());
+    }
+    // Runtime owns the admitted messages; core owns the derived activation.
+    // Enrich only the first conversational user row, never a text projection
+    // of the batch (which can include peer, system, and injected context).
+    if let Some(append) = appends
+        .iter_mut()
+        .find(|append| append.role == ConversationAppendRole::User)
+    {
+        match &mut append.content {
+            CoreRenderable::Text { text } => {
+                if !text.is_empty() {
+                    skill_blocks.push(crate::types::ContentBlock::Text {
+                        text: std::mem::take(text),
+                    });
+                }
+            }
+            CoreRenderable::Blocks { blocks } => skill_blocks.append(blocks),
+            _ => {
+                return Err(AgentError::ConfigError(
+                    "role=user transcript append only accepts operator text or content blocks"
+                        .to_string(),
+                ));
+            }
+        }
+        append.content = CoreRenderable::Blocks {
+            blocks: skill_blocks,
+        };
+    } else {
+        // Peer/system-only turns have no operator row to enrich. Keep their
+        // authored sequence intact and add only the derived user context.
+        // In particular, do not turn activation into a nonleading System.
+        appends.push(ConversationAppend {
+            role: ConversationAppendRole::User,
+            content: CoreRenderable::Blocks {
+                blocks: skill_blocks,
+            },
+            identity: None,
+        });
+    }
+    Ok(())
+}
+
 fn project_turn_request_context(
     messages: &mut Vec<Message>,
     contexts: &[crate::lifecycle::run_primitive::TurnRequestContext],
@@ -1950,9 +1998,10 @@ where
     /// (non-runtime) path: each entry materializes as a separate typed
     /// injected-context user-channel message immediately before the turn's
     /// user message. When `typed_turn_appends` is non-empty the runtime
-    /// authored every transcript append for this turn (injected context
+    /// authored the admitted transcript appends for this turn (injected context
     /// arrives as `InjectedContext`-role appends), so passing both is a
-    /// caller error — exactly one lowering owner per mode.
+    /// caller error — exactly one lowering owner per mode. Core adds resolved
+    /// per-turn skill context to either mode before committing the transcript.
     pub async fn run_with_events_and_typed_turn_appends(
         &mut self,
         user_input: ContentInput,
@@ -2066,7 +2115,7 @@ where
     async fn run_inner(
         &mut self,
         user_input: ContentInput,
-        typed_turn_appends: Vec<ConversationAppend>,
+        mut typed_turn_appends: Vec<ConversationAppend>,
         injected_context: Vec<ContentInput>,
         transcript_identity: Option<TranscriptMessageIdentity>,
         event_tx: Option<mpsc::Sender<AgentEvent>>,
@@ -2118,6 +2167,14 @@ where
                 return Err(err);
             }
         };
+        if !typed_turn_appends.is_empty()
+            && let Err(err) =
+                lower_skill_context_into_turn_appends(&mut typed_turn_appends, skill_blocks.clone())
+        {
+            self.handle_run_failure(&err, event_tx.as_ref()).await;
+            self.clear_runtime_execution_kind();
+            return Err(err);
+        }
         let user_input = if skill_blocks.is_empty() {
             user_input
         } else {
@@ -2419,8 +2476,14 @@ where
         }
     }
 
-    /// Cancel the current run
+    /// Cancel a run after its execution future has been dropped.
     pub fn cancel(&mut self) {
+        if let Err(error) = self.observe_dropped_run_cancellation() {
+            tracing::warn!(%error, "generated authority rejected dropped-run cancellation");
+        }
+    }
+
+    fn observe_dropped_run_cancellation(&mut self) -> Result<(), AgentError> {
         use crate::turn_execution_authority::TurnExecutionInput;
 
         self.clear_runtime_execution_kind();
@@ -2429,11 +2492,25 @@ where
             .turn_state_handle
             .as_deref()
             .map(crate::handles::TurnStateHandle::snapshot);
-        let input = match snapshot.and_then(|s| s.active_run_id) {
-            Some(run_id) => TurnExecutionInput::CancelNow { run_id },
-            None => TurnExecutionInput::ForceCancelNoRun,
-        };
-        let _ = self.apply_turn_input(input);
+        match snapshot.and_then(|s| s.active_run_id) {
+            Some(run_id) => {
+                self.apply_turn_input(TurnExecutionInput::CancelNow {
+                    run_id: run_id.clone(),
+                })?;
+                // Exclusive Agent ownership is returned only after the run
+                // future is gone. Report that observation to the turn owner,
+                // then realize its terminal effect through the ordinary seam.
+                let transition =
+                    self.apply_turn_input(TurnExecutionInput::CancellationObserved { run_id })?;
+                for effect in &transition.effects {
+                    self.execute_turn_terminal_effect(effect)?;
+                }
+            }
+            None => {
+                self.apply_turn_input(TurnExecutionInput::ForceCancelNoRun)?;
+            }
+        }
+        Ok(())
     }
 
     /// Consume canonical pending `skill_references` staged by the surface and
@@ -3257,6 +3334,375 @@ mod skill_activation_effect_tests {
                 Arc::new(NoopStore),
             )
             .await
+    }
+
+    fn skill_append(role: ConversationAppendRole, content: CoreRenderable) -> ConversationAppend {
+        ConversationAppend {
+            role,
+            content,
+            identity: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_skill_lowering_preserves_mixed_appends_and_media() {
+        use crate::types::{ContentBlock, ImageData};
+
+        let image = ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: ImageData::Inline {
+                data: "synthetic-image".into(),
+            },
+        };
+        let mut system = skill_append(
+            ConversationAppendRole::System,
+            CoreRenderable::text("system"),
+        );
+        system.identity = Some(crate::types::SystemMessageIdentity {
+            source: Some("host".into()),
+            idempotency_key: Some("ordered-system".into()),
+        });
+        let mut appends = vec![
+            system,
+            skill_append(
+                ConversationAppendRole::SystemNotice,
+                CoreRenderable::SystemNotice {
+                    kind: crate::types::SystemNoticeKind::Comms,
+                    body: Some("peer context".into()),
+                    blocks: vec![crate::types::SystemNoticeBlock::Comms {
+                        kind: crate::types::CommsNoticeKind::Message,
+                        direction: crate::types::SystemNoticeDirection::Incoming,
+                        peer: Some(crate::types::SystemNoticePeer {
+                            id: crate::comms::PeerId::new(),
+                            display_name: Some("peer".into()),
+                        }),
+                        request_id: Some("peer-request".into()),
+                        sender_taint: Some(crate::comms::SenderContentTaint::Tainted),
+                        intent: None,
+                        status: None,
+                        summary: None,
+                        payload: None,
+                        content: vec![image.clone()],
+                    }],
+                },
+            ),
+            skill_append(
+                ConversationAppendRole::InjectedContext,
+                CoreRenderable::Blocks {
+                    blocks: vec![
+                        ContentBlock::Text {
+                            text: "ambient".into(),
+                        },
+                        image.clone(),
+                    ],
+                },
+            ),
+            skill_append(
+                ConversationAppendRole::User,
+                CoreRenderable::Blocks {
+                    blocks: vec![
+                        ContentBlock::Text {
+                            text: "first".into(),
+                        },
+                        image,
+                    ],
+                },
+            ),
+            skill_append(
+                ConversationAppendRole::System,
+                CoreRenderable::text("later system"),
+            ),
+            skill_append(ConversationAppendRole::User, CoreRenderable::text("second")),
+        ];
+        let before = appends.clone();
+        let skills = ["first-skill", "second-skill"].map(|name| ContentBlock::SkillContext {
+            skill_key: fixture_skill_key(name),
+            text: format!("full {name} body"),
+        });
+        lower_skill_context_into_turn_appends(&mut appends, skills.to_vec()).unwrap();
+        assert_eq!(appends.len(), before.len());
+        for index in [0, 1, 2, 4, 5] {
+            assert_eq!(appends[index], before[index]);
+        }
+        let CoreRenderable::Blocks { blocks } = &appends[3].content else {
+            panic!("user must retain typed blocks");
+        };
+        let CoreRenderable::Blocks { blocks: original } = &before[3].content else {
+            unreachable!();
+        };
+        assert_eq!(&blocks[..2], skills.as_slice());
+        assert_eq!(&blocks[2..], original);
+        assert_eq!(appends[3].role, before[3].role);
+        assert_eq!(appends[3].identity, before[3].identity);
+        let unchanged = appends.clone();
+        lower_skill_context_into_turn_appends(&mut appends, Vec::new()).unwrap();
+        assert_eq!(appends, unchanged, "no activation must be an exact no-op");
+
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let identity = TranscriptMessageIdentity {
+            interaction_id: Some(crate::interaction::InteractionId(uuid::Uuid::from_u128(72))),
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::channel(64);
+        agent
+            .run_with_events_and_typed_turn_appends(
+                "first\nsecond".into(),
+                appends,
+                Vec::new(),
+                Some(identity.clone()),
+                tx,
+            )
+            .await
+            .unwrap();
+        let restored: Session =
+            serde_json::from_value(serde_json::to_value(agent.session()).unwrap()).unwrap();
+        let messages = restored.messages();
+        assert_eq!(messages.len(), 7);
+        assert!(
+            matches!(&messages[0], Message::System(message) if message.identity == before[0].identity)
+        );
+        let expected_notice = before[1].content.clone().into_system_notice_message();
+        assert!(matches!(&messages[1], Message::SystemNotice(message)
+            if message.kind == expected_notice.kind
+                && message.body == expected_notice.body
+                && message.blocks == expected_notice.blocks));
+        for index in [2, 3, 5] {
+            let Message::User(user) = &messages[index] else {
+                panic!("runtime-authored user role lost");
+            };
+            assert_eq!(user.identity, identity);
+            let expected = if index == 2 {
+                injected_context_message_from_operator_renderable(unchanged[index].content.clone())
+                    .unwrap()
+            } else {
+                user_message_from_operator_renderable(unchanged[index].content.clone()).unwrap()
+            };
+            assert_eq!(user.content, expected.content);
+            assert_eq!(user.transcript_role, expected.transcript_role);
+        }
+        assert!(
+            matches!(&messages[4], Message::System(message) if message.content == "later system")
+        );
+        let mut peer_events = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, AgentEvent::PeerContentIngested { .. }) {
+                peer_events += 1;
+            }
+        }
+        assert_eq!(
+            peer_events, 1,
+            "skill enrichment must not duplicate peer ingestion"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_skill_activation_commits_once_with_identity_and_hook_input() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let key = fixture_skill_key("email-extractor");
+        agent.pending_skill_references = Some(vec![key.clone()]);
+        let identity = TranscriptMessageIdentity {
+            interaction_id: Some(crate::interaction::InteractionId(uuid::Uuid::from_u128(71))),
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::channel(64);
+        agent
+            .run_with_events_and_typed_turn_appends(
+                "first\nsecond".into(),
+                vec![
+                    skill_append(
+                        ConversationAppendRole::InjectedContext,
+                        CoreRenderable::text("ambient"),
+                    ),
+                    skill_append(ConversationAppendRole::User, CoreRenderable::text("first")),
+                    skill_append(ConversationAppendRole::User, CoreRenderable::text("second")),
+                ],
+                Vec::new(),
+                Some(identity.clone()),
+                tx,
+            )
+            .await
+            .unwrap();
+        let users: Vec<_> = agent
+            .session()
+            .messages()
+            .iter()
+            .filter_map(|message| {
+                if let Message::User(user) = message {
+                    Some(user)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(users.len(), 3);
+        assert_eq!(
+            users[0].transcript_role,
+            crate::types::TranscriptUserRole::InjectedContext
+        );
+        assert_eq!(users[0].text_content(), "ambient");
+        assert_eq!(users[2].text_content(), "second");
+        for user in &users {
+            assert_eq!(user.identity, identity);
+        }
+        let crate::types::ContentBlock::SkillContext { skill_key, text } = &users[1].content[0]
+        else {
+            panic!("resolved context must be committed, not only emitted");
+        };
+        assert_eq!(skill_key, &key);
+        assert_eq!(text, "<skill>injected canonical skill</skill>");
+        assert_eq!(users[1].content.len(), 2);
+        let mut started = 0;
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::RunStarted { input, .. } = event {
+                started += 1;
+                assert!(serde_json::to_string(&input).unwrap().contains(text));
+            }
+        }
+        assert_eq!(started, 1);
+    }
+
+    #[tokio::test]
+    async fn standalone_skill_activation_keeps_typed_context() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        let key = fixture_skill_key("email-extractor");
+        agent.pending_skill_references = Some(vec![key.clone()]);
+        let (tx, _rx) = mpsc::channel(64);
+        agent
+            .run_with_events("standalone prompt".into(), tx)
+            .await
+            .unwrap();
+        let Message::User(user) = &agent.session().messages()[0] else {
+            panic!("standalone user message");
+        };
+        assert_eq!(
+            user.content,
+            vec![
+                crate::types::ContentBlock::SkillContext {
+                    skill_key: key,
+                    text: "<skill>injected canonical skill</skill>".into(),
+                },
+                crate::types::ContentBlock::Text {
+                    text: "standalone prompt".into(),
+                },
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_skill_activation_preserves_system_only_turns() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        agent.pending_skill_references = Some(vec![fixture_skill_key("email-extractor")]);
+        let (tx, _rx) = mpsc::channel(64);
+        agent
+            .run_with_events_and_typed_turn_appends(
+                "system context".into(),
+                vec![skill_append(
+                    ConversationAppendRole::System,
+                    CoreRenderable::text("system context"),
+                )],
+                Vec::new(),
+                None,
+                tx,
+            )
+            .await
+            .unwrap();
+        let messages = agent.session().messages();
+        assert!(
+            matches!(&messages[0], Message::System(system) if system.content == "system context")
+        );
+        assert!(
+            matches!(&messages[1], Message::User(user) if matches!(&user.content[..],
+            [crate::types::ContentBlock::SkillContext { .. }]))
+        );
+    }
+
+    struct DenySkillTurn;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl crate::HookEngine for DenySkillTurn {
+        async fn execute(
+            &self,
+            invocation: crate::HookInvocation,
+            _overrides: Option<&crate::HookRunOverrides>,
+        ) -> Result<crate::HookExecutionReport, crate::HookEngineError> {
+            Ok(crate::HookExecutionReport {
+                started: Vec::new(),
+                outcomes: Vec::new(),
+                decision: (invocation.point == HookPoint::RunStarted).then(|| {
+                    crate::HookDecision::deny(
+                        crate::HookId::new("deny-skill-turn"),
+                        crate::HookReasonCode::PolicyViolation,
+                        "synthetic denial",
+                        None,
+                    )
+                }),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_skill_activation_hook_denial_commits_no_appends() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        agent.hook_engine = Some(Arc::new(DenySkillTurn));
+        agent.pending_skill_references = Some(vec![fixture_skill_key("email-extractor")]);
+        let before = agent.session().messages().to_vec();
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = agent
+            .run_with_events_and_typed_turn_appends(
+                "denied".into(),
+                vec![
+                    skill_append(
+                        ConversationAppendRole::System,
+                        CoreRenderable::text("uncommitted system"),
+                    ),
+                    skill_append(
+                        ConversationAppendRole::InjectedContext,
+                        CoreRenderable::text("uncommitted context"),
+                    ),
+                    skill_append(ConversationAppendRole::User, CoreRenderable::text("denied")),
+                ],
+                Vec::new(),
+                None,
+                tx,
+            )
+            .await;
+        assert!(matches!(result, Err(AgentError::HookDenied { .. })));
+        assert_eq!(agent.session().messages(), before);
+        while let Ok(event) = rx.try_recv() {
+            assert!(!matches!(event, AgentEvent::RunStarted { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_skill_activation_invalid_user_shape_fails_before_any_append() {
+        let mut agent = build_agent_with_engine(SucceedingSkillEngine).await;
+        agent.pending_skill_references = Some(vec![fixture_skill_key("email-extractor")]);
+        let before = agent.session().messages().to_vec();
+        let (tx, _rx) = mpsc::channel(64);
+        let error = agent
+            .run_with_events_and_typed_turn_appends(
+                "invalid".into(),
+                vec![
+                    skill_append(
+                        ConversationAppendRole::System,
+                        CoreRenderable::text("uncommitted"),
+                    ),
+                    skill_append(
+                        ConversationAppendRole::User,
+                        CoreRenderable::Json {
+                            value: serde_json::json!({"not": "operator"}),
+                        },
+                    ),
+                ],
+                Vec::new(),
+                None,
+                tx,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentError::ConfigError(_)));
+        assert_eq!(agent.session().messages(), before);
     }
 
     fn with_test_turn_state_handle(builder: AgentBuilder) -> AgentBuilder {

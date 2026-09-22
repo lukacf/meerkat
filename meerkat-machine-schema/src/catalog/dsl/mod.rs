@@ -2862,6 +2862,7 @@ runtime_internal_inputs!(
         RunCompleted,
         RunFailed,
         RuntimeExecutorExited,
+        CloseStandaloneTurn,
         ServiceTurnCommitted,
         RuntimeLoopStoppedForUnregister,
         SatisfyWaitAll,

@@ -24,9 +24,12 @@ use std::sync::Arc;
 
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat_mob::{
-    AgentIdentity, MobBuilder, MobDefinition, MobEventKind, MobStorage, SpawnMemberSpec,
-    validate_definition,
+    AgentIdentity, MobBuilder, MobDefinition, MobEventKind, MobRuntimeMode, MobStorage,
+    SpawnMemberSpec, validate_definition,
 };
+
+mod tracked_turn;
+use tracked_turn::DemoError;
 
 const CODING_SWARM_TOML: &str = r#"
 [mob]
@@ -84,8 +87,11 @@ fn event_label(kind: &MobEventKind) -> &'static str {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), DemoError> {
+    meerkat_runtime::host_stack::run_host("017-mob-coding-swarm", async_main)?
+}
+
+async fn async_main() -> Result<(), DemoError> {
     let _api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
@@ -223,7 +229,9 @@ content = "Implement Rust services, APIs, and data models."
 
     // Spawn an orchestrator (lead profile) and a worker.
     println!("\nSpawning agents...");
-    let mut lead_spec = SpawnMemberSpec::new("lead", "lead-1");
+    // Exact tracked turns use the turn-driven lane, not autonomous inbox delivery.
+    let mut lead_spec =
+        SpawnMemberSpec::new("lead", "lead-1").with_runtime_mode(MobRuntimeMode::TurnDriven);
     lead_spec.initial_message = Some("You are the coding swarm orchestrator.".to_string().into());
     let lead_ref = handle.spawn_spec(lead_spec).await?;
     println!("  Spawned lead-1: {lead_ref:?}");
@@ -254,28 +262,23 @@ content = "Implement Rust services, APIs, and data models."
 
     // Send a task to the orchestrator (external turn -- lead is external_addressable).
     println!("\nSending task to orchestrator (live LLM call)...");
-    handle
-        .member(&AgentIdentity::from("lead-1"))
-        .await?
-        .send(
-            "Plan a small task: write a function that reverses a string in Rust. \
+    let lead = handle.member(&AgentIdentity::from("lead-1")).await?;
+    let turn_result = tracked_turn::report_turn(
+        &lead,
+        "Plan a small task: write a function that reverses a string in Rust. \
              Describe the plan in 2-3 sentences. Do NOT spawn workers or use any tools -- \
-             just describe the plan in plain text."
-                .to_string(),
-            meerkat_core::types::HandlingMode::Queue,
-        )
-        .await?;
-
-    // Poll for mob events until we see activity (with timeout).
-    println!("Waiting for response...");
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let ev = handle.poll_events(0, 1).await?;
-        if !ev.is_empty() || tokio::time::Instant::now() > deadline {
-            break;
+             just describe the plan in plain text.",
+        std::time::Duration::from_secs(60),
+        &mut std::io::stdout(),
+    )
+    .await;
+    if let Err(error) = turn_result {
+        if let Err(cleanup_error) = handle.retire_all().await {
+            eprintln!("Cleanup also failed: {cleanup_error}");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        return Err(error);
     }
+    // Lifecycle events are diagnostic only; the exact response is already shown.
     let events = handle.poll_events(0, 50).await?;
     println!("\nMob events ({} total):", events.len());
     for event in &events {

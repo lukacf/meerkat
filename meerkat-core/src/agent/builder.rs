@@ -2217,6 +2217,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropped_run_cancel_observes_generated_terminal_without_erasing_identity() {
+        use crate::TurnStateHandle;
+        use crate::turn_execution_authority::{
+            ContentShape, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+        };
+
+        let handle = Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(handle.clone())
+            .with_runtime_test_visibility_owner(explicit_test_visibility_owner())
+            .build_standalone(
+                Arc::new(MockClient),
+                Arc::new(MockTools),
+                Arc::new(MockStore),
+            )
+            .await;
+        let run_id = crate::lifecycle::RunId::new();
+        handle
+            .start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .unwrap();
+        handle.primitive_applied(run_id.clone()).unwrap();
+
+        agent.cancel();
+
+        let terminal = handle.snapshot();
+        assert_eq!(terminal.turn_phase, TurnPhase::Cancelled);
+        assert_eq!(terminal.terminal_run_id, Some(run_id));
+        assert_eq!(
+            terminal.terminal_outcome,
+            Some(TurnTerminalOutcome::Cancelled)
+        );
+        assert!(terminal.active_run_id.is_none());
+        agent.cancel();
+        assert_eq!(handle.snapshot(), terminal);
+
+        let resumed = agent
+            .run("continue after direct cancellation".to_string().into())
+            .await
+            .expect("the direct core builder can run again after cancellation");
+        assert_eq!(resumed.text, "Done");
+        let completed = handle.snapshot();
+        assert_eq!(completed.turn_phase, TurnPhase::Completed);
+        assert_eq!(
+            completed.terminal_outcome,
+            Some(TurnTerminalOutcome::Completed)
+        );
+        assert_ne!(completed.terminal_run_id, terminal.terminal_run_id);
+    }
+
+    #[tokio::test]
+    async fn direct_test_builder_without_turn_authority_keeps_best_effort_cancel_contract() {
+        let mut agent = AgentBuilder::new()
+            .with_runtime_test_visibility_owner(explicit_test_visibility_owner())
+            .require_runtime_execution_kind_stamp()
+            .build_standalone(
+                Arc::new(MockClient),
+                Arc::new(MockTools),
+                Arc::new(MockStore),
+            )
+            .await;
+        assert!(agent.turn_state_handle().is_none());
+
+        // This construction escape hatch is test-only; no fallback machine
+        // should be invented when the fixture deliberately omits authority.
+        agent
+            .execute_turn_terminal_effect(
+                &crate::turn_execution_authority::TurnExecutionEffect::RunCompleted {
+                    run_id: crate::lifecycle::RunId::new(),
+                },
+            )
+            .expect("the absent-handle terminal callback remains a no-op");
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+        agent.cancel();
+        assert!(agent.turn_state_handle().is_none());
+        let error = agent
+            .run("unstamped follow-up".to_string().into())
+            .await
+            .expect_err("best-effort cancellation must still consume the execution stamp");
+        assert!(error.to_string().contains("runtime_execution_kind not set"));
+    }
+
+    #[tokio::test]
     async fn runtime_backed_cancel_consumes_execution_kind_stamp() {
         let client = Arc::new(MockClient);
         let tools = Arc::new(MockTools);

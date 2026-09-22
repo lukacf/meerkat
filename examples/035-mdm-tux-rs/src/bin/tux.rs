@@ -40,7 +40,7 @@ use tokio::sync::mpsc;
 
 use mdm_tux::machines::tux_claim::{self, State as ClaimState};
 use mdm_tux::machines::tux_kennel_control::{
-    self, Effect as TkcEffect, Event as TkcEvent, State as TuxKennelState,
+    self, BrokerEpoch, Effect as TkcEffect, Event as TkcEvent, State as TuxKennelState,
 };
 use mdm_tux::rpc_client::RpcClient;
 use mdm_tux::{
@@ -58,20 +58,15 @@ enum TargetPhase {
     Running,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HandlingMode {
-    Steer,
-    Queue,
-}
-
 struct TargetView {
+    stream_binding: Option<mdm_tux::rpc_client::StreamBinding>,
+    connection: Option<mdm_tux::rpc_client::RpcConnection>,
     name: String,
     target_id: String,
     rpc_addr: String,
     session_id: Option<String>,
     history: VecDeque<String>,
     streaming_text: String,
-    handling_mode: HandlingMode,
     phase: TargetPhase,
     /// Channel to cancel background notification listener.
     _cancel_tx: Option<mpsc::Sender<()>>,
@@ -83,13 +78,14 @@ struct TargetView {
 impl TargetView {
     fn new(name: String, target_id: String, rpc_addr: String) -> Self {
         Self {
+            stream_binding: None,
+            connection: None,
             name,
             target_id,
             rpc_addr,
             session_id: None,
             history: VecDeque::new(),
             streaming_text: String::new(),
-            handling_mode: HandlingMode::Steer,
             phase: TargetPhase::Disconnected,
             _cancel_tx: None,
             known_models: HashSet::new(),
@@ -192,6 +188,29 @@ struct App {
 }
 
 impl App {
+    fn active_view(&self) -> Option<&TargetView> {
+        if self.mode == Mode::Hive {
+            Some(
+                self.find_target_by_id("hive")
+                    .and_then(|idx| self.targets.get(idx))
+                    .unwrap_or(&self.hive_view),
+            )
+        } else {
+            self.selected_target()
+        }
+    }
+
+    fn active_view_mut(&mut self) -> Option<&mut TargetView> {
+        if self.mode == Mode::Hive {
+            match self.find_target_by_id("hive") {
+                Some(idx) => self.targets.get_mut(idx),
+                None => Some(&mut self.hive_view),
+            }
+        } else {
+            self.selected_target_mut()
+        }
+    }
+
     fn selected_target(&self) -> Option<&TargetView> {
         self.targets.get(self.selected)
     }
@@ -241,10 +260,12 @@ enum TuiEvent {
     /// A target's RPC client connected.
     TargetConnected {
         target_id: String,
+        connection: mdm_tux::rpc_client::RpcConnection,
     },
     /// A target's RPC client disconnected.
     TargetDisconnected {
         target_id: String,
+        connection: mdm_tux::rpc_client::RpcConnection,
     },
     /// RPC response to display.
     RpcResponse {
@@ -258,29 +279,29 @@ enum TuiEvent {
     /// Session created or resumed.
     SessionBound {
         target_id: String,
-        session_id: String,
+        binding: mdm_tux::rpc_client::StreamBinding,
+    },
+    SessionBindingFailed {
+        target_id: String,
+        selection: mdm_tux::rpc_client::BindingSelection,
+        message: String,
     },
     /// Streaming event from a target.
     StreamEvent {
         target_id: String,
         event: Value,
+        binding: mdm_tux::rpc_client::StreamBinding,
     },
-    /// Kennel events.
-    KennelAvailableTargets(Vec<TargetListEntry>),
-    KennelMineTargets(Vec<TargetListEntry>),
-    KennelClaimGranted(Vec<ClaimGrant>),
-    KennelClaimReleased {
+    StreamEnded {
         target_id: String,
-        lease_ref: LeaseRef,
-        reason: LeaseTerminationReason,
+        binding: mdm_tux::rpc_client::StreamBinding,
     },
+    Kennel {
+        epoch: BrokerEpoch,
+        event: KennelUiEvent,
+    },
+    /// Diagnostics before a signed broker registration exists.
     KennelError(String),
-    /// Kennel gave us a new target with RPC addr.
-    KennelTargetDiscovered {
-        target_id: String,
-        name: String,
-        rpc_addr: String,
-    },
     /// Model catalog response.
     ModelCatalog {
         target_id: String,
@@ -290,6 +311,23 @@ enum TuiEvent {
     SessionList {
         target_id: String,
         sessions: Value,
+    },
+}
+
+enum KennelUiEvent {
+    AvailableTargets(Vec<TargetListEntry>),
+    MineTargets(Vec<TargetListEntry>),
+    ClaimGranted(Vec<ClaimGrant>),
+    ClaimReleased {
+        target_id: String,
+        lease_ref: LeaseRef,
+        reason: LeaseTerminationReason,
+    },
+    Error(String),
+    Reconciled,
+    HiveRegistered {
+        rpc_addr: String,
+        session_id: Option<String>,
     },
     /// Hive agent responses from the kennel.
     HiveStreamEvent {
@@ -303,6 +341,15 @@ enum TuiEvent {
     },
 }
 
+impl TuiEvent {
+    fn kennel(epoch: &BrokerEpoch, event: KennelUiEvent) -> Self {
+        Self::Kennel {
+            epoch: epoch.clone(),
+            event,
+        }
+    }
+}
+
 // ── Commands to background RPC tasks ─────────────────────────────────────────
 
 enum RpcCommand {
@@ -311,18 +358,21 @@ enum RpcCommand {
         target_id: String,
         session_id: String,
         prompt: String,
-        handling_mode: HandlingMode,
         model: Option<String>,
     },
     /// List sessions.
-    ListSessions { target_id: String },
+    ListSessions {
+        target_id: String,
+    },
     /// Resume a session by ID.
     ResumeSession {
         target_id: String,
         session_id: String,
     },
     /// List models.
-    ListModels { target_id: String },
+    ListModels {
+        target_id: String,
+    },
     /// Interrupt a running turn.
     Interrupt {
         target_id: String,
@@ -330,17 +380,17 @@ enum RpcCommand {
     },
     /// Resume the most recent session. Session creation is not implemented
     /// for a fresh direct target.
-    ResumeLatestOrCreate { target_id: String },
-    /// Respawn a mob member via the hive. Retires + re-spawns with fresh
-    /// comms wiring. Used instead of raw session/create for mob members.
-    MobRespawn {
-        /// The target name (mob member agent identity).
-        target_name: String,
-        /// Current session to archive before creating a new hive session.
-        current_session_id: Option<String>,
+    ResumeLatestOrCreate {
+        target_id: String,
     },
     /// Connect to a target's RPC address.
-    Connect { target_id: String, rpc_addr: String },
+    Connect {
+        target_id: String,
+        rpc_addr: String,
+    },
+    Disconnect {
+        target_id: String,
+    },
 }
 
 enum KennelClientCommand {
@@ -360,20 +410,63 @@ enum KennelClientCommand {
 
 // ── RPC command processor ────────────────────────────────────────────────────
 
+struct RpcTargetConnection {
+    attempt: u64,
+    client: Option<Arc<RpcClient>>,
+}
+
 async fn rpc_command_loop(
     mut command_rx: mpsc::UnboundedReceiver<RpcCommand>,
     event_tx: mpsc::Sender<TuiEvent>,
 ) {
-    // Map target_id -> (RpcClient, notification_listener_cancel)
-    let clients: Arc<tokio::sync::Mutex<HashMap<String, Arc<RpcClient>>>> =
+    let clients: Arc<tokio::sync::Mutex<HashMap<String, RpcTargetConnection>>> =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let mut next_connection_attempt = 0u64;
 
     while let Some(cmd) = command_rx.recv().await {
         match cmd {
+            RpcCommand::Disconnect { target_id } => {
+                let client = clients
+                    .lock()
+                    .await
+                    .remove(&target_id)
+                    .and_then(|slot| slot.client);
+                if let Some(client) = client {
+                    client.shutdown().await;
+                    let _ = event_tx
+                        .send(TuiEvent::TargetDisconnected {
+                            target_id,
+                            connection: client.connection(),
+                        })
+                        .await;
+                }
+            }
             RpcCommand::Connect {
                 target_id,
                 rpc_addr,
             } => {
+                next_connection_attempt += 1;
+                let attempt = next_connection_attempt;
+                let previous = clients
+                    .lock()
+                    .await
+                    .insert(
+                        target_id.clone(),
+                        RpcTargetConnection {
+                            attempt,
+                            client: None,
+                        },
+                    )
+                    .and_then(|slot| slot.client);
+                if let Some(previous) = previous {
+                    previous.shutdown().await;
+                    let _ = event_tx
+                        .send(TuiEvent::TargetDisconnected {
+                            target_id: target_id.clone(),
+                            connection: previous.connection(),
+                        })
+                        .await;
+                }
                 let event_tx = event_tx.clone();
                 let clients = clients.clone();
                 let tid = target_id.clone();
@@ -387,24 +480,35 @@ async fn rpc_command_loop(
                             if let Err(e) =
                                 client.request("initialize", serde_json::json!({})).await
                             {
-                                let _ = event_tx
-                                    .send(TuiEvent::RpcError {
-                                        target_id: tid,
-                                        message: format!("initialize failed: {e}"),
-                                    })
-                                    .await;
+                                let map = clients.lock().await;
+                                if map.get(&tid).is_some_and(|slot| slot.attempt == attempt) {
+                                    let _ = event_tx
+                                        .send(TuiEvent::RpcError {
+                                            target_id: tid,
+                                            message: format!("initialize failed: {e}"),
+                                        })
+                                        .await;
+                                }
                                 return;
                             }
                             let client = Arc::new(client);
                             {
                                 let mut map = clients.lock().await;
-                                map.insert(tid.clone(), client.clone());
+                                let Some(slot) =
+                                    map.get_mut(&tid).filter(|slot| slot.attempt == attempt)
+                                else {
+                                    drop(map);
+                                    client.shutdown().await;
+                                    return;
+                                };
+                                slot.client = Some(client.clone());
+                                let _ = event_tx
+                                    .send(TuiEvent::TargetConnected {
+                                        target_id: tid.clone(),
+                                        connection: client.connection(),
+                                    })
+                                    .await;
                             }
-                            let _ = event_tx
-                                .send(TuiEvent::TargetConnected {
-                                    target_id: tid.clone(),
-                                })
-                                .await;
                             // Drain notifications
                             let event_tx2 = event_tx.clone();
                             let tid2 = tid.clone();
@@ -412,31 +516,43 @@ async fn rpc_command_loop(
                             let this_client = client.clone();
                             tokio::spawn(async move {
                                 while let Some(notification) = ntf_rx.recv().await {
-                                    let method = notification
-                                        .get("method")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    match method {
-                                        "session/stream_event" | "session/event" => {
-                                            let params = notification
-                                                .get("params")
-                                                .cloned()
-                                                .unwrap_or(Value::Null);
-                                            let _ = event_tx2
-                                                .send(TuiEvent::StreamEvent {
-                                                    target_id: tid2.clone(),
-                                                    event: params,
-                                                })
-                                                .await;
-                                        }
-                                        _ => {}
+                                    let current = clients2
+                                        .lock()
+                                        .await
+                                        .get(&tid2)
+                                        .and_then(|slot| slot.client.as_ref())
+                                        .is_some_and(|active| Arc::ptr_eq(active, &this_client));
+                                    if !current {
+                                        break;
+                                    }
+                                    if let Some((binding, params)) =
+                                        this_client.stream_notification(&notification).await
+                                    {
+                                        let _ = event_tx2
+                                            .send(TuiEvent::StreamEvent {
+                                                target_id: tid2.clone(),
+                                                event: params,
+                                                binding,
+                                            })
+                                            .await;
+                                    } else if let Some(binding) =
+                                        this_client.ended_stream(&notification).await
+                                    {
+                                        let _ = event_tx2
+                                            .send(TuiEvent::StreamEnded {
+                                                target_id: tid2.clone(),
+                                                binding,
+                                            })
+                                            .await;
                                     }
                                 }
                                 // Remove dead client, but only if no newer
                                 // connection has already replaced it.
                                 let was_current = {
                                     let mut map = clients2.lock().await;
-                                    if let Some(existing) = map.get(&tid2) {
+                                    if let Some(existing) =
+                                        map.get(&tid2).and_then(|slot| slot.client.as_ref())
+                                    {
                                         if Arc::ptr_eq(existing, &this_client) {
                                             map.remove(&tid2);
                                             true
@@ -452,18 +568,24 @@ async fn rpc_command_loop(
                                 // overridden by a stale disconnect event.
                                 if was_current {
                                     let _ = event_tx2
-                                        .send(TuiEvent::TargetDisconnected { target_id: tid2 })
+                                        .send(TuiEvent::TargetDisconnected {
+                                            target_id: tid2,
+                                            connection: this_client.connection(),
+                                        })
                                         .await;
                                 }
                             });
                         }
                         Err(e) => {
-                            let _ = event_tx
-                                .send(TuiEvent::RpcError {
-                                    target_id: tid,
-                                    message: format!("connect failed: {e}"),
-                                })
-                                .await;
+                            let map = clients.lock().await;
+                            if map.get(&tid).is_some_and(|slot| slot.attempt == attempt) {
+                                let _ = event_tx
+                                    .send(TuiEvent::RpcError {
+                                        target_id: tid,
+                                        message: format!("connect failed: {e}"),
+                                    })
+                                    .await;
+                            }
                         }
                     }
                 });
@@ -472,7 +594,6 @@ async fn rpc_command_loop(
                 target_id,
                 session_id,
                 prompt,
-                handling_mode,
                 model,
             } => {
                 let event_tx = event_tx.clone();
@@ -480,7 +601,7 @@ async fn rpc_command_loop(
                 tokio::spawn(async move {
                     let client = {
                         let map = clients.lock().await;
-                        map.get(&target_id).cloned()
+                        map.get(&target_id).and_then(|slot| slot.client.clone())
                     };
                     let Some(client) = client else {
                         let _ = event_tx
@@ -491,15 +612,7 @@ async fn rpc_command_loop(
                             .await;
                         return;
                     };
-                    let mode_str = match handling_mode {
-                        HandlingMode::Steer => "steer",
-                        HandlingMode::Queue => "queue",
-                    };
-                    let mut params = serde_json::json!({
-                        "session_id": session_id,
-                        "prompt": prompt,
-                        "handling_mode": mode_str,
-                    });
+                    let mut params = mdm_tux::rpc_client::turn_params(&session_id, &prompt);
                     if let Some(m) = model {
                         // Infer provider from model name prefix
                         let provider = if m.starts_with("claude-") {
@@ -538,7 +651,7 @@ async fn rpc_command_loop(
                 tokio::spawn(async move {
                     let client = {
                         let map = clients.lock().await;
-                        map.get(&target_id).cloned()
+                        map.get(&target_id).and_then(|slot| slot.client.clone())
                     };
                     let Some(client) = client else {
                         let _ = event_tx
@@ -575,12 +688,14 @@ async fn rpc_command_loop(
             } => {
                 let event_tx = event_tx.clone();
                 let clients = clients.clone();
+                let selected = clients
+                    .lock()
+                    .await
+                    .get(&target_id)
+                    .and_then(|slot| slot.client.as_ref())
+                    .map(|client| (client.clone(), client.begin_binding()));
                 tokio::spawn(async move {
-                    let client = {
-                        let map = clients.lock().await;
-                        map.get(&target_id).cloned()
-                    };
-                    let Some(client) = client else {
+                    let Some((client, pending)) = selected else {
                         let _ = event_tx
                             .send(TuiEvent::RpcError {
                                 target_id,
@@ -589,27 +704,29 @@ async fn rpc_command_loop(
                             .await;
                         return;
                     };
+                    let selection = pending.selection();
                     // Bind only after the server confirms that the session
                     // exists and its stream was opened.
-                    match client
-                        .request(
-                            "session/stream_open",
-                            serde_json::json!({ "session_id": session_id }),
-                        )
-                        .await
-                    {
-                        Ok(_) => {
+                    match client.bind_selected(&session_id, pending).await {
+                        Ok(binding) => {
+                            if !clients
+                                .lock()
+                                .await
+                                .get(&target_id)
+                                .and_then(|slot| slot.client.as_ref())
+                                .is_some_and(|active| Arc::ptr_eq(active, &client))
+                            {
+                                return;
+                            }
                             let _ = event_tx
-                                .send(TuiEvent::SessionBound {
-                                    target_id,
-                                    session_id,
-                                })
+                                .send(TuiEvent::SessionBound { target_id, binding })
                                 .await;
                         }
                         Err(e) => {
                             let _ = event_tx
-                                .send(TuiEvent::RpcError {
+                                .send(TuiEvent::SessionBindingFailed {
                                     target_id,
+                                    selection,
                                     message: format!("session/stream_open failed: {e}"),
                                 })
                                 .await;
@@ -623,7 +740,7 @@ async fn rpc_command_loop(
                 tokio::spawn(async move {
                     let client = {
                         let map = clients.lock().await;
-                        map.get(&target_id).cloned()
+                        map.get(&target_id).and_then(|slot| slot.client.clone())
                     };
                     let Some(client) = client else {
                         let _ = event_tx
@@ -666,7 +783,7 @@ async fn rpc_command_loop(
                 tokio::spawn(async move {
                     let client = {
                         let map = clients.lock().await;
-                        map.get(&target_id).cloned()
+                        map.get(&target_id).and_then(|slot| slot.client.clone())
                     };
                     let Some(client) = client else {
                         let _ = event_tx
@@ -703,192 +820,64 @@ async fn rpc_command_loop(
                     }
                 });
             }
-            RpcCommand::MobRespawn {
-                target_name,
-                current_session_id,
-            } => {
+            RpcCommand::ResumeLatestOrCreate { target_id } => {
                 let event_tx = event_tx.clone();
                 let clients = clients.clone();
+                let selected = clients
+                    .lock()
+                    .await
+                    .get(&target_id)
+                    .and_then(|slot| slot.client.as_ref())
+                    .map(|client| (client.clone(), client.begin_binding()));
                 tokio::spawn(async move {
-                    // Hive is the orchestrator session, not a mob member.
-                    // /new on hive archives the current session and creates
-                    // a fresh one. For regular targets, mob/respawn is used.
-                    if target_name == "hive" {
-                        let client = {
-                            let map = clients.lock().await;
-                            map.get("hive").cloned()
-                        };
-                        let Some(client) = client else {
-                            let _ = event_tx
-                                .send(TuiEvent::RpcError {
-                                    target_id: target_name,
-                                    message: "no hive RPC connection".into(),
-                                })
-                                .await;
-                            return;
-                        };
-                        // Archive the current session when it is known, then
-                        // create a fresh hive session.
-                        if let Some(session_id) = current_session_id {
-                            if let Err(e) = client
-                                .request(
-                                    "session/archive",
-                                    serde_json::json!({ "session_id": session_id }),
-                                )
-                                .await
-                            {
-                                let _ = event_tx
-                                    .send(TuiEvent::RpcError {
-                                        target_id: target_name,
-                                        message: format!("session/archive failed: {e}"),
-                                    })
-                                    .await;
-                                return;
-                            }
-                        }
-                        match client
-                            .request("session/create", serde_json::json!({
-                                "prompt": "You are the hive orchestrator. Use peers as the source of truth, then use send_request and send_message to manage the fleet.",
-                                "initial_turn": "deferred"
-                            }))
-                            .await
-                        {
-                            Ok(result) => {
-                                let sid = result
-                                    .get("session_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown");
-                                if sid != "unknown" {
-                                    let _ = event_tx
-                                        .send(TuiEvent::SessionBound {
-                                            target_id: target_name.clone(),
-                                            session_id: sid.to_string(),
-                                        })
-                                        .await;
+                    let Some((client, pending)) = selected else {
+                        return;
+                    };
+                    let selection = pending.selection();
+                    // Try to find an existing session to resume.
+                    if let Ok(list_result) =
+                        client.request("session/list", serde_json::json!({})).await
+                        && let Some(sessions) =
+                            list_result.get("sessions").and_then(|v| v.as_array())
+                        && let Some(latest) = sessions.first()
+                        && let Some(sid) = latest.get("session_id").and_then(|v| v.as_str())
+                    {
+                        match client.bind_selected(sid, pending).await {
+                            Ok(binding) => {
+                                if !clients
+                                    .lock()
+                                    .await
+                                    .get(&target_id)
+                                    .and_then(|slot| slot.client.as_ref())
+                                    .is_some_and(|active| Arc::ptr_eq(active, &client))
+                                {
+                                    return;
                                 }
                                 let _ = event_tx
-                                    .send(TuiEvent::RpcResponse {
-                                        target_id: target_name,
-                                        body: format!("new hive session: {sid}"),
+                                    .send(TuiEvent::SessionBound {
+                                        target_id: target_id.clone(),
+                                        binding,
                                     })
                                     .await;
                             }
                             Err(e) => {
                                 let _ = event_tx
-                                    .send(TuiEvent::RpcError {
-                                        target_id: target_name,
-                                        message: format!("session/create failed: {e}"),
+                                    .send(TuiEvent::SessionBindingFailed {
+                                        target_id: target_id.clone(),
+                                        selection,
+                                        message: format!("session/stream_open failed: {e}"),
                                     })
                                     .await;
                             }
                         }
                         return;
                     }
-
-                    // mob/respawn routes to the hive (kennel mode) or the
-                    // target itself. Fresh direct targets do not currently
-                    // create the local mob definition required by this call.
-                    let (client, mob_id) = {
-                        let map = clients.lock().await;
-                        if let Some(hive) = map.get("hive").cloned() {
-                            (hive, "hive-fleet".to_string())
-                        } else if let Some(target) = map.get(&target_name).cloned() {
-                            // Direct mode: the target manages its own mob.
-                            (target, "local".to_string())
-                        } else {
-                            let _ = event_tx
-                                .send(TuiEvent::RpcError {
-                                    target_id: target_name,
-                                    message: "no RPC connection for mob/respawn".into(),
-                                })
-                                .await;
-                            return;
-                        }
-                    };
-                    match client
-                        .request(
-                            "mob/respawn",
-                            serde_json::json!({
-                                "mob_id": mob_id,
-                                "agent_identity": target_name,
-                            }),
-                        )
-                        .await
-                    {
-                        Ok(result) => {
-                            let _ = event_tx
-                                .send(TuiEvent::RpcResponse {
-                                    target_id: target_name,
-                                    body: format!("respawned: {result}"),
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = event_tx
-                                .send(TuiEvent::RpcError {
-                                    target_id: target_name,
-                                    message: format!("mob/respawn failed: {e}"),
-                                })
-                                .await;
-                        }
-                    }
-                });
-            }
-            RpcCommand::ResumeLatestOrCreate { target_id } => {
-                let event_tx = event_tx.clone();
-                let clients = clients.clone();
-                tokio::spawn(async move {
-                    let client = {
-                        let map = clients.lock().await;
-                        map.get(&target_id).cloned()
-                    };
-                    let Some(client) = client else { return };
-                    // Try to find an existing session to resume.
-                    if let Ok(list_result) =
-                        client.request("session/list", serde_json::json!({})).await
-                    {
-                        if let Some(sessions) =
-                            list_result.get("sessions").and_then(|v| v.as_array())
-                        {
-                            if let Some(latest) = sessions.first() {
-                                if let Some(sid) = latest.get("session_id").and_then(|v| v.as_str())
-                                {
-                                    match client
-                                        .request(
-                                            "session/stream_open",
-                                            serde_json::json!({ "session_id": sid }),
-                                        )
-                                        .await
-                                    {
-                                        Ok(_) => {
-                                            let _ = event_tx
-                                                .send(TuiEvent::SessionBound {
-                                                    target_id: target_id.clone(),
-                                                    session_id: sid.to_string(),
-                                                })
-                                                .await;
-                                        }
-                                        Err(e) => {
-                                            let _ = event_tx
-                                                .send(TuiEvent::RpcError {
-                                                    target_id: target_id.clone(),
-                                                    message: format!(
-                                                        "session/stream_open failed: {e}"
-                                                    ),
-                                                })
-                                                .await;
-                                        }
-                                    }
-                                    return;
-                                }
-                            }
-                        }
-                    }
                     // No existing session. Kennel mode normally creates one
                     // before TUX connects, but fresh direct mode does not.
                     let _ = event_tx
-                        .send(TuiEvent::RpcError {
+                        .send(TuiEvent::SessionBindingFailed {
                             target_id,
+                            selection,
                             message: "no persisted session found; fresh direct-session creation is not implemented"
                                 .into(),
                         })
@@ -975,10 +964,8 @@ fn handle_stream_event(target: &mut TargetView, params: &Value) {
                 .map(|blocks| {
                     blocks
                         .iter()
-                        .filter_map(|b| {
-                            (b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                                .then(|| b.get("text").and_then(|t| t.as_str()).unwrap_or(""))
-                        })
+                        .filter(|&b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                        .map(|b| b.get("text").and_then(|t| t.as_str()).unwrap_or(""))
                         .collect::<Vec<_>>()
                         .join("\n")
                 })
@@ -1315,6 +1302,7 @@ async fn spawn_kennel_client(
     tux_id: String,
     _direct_addr: String,
 ) {
+    let mut broker_signer: Option<String> = None;
     'outer: loop {
         let stream =
             match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&kennel_addr))
@@ -1359,7 +1347,11 @@ async fn spawn_kennel_client(
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         };
-        if verify_envelope(&env).is_err() {
+        if verify_envelope(&env).is_err()
+            || broker_signer
+                .as_ref()
+                .is_some_and(|signer| signer != &env.signer_id)
+        {
             let _ = event_tx
                 .send(TuiEvent::KennelError(
                     "[kennel] invalid signed register reply".into(),
@@ -1368,11 +1360,27 @@ async fn spawn_kennel_client(
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
-        let (hive_rpc_addr, hive_session_id) = match &env.payload {
+        broker_signer = Some(env.signer_id.clone());
+        let (hive_rpc_addr, hive_session_id, epoch) = match &env.payload {
             KennelPayload::TuxRegistered {
                 hive_rpc_addr,
                 hive_session_id,
-            } => (hive_rpc_addr.clone(), hive_session_id.clone()),
+                broker_incarnation,
+            } => {
+                let epoch = BrokerEpoch::new(broker_incarnation.clone());
+                let _ = apply_tkc_event(
+                    &claims,
+                    Some(&kennel_cmd_tx),
+                    TkcEvent::BrokerRegistered {
+                        epoch: epoch.clone(),
+                    },
+                    |_| (),
+                );
+                let _ = event_tx
+                    .send(TuiEvent::kennel(&epoch, KennelUiEvent::Reconciled))
+                    .await;
+                (hive_rpc_addr.clone(), hive_session_id.clone(), epoch)
+            }
             _ => {
                 let _ = event_tx
                     .send(TuiEvent::KennelError(format!(
@@ -1384,31 +1392,17 @@ async fn spawn_kennel_client(
                 continue;
             }
         };
-        // If the kennel has a hive agent, add it as a connectable target
+        // Advertise and connect only after the UI validates this broker epoch.
         if let Some(addr) = hive_rpc_addr {
             let _ = event_tx
-                .send(TuiEvent::KennelTargetDiscovered {
-                    target_id: "hive".into(),
-                    name: "hive".into(),
-                    rpc_addr: addr.clone(),
-                })
+                .send(TuiEvent::kennel(
+                    &epoch,
+                    KennelUiEvent::HiveRegistered {
+                        rpc_addr: addr,
+                        session_id: hive_session_id,
+                    },
+                ))
                 .await;
-            // Pre-bind the hive session supplied by the kennel. The fallback
-            // connection path only resumes persisted sessions; it does not
-            // create one.
-            if let Some(sid) = hive_session_id {
-                let _ = event_tx
-                    .send(TuiEvent::SessionBound {
-                        target_id: "hive".into(),
-                        session_id: sid,
-                    })
-                    .await;
-            }
-            // Auto-connect to hive RPC
-            let _ = _rpc_command_tx.send(RpcCommand::Connect {
-                target_id: "hive".into(),
-                rpc_addr: addr,
-            });
         }
         let _ = apply_tkc_event(
             &claims,
@@ -1420,6 +1414,7 @@ async fn spawn_kennel_client(
         let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
         let mut refresh = tokio::time::interval(Duration::from_secs(5));
         let mut renew = tokio::time::interval(Duration::from_secs(15));
+        let mut claim_requests: HashMap<String, Vec<String>> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -1457,15 +1452,31 @@ async fn spawn_kennel_client(
                 }
                 maybe = read_envelope(&mut reader) => {
                     let Some(env) = maybe.ok().flatten() else { break; };
-                    if verify_envelope(&env).is_err() {
+                    if verify_envelope(&env).is_err()
+                        || broker_signer.as_ref() != Some(&env.signer_id) {
                         break;
                     }
                     match env.payload {
+                        KennelPayload::ClaimRequestCompleted { in_reply_to, refused_target_ids } => {
+                            if let Some(requested) = claim_requests.remove(&in_reply_to) {
+                                for target_id in refused_target_ids {
+                                    if requested.contains(&target_id) {
+                                        let _ = apply_tkc_event(&claims, Some(&kennel_cmd_tx),
+                                            TkcEvent::ClaimRefused { target_id }, |_| ());
+                                    }
+                                }
+                                let _ = event_tx.send(TuiEvent::kennel(&epoch, KennelUiEvent::Reconciled)).await;
+                            }
+                        }
                         KennelPayload::TargetList { scope: ListScope::Available, targets } => {
-                            let _ = event_tx.send(TuiEvent::KennelAvailableTargets(targets)).await;
+                            let _ = apply_tkc_event(&claims, None,
+                                TkcEvent::SeenAvailableList { targets: targets.clone() }, |_| ());
+                            let _ = event_tx.send(TuiEvent::kennel(&epoch, KennelUiEvent::AvailableTargets(targets))).await;
                         }
                         KennelPayload::TargetList { scope: ListScope::Mine, targets } => {
-                            let _ = event_tx.send(TuiEvent::KennelMineTargets(targets)).await;
+                            let _ = apply_tkc_event(&claims, None,
+                                TkcEvent::SeenMineList { targets: targets.clone() }, |_| ());
+                            let _ = event_tx.send(TuiEvent::kennel(&epoch, KennelUiEvent::MineTargets(targets))).await;
                         }
                         KennelPayload::ClaimGranted { claims: grants } => {
                             let _ = apply_tkc_event(
@@ -1477,47 +1488,39 @@ async fn spawn_kennel_client(
                                 },
                                 |_| (),
                             );
-                            // For each granted claim with an rpc_addr, tell the TUI
-                            for grant in &grants {
-                                if let Some(rpc_addr) = &grant.rpc_addr {
-                                    let _ = event_tx.send(TuiEvent::KennelTargetDiscovered {
-                                        target_id: grant.target_id.clone(),
-                                        name: grant.target_name.clone(),
-                                        rpc_addr: rpc_addr.clone(),
-                                    }).await;
-                                }
-                            }
-                            let _ = event_tx.send(TuiEvent::KennelClaimGranted(grants)).await;
+                            let _ = event_tx.send(TuiEvent::kennel(&epoch, KennelUiEvent::ClaimGranted(grants))).await;
                         }
                         KennelPayload::ClaimReleased {
                             target_id,
                             lease_ref,
                             reason,
                         } => {
-                            let _ = apply_tkc_event(
+                            let released = apply_tkc_event(
                                 &claims,
                                 Some(&kennel_cmd_tx),
                                 TkcEvent::ClaimReleased {
                                     target_id: target_id.clone(),
+                                    lease_ref: lease_ref.clone(),
                                 },
                                 |_| (),
                             );
+                            if released.is_none() { continue; }
                             let _ = event_tx
-                                .send(TuiEvent::KennelClaimReleased {
+                                .send(TuiEvent::kennel(&epoch, KennelUiEvent::ClaimReleased {
                                     target_id,
                                     lease_ref,
                                     reason,
-                                })
+                                }))
                                 .await;
                         }
                         KennelPayload::HiveStreamEvent { event } => {
-                            let _ = event_tx.send(TuiEvent::HiveStreamEvent { event }).await;
+                            let _ = event_tx.send(TuiEvent::kennel(&epoch, KennelUiEvent::HiveStreamEvent { event })).await;
                         }
                         KennelPayload::HiveComplete { text } => {
-                            let _ = event_tx.send(TuiEvent::HiveComplete { text }).await;
+                            let _ = event_tx.send(TuiEvent::kennel(&epoch, KennelUiEvent::HiveComplete { text })).await;
                         }
                         KennelPayload::HiveError { message } => {
-                            let _ = event_tx.send(TuiEvent::HiveError { message }).await;
+                            let _ = event_tx.send(TuiEvent::kennel(&epoch, KennelUiEvent::HiveError { message })).await;
                         }
                         _ => {}
                     }
@@ -1525,17 +1528,18 @@ async fn spawn_kennel_client(
                 Some(cmd) = kennel_rx.recv() => {
                     match cmd {
                         KennelClientCommand::ClaimTarget { target_id } => {
-                            if !send_kennel_message(
-                                &mut write_half,
-                                &keypair,
-                                &tux_id,
+                            if !matches!(claim_state_for_id(&claims, &target_id), Some(ClaimState::ClaimRequested { .. })) {
+                                continue;
+                            }
+                            let envelope = build_signed_envelope(&keypair, &tux_id,
                                 KennelPayload::ClaimTargets {
-                                    target_ids: vec![target_id],
+                                    target_ids: vec![target_id.clone()],
                                     lease_ttl_sec: None,
                                 },
-                            )
-                            .await
-                            {
+                            );
+                            let Ok(envelope) = envelope else { break; };
+                            claim_requests.insert(envelope.message_id.clone(), vec![target_id]);
+                            if write_envelope(&mut write_half, &envelope).await.is_err() {
                                 break;
                             }
                         }
@@ -1591,7 +1595,10 @@ async fn spawn_kennel_client(
             |_| (),
         );
         let _ = event_tx
-            .send(TuiEvent::KennelError("[kennel] disconnected".into()))
+            .send(TuiEvent::kennel(
+                &epoch,
+                KennelUiEvent::Error("[kennel] disconnected".into()),
+            ))
             .await;
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -1837,10 +1844,10 @@ fn tui_loop(
                 Event::Paste(text) => {
                     let line_count = text.lines().count();
                     app.input.push_str(&text);
-                    if line_count > 1 {
-                        if let Some(t) = app.selected_target_mut() {
-                            t.push_notice("pasted input", &format!("{line_count} lines"));
-                        }
+                    if line_count > 1
+                        && let Some(t) = app.selected_target_mut()
+                    {
+                        t.push_notice("pasted input", &format!("{line_count} lines"));
                     }
                     dirty = true;
                 }
@@ -1869,11 +1876,18 @@ fn process_event(
     ev: TuiEvent,
     rpc_tx: &mpsc::UnboundedSender<RpcCommand>,
     claims: Option<&ClaimRegistry>,
-    kennel_tx: Option<&mpsc::UnboundedSender<KennelClientCommand>>,
+    _kennel_tx: Option<&mpsc::UnboundedSender<KennelClientCommand>>,
 ) {
     match ev {
-        TuiEvent::TargetConnected { target_id } => {
+        TuiEvent::TargetConnected {
+            target_id,
+            connection,
+        } => {
+            if !connection.is_live() {
+                return;
+            }
             if let Some(idx) = app.find_target_by_id(&target_id) {
+                app.targets[idx].connection = Some(connection);
                 let was_disconnected = app.targets[idx].phase == TargetPhase::Disconnected;
                 app.targets[idx].phase = TargetPhase::Idle;
                 let name = app.targets[idx].name.clone();
@@ -1883,19 +1897,33 @@ fn process_event(
                 );
                 // Clear stale session on reconnect — the target may have
                 // restarted with a different session.
-                if was_disconnected {
+                app.targets[idx].stream_binding = None;
+                if was_disconnected && target_id != "hive" {
                     app.targets[idx].session_id = None;
                 }
                 // Resume the latest persisted session. Fresh direct targets
                 // currently have no session-creation path.
                 if app.targets[idx].session_id.is_none() {
                     let _ = rpc_tx.send(RpcCommand::ResumeLatestOrCreate { target_id });
+                } else if let Some(session_id) = app.targets[idx].session_id.clone() {
+                    let _ = rpc_tx.send(RpcCommand::ResumeSession {
+                        target_id,
+                        session_id,
+                    });
                 }
             }
         }
-        TuiEvent::TargetDisconnected { target_id } => {
+        TuiEvent::TargetDisconnected {
+            target_id,
+            connection,
+        } => {
             if let Some(idx) = app.find_target_by_id(&target_id) {
+                if app.targets[idx].connection.as_ref() != Some(&connection) {
+                    return;
+                }
+                app.targets[idx].connection = None;
                 app.targets[idx].phase = TargetPhase::Disconnected;
+                app.targets[idx].stream_binding = None;
                 app.targets[idx].flush_streaming();
                 app.targets[idx].push_notice("disconnected", "RPC connection lost");
             }
@@ -1914,19 +1942,56 @@ fn process_event(
                 app.targets[idx].push_notice("error", &message);
             }
         }
-        TuiEvent::SessionBound {
-            target_id,
-            session_id,
-        } => {
+        TuiEvent::SessionBound { target_id, binding } => {
             if let Some(idx) = app.find_target_by_id(&target_id) {
+                if !binding.is_current()
+                    || app.targets[idx].connection.as_ref() != Some(binding.connection())
+                {
+                    return;
+                }
+                let session_id = binding.session_id.clone();
                 let short = short_id(&session_id);
                 app.targets[idx].session_id = Some(session_id);
+                app.targets[idx].stream_binding = Some(binding);
                 app.targets[idx].phase = TargetPhase::Idle;
                 app.targets[idx].push_notice("session", &format!("bound to {short}"));
             }
         }
-        TuiEvent::StreamEvent { target_id, event } => {
-            if let Some(idx) = app.find_target_by_id(&target_id) {
+        TuiEvent::SessionBindingFailed {
+            target_id,
+            selection,
+            message,
+        } => {
+            if let Some(idx) = app.find_target_by_id(&target_id)
+                && selection.is_current()
+                && app.targets[idx].connection.as_ref() == Some(selection.connection())
+            {
+                app.targets[idx].stream_binding = None;
+                app.targets[idx].phase = TargetPhase::Idle;
+                app.targets[idx].flush_streaming();
+                app.targets[idx].push_notice("error", &message);
+            }
+        }
+        TuiEvent::StreamEnded { target_id, binding } => {
+            if let Some(idx) = app.find_target_by_id(&target_id)
+                && app.targets[idx].stream_binding.as_ref() == Some(&binding)
+            {
+                app.targets[idx].stream_binding = None;
+                app.targets[idx].flush_streaming();
+                app.targets[idx].phase = TargetPhase::Idle;
+                app.targets[idx]
+                    .push_notice("stream ended", "use /resume to rebind before sending");
+            }
+        }
+        TuiEvent::StreamEvent {
+            target_id,
+            event,
+            binding,
+        } => {
+            if let Some(idx) = app.find_target_by_id(&target_id)
+                && binding.is_current()
+                && app.targets[idx].stream_binding.as_ref() == Some(&binding)
+            {
                 handle_stream_event(&mut app.targets[idx], &event);
             }
         }
@@ -2008,76 +2073,88 @@ fn process_event(
                 ]);
             }
         }
-        TuiEvent::KennelAvailableTargets(targets) => {
-            if let Some(claims) = claims {
-                let _ = apply_tkc_event(
-                    claims,
-                    None,
-                    TkcEvent::SeenAvailableList {
-                        targets: targets.clone(),
-                    },
-                    |_| (),
-                );
-                // Add any new targets with rpc_addr, and auto-reclaim
-                // disconnected targets that reappear as available.
-                for entry in &targets {
-                    if let Some(rpc_addr) = &entry.rpc_addr {
-                        if app.find_target_by_id(&entry.target_id).is_none() {
-                            app.targets.push(TargetView::new(
-                                entry.name.clone(),
-                                entry.target_id.clone(),
-                                rpc_addr.clone(),
-                            ));
-                        } else if let Some(idx) = app.find_target_by_id(&entry.target_id) {
-                            // Target reappeared — update rpc_addr and
-                            // auto-reclaim if disconnected.
-                            app.targets[idx].rpc_addr = rpc_addr.clone();
-                            if app.targets[idx].phase == TargetPhase::Disconnected {
-                                let _ = apply_tkc_event(
-                                    claims,
-                                    kennel_tx,
-                                    TkcEvent::UserClaimTarget {
-                                        target_id: entry.target_id.clone(),
-                                    },
-                                    |_| (),
-                                );
-                            }
-                        }
+        TuiEvent::Kennel { epoch, event } => {
+            let Some(claims) = claims else {
+                return;
+            };
+            let owner = claims.read();
+            if owner.broker_epoch.as_ref() != Some(&epoch) {
+                return;
+            }
+            // Keep the owner observation stable through projection and command enqueue.
+            process_kennel_event(app, event, rpc_tx, &owner);
+        }
+        TuiEvent::KennelError(msg) => {
+            if let Some(target) = app.selected_target_mut() {
+                target.push_notice("kennel", &msg);
+            }
+        }
+    }
+}
+
+fn process_kennel_event(
+    app: &mut App,
+    event: KennelUiEvent,
+    rpc_tx: &mpsc::UnboundedSender<RpcCommand>,
+    owner: &TuxKennelState,
+) {
+    match event {
+        KennelUiEvent::AvailableTargets(targets) => {
+            // Discovery is not ownership intent.
+            for entry in &targets {
+                if let Some(rpc_addr) = &entry.rpc_addr {
+                    if app.find_target_by_id(&entry.target_id).is_none() {
+                        app.targets.push(TargetView::new(
+                            entry.name.clone(),
+                            entry.target_id.clone(),
+                            rpc_addr.clone(),
+                        ));
+                    } else if let Some(idx) = app.find_target_by_id(&entry.target_id) {
+                        app.targets[idx].rpc_addr = rpc_addr.clone();
                     }
-                    app.target_states
-                        .entry(entry.target_id.clone())
-                        .or_insert(KennelUiState::Available);
+                }
+                app.target_states
+                    .entry(entry.target_id.clone())
+                    .or_insert(KennelUiState::Available);
+            }
+        }
+        KennelUiEvent::MineTargets(targets) => {
+            for entry in &targets {
+                let Some(ClaimState::Claimed { lease_id, .. }) = owner.claims.get(&entry.target_id)
+                else {
+                    continue;
+                };
+                if entry.lease_id.as_ref() != Some(lease_id) {
+                    continue;
+                }
+                app.target_states
+                    .insert(entry.target_id.clone(), KennelUiState::ClaimedByMe);
+                app.target_leases
+                    .insert(entry.target_id.clone(), lease_id.clone());
+                if let Some(rpc_addr) = &entry.rpc_addr
+                    && let Some(idx) = app.find_target_by_id(&entry.target_id)
+                {
+                    let addr_changed = app.targets[idx].rpc_addr != *rpc_addr;
+                    app.targets[idx].rpc_addr = rpc_addr.clone();
+                    if addr_changed || app.targets[idx].phase == TargetPhase::Disconnected {
+                        let _ = rpc_tx.send(RpcCommand::Connect {
+                            target_id: entry.target_id.clone(),
+                            rpc_addr: rpc_addr.clone(),
+                        });
+                    }
                 }
             }
         }
-        TuiEvent::KennelMineTargets(targets) => {
-            if let Some(claims) = claims {
-                let _ = apply_tkc_event(
-                    claims,
-                    None,
-                    TkcEvent::SeenMineList {
-                        targets: targets.clone(),
-                    },
-                    |_| (),
-                );
-                for entry in &targets {
-                    if let Some(rpc_addr) = &entry.rpc_addr {
-                        if let Some(idx) = app.find_target_by_id(&entry.target_id) {
-                            let addr_changed = app.targets[idx].rpc_addr != *rpc_addr;
-                            app.targets[idx].rpc_addr = rpc_addr.clone();
-                            if addr_changed || app.targets[idx].phase == TargetPhase::Disconnected {
-                                let _ = rpc_tx.send(RpcCommand::Connect {
-                                    target_id: entry.target_id.clone(),
-                                    rpc_addr: rpc_addr.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        TuiEvent::KennelClaimGranted(grants) => {
+        KennelUiEvent::ClaimGranted(grants) => {
             for grant in &grants {
+                if owner
+                    .claims
+                    .get(&grant.target_id)
+                    .and_then(ClaimState::lease_id)
+                    != Some(grant.lease_id.as_str())
+                {
+                    continue;
+                }
                 app.target_states
                     .insert(grant.target_id.clone(), KennelUiState::ClaimedByMe);
                 app.target_leases
@@ -2092,28 +2169,46 @@ fn process_event(
                     ));
                 }
                 // Connect RPC immediately (no attach step)
-                if let Some(rpc_addr) = &grant.rpc_addr {
-                    if let Some(idx) = app.find_target_by_id(&grant.target_id) {
-                        if !rpc_addr.is_empty() {
-                            let _ = rpc_tx.send(RpcCommand::Connect {
-                                target_id: grant.target_id.clone(),
-                                rpc_addr: rpc_addr.clone(),
-                            });
-                            app.targets[idx].push_notice("claimed", &grant.target_name);
-                        }
-                    }
+                if let Some(rpc_addr) = &grant.rpc_addr
+                    && let Some(idx) = app.find_target_by_id(&grant.target_id)
+                    && !rpc_addr.is_empty()
+                {
+                    app.targets[idx].rpc_addr = rpc_addr.clone();
+                    let _ = rpc_tx.send(RpcCommand::Connect {
+                        target_id: grant.target_id.clone(),
+                        rpc_addr: rpc_addr.clone(),
+                    });
+                    app.targets[idx].push_notice("claimed", &grant.target_name);
                 }
             }
         }
-        TuiEvent::KennelClaimReleased {
+        KennelUiEvent::ClaimReleased {
             target_id,
             lease_ref,
             reason,
         } => {
+            if !matches!(
+                owner.claims.get(&target_id),
+                Some(ClaimState::Available { .. })
+            ) {
+                return;
+            }
+            if let LeaseRef::Known { lease_id } = &lease_ref
+                && app
+                    .target_leases
+                    .get(&target_id)
+                    .is_some_and(|current| current != lease_id)
+            {
+                return;
+            }
             app.target_states
                 .insert(target_id.clone(), KennelUiState::Available);
             app.target_leases.remove(&target_id);
+            let _ = rpc_tx.send(RpcCommand::Disconnect {
+                target_id: target_id.clone(),
+            });
             if let Some(idx) = app.find_target_by_id(&target_id) {
+                app.targets[idx].stream_binding = None;
                 app.targets[idx].flush_streaming();
                 app.targets[idx].phase = TargetPhase::Disconnected;
                 let lease_text = match &lease_ref {
@@ -2126,42 +2221,53 @@ fn process_event(
                 );
             }
         }
-        TuiEvent::KennelTargetDiscovered {
-            target_id,
-            name,
+        KennelUiEvent::HiveRegistered {
             rpc_addr,
+            session_id,
         } => {
-            if app.find_target_by_id(&target_id).is_none() {
-                app.targets.push(TargetView::new(name, target_id, rpc_addr));
-            } else if let Some(idx) = app.find_target_by_id(&target_id) {
-                let addr_changed = app.targets[idx].rpc_addr != rpc_addr;
-                app.targets[idx].name = name;
-                app.targets[idx].rpc_addr = rpc_addr.clone();
-                if addr_changed || app.targets[idx].phase == TargetPhase::Disconnected {
-                    let _ = rpc_tx.send(RpcCommand::Connect {
-                        target_id,
-                        rpc_addr,
-                    });
-                }
-            }
+            let index = app.find_target_by_id("hive").unwrap_or_else(|| {
+                app.targets.push(TargetView::new(
+                    "hive".into(),
+                    "hive".into(),
+                    rpc_addr.clone(),
+                ));
+                app.targets.len() - 1
+            });
+            app.targets[index].rpc_addr = rpc_addr.clone();
+            app.targets[index].session_id = session_id;
+            app.targets[index].stream_binding = None;
+            app.targets[index].connection = None;
+            app.targets[index].phase = TargetPhase::Disconnected;
+            let _ = rpc_tx.send(RpcCommand::Connect {
+                target_id: "hive".into(),
+                rpc_addr,
+            });
         }
-        TuiEvent::KennelError(msg) => {
-            // Show in selected target or first target
+        KennelUiEvent::Error(msg) => {
             if let Some(t) = app.selected_target_mut() {
                 t.push_notice("kennel", &msg);
             }
         }
-        TuiEvent::HiveStreamEvent { event } => {
+        KennelUiEvent::Reconciled => {
+            for (id, claim) in &owner.claims {
+                if matches!(claim, ClaimState::Available { .. }) {
+                    app.target_states
+                        .insert(id.clone(), KennelUiState::Available);
+                    app.target_leases.remove(id);
+                }
+            }
+        }
+        KennelUiEvent::HiveStreamEvent { event } => {
             handle_stream_event(&mut app.hive_view, &event);
         }
-        TuiEvent::HiveComplete { text } => {
+        KennelUiEvent::HiveComplete { text } => {
             app.hive_view.flush_streaming();
             if !text.is_empty() {
                 app.hive_view.push_remote_turn(&text);
             }
             app.hive_planning = false;
         }
-        TuiEvent::HiveError { message } => {
+        KennelUiEvent::HiveError { message } => {
             app.hive_view.flush_streaming();
             app.hive_view.push_notice("hive error", &message);
             app.hive_planning = false;
@@ -2269,10 +2375,7 @@ fn handle_key(
             app.input.clear();
         }
         KeyCode::Char('l') if modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.mode == Mode::Hive {
-                app.hive_view.history.clear();
-                app.hive_view.streaming_text.clear();
-            } else if let Some(t) = app.selected_target_mut() {
+            if let Some(t) = app.active_view_mut() {
                 t.history.clear();
                 t.streaming_text.clear();
             }
@@ -2308,11 +2411,20 @@ fn handle_key(
                     app.targets[idx].push_notice("error", "target not connected");
                     return;
                 }
-                if target.session_id.is_none() {
+                if target.phase == TargetPhase::Running {
+                    app.targets[idx].push_notice("busy", "wait for completion or /interrupt");
+                    return;
+                }
+                if target.session_id.is_none()
+                    || !target
+                        .stream_binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.is_current())
+                {
                     let message = if app.transport == TransportMode::Direct {
                         "no persisted session is available; fresh direct-session creation is not implemented"
                     } else {
-                        "no session is bound; wait for kennel registration or use /new"
+                        "no session is bound; wait for kennel registration"
                     };
                     app.targets[idx].push_notice("error", message);
                     return;
@@ -2329,7 +2441,6 @@ fn handle_key(
 
                 let target_id = app.targets[idx].target_id.clone();
                 let session_id = app.targets[idx].session_id.clone().unwrap_or_default();
-                let handling_mode = app.targets[idx].handling_mode;
                 let model = app.pending_model.take();
                 app.targets[idx].push_user_turn(&body);
                 app.targets[idx].phase = TargetPhase::Running;
@@ -2337,7 +2448,6 @@ fn handle_key(
                     target_id,
                     session_id,
                     prompt: body,
-                    handling_mode,
                     model,
                 });
             }
@@ -2349,14 +2459,23 @@ fn handle_key(
                         app.targets[hive_idx].push_notice("error", "hive not connected");
                         return;
                     }
-                    if hive.session_id.is_none() {
+                    if hive.phase == TargetPhase::Running {
+                        app.targets[hive_idx]
+                            .push_notice("busy", "wait for completion or /interrupt");
+                        return;
+                    }
+                    if hive.session_id.is_none()
+                        || !hive
+                            .stream_binding
+                            .as_ref()
+                            .is_some_and(|binding| binding.is_current())
+                    {
                         app.targets[hive_idx]
                             .push_notice("error", "hive has no session; waiting for connection");
                         return;
                     }
                     let target_id = hive.target_id.clone();
                     let session_id = hive.session_id.clone().unwrap_or_default();
-                    let handling_mode = hive.handling_mode;
                     let model = app.pending_model.take();
                     app.targets[hive_idx].push_user_turn(&body);
                     app.targets[hive_idx].phase = TargetPhase::Running;
@@ -2364,13 +2483,12 @@ fn handle_key(
                         target_id,
                         session_id,
                         prompt: body,
-                        handling_mode,
                         model,
                     });
                 } else {
-                    app.targets.get_mut(0).map(|t| {
+                    if let Some(t) = app.targets.get_mut(0) {
                         t.push_notice("error", "hive not available (kennel mode required)")
-                    });
+                    }
                 }
             }
         }
@@ -2404,23 +2522,9 @@ fn handle_slash_command(
             if app.targets.is_empty() {
                 return;
             }
-            let target_name = app.targets[idx].name.clone();
-            let current_session_id = app.targets[idx].session_id.clone();
             app.targets[idx].push_user_turn("/new");
-            if target_name == "hive" {
-                app.targets[idx].push_notice("session", "creating fresh hive session...");
-            } else if app.transport == TransportMode::Direct {
-                app.targets[idx].push_notice(
-                    "unsupported",
-                    "fresh direct-session creation is not implemented; mob/respawn will fail without a local mob definition",
-                );
-            } else {
-                app.targets[idx].push_notice("mob", &format!("respawning {target_name}..."));
-            }
-            let _ = rpc_tx.send(RpcCommand::MobRespawn {
-                target_name,
-                current_session_id,
-            });
+            app.targets[idx].push_notice("unsupported",
+                "/new is disabled: managed sessions require an owner-coordinated reset; no session was archived or replaced");
         }
         "/resume" if arg.is_empty() => {
             if app.targets.is_empty() {
@@ -2453,20 +2557,14 @@ fn handle_slash_command(
                         "  `/release`      -- release selected target back to kennel".into(),
                     );
                 }
-                let new_help = if t.target_id == "hive" {
-                    "  `/new`          -- archive and replace the hive session"
-                } else if app.transport == TransportMode::Direct {
-                    "  `/new`          -- unsupported for a fresh direct target"
-                } else {
-                    "  `/new`          -- respawn the selected kennel target"
-                };
-                t.push_line(new_help.into());
+                t.push_line(
+                    "  `/new`          -- unsupported (no managed reset transaction)".into(),
+                );
                 t.push_line("  `/resume`       -- list past sessions".into());
                 t.push_line("  `/resume <ID>`  -- resume session by ID".into());
                 t.push_line("  `/model <name>` -- set model for next turn".into());
                 t.push_line("  `/models`       -- list available models".into());
-                t.push_line("  `/steer`        -- set handling mode to steer".into());
-                t.push_line("  `/queue`        -- set handling mode to queue".into());
+                t.push_line("  `/steer`, `/queue` -- unsupported on this RPC client".into());
                 t.push_line("  `/interrupt`    -- interrupt current turn".into());
                 t.push_line("  `/help`         -- show this help".into());
             }
@@ -2498,16 +2596,12 @@ fn handle_slash_command(
             app.targets[idx].push_user_turn("/models");
             let _ = rpc_tx.send(RpcCommand::ListModels { target_id });
         }
-        "/steer" => {
+        "/steer" | "/queue" => {
             if let Some(t) = app.targets.get_mut(idx) {
-                t.handling_mode = HandlingMode::Steer;
-                t.push_notice("mode", "handling mode set to steer");
-            }
-        }
-        "/queue" => {
-            if let Some(t) = app.targets.get_mut(idx) {
-                t.handling_mode = HandlingMode::Queue;
-                t.push_notice("mode", "handling mode set to queue");
+                t.push_notice(
+                    "unsupported",
+                    "turn/start has no steering/queue mode; wait for completion or /interrupt",
+                );
             }
         }
         "/interrupt" => {
@@ -2543,20 +2637,19 @@ fn handle_slash_command(
                 return;
             }
             let target_id = app.targets[idx].target_id.clone();
-            if let Some(claims) = claims {
-                if let Some(state) = claim_state_for_id(claims, &target_id) {
-                    if let Some(lease_id) = state.lease_id() {
-                        app.targets[idx].push_user_turn("/release");
-                        let _ = apply_tkc_event(
-                            claims,
-                            kennel_tx,
-                            TkcEvent::UserReleaseLease {
-                                lease_id: lease_id.to_string(),
-                            },
-                            |_| (),
-                        );
-                    }
-                }
+            if let Some(claims) = claims
+                && let Some(state) = claim_state_for_id(claims, &target_id)
+                && let Some(lease_id) = state.lease_id()
+            {
+                app.targets[idx].push_user_turn("/release");
+                let _ = apply_tkc_event(
+                    claims,
+                    kennel_tx,
+                    TkcEvent::UserReleaseLease {
+                        lease_id: lease_id.to_string(),
+                    },
+                    |_| (),
+                );
             }
         }
         _ => {}
@@ -2692,10 +2785,6 @@ fn render_targets(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App
                     }
                 }
             };
-            let mode_indicator = match t.handling_mode {
-                HandlingMode::Steer => "",
-                HandlingMode::Queue => " [Q]",
-            };
             let style = if sel {
                 Style::default()
                     .fg(Color::Green)
@@ -2708,7 +2797,7 @@ fn render_targets(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App
                     TargetPhase::Idle => Style::default(),
                 }
             };
-            ListItem::new(format!("{prefix}{icon} {}{suffix}{mode_indicator}", t.name)).style(style)
+            ListItem::new(format!("{prefix}{icon} {}{suffix}", t.name)).style(style)
         })
         .collect();
     let title = format!("TARGETS  {}", app.targets.len());
@@ -2723,13 +2812,7 @@ fn render_timeline(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mu
     let inner_height = area.height.saturating_sub(2);
 
     // In Hive mode, show the hive target's view; in Direct mode, show the selected target.
-    let target: &TargetView = if app.mode == Mode::Hive {
-        app.find_target_by_id("hive")
-            .and_then(|idx| app.targets.get(idx))
-            .unwrap_or(&app.hive_view)
-    } else if let Some(t) = app.targets.get(app.selected) {
-        t
-    } else {
+    let Some(target) = app.active_view() else {
         let placeholder =
             "No targets configured.\n\nUse --target HOST:PORT to connect to an agent.";
         f.render_widget(
@@ -2778,6 +2861,9 @@ fn render_timeline(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mu
 
     let content_height = paragraph.line_count(inner_width) as u16;
     let max_scroll = timeline_max_scroll(content_height, inner_height);
+    let phase = target.phase;
+    let name = target.name.clone();
+    let history_len = target.history.len();
     if app.auto_scroll {
         app.scroll_offset = max_scroll;
     } else {
@@ -2787,22 +2873,17 @@ fn render_timeline(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mu
         }
     }
 
-    let phase_label = match target.phase {
+    let phase_label = match phase {
         TargetPhase::Disconnected => "disconnected",
         TargetPhase::Running => "running",
         TargetPhase::Idle => "idle",
     };
     let title = if app.auto_scroll {
-        format!(
-            "TIMELINE  {}  {}  {} lines",
-            target.name,
-            phase_label,
-            target.history.len()
-        )
+        format!("TIMELINE  {}  {}  {} lines", name, phase_label, history_len)
     } else {
         format!(
             "TIMELINE  {}  scrolled  line {} / {}",
-            target.name,
+            name,
             app.scroll_offset.saturating_add(1),
             max_scroll.saturating_add(1)
         )
@@ -2849,7 +2930,7 @@ fn render_input(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) 
                 TargetPhase::Disconnected => {
                     "Hive disconnected -- waiting for RPC connection".into()
                 }
-                TargetPhase::Running => "Hive is working; new messages queue.".into(),
+                TargetPhase::Running => "Hive is working; wait or /interrupt.".into(),
                 TargetPhase::Idle => "Ready to send to hive.".into(),
             }
         } else {
@@ -2858,7 +2939,7 @@ fn render_input(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) 
     } else if let Some(t) = app.selected_target() {
         match t.phase {
             TargetPhase::Disconnected => "Target disconnected -- waiting for RPC connection".into(),
-            TargetPhase::Running => format!("{} is working; new messages queue.", t.name),
+            TargetPhase::Running => format!("{} is working; wait or /interrupt.", t.name),
             TargetPhase::Idle => format!("Ready to send to {}.", t.name),
         }
     } else {
@@ -2933,12 +3014,12 @@ fn find_all_flags(args: &[String], flag: &str) -> Vec<String> {
     let mut values = Vec::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == flag {
-            if let Some(val) = args.get(i + 1) {
-                values.push(val.clone());
-                i += 2;
-                continue;
-            }
+        if args[i] == flag
+            && let Some(val) = args.get(i + 1)
+        {
+            values.push(val.clone());
+            i += 2;
+            continue;
         }
         i += 1;
     }
@@ -3055,11 +3136,1018 @@ mod tests {
         assert_eq!(targets, vec!["host1:8000", "host2:9000"]);
     }
 
+    fn app() -> App {
+        App {
+            transport: TransportMode::Kennel,
+            mode: Mode::Hive,
+            targets: vec![
+                TargetView::new("target".into(), "t".into(), "addr".into()),
+                TargetView::new("hive".into(), "hive".into(), "addr".into()),
+            ],
+            selected: 0,
+            input: String::new(),
+            scroll_offset: 0,
+            auto_scroll: true,
+            hive_planning: false,
+            quit: false,
+            pending_model: None,
+            target_states: HashMap::new(),
+            target_leases: HashMap::new(),
+            hive_view: TargetView::new("fallback".into(), "hive".into(), String::new()),
+        }
+    }
+
+    fn register_broker(claims: &ClaimRegistry, incarnation: &str) -> BrokerEpoch {
+        let epoch = BrokerEpoch::new(incarnation);
+        apply_tkc_event(
+            claims,
+            None,
+            TkcEvent::BrokerRegistered {
+                epoch: epoch.clone(),
+            },
+            |_| (),
+        )
+        .unwrap();
+        epoch
+    }
+
+    async fn stream_server_fixture() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            let mut next = 0u64;
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "initialize" => serde_json::json!({}),
+                    "session/stream_open" => {
+                        next += 1;
+                        serde_json::json!({"stream_id": format!("stream-{next}")})
+                    }
+                    "session/stream_close" => serde_json::json!({"closed": true}),
+                    method => panic!("unexpected fixture request {method}"),
+                };
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0", "id": request["id"], "result": result,
+                });
+                writer
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        (addr.to_string(), server)
+    }
+
+    async fn stream_client_fixture() -> (RpcClient, tokio::task::JoinHandle<()>) {
+        let (addr, server) = stream_server_fixture().await;
+        let (events, _) = mpsc::unbounded_channel();
+        let client = RpcClient::connect(&addr, events).await.unwrap();
+        (client, server)
+    }
+
     #[test]
-    fn handling_mode_toggle() {
-        let mut target = TargetView::new("t".into(), "id".into(), "addr".into());
-        assert_eq!(target.handling_mode, HandlingMode::Steer);
-        target.handling_mode = HandlingMode::Queue;
-        assert_eq!(target.handling_mode, HandlingMode::Queue);
+    fn unsupported_reset_and_modes_never_send_rpc_commands() {
+        let mut app = app();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for mode in [Mode::Hive, Mode::Direct] {
+            app.mode = mode;
+            for command in ["/new", "/steer", "/queue"] {
+                handle_slash_command(&mut app, command, &tx, None, None);
+                assert!(rx.try_recv().is_err());
+            }
+        }
+        assert!(
+            app.targets
+                .iter()
+                .all(|view| view.history.iter().any(|line| line.contains("unsupported")))
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_hive_binding_subscribes_and_obsolete_streams_cannot_paint() {
+        let (client, server) = stream_client_fixture().await;
+        let mut app = app();
+        let claims = ClaimRegistry::default();
+        let epoch = register_broker(&claims, "broker");
+        let (rpc, mut commands) = mpsc::unbounded_channel();
+        process_event(
+            &mut app,
+            TuiEvent::kennel(
+                &epoch,
+                KennelUiEvent::HiveRegistered {
+                    rpc_addr: "fixture-rpc-address".into(),
+                    session_id: Some("managed-hive".into()),
+                },
+            ),
+            &rpc,
+            Some(&claims),
+            None,
+        );
+        assert!(
+            matches!(commands.try_recv().unwrap(), RpcCommand::Connect { target_id, .. }
+            if target_id == "hive")
+        );
+        process_event(
+            &mut app,
+            TuiEvent::TargetConnected {
+                target_id: "hive".into(),
+                connection: client.connection(),
+            },
+            &rpc,
+            None,
+            None,
+        );
+        assert!(
+            matches!(commands.try_recv().unwrap(), RpcCommand::ResumeSession {
+            target_id, session_id,
+        } if target_id == "hive" && session_id == "managed-hive")
+        );
+        let stale = client.bind_session("old-hive").await.unwrap();
+        let binding = client.bind_session("managed-hive").await.unwrap();
+        process_event(
+            &mut app,
+            TuiEvent::SessionBound {
+                target_id: "hive".into(),
+                binding: binding.clone(),
+            },
+            &rpc,
+            None,
+            None,
+        );
+        let event = serde_json::json!({"event":{"payload":{"type":"text_delta","delta":"fresh"}}});
+        process_event(
+            &mut app,
+            TuiEvent::StreamEvent {
+                target_id: "hive".into(),
+                binding: stale.clone(),
+                event: event.clone(),
+            },
+            &rpc,
+            None,
+            None,
+        );
+        assert!(app.active_view().unwrap().streaming_text.is_empty());
+        process_event(
+            &mut app,
+            TuiEvent::StreamEnded {
+                target_id: "hive".into(),
+                binding: stale,
+            },
+            &rpc,
+            None,
+            None,
+        );
+        assert_eq!(
+            app.active_view().unwrap().stream_binding.as_ref(),
+            Some(&binding)
+        );
+        process_event(
+            &mut app,
+            TuiEvent::StreamEvent {
+                target_id: "hive".into(),
+                binding: binding.clone(),
+                event,
+            },
+            &rpc,
+            None,
+            None,
+        );
+        assert_eq!(app.active_view().unwrap().streaming_text, "fresh");
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reversed_bound_publication_and_late_end_cannot_replace_latest_selection() {
+        let (client, server) = stream_client_fixture().await;
+        let old = client.bind_session("session-a").await.unwrap();
+        let newest = client.bind_session("session-b").await.unwrap();
+        let mut app = app();
+        let (rpc, _commands) = mpsc::unbounded_channel();
+        process_event(
+            &mut app,
+            TuiEvent::TargetConnected {
+                target_id: "hive".into(),
+                connection: client.connection(),
+            },
+            &rpc,
+            None,
+            None,
+        );
+        process_event(
+            &mut app,
+            TuiEvent::SessionBound {
+                target_id: "hive".into(),
+                binding: newest.clone(),
+            },
+            &rpc,
+            None,
+            None,
+        );
+        app.targets[1].phase = TargetPhase::Running;
+        let history_count = app.targets[1].history.len();
+        process_event(
+            &mut app,
+            TuiEvent::SessionBound {
+                target_id: "hive".into(),
+                binding: old.clone(),
+            },
+            &rpc,
+            None,
+            None,
+        );
+        process_event(
+            &mut app,
+            TuiEvent::StreamEnded {
+                target_id: "hive".into(),
+                binding: old,
+            },
+            &rpc,
+            None,
+            None,
+        );
+        assert_eq!(app.targets[1].session_id.as_deref(), Some("session-b"));
+        assert_eq!(app.targets[1].stream_binding.as_ref(), Some(&newest));
+        assert!(app.targets[1].phase == TargetPhase::Running);
+        assert_eq!(app.targets[1].history.len(), history_count);
+        let ended = client
+            .ended_stream(&serde_json::json!({
+                "method": "session/stream_end",
+                "params": {"session_id": newest.session_id, "stream_id": newest.stream_id},
+            }))
+            .await
+            .unwrap();
+        process_event(
+            &mut app,
+            TuiEvent::StreamEnded {
+                target_id: "hive".into(),
+                binding: ended.clone(),
+            },
+            &rpc,
+            None,
+            None,
+        );
+        process_event(
+            &mut app,
+            TuiEvent::SessionBound {
+                target_id: "hive".into(),
+                binding: ended,
+            },
+            &rpc,
+            None,
+            None,
+        );
+        assert!(app.targets[1].stream_binding.is_none());
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn obsolete_connection_bound_and_lifecycle_events_cannot_replace_current_connection() {
+        let (old_client, old_server) = stream_client_fixture().await;
+        let old = old_client.bind_session("old-session").await.unwrap();
+        let (new_client, new_server) = stream_client_fixture().await;
+        let new = new_client.bind_session("new-session").await.unwrap();
+        let mut app = app();
+        let (rpc, _commands) = mpsc::unbounded_channel();
+        process_event(
+            &mut app,
+            TuiEvent::TargetConnected {
+                target_id: "hive".into(),
+                connection: new_client.connection(),
+            },
+            &rpc,
+            None,
+            None,
+        );
+        process_event(
+            &mut app,
+            TuiEvent::SessionBound {
+                target_id: "hive".into(),
+                binding: new.clone(),
+            },
+            &rpc,
+            None,
+            None,
+        );
+        // Even before transport shutdown, the view only accepts its own connection.
+        assert!(old.is_current());
+        process_event(
+            &mut app,
+            TuiEvent::SessionBound {
+                target_id: "hive".into(),
+                binding: old,
+            },
+            &rpc,
+            None,
+            None,
+        );
+        old_client.shutdown().await;
+        process_event(
+            &mut app,
+            TuiEvent::TargetDisconnected {
+                target_id: "hive".into(),
+                connection: old_client.connection(),
+            },
+            &rpc,
+            None,
+            None,
+        );
+        process_event(
+            &mut app,
+            TuiEvent::TargetConnected {
+                target_id: "hive".into(),
+                connection: old_client.connection(),
+            },
+            &rpc,
+            None,
+            None,
+        );
+        assert_eq!(app.targets[1].session_id.as_deref(), Some("new-session"));
+        assert_eq!(app.targets[1].stream_binding.as_ref(), Some(&new));
+        old_client.close().await;
+        new_client.close().await;
+        old_server.await.unwrap();
+        new_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delayed_latest_discovery_cannot_override_a_newer_explicit_resume() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (listed_tx, listed_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, writer) = stream.into_split();
+            let writer = Arc::new(tokio::sync::Mutex::new(writer));
+            let mut lines = BufReader::new(reader).lines();
+            let mut listed = Some(listed_tx);
+            let mut release = Some(release_rx);
+            let mut delayed = None;
+            let mut opened = Vec::new();
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                if request["method"] == "session/list" {
+                    listed.take().unwrap().send(()).unwrap();
+                    let release = release.take().unwrap();
+                    let writer = writer.clone();
+                    delayed = Some(tokio::spawn(async move {
+                        tokio::time::timeout(Duration::from_secs(5), release)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0", "id": request["id"],
+                            "result": {"sessions": [{"session_id": "older-latest"}]},
+                        });
+                        writer
+                            .lock()
+                            .await
+                            .write_all(format!("{response}\n").as_bytes())
+                            .await
+                            .unwrap();
+                    }));
+                    continue;
+                }
+                let result = match request["method"].as_str().unwrap() {
+                    "initialize" => serde_json::json!({}),
+                    "session/stream_open" => {
+                        let session = request["params"]["session_id"].as_str().unwrap();
+                        opened.push(session.to_string());
+                        serde_json::json!({"stream_id": format!("stream-{session}")})
+                    }
+                    "session/stream_close" => serde_json::json!({"closed": true}),
+                    method => panic!("unexpected request {method}"),
+                };
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0", "id": request["id"], "result": result,
+                });
+                writer
+                    .lock()
+                    .await
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            if let Some(delayed) = delayed {
+                delayed.await.unwrap();
+            }
+            opened
+        });
+        let (commands, command_rx) = mpsc::unbounded_channel();
+        let (events, mut event_rx) = mpsc::channel(16);
+        let worker = tokio::spawn(rpc_command_loop(command_rx, events));
+        commands
+            .send(RpcCommand::Connect {
+                target_id: "hive".into(),
+                rpc_addr: addr.to_string(),
+            })
+            .unwrap();
+        let connected = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(&connected, TuiEvent::TargetConnected { .. }));
+        let mut app = app();
+        let (ui_commands, _unused) = mpsc::unbounded_channel();
+        process_event(&mut app, connected, &ui_commands, None, None);
+        commands
+            .send(RpcCommand::ResumeLatestOrCreate {
+                target_id: "hive".into(),
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), listed_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        commands
+            .send(RpcCommand::ResumeSession {
+                target_id: "hive".into(),
+                session_id: "newer-explicit".into(),
+            })
+            .unwrap();
+        let bound = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(&bound, TuiEvent::SessionBound { binding, .. }
+            if binding.session_id == "newer-explicit"));
+        process_event(&mut app, bound, &ui_commands, None, None);
+        let history_count = app.targets[1].history.len();
+        release_tx.send(()).unwrap();
+        let obsolete = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&obsolete, TuiEvent::SessionBindingFailed { selection, .. }
+            if !selection.is_current())
+        );
+        process_event(&mut app, obsolete, &ui_commands, None, None);
+        assert_eq!(app.targets[1].session_id.as_deref(), Some("newer-explicit"));
+        assert_eq!(app.targets[1].history.len(), history_count);
+        commands
+            .send(RpcCommand::Disconnect {
+                target_id: "hive".into(),
+            })
+            .unwrap();
+        drop(commands);
+        worker.await.unwrap();
+        assert_eq!(server.await.unwrap(), vec!["newer-explicit"]);
+    }
+
+    #[tokio::test]
+    async fn late_connection_completion_cannot_replace_newer_connection() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let old_addr = listener.local_addr().unwrap().to_string();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let old_server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "initialize");
+            entered_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), release_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let response = serde_json::json!({
+                "jsonrpc": "2.0", "id": request["id"], "result": {},
+            });
+            writer
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+            line.clear();
+            assert_eq!(
+                reader.read_line(&mut line).await.unwrap(),
+                0,
+                "obsolete connection must be closed, not installed"
+            );
+        });
+        let (new_addr, new_server) = stream_server_fixture().await;
+        let (commands, command_rx) = mpsc::unbounded_channel();
+        let (events, mut event_rx) = mpsc::channel(16);
+        let worker = tokio::spawn(rpc_command_loop(command_rx, events));
+        commands
+            .send(RpcCommand::Connect {
+                target_id: "hive".into(),
+                rpc_addr: old_addr,
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        commands
+            .send(RpcCommand::Connect {
+                target_id: "hive".into(),
+                rpc_addr: new_addr,
+            })
+            .unwrap();
+        let connected = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let TuiEvent::TargetConnected { connection, .. } = connected else {
+            panic!("new connection should become ready first");
+        };
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), old_server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(event_rx.try_recv().is_err());
+        commands
+            .send(RpcCommand::ResumeSession {
+                target_id: "hive".into(),
+                session_id: "new-connection-session".into(),
+            })
+            .unwrap();
+        let bound = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(bound, TuiEvent::SessionBound { binding, .. }
+            if binding.connection() == &connection && binding.is_current()));
+        commands
+            .send(RpcCommand::Disconnect {
+                target_id: "hive".into(),
+            })
+            .unwrap();
+        drop(commands);
+        worker.await.unwrap();
+        new_server.await.unwrap();
+    }
+
+    #[test]
+    fn clear_uses_rendered_hive_and_preserves_other_targets() {
+        let mut app = app();
+        app.targets[0].push_line("other".into());
+        app.targets[1].push_line("rendered".into());
+        app.targets[1].streaming_text = "delta".into();
+        app.hive_view.push_line("fallback".into());
+        let (tx, _) = mpsc::unbounded_channel();
+        handle_key(
+            &mut app,
+            KeyCode::Char('l'),
+            KeyModifiers::CONTROL,
+            &tx,
+            None,
+            None,
+        );
+        assert!(app.active_view().unwrap().history.is_empty());
+        assert!(app.active_view().unwrap().streaming_text.is_empty());
+        assert_eq!(app.targets[0].history.len(), 1);
+        assert_eq!(app.hive_view.history.len(), 1);
+        app.targets.pop();
+        handle_key(
+            &mut app,
+            KeyCode::Char('l'),
+            KeyModifiers::CONTROL,
+            &tx,
+            None,
+            None,
+        );
+        assert!(app.hive_view.history.is_empty());
+        app.mode = Mode::Direct;
+        app.selected = 0;
+        app.targets[0].streaming_text = "direct delta".into();
+        app.hive_view.push_line("unselected fallback".into());
+        handle_key(
+            &mut app,
+            KeyCode::Char('l'),
+            KeyModifiers::CONTROL,
+            &tx,
+            None,
+            None,
+        );
+        assert!(app.targets[0].history.is_empty());
+        assert!(app.targets[0].streaming_text.is_empty());
+        assert_eq!(app.hive_view.history.len(), 1);
+    }
+
+    #[test]
+    fn discovery_and_release_do_not_send_claim_requests() {
+        let mut app = app();
+        let claims = ClaimRegistry::default();
+        let epoch = register_broker(&claims, "broker");
+        let (rpc, _) = mpsc::unbounded_channel();
+        let (kennel, mut requests) = mpsc::unbounded_channel();
+        let entry = TargetListEntry {
+            target_id: "t".into(),
+            name: "target".into(),
+            state: mdm_tux::KennelTargetState::Available,
+            lease_id: None,
+            rpc_addr: Some("addr".into()),
+        };
+        for _ in 0..3 {
+            apply_tkc_event(
+                &claims,
+                None,
+                TkcEvent::SeenAvailableList {
+                    targets: vec![entry.clone()],
+                },
+                |_| (),
+            )
+            .unwrap();
+            process_event(
+                &mut app,
+                TuiEvent::kennel(&epoch, KennelUiEvent::AvailableTargets(vec![entry.clone()])),
+                &rpc,
+                Some(&claims),
+                Some(&kennel),
+            );
+            assert!(requests.try_recv().is_err());
+        }
+        apply_tkc_event(
+            &claims,
+            Some(&kennel),
+            TkcEvent::UserClaimTarget {
+                target_id: "t".into(),
+            },
+            |_| (),
+        )
+        .unwrap();
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            KennelClientCommand::ClaimTarget { .. }
+        ));
+        let grant = ClaimGrant {
+            target_id: "t".into(),
+            target_name: "target".into(),
+            lease_id: "lease".into(),
+            target_pubkey: "synthetic".into(),
+            target_direct_addr: "inproc://synthetic".into(),
+            rpc_addr: Some("addr".into()),
+            expires_at_ms: 10_000,
+        };
+        apply_tkc_event(
+            &claims,
+            Some(&kennel),
+            TkcEvent::ClaimGranted {
+                claims: vec![grant.clone()],
+                now_ms: 100,
+            },
+            |_| (),
+        )
+        .unwrap();
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            KennelClientCommand::ClaimAck { .. }
+        ));
+        process_event(
+            &mut app,
+            TuiEvent::kennel(&epoch, KennelUiEvent::ClaimGranted(vec![grant])),
+            &rpc,
+            Some(&claims),
+            Some(&kennel),
+        );
+        apply_tkc_event(
+            &claims,
+            Some(&kennel),
+            TkcEvent::UserReleaseLease {
+                lease_id: "lease".into(),
+            },
+            |_| (),
+        )
+        .unwrap();
+        assert!(matches!(
+            requests.try_recv().unwrap(),
+            KennelClientCommand::ReleaseTarget { .. }
+        ));
+        let lease_ref = LeaseRef::Known {
+            lease_id: "lease".into(),
+        };
+        apply_tkc_event(
+            &claims,
+            Some(&kennel),
+            TkcEvent::ClaimReleased {
+                target_id: "t".into(),
+                lease_ref: lease_ref.clone(),
+            },
+            |_| (),
+        )
+        .unwrap();
+        process_event(
+            &mut app,
+            TuiEvent::kennel(
+                &epoch,
+                KennelUiEvent::ClaimReleased {
+                    target_id: "t".into(),
+                    lease_ref,
+                    reason: LeaseTerminationReason::ReleasedByTux,
+                },
+            ),
+            &rpc,
+            Some(&claims),
+            Some(&kennel),
+        );
+        for _ in 0..2 {
+            process_event(
+                &mut app,
+                TuiEvent::kennel(&epoch, KennelUiEvent::AvailableTargets(vec![entry.clone()])),
+                &rpc,
+                Some(&claims),
+                Some(&kennel),
+            );
+            assert!(requests.try_recv().is_err());
+        }
+    }
+
+    fn projection_snapshot(app: &App) -> Value {
+        fn view(view: &TargetView) -> Value {
+            serde_json::json!({
+                "id": view.target_id, "name": view.name, "rpc": view.rpc_addr,
+                "session": view.session_id, "history": view.history,
+                "streaming": view.streaming_text,
+                "phase": match view.phase {
+                    TargetPhase::Disconnected => "disconnected",
+                    TargetPhase::Idle => "idle",
+                    TargetPhase::Running => "running",
+                },
+            })
+        }
+        let states: std::collections::BTreeMap<_, _> = app
+            .target_states
+            .iter()
+            .map(|(id, state)| (id.clone(), *state == KennelUiState::ClaimedByMe))
+            .collect();
+        serde_json::json!({
+            "targets": app.targets.iter().map(view).collect::<Vec<_>>(),
+            "fallback": view(&app.hive_view), "planning": app.hive_planning,
+            "states": states, "leases": app.target_leases,
+        })
+    }
+
+    #[test]
+    fn every_old_broker_projection_is_rejected_after_restart_or_reconnect() {
+        for next_incarnation in ["first", "second"] {
+            let entry = TargetListEntry {
+                target_id: "t".into(),
+                name: "obsolete-target".into(),
+                state: mdm_tux::KennelTargetState::Claimed,
+                lease_id: Some("lease".into()),
+                rpc_addr: Some("obsolete-address".into()),
+            };
+            let grant = ClaimGrant {
+                target_id: "t".into(),
+                target_name: "obsolete-target".into(),
+                lease_id: "lease".into(),
+                target_pubkey: "synthetic".into(),
+                target_direct_addr: "obsolete-direct".into(),
+                rpc_addr: Some("obsolete-address".into()),
+                expires_at_ms: 10_000,
+            };
+            let events = vec![
+                KennelUiEvent::AvailableTargets(vec![entry.clone()]),
+                KennelUiEvent::MineTargets(vec![entry]),
+                KennelUiEvent::ClaimGranted(vec![grant]),
+                KennelUiEvent::ClaimReleased {
+                    target_id: "t".into(),
+                    lease_ref: LeaseRef::Known {
+                        lease_id: "lease".into(),
+                    },
+                    reason: LeaseTerminationReason::ReleasedByTux,
+                },
+                KennelUiEvent::HiveRegistered {
+                    rpc_addr: "obsolete-hive".into(),
+                    session_id: Some("obsolete-session".into()),
+                },
+                KennelUiEvent::Reconciled,
+                KennelUiEvent::Error("obsolete error".into()),
+                KennelUiEvent::HiveStreamEvent {
+                    event: serde_json::json!({
+                        "event": {"payload": {"type": "text_delta", "delta": "obsolete delta"}}
+                    }),
+                },
+                KennelUiEvent::HiveComplete {
+                    text: "obsolete completion".into(),
+                },
+                KennelUiEvent::HiveError {
+                    message: "obsolete hive error".into(),
+                },
+            ];
+            for event in events {
+                let claims = ClaimRegistry::default();
+                let old_epoch = register_broker(&claims, "first");
+                let current_epoch = register_broker(&claims, next_incarnation);
+                assert_ne!(old_epoch, current_epoch);
+                let available = matches!(
+                    &event,
+                    KennelUiEvent::ClaimReleased { .. } | KennelUiEvent::Reconciled
+                );
+                claims.write().claims.insert(
+                    "t".into(),
+                    if available {
+                        ClaimState::Available {
+                            target_id: "t".into(),
+                            target_name: "target".into(),
+                        }
+                    } else {
+                        ClaimState::Claimed {
+                            target_id: "t".into(),
+                            target_name: "target".into(),
+                            lease_id: "lease".into(),
+                            rpc_addr: Some("current-target".into()),
+                        }
+                    },
+                );
+                let owner_before = claims.read().clone();
+                let mut app = app();
+                app.targets[0].rpc_addr = "current-target".into();
+                app.targets[0].session_id = Some("current-target-session".into());
+                app.targets[0].phase = TargetPhase::Running;
+                app.targets[0].streaming_text = "current target delta".into();
+                app.targets[1].rpc_addr = "current-hive".into();
+                app.targets[1].session_id = Some("current-hive-session".into());
+                app.target_states
+                    .insert("t".into(), KennelUiState::ClaimedByMe);
+                app.target_leases.insert("t".into(), "lease".into());
+                app.hive_view.push_line("current fallback".into());
+                app.hive_view.streaming_text = "current hive delta".into();
+                app.hive_planning = true;
+                let before = projection_snapshot(&app);
+                let (rpc, mut commands) = mpsc::unbounded_channel();
+                process_event(
+                    &mut app,
+                    TuiEvent::kennel(&old_epoch, event),
+                    &rpc,
+                    Some(&claims),
+                    None,
+                );
+                assert_eq!(projection_snapshot(&app), before);
+                assert_eq!(*claims.read(), owner_before);
+                assert!(
+                    commands.try_recv().is_err(),
+                    "old epoch emitted an RPC command"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn same_epoch_release_cannot_disconnect_a_newer_claim_and_empty_mine_preserves_it() {
+        let claims = ClaimRegistry::default();
+        let epoch = register_broker(&claims, "broker");
+        claims.write().claims.insert(
+            "t".into(),
+            ClaimState::Claimed {
+                target_id: "t".into(),
+                target_name: "target".into(),
+                lease_id: "new-lease".into(),
+                rpc_addr: Some("current-address".into()),
+            },
+        );
+        let mut app = app();
+        app.target_states
+            .insert("t".into(), KennelUiState::ClaimedByMe);
+        app.target_leases.insert("t".into(), "new-lease".into());
+        let before = projection_snapshot(&app);
+        let owner_before = claims.read().clone();
+        let (rpc, mut commands) = mpsc::unbounded_channel();
+        process_event(
+            &mut app,
+            TuiEvent::kennel(
+                &epoch,
+                KennelUiEvent::ClaimReleased {
+                    target_id: "t".into(),
+                    lease_ref: LeaseRef::Known {
+                        lease_id: "old-lease".into(),
+                    },
+                    reason: LeaseTerminationReason::ReleasedByTux,
+                },
+            ),
+            &rpc,
+            Some(&claims),
+            None,
+        );
+        process_event(
+            &mut app,
+            TuiEvent::kennel(&epoch, KennelUiEvent::MineTargets(vec![])),
+            &rpc,
+            Some(&claims),
+            None,
+        );
+        assert_eq!(projection_snapshot(&app), before);
+        assert_eq!(*claims.read(), owner_before);
+        assert!(commands.try_recv().is_err());
+        process_event(
+            &mut app,
+            TuiEvent::kennel(
+                &epoch,
+                KennelUiEvent::ClaimGranted(vec![ClaimGrant {
+                    target_id: "t".into(),
+                    target_name: "target".into(),
+                    lease_id: "new-lease".into(),
+                    target_pubkey: "synthetic".into(),
+                    target_direct_addr: "inproc://target".into(),
+                    rpc_addr: Some("current-address".into()),
+                    expires_at_ms: 10_000,
+                }]),
+            ),
+            &rpc,
+            Some(&claims),
+            None,
+        );
+        assert!(
+            matches!(commands.try_recv().unwrap(), RpcCommand::Connect { target_id, rpc_addr }
+            if target_id == "t" && rpc_addr == "current-address")
+        );
+    }
+
+    #[test]
+    fn delayed_ui_snapshots_cannot_resurrect_a_released_or_restarted_lease() {
+        let mut app = app();
+        let claims = ClaimRegistry::default();
+        let old_epoch = register_broker(&claims, "first");
+        let (rpc, mut commands) = mpsc::unbounded_channel();
+        let entry = TargetListEntry {
+            target_id: "t".into(),
+            name: "target".into(),
+            state: mdm_tux::KennelTargetState::Claimed,
+            lease_id: Some("obsolete".into()),
+            rpc_addr: Some("old-address".into()),
+        };
+        apply_tkc_event(
+            &claims,
+            None,
+            TkcEvent::SeenMineList {
+                targets: vec![entry.clone()],
+            },
+            |_| (),
+        )
+        .unwrap();
+        apply_tkc_event(
+            &claims,
+            None,
+            TkcEvent::ClaimReleased {
+                target_id: "t".into(),
+                lease_ref: LeaseRef::Known {
+                    lease_id: "obsolete".into(),
+                },
+            },
+            |_| (),
+        )
+        .unwrap();
+        let expected = claims.read().clone();
+        process_event(
+            &mut app,
+            TuiEvent::kennel(&old_epoch, KennelUiEvent::MineTargets(vec![entry.clone()])),
+            &rpc,
+            Some(&claims),
+            None,
+        );
+        assert_eq!(*claims.read(), expected);
+        assert!(commands.try_recv().is_err());
+        apply_tkc_event(
+            &claims,
+            None,
+            TkcEvent::BrokerRegistered {
+                epoch: BrokerEpoch::new("first"),
+            },
+            |_| (),
+        )
+        .unwrap();
+        apply_tkc_event(
+            &claims,
+            None,
+            TkcEvent::SeenMineList {
+                targets: vec![entry.clone()],
+            },
+            |_| (),
+        )
+        .unwrap();
+        apply_tkc_event(
+            &claims,
+            None,
+            TkcEvent::BrokerRegistered {
+                epoch: BrokerEpoch::new("second"),
+            },
+            |_| (),
+        )
+        .unwrap();
+        let expected = claims.read().clone();
+        process_event(
+            &mut app,
+            TuiEvent::kennel(&old_epoch, KennelUiEvent::MineTargets(vec![entry])),
+            &rpc,
+            Some(&claims),
+            None,
+        );
+        assert_eq!(*claims.read(), expected);
+        assert!(commands.try_recv().is_err());
     }
 }

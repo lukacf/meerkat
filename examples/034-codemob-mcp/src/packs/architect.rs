@@ -29,13 +29,9 @@ impl Pack for ArchitectPack {
 
     fn definition(
         &self,
-        task: &str,
-        context: &str,
         overrides: &BTreeMap<String, String>,
         pp: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
-        let ctx = format_context(context);
-
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("planner"),
@@ -90,7 +86,7 @@ impl Pack for ArchitectPack {
             StepId::from("plan"),
             flow_step(
                 "planner",
-                format!("Create an architecture plan for:\n\n{task}{ctx}"),
+                format!("Create an architecture plan for:\n\n{TASK_TEMPLATE}"),
                 &[],
                 600_000,
             ),

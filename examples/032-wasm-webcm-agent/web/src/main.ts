@@ -134,7 +134,8 @@ async function boot() {
       stream: mainStream,
       statusEl: orchestratorStatusEl,
       subHandle: null,
-      currentCard: null,
+      pendingCards: new Map(),
+      seenEvents: new Set(),
     });
 
     // Sub-agent panels
@@ -144,7 +145,8 @@ async function boot() {
         stream: new StreamRenderer(els.stream),
         statusEl: els.status,
         subHandle: null,
-        currentCard: null,
+        pendingCards: new Map(),
+        seenEvents: new Set(),
       });
     }
 

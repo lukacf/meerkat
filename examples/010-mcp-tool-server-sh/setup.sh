@@ -2,7 +2,7 @@
 # 010 — MCP Tool Server Integration
 #
 # End-to-end demo:
-# - starts from an isolated temp CLI/project config root
+# - starts from example-local CLI/project config roots
 # - registers a real stdio MCP server
 # - shows the generated project-scoped mcp.toml
 # - verifies registration with rkat mcp list/get
@@ -25,7 +25,11 @@ SERVER_SCRIPT="$ROOT/demo_mcp_server.py"
 
 resolve_rkat() {
   if [[ -n "${RKAT:-}" ]]; then
-    printf '%s\n' "$RKAT"
+    case "$RKAT" in
+      /*) printf '%s\n' "$RKAT" ;;
+      */*) printf '%s/%s\n' "$PWD" "$RKAT" ;;
+      *) printf '%s\n' "$RKAT" ;;
+    esac
     return
   fi
 
@@ -61,7 +65,7 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
   exit 1
 fi
 
-mkdir -p "$STATE_ROOT" "$CONTEXT_ROOT" "$USER_CONFIG_ROOT"
+mkdir -p "$STATE_ROOT" "$CONTEXT_ROOT/.rkat" "$USER_CONFIG_ROOT"
 
 BASE_ARGS=(
   --state-root "$STATE_ROOT"
@@ -76,6 +80,27 @@ run_in_project() {
   )
 }
 
+print_cleanup() {
+  printf '(cd %q && ' "$CONTEXT_ROOT"
+  printf '%q ' "$RKAT" "${BASE_ARGS[@]}" mcp remove "$SERVER_NAME" --scope project
+  printf ')\n'
+}
+
+REGISTERED=false
+cleanup() {
+  local status=$?
+  if [[ "$REGISTERED" == true ]]; then
+    echo "--- Cleanup: remove this run's example registration ---"
+    print_cleanup
+    if ! run_in_project mcp remove "$SERVER_NAME" --scope project; then
+      echo "Cleanup failed; run the command above before retrying." >&2
+      if [[ "$status" == 0 ]]; then status=1; fi
+    fi
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
 echo "=== 010 — MCP Tool Server Integration ==="
 echo
 echo "Workspace roots:"
@@ -87,6 +112,7 @@ echo
 echo "--- 1. Register a real stdio MCP server ---"
 run_in_project mcp add "$SERVER_NAME" --scope project -- \
   python3 "$SERVER_SCRIPT"
+REGISTERED=true
 echo
 
 echo "--- 2. Show registered MCP servers ---"
@@ -106,6 +132,7 @@ echo "--- 5. Run a live prompt that should use MCP tools ---"
 echo "Prompt asks the agent to call incident tools and quote exact fields."
 echo
 run_in_project run \
+  --model claude-sonnet-4-6 \
   --wait-for-mcp \
   --verbose \
   "You are the on-call incident coordinator.
@@ -120,8 +147,6 @@ Return:
 Do not answer from prior knowledge; use the MCP tool outputs."
 echo
 
-echo "--- 6. Cleanup command ---"
-echo "(cd \"$CONTEXT_ROOT\" && \"$RKAT\" ${BASE_ARGS[*]} mcp remove $SERVER_NAME --scope project)"
-echo
-echo "Done. The example kept all state under:"
+echo "Done. The EXIT trap removes this run's MCP registration, even on failure."
+echo "Session state remains under:"
 echo "  $WORK"

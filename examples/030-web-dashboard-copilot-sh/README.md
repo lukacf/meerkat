@@ -31,33 +31,22 @@ The generated definition has four roles:
 | `status-scribe` | Produces Slack-ready status updates and next-step checklists |
 
 This is the kind of team a host application could embed in a release dashboard.
-The host still has to import the generated source
-`.work/dashboard-copilot/definition.json`, inline its referenced skills as
-described below, use `@rkat/web` to create the mob and spawn the specialists,
-route prompts, and render results. Runtime initialization does not expose or
-instantiate the full packed definition.
-
-### Required browser skill preparation
-
-The generated definition uses filesystem-backed `skills` entries, which browser
-member construction rejects. Before `createMob()` / `spawn()`, load each
-referenced skill's trusted text from `.work/dashboard-copilot/skills/*.md`
-(paths here are relative to this example directory), or from the trust-verified
-pack. Replace each corresponding `definition.skills` entry with
-`{ source: "inline", content: skillText }`, preserving the entry's key and every
-profile's skill references. Bundle those trusted texts into the host or serve
-them as host-managed assets; the WASM runtime cannot read those filesystem paths.
-
-`initFromMobpack()` compiles verified pack skills into standalone session
-prompts. It does not supply filesystem skills to a separately imported
-`MobDefinition`; that definition still needs the explicit inlining step.
+The host still has to load the generated browser `definition.inline.json`, use
+`@rkat/web` to create the mob and spawn the specialists, route prompts, and
+render results. Runtime initialization does not expose or instantiate the full
+packed definition. Do not pass the source definition's filesystem skill paths
+to `createMob()`: WASM cannot read them. The script emits exact inline markdown
+copies while preserving the path-based source and packaged files.
 
 ## Prerequisites
 
 ```bash
-export ANTHROPIC_API_KEY=sk-...
 ./scripts/repo-cargo build -p rkat --bin rkat
 ```
+
+Python 3 is required to emit the inline definition. Packaging does not require
+provider credentials; actual model calls in a host application do. All CLI
+roots are example-local under `.work/`.
 
 The script uses `sdks/web/wasm/meerkat_web_runtime_bg.wasm` by default. To
 rebuild it after Rust changes, install Node.js and `wasm-pack`, then run:
@@ -89,6 +78,7 @@ The script will:
 3. Run `rkat mob inspect` and `rkat mob validate`
 4. Assemble the browser bundle with `rkat mob web build --wasm ...`
 5. Emit supporting assets:
+   - `.work/dashboard-copilot-web/definition.inline.json`
    - `.work/dashboard-context.json`
    - `.work/example-questions.md`
    - `.work/embed-snippet.html`
@@ -104,6 +94,7 @@ artifact. It includes:
 - the WASM runtime files,
 - the generated `manifest.web.toml`,
 - the packed mob definition and skills prepared for web execution.
+- `definition.inline.json` with browser-readable inline skills for `createMob()`.
 
 Its generated `index.html` only trust-verifies the pack and initializes the
 WASM runtime. The Start button does not create or spawn the declared team.
@@ -122,8 +113,9 @@ Imagine your internal release dashboard already shows:
 - queue depth,
 - the last 20 minutes of operator notes.
 
-After a host application inlines the skills, creates the mob, and connects a
-prompt UI, the copilot could sit beside those widgets and answer questions like:
+After a host application loads `definition.inline.json`, creates the mob, and
+connects a prompt UI, the copilot could sit beside those widgets and answer
+questions like:
 
 - "Do we continue the rollout or pause it?"
 - "Which metric moved first after the deployment?"
@@ -155,13 +147,30 @@ not a finished copilot panel.
 ## Suggested Host Integration Pattern
 
 1. Build the web bootstrap with this script
-2. Import `.work/dashboard-copilot/definition.json` and replace its referenced
-   path skills with inline trusted text from `.work/dashboard-copilot/skills/`,
-   retaining the skill keys and profile references
-3. Use `@rkat/web` in a host application to create the prepared mob and spawn its members
-4. Add prompt, event, and transcript UI for the operator
-5. Pass current dashboard context into that host application
-6. Serve or embed the completed host experience in the dashboard
+2. Load `definition.inline.json` from the generated bundle and pass it to
+   `@rkat/web` `runtime.createMob()`; then spawn the declared profiles. The
+   [029 integration snippet](../029-web-incident-war-room-sh/README.md#suggested-integration-exercise)
+   works unchanged with this definition. Runtime bootstrap alone does not
+   convert path skills in a caller-supplied definition.
+3. Add prompt, event, and transcript UI for the operator
+4. Pass current dashboard context into that host application
+5. Serve or embed the completed host experience in the dashboard
+
+The inline definition is a separate host input, not covered by verification of
+`mobpack.bin`; protect it with the same integrity controls as your host assets.
+Spawning can start model turns; the host owns credentials and teardown.
+
+## Offline Regression Test
+
+```bash
+node --test --test-force-exit examples/029-web-incident-war-room-sh/test_browser_skills.mjs
+```
+
+This covers both web examples using the current CLI and actual prebuilt WASM,
+with synthetic provider responses and no external requests. Roles are tested
+individually; this is not a multi-member wiring, live-provider or finished-UI test.
+The force-exit flag closes lingering WASM timers after explicit fixture teardown
+and the test verdict.
 
 ## Notes
 

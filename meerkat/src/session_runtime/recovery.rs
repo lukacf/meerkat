@@ -13,6 +13,39 @@
 
 use meerkat_core::service::CreateSessionRequest;
 
+/// Re-inject process-local resources after canonical durable recovery lowering.
+/// Durable policy and build state are deliberately absent: changes to those
+/// must enter `SurfaceSessionRecoveryOverrides`, not this resource seam.
+pub fn inject_recovery_resources(
+    build: &mut meerkat_core::service::SessionBuildOptions,
+    resources: &crate::AgentBuildConfig,
+) {
+    let resources = resources.to_session_build_options();
+    build.llm_client_override = resources
+        .llm_client_override
+        .or(build.llm_client_override.take());
+    build.agent_llm_client_decorator = resources
+        .agent_llm_client_decorator
+        .or(build.agent_llm_client_decorator.take());
+    build.external_tools = resources.external_tools.or(build.external_tools.take());
+    build.mcp_servers = resources.mcp_servers;
+    build.custom_models = resources.custom_models;
+    build.model_fallback = resources.model_fallback;
+    build.image_generation_provider = resources.image_generation_provider;
+    build.auto_compact_threshold_override = resources.auto_compact_threshold_override;
+    build.compaction_curator_override = resources.compaction_curator_override;
+    build.session_comms_runtime_override = resources.session_comms_runtime_override;
+    build.blob_store_override = resources.blob_store_override;
+    build.checkpointer = resources.checkpointer.or(build.checkpointer.take());
+    build.schedule_tools = resources.schedule_tools;
+    build.workgraph_tools = resources.workgraph_tools;
+    build.workgraph_namespace_grant = resources.workgraph_namespace_grant;
+    build.mob_tools = resources.mob_tools;
+    build.tool_dispatch_admission = resources.tool_dispatch_admission;
+    build.tool_consequence_policy_registry = resources.tool_consequence_policy_registry;
+    build.host_prompt_sections = resources.host_prompt_sections;
+}
+
 /// Result of `recovered_create_request*`: a [`CreateSessionRequest`]
 /// reconstructed from a persisted session, plus a flag indicating
 /// whether the runtime binding already existed before recovery (so callers
@@ -167,10 +200,7 @@ mod context {
             overrides: meerkat_core::SurfaceSessionRecoveryOverrides,
             binding_mode: RecoveryRuntimeBindingMode,
         ) -> Result<RecoveredCreateRequest, RecoveryError> {
-            let current_generation = match self.config_runtime.as_ref() {
-                Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
-                None => None,
-            };
+            let current_generation = self.recovery_config_generation().await;
             let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
             let bindings = match binding_mode {
                 RecoveryRuntimeBindingMode::Authoritative => {
@@ -188,7 +218,62 @@ mod context {
                 session_id: session_id.clone(),
                 message: e.to_string(),
             })?;
-            let recovered = match build_recovered_session(
+            let request = match self.lower_recovered_create_request(
+                session,
+                overrides,
+                bindings,
+                current_generation,
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    if !runtime_was_registered
+                        && let Err(cleanup_error) =
+                            self.runtime_adapter.unregister_session(session_id).await
+                    {
+                        return Err(RecoveryError::BindingPreparation {
+                            session_id: session_id.clone(),
+                            message: format!(
+                                "{error}; additionally failed to unregister newly recovered runtime binding: {cleanup_error}"
+                            ),
+                        });
+                    }
+                    return Err(error);
+                }
+            };
+            Ok(RecoveredCreateRequest {
+                request,
+                runtime_was_registered,
+            })
+        }
+
+        /// Lower durable recovery using an already-owned materialization lease.
+        /// Registration and cancellation compensation remain with its caller;
+        /// this method never prepares or unregisters a second binding.
+        pub async fn recovered_create_request_with_bindings(
+            &self,
+            session: Session,
+            overrides: meerkat_core::SurfaceSessionRecoveryOverrides,
+            bindings: meerkat_core::SessionRuntimeBindings,
+        ) -> Result<meerkat_core::service::CreateSessionRequest, RecoveryError> {
+            let current_generation = self.recovery_config_generation().await;
+            self.lower_recovered_create_request(session, overrides, bindings, current_generation)
+        }
+
+        async fn recovery_config_generation(&self) -> Option<u64> {
+            match self.config_runtime.as_ref() {
+                Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
+                None => None,
+            }
+        }
+
+        fn lower_recovered_create_request(
+            &self,
+            session: Session,
+            overrides: meerkat_core::SurfaceSessionRecoveryOverrides,
+            bindings: meerkat_core::SessionRuntimeBindings,
+            current_generation: Option<u64>,
+        ) -> Result<meerkat_core::service::CreateSessionRequest, RecoveryError> {
+            let recovered = build_recovered_session(
                 session,
                 &overrides,
                 SurfaceSessionRecoveryContext {
@@ -205,27 +290,9 @@ mod context {
                     backend: self.backend.map(ToString::to_string),
                     config_generation: current_generation,
                 },
-            ) {
-                Ok(recovered) => recovered,
-                Err(error) => {
-                    if !runtime_was_registered
-                        && let Err(cleanup_error) =
-                            self.runtime_adapter.unregister_session(session_id).await
-                    {
-                        return Err(RecoveryError::BindingPreparation {
-                            session_id: session_id.clone(),
-                            message: format!(
-                                "{error}; additionally failed to unregister newly recovered runtime binding: {cleanup_error}"
-                            ),
-                        });
-                    }
-                    return Err(RecoveryError::Recovery(error));
-                }
-            };
-            Ok(RecoveredCreateRequest {
-                request: recovered.into_deferred_create_request(),
-                runtime_was_registered,
-            })
+            )
+            .map_err(RecoveryError::Recovery)?;
+            Ok(recovered.into_deferred_create_request())
         }
     }
 }

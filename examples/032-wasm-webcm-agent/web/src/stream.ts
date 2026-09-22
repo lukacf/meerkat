@@ -7,6 +7,11 @@
 
 import { marked, type Renderer } from "marked";
 import hljs from "highlight.js";
+import DOMPurify from "dompurify";
+
+function markdownHtml(markdown: string): string {
+  return DOMPurify.sanitize(marked.parse(markdown) as string, { USE_PROFILES: { html: true } });
+}
 
 // Custom renderer for code highlighting (marked v15+ API)
 const renderer: Partial<Renderer> = {
@@ -42,7 +47,7 @@ export class StreamRenderer {
   private appendText(markdown: string): void {
     const el = document.createElement("div");
     el.className = "stream-entry stream-text";
-    el.innerHTML = marked.parse(markdown) as string;
+    el.innerHTML = markdownHtml(markdown);
     this.append(el);
   }
 
@@ -61,7 +66,7 @@ export class StreamRenderer {
   /** Finalize streaming text: replace raw deltas with rendered markdown. */
   finalizeText(markdown: string): void {
     if (this.pendingTextEl) {
-      this.pendingTextEl.innerHTML = marked.parse(markdown) as string;
+      this.pendingTextEl.innerHTML = markdownHtml(markdown);
       this.pendingTextEl = null;
     } else {
       this.appendText(markdown);
@@ -143,15 +148,17 @@ export class StreamRenderer {
     if (this.statusEl) {
       this.statusEl.remove();
       this.statusEl = null;
+      this.pendingTextEl = null;
     }
   }
 
   /** Render an error line. */
-  appendError(text: string): void {
+  appendError(text: string, report?: unknown): void {
     this.clearStatus();
     const el = document.createElement("div");
     el.className = "stream-entry stream-error";
     el.textContent = text;
+    if (report) el.dataset.errorReport = JSON.stringify(report);
     this.append(el);
   }
 
@@ -177,13 +184,16 @@ export class StreamRenderer {
     intro.className = "stream-intro";
     intro.innerHTML =
       `Collaborative multi-agent system (Meerkat Mob) entirely in your browser — no backend, no server. ` +
-      `The Alpha Meerkat (<span class="model-tag">${models.main}</span>) coordinates a ` +
-      `planner (<span class="model-tag">${models.planner}</span>), ` +
-      `coder (<span class="model-tag">${models.coder}</span>), and ` +
-      `reviewer (<span class="model-tag">${models.reviewer}</span>) ` +
+      `The Alpha Meerkat (<span class="model-tag"></span>) coordinates a ` +
+      `planner (<span class="model-tag"></span>), ` +
+      `coder (<span class="model-tag"></span>), and ` +
+      `reviewer (<span class="model-tag"></span>) ` +
       `with access to a sandboxed Alpine Linux VM.<br><br>` +
       `Try: <em>"Write an ASCII meerkat generator in micropython with randomized poses"</em> ` +
       `or <em>"Build a markdown-to-HTML converter with tests in Lua"</em>`;
+    intro.querySelectorAll(".model-tag").forEach((el, index) => {
+      el.textContent = [models.main, models.planner, models.coder, models.reviewer][index];
+    });
 
     this.container.appendChild(banner);
     this.container.appendChild(intro);

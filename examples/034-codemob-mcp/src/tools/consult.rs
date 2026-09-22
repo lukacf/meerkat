@@ -3,14 +3,12 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use meerkat::surface::{request_action, RequestContext};
-use meerkat::SessionService;
+use meerkat::surface::RequestContext;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
     StartTurnRuntimeSemantics,
 };
 use meerkat_core::types::SessionId;
-use meerkat_core::Session;
 
 use super::ToolCallError;
 use crate::state::ForceState;
@@ -42,6 +40,16 @@ pub async fn handle(
 ) -> Result<Value, ToolCallError> {
     let input: ConsultInput = serde_json::from_value(arguments.clone())
         .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
+    let provider_params = input
+        .provider_params
+        .map(serde_json::from_value::<meerkat_core::ProviderParamsOverride>)
+        .transpose()
+        .map_err(|e| ToolCallError::invalid_params(format!("Invalid provider_params: {e}")))?;
+    if input.session_id.is_some() && provider_params.is_some() {
+        return Err(ToolCallError::invalid_params(
+            "provider_params is supported only for new consult sessions; continuation inherits the original configuration",
+        ));
+    }
 
     let prompt = match &input.context {
         Some(ctx) if !ctx.is_empty() => format!("{}\n\n## Context\n\n{ctx}", input.question),
@@ -56,21 +64,7 @@ pub async fn handle(
         let session_id = SessionId::parse(sid)
             .map_err(|e| ToolCallError::invalid_params(format!("Invalid session_id: {e}")))?;
 
-        if let Some(context) = request_context.as_ref() {
-            let service = state.session_service.clone();
-            let session_id_for_cancel = session_id.clone();
-            // This example is explicitly standalone/ephemeral; production
-            // runtime-backed surfaces route cancellation through MeerkatMachine.
-            let _ = context
-                .install_cancel_action(request_action(move || {
-                    let service = service.clone();
-                    let session_id = session_id_for_cancel.clone();
-                    async move {
-                        let _ = service.interrupt(&session_id).await;
-                    }
-                }))
-                .await;
-        }
+        let signal = super::cancellation::cancellation_signal(request_context.as_ref()).await?;
 
         let req = StartTurnRequest {
             injected_context: Vec::new(),
@@ -80,11 +74,9 @@ pub async fn handle(
             runtime: StartTurnRuntimeSemantics::default(),
         };
 
-        let result = state
-            .session_service
-            .start_turn(&session_id, req)
-            .await
-            .map_err(|e| ToolCallError::internal(format!("Session error: {e}")))?;
+        let result =
+            super::cancellation::run_turn(&state.session_service, &session_id, req, &signal)
+                .await?;
 
         return Ok(json!({
             "content": [
@@ -95,35 +87,9 @@ pub async fn handle(
     }
 
     // New session path.
-    let session = Session::new();
-    let session_id = session.id().clone();
-
-    if let Some(context) = request_context.as_ref() {
-        let service = state.session_service.clone();
-        let session_id_for_cancel = session_id.clone();
-        // No archive cleanup — session stays alive for continuation via session_id.
-        // This example is explicitly standalone/ephemeral; production
-        // runtime-backed surfaces route cancellation through MeerkatMachine.
-        let _ = context
-            .install_cancel_action(request_action(move || {
-                let service = service.clone();
-                let session_id = session_id_for_cancel.clone();
-                async move {
-                    let _ = service.interrupt(&session_id).await;
-                }
-            }))
-            .await;
-    }
-
     let system_prompt = input
         .system_prompt
         .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
-    let provider_params = input
-        .provider_params
-        .map(serde_json::from_value::<meerkat_core::ProviderParamsOverride>)
-        .transpose()
-        .map_err(|e| ToolCallError::invalid_params(format!("Invalid provider_params: {e}")))?;
-
     let mut labels = BTreeMap::new();
     labels.insert("source".into(), "consult".into());
     labels.insert("model".into(), model.clone());
@@ -135,7 +101,6 @@ pub async fn handle(
         .filter(|v| !v.is_empty());
 
     let mut build = SessionBuildOptions {
-        resume_session: Some(session),
         override_shell: meerkat_core::ToolCategoryOverride::from_override(input.shell),
         additional_instructions,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
@@ -147,21 +112,31 @@ pub async fn handle(
     let req = CreateSessionRequest {
         injected_context: Vec::new(),
         model,
-        prompt: prompt.into(),
+        prompt: "".into(),
         system_prompt: meerkat_core::SystemPromptOverride::Set(system_prompt),
         max_tokens: None,
         event_tx: None,
-        initial_turn: InitialTurnPolicy::RunImmediately,
+        initial_turn: InitialTurnPolicy::Defer,
         deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
         build: Some(build),
         labels: Some(labels),
     };
 
-    let result = state
-        .session_service
-        .create_session(req)
-        .await
-        .map_err(|e| ToolCallError::internal(format!("Session error: {e}")))?;
+    let turn = StartTurnRequest {
+        injected_context: Vec::new(),
+        prompt: prompt.into(),
+        system_prompt: None,
+        event_tx: None,
+        runtime: StartTurnRuntimeSemantics::default(),
+    };
+    let result = super::cancellation::create_and_run(
+        &state.session_service,
+        req,
+        turn,
+        request_context.as_ref(),
+    )
+    .await?;
+    let session_id = &result.session_id;
 
     Ok(json!({
         "content": [

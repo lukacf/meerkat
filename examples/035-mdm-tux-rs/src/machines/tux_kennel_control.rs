@@ -11,9 +11,25 @@ use crate::{ClaimGrant, TargetListEntry};
 
 use super::tux_claim;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerEpoch {
+    incarnation: String,
+    connection: uuid::Uuid,
+}
+
+impl BrokerEpoch {
+    pub fn new(incarnation: impl Into<String>) -> Self {
+        Self {
+            incarnation: incarnation.into(),
+            connection: uuid::Uuid::new_v4(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct State {
     pub kennel_connected: bool,
+    pub broker_epoch: Option<BrokerEpoch>,
     pub claims: HashMap<String, tux_claim::State>,
 }
 
@@ -37,6 +53,12 @@ impl State {
 #[derive(Debug, Clone)]
 pub enum Event {
     KennelConnected,
+    BrokerRegistered {
+        epoch: BrokerEpoch,
+    },
+    ClaimRefused {
+        target_id: String,
+    },
     KennelDisconnected,
     SeenAvailableList {
         targets: Vec<TargetListEntry>,
@@ -56,6 +78,7 @@ pub enum Event {
     },
     ClaimReleased {
         target_id: String,
+        lease_ref: crate::LeaseRef,
     },
 }
 
@@ -114,6 +137,31 @@ fn apply_claim_event(
 pub fn transition(mut state: State, event: Event) -> Result<(State, Vec<Effect>), TransitionError> {
     let mut out = Vec::new();
     match event {
+        Event::BrokerRegistered { epoch } => {
+            if state
+                .broker_epoch
+                .as_ref()
+                .is_some_and(|old| old.incarnation != epoch.incarnation)
+            {
+                for target_id in state.claims.keys().cloned().collect::<Vec<_>>() {
+                    apply_claim_event(
+                        &mut state.claims,
+                        &target_id,
+                        tux_claim::Event::BrokerRestarted,
+                        &mut out,
+                    )?;
+                }
+            }
+            state.broker_epoch = Some(epoch);
+        }
+        Event::ClaimRefused { target_id } => {
+            apply_claim_event(
+                &mut state.claims,
+                &target_id,
+                tux_claim::Event::ClaimRefused,
+                &mut out,
+            )?;
+        }
         Event::KennelConnected => {
             state.kennel_connected = true;
         }
@@ -178,6 +226,16 @@ pub fn transition(mut state: State, event: Event) -> Result<(State, Vec<Effect>)
                     );
                 }
                 if let Some(lease_id) = target.lease_id.clone() {
+                    // A list is not correlated claim completion. It must not
+                    // overwrite a newer positive lease observation.
+                    if state
+                        .claims
+                        .get(&target.target_id)
+                        .and_then(|claim| claim.lease_id())
+                        .is_some_and(|current| current != lease_id)
+                    {
+                        continue;
+                    }
                     apply_claim_event(
                         &mut state.claims,
                         &target.target_id,
@@ -235,7 +293,20 @@ pub fn transition(mut state: State, event: Event) -> Result<(State, Vec<Effect>)
                 }));
             }
         }
-        Event::ClaimReleased { target_id, .. } => {
+        Event::ClaimReleased {
+            target_id,
+            lease_ref,
+        } => {
+            let matches = state
+                .claims
+                .get(&target_id)
+                .is_some_and(|claim| match &lease_ref {
+                    crate::LeaseRef::Known { lease_id } => claim.lease_id() == Some(lease_id),
+                    crate::LeaseRef::PendingRebind => claim.lease_id().is_none(),
+                });
+            if !matches {
+                return Err(err("State", "ClaimReleased", "obsolete lease release"));
+            }
             if state.claims.contains_key(&target_id) {
                 apply_claim_event(
                     &mut state.claims,
@@ -253,6 +324,149 @@ pub fn transition(mut state: State, event: Event) -> Result<(State, Vec<Effect>)
 mod tests {
     use super::*;
     use crate::{KennelTargetState, TargetListEntry};
+
+    #[test]
+    fn refusal_completes_request_and_restart_is_not_transport_loss() {
+        let mut state = State::default();
+        state.claims.insert(
+            "t".into(),
+            tux_claim::State::Available {
+                target_id: "t".into(),
+                target_name: "target".into(),
+            },
+        );
+        let (state, _) = transition(
+            state,
+            Event::BrokerRegistered {
+                epoch: BrokerEpoch::new("first"),
+            },
+        )
+        .unwrap();
+        let (state, _) = transition(
+            state,
+            Event::UserClaimTarget {
+                target_id: "t".into(),
+            },
+        )
+        .unwrap();
+        let (state, _) = transition(
+            state,
+            Event::ClaimRefused {
+                target_id: "t".into(),
+            },
+        )
+        .unwrap();
+        let (mut state, effects) = transition(
+            state,
+            Event::UserClaimTarget {
+                target_id: "t".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(effects.len(), 1);
+        state.claims.insert(
+            "t".into(),
+            tux_claim::State::Claimed {
+                target_id: "t".into(),
+                target_name: "target".into(),
+                lease_id: "live".into(),
+                rpc_addr: Some("rpc".into()),
+            },
+        );
+        let live = state.claims["t"].clone();
+        let (state, _) = transition(state, Event::KennelDisconnected).unwrap();
+        let (state, _) = transition(
+            state,
+            Event::BrokerRegistered {
+                epoch: BrokerEpoch::new("first"),
+            },
+        )
+        .unwrap();
+        let (state, _) = transition(state, Event::SeenMineList { targets: vec![] }).unwrap();
+        let (state, _) = transition(
+            state,
+            Event::SeenMineList {
+                targets: vec![TargetListEntry {
+                    target_id: "t".into(),
+                    name: "target".into(),
+                    state: KennelTargetState::Claimed,
+                    lease_id: Some("stale".into()),
+                    rpc_addr: None,
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(state.claims["t"], live);
+        let (state, _) = transition(
+            state,
+            Event::BrokerRegistered {
+                epoch: BrokerEpoch::new("second"),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            state.claims["t"],
+            tux_claim::State::Available { .. }
+        ));
+    }
+
+    #[test]
+    fn empty_mine_before_ack_cannot_invalidate_a_fresh_grant() {
+        let mut state = State::default();
+        state.claims.insert(
+            "t".into(),
+            tux_claim::State::Available {
+                target_id: "t".into(),
+                target_name: "target".into(),
+            },
+        );
+        let (state, _) = transition(
+            state,
+            Event::UserClaimTarget {
+                target_id: "t".into(),
+            },
+        )
+        .unwrap();
+        let (state, effects) = transition(state, Event::SeenMineList { targets: vec![] }).unwrap();
+        assert!(effects.is_empty());
+        assert!(matches!(
+            state.claims["t"],
+            tux_claim::State::ClaimRequested { .. }
+        ));
+        let (state, effects) = transition(
+            state,
+            Event::ClaimGranted {
+                claims: vec![ClaimGrant {
+                    target_id: "t".into(),
+                    target_name: "target".into(),
+                    lease_id: "fresh".into(),
+                    rpc_addr: Some("tcp://127.0.0.1:1".into()),
+                    target_pubkey: "synthetic".into(),
+                    target_direct_addr: "inproc://synthetic".into(),
+                    expires_at_ms: 10_000,
+                }],
+                now_ms: 100,
+            },
+        )
+        .unwrap();
+        assert!(effects.iter().any(|effect| matches!(effect, Effect::Claim {
+            effect: tux_claim::Effect::SendClaimAck { lease_id }, ..
+        } if lease_id == "fresh")));
+        // The emitted ACK has not been delivered. An earlier Mine reply can
+        // arrive in this interval and is not authoritative negative evidence.
+        let granted = state.clone();
+        let (state, effects) = transition(state, Event::SeenMineList { targets: vec![] }).unwrap();
+        assert_eq!(state, granted);
+        assert!(effects.is_empty());
+        let (state, _) = transition(
+            state,
+            Event::ClaimRefused {
+                target_id: "t".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(state, granted);
+    }
 
     #[test]
     fn mine_list_without_lease_seeds_target() {
@@ -282,6 +496,7 @@ mod tests {
         let (state, _effects) = transition(
             State {
                 kennel_connected: true,
+                broker_epoch: None,
                 claims: HashMap::new(),
             },
             Event::SeenMineList {
@@ -325,6 +540,7 @@ mod tests {
         let (state, effects) = transition(
             State {
                 kennel_connected: true,
+                broker_epoch: None,
                 claims,
             },
             Event::SeenMineList { targets: vec![] },

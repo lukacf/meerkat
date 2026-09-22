@@ -104,11 +104,19 @@ def lookup_service(arguments: dict[str, Any]) -> tuple[str, dict[str, Any]] | No
     return service, data
 
 
-def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
+def handle_request(request: Any) -> dict[str, Any] | None:
+    if not isinstance(request, dict):
+        return rpc_error(None, -32600, "Invalid Request: expected an object")
     request_id = request.get("id")
     method = request.get("method")
+    if isinstance(request_id, bool) or not isinstance(
+        request_id, (str, int, float, type(None))
+    ):
+        return rpc_error(None, -32600, "Invalid Request: invalid id")
+    if request.get("jsonrpc") != "2.0" or not isinstance(method, str):
+        return rpc_error(request_id, -32600, "Invalid Request: expected JSON-RPC 2.0 and method")
 
-    if request_id is None:
+    if "id" not in request:
         return None
 
     if method == "initialize":
@@ -129,8 +137,14 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
 
     if method == "tools/call":
         params = request.get("params", {})
+        if not isinstance(params, dict):
+            return rpc_error(request_id, -32602, "Invalid Params: expected an object")
         name = params.get("name")
         arguments = params.get("arguments", {})
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            return rpc_error(request_id, -32602, "Invalid Params: expected tool name and arguments object")
+        if not isinstance(arguments.get("service"), str) or set(arguments) != {"service"}:
+            return rpc_error(request_id, -32602, "Invalid Params: expected only a string service")
         resolved = lookup_service(arguments)
         if not resolved:
             return rpc_result(

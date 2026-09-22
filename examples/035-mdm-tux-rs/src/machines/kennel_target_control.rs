@@ -55,11 +55,13 @@ pub enum Event {
     ClaimAcked {
         lease_id: String,
         tux_id: String,
+        now_ms: i64,
     },
     LeaseRenewed {
         lease_id: String,
         tux_id: String,
         new_expires_at_ms: i64,
+        now_ms: i64,
     },
     Released {
         reason: LeaseTerminationReason,
@@ -155,7 +157,10 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 .map_err(|e| err("State", "Registered", &e.reason))?;
                 Ok(lift(next, connected, effects))
             } else {
-                Ok((State { connected, lease }, vec![]))
+                let (lease, effects) =
+                    kennel_lease::transition(lease, kennel_lease::Event::TargetConnected)
+                        .map_err(|e| err("State", "Registered", &e.reason))?;
+                Ok(lift(lease, connected, effects))
             }
         }
         Event::ClaimRequested {
@@ -178,10 +183,18 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             .map_err(|e| err("State", "ClaimRequested", &e.reason))?;
             Ok(lift(next, connected, effects))
         }
-        Event::ClaimAcked { lease_id, tux_id } => {
+        Event::ClaimAcked {
+            lease_id,
+            tux_id,
+            now_ms,
+        } => {
             let (next, effects) = kennel_lease::transition(
                 lease,
-                kennel_lease::Event::ClaimAcked { lease_id, tux_id },
+                kennel_lease::Event::ClaimAcked {
+                    lease_id,
+                    tux_id,
+                    now_ms,
+                },
             )
             .map_err(|e| err("State", "ClaimAcked", &e.reason))?;
             Ok(lift(next, connected, effects))
@@ -190,6 +203,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             lease_id,
             tux_id,
             new_expires_at_ms,
+            now_ms,
         } => {
             let (next, effects) = kennel_lease::transition(
                 lease,
@@ -197,6 +211,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                     lease_id,
                     tux_id,
                     new_expires_at_ms,
+                    now_ms,
                 },
             )
             .map_err(|e| err("State", "LeaseRenewed", &e.reason))?;
@@ -260,5 +275,47 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             .map_err(|e| err("State", "TuxDisconnected", &e.reason))?;
             Ok(lift(next, connected, effects))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rpc_only_reregistration_preserves_connected_target_after_claim_expiry() {
+        let state = State {
+            connected: true,
+            lease: kennel_lease::State::Claimed {
+                target_id: "target".into(),
+                tux_id: "tux".into(),
+                lease_id: "lease".into(),
+                expires_at_ms: 100,
+            },
+        };
+        let (state, _) = transition(
+            state,
+            Event::TargetDisconnected {
+                now_ms: 10,
+                recovery_window_ms: 50,
+            },
+        )
+        .unwrap();
+        let (state, _) = transition(
+            state,
+            Event::Registered {
+                attached_tux_id: None,
+                now_ms: 20,
+                recovery_window_ms: 50,
+            },
+        )
+        .unwrap();
+        let (state, effects) = transition(state, Event::Tick { now_ms: 60 }).unwrap();
+        assert!(state.connected);
+        assert!(matches!(state.lease, kennel_lease::State::Available { .. }));
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Lease(kennel_lease::Effect::DropTargetRecord { .. })
+        )));
     }
 }

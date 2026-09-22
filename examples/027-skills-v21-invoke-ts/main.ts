@@ -56,9 +56,9 @@ async function main() {
   const roots = prepareLocalSkillSource(skillName);
 
   const client = new MeerkatClient();
-  await client.connect({ isolated: true, ...roots });
 
   try {
+    await client.connect({ isolated: true, ...roots });
     client.requireCapability("skills");
 
     // Create a session, then invoke the skill on it.
@@ -79,4 +79,7 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

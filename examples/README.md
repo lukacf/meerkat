@@ -64,21 +64,50 @@ pedagogical workflows rather than lightweight command recipes:
 | # | Example | Why Start Here |
 |---|---------|----------------|
 | 010 | [mcp-tool-server-sh](010-mcp-tool-server-sh/) | End-to-end MCP integration: register a real local stdio server, inspect config, and run a live MCP-backed prompt |
-| 028 | [mobpack-release-triage-sh](028-mobpack-release-triage-sh/) | Portable release-incident mobpack: build, sign, inspect, validate, and deploy a believable multi-role triage artifact |
+| 028 | [mobpack-release-triage-sh](028-mobpack-release-triage-sh/) | Offline portable release-incident mobpack: build, sign, inspect, and validate a multi-role artifact without spawning members |
 | 029 | [web-incident-war-room-sh](029-web-incident-war-room-sh/) | Package a SEV-team definition and assemble a browser runtime bootstrap with kickoff prompts |
 | 030 | [web-dashboard-copilot-sh](030-web-dashboard-copilot-sh/) | Produce a browser bootstrap plus dashboard context, prompts, and iframe placement assets |
 
 ## Verification Status
 
-This repo mixes live examples, build-verified examples, and recipe-style
-examples that depend on external toolchains or provider credentials. The table
-below describes the expected local validation level.
+The [adversarial audit ledger](AUDIT.md) records every reviewed finding,
+independent adjudication, correction, and per-example verification result.
+Baseline evidence links refer to the reviewed commit, not to line numbers that
+may have moved during repairs.
 
-| Status | Examples |
-|--------|----------|
-| **Live when provider keys/services are available** | 001-003, 005-015, 017-019, 021-028, 034-037 |
-| **Build-verified locally** | Registered Rust examples via `./scripts/repo-cargo check`; 031 via a prebuilt `sdks/web/wasm` package plus Vite; 032 and 033 via repo-local WASM builds plus Vite |
-| **Syntax-checked / recipe-oriented** | 004, 010, 028-030 shell entrypoints and 036 audio setup when live provider/audio devices are unavailable |
+After installing the local SDK and each example's documented dependencies:
+
+```bash
+# Deterministic regression suites; no live-provider credentials required
+make -C examples verify
+```
+
+The regression harness requires Node.js 22 or newer, Python 3.11 or newer,
+the repository's pinned Rust toolchain, and Chrome/Chromium for headless
+browser checks. These are test-harness prerequisites, not a claim that every
+example uses every toolchain. The WebCM guest check also requires example
+032's documented public guest image and emulator module; it boots the real
+guest and exercises synthetic file and terminal operations without an LLM.
+
+The Makefile exposes narrower lanes for registered Rust examples, standalone
+Rust applications, SDK subprocesses, shell/MCP/mobpack workflows, browser
+applications, and audio/transport lifecycle tests. Browser runtime tests require
+the current `sdks/web/wasm` artifact; build it using the Web SDK instructions
+before running those lanes.
+
+These checks deliberately distinguish real example execution against local
+synthetic transports from external provider validation. A successful compile,
+mock response, browser bootstrap, or missing-credential error does **not** prove
+live multi-agent behavior. Physical microphone/speaker operation, remote device
+control, and provider-backed scenarios require their documented prerequisites
+and separate explicit runs. The ledger names remaining limitations rather than
+counting them as passed tests.
+
+Standalone Rust examples own separate lockfiles. `make verify-lock-consistency`
+checks these as well as the root lock; release preparation refreshes and stages
+them automatically after a version bump. Outside a release, run
+`python3 scripts/example-locks.py refresh` from the repository root, review the
+resulting example locks, and commit them together with the relevant changes.
 
 ## Examples by Level
 
@@ -106,7 +135,7 @@ below describes the expected local validation level.
 
 | # | Example | Surface | Description |
 |---|---------|---------|-------------|
-| 011 | [hooks-guardrails-rs](011-hooks-guardrails-rs/) | Rust | Intercept agent behavior at 8 hook points for audit, filtering, gating |
+| 011 | [hooks-guardrails-rs](011-hooks-guardrails-rs/) | Rust | Agent-loop hooks for audit, filtering, and gating, plus a working command observer |
 | 012 | [skills-loading-rs](012-skills-loading-rs/) | Rust | Compose inline and filesystem skills, with the broader source architecture explained in code |
 | 013 | [context-compaction-rs](013-context-compaction-rs/) | Rust | Automatic context summarization for long-running conversations |
 | 014 | [semantic-memory-rs](014-semantic-memory-rs/) | Rust | In-memory semantic recall, plus the production HNSW/SQLite architecture |
@@ -131,7 +160,7 @@ below describes the expected local validation level.
 | 025 | [full-stack-agent-rs](025-full-stack-agent-rs/) | Rust | Focused standalone composition of tools, budget, JSONL storage, prompt behavior, and events |
 | 026 | [skills-v21-invoke-py](026-skills-v21-invoke-py/) | Python | Invoke a specific skill with canonical `SkillKey` refs |
 | 027 | [skills-v21-invoke-ts](027-skills-v21-invoke-ts/) | TypeScript | Use `session.invokeSkill()` with canonical `SkillKey` refs |
-| 028 | [mobpack-release-triage-sh](028-mobpack-release-triage-sh/) | Shell | Build, sign, validate, and deploy a realistic release-triage `.mobpack` |
+| 028 | [mobpack-release-triage-sh](028-mobpack-release-triage-sh/) | Shell | Build, sign, inspect, and validate a release-triage `.mobpack`; no incident execution |
 | 029 | [web-incident-war-room-sh](029-web-incident-war-room-sh/) | Shell | Pack an incident-team definition and assemble its browser WASM bootstrap |
 | 030 | [web-dashboard-copilot-sh](030-web-dashboard-copilot-sh/) | Shell | Assemble a release-copilot browser bootstrap with host-integration assets |
 | 031 | [wasm-mini-diplomacy-sh](031-wasm-mini-diplomacy-sh/) | Shell + Web | 9 autonomous faction agents plus a turn-driven narrator across 4 WASM mobs |

@@ -22,9 +22,13 @@ use std::sync::Arc;
 
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat_mob::{
-    AgentIdentity, MobBuilder, MobDefinition, MobEventKind, MobStorage, SpawnMemberSpec,
-    validate_definition,
+    AgentIdentity, MobBuilder, MobDefinition, MobEventKind, MobRuntimeMode, MobStorage,
+    SpawnMemberSpec, validate_definition,
 };
+
+#[path = "../017-mob-coding-swarm-rs/tracked_turn.rs"]
+mod tracked_turn;
+use tracked_turn::DemoError;
 
 const RESEARCH_TEAM_TOML: &str = r#"
 [mob]
@@ -82,8 +86,11 @@ fn event_label(kind: &MobEventKind) -> &'static str {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), DemoError> {
+    meerkat_runtime::host_stack::run_host("018-mob-research-team", async_main)?
+}
+
+async fn async_main() -> Result<(), DemoError> {
     let _api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
@@ -224,7 +231,9 @@ content = "Evaluate technical feasibility, architecture options, scalability con
     // Spawn the lead analyst and two researchers.
     println!("\nSpawning team...");
 
-    let mut lead_spec = SpawnMemberSpec::new("lead-analyst", "lead-1");
+    // Exact tracked turns use the turn-driven lane, not autonomous inbox delivery.
+    let mut lead_spec = SpawnMemberSpec::new("lead-analyst", "lead-1")
+        .with_runtime_mode(MobRuntimeMode::TurnDriven);
     lead_spec.initial_message = Some(
         "You are the lead analyst coordinating this research team."
             .to_string()
@@ -281,30 +290,24 @@ content = "Evaluate technical feasibility, architecture options, scalability con
 
     // Send a research question to the lead analyst (live LLM call).
     println!("\nSending research question to lead analyst (live LLM call)...");
-    handle
-        .member(&AgentIdentity::from("lead-1"))
-        .await?
-        .send(
-            "Briefly outline 3 key research questions about the market for AI code assistants. \
+    let lead = handle.member(&AgentIdentity::from("lead-1")).await?;
+    let turn_result = tracked_turn::report_turn(
+        &lead,
+        "Briefly outline 3 key research questions about the market for AI code assistants. \
              Keep your response to 3-4 sentences total. Do NOT use any tools -- \
-             just provide the questions in plain text."
-                .to_string(),
-            meerkat_core::types::HandlingMode::Queue,
-        )
-        .await?;
-
-    // Poll until we see mob events (with timeout).
-    println!("Waiting for response...");
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let ev = handle.poll_events(0, 1).await?;
-        if !ev.is_empty() || tokio::time::Instant::now() > deadline {
-            break;
+             just provide the questions in plain text.",
+        std::time::Duration::from_secs(60),
+        &mut std::io::stdout(),
+    )
+    .await;
+    if let Err(error) = turn_result {
+        if let Err(cleanup_error) = handle.retire_all().await {
+            eprintln!("Cleanup also failed: {cleanup_error}");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        return Err(error);
     }
 
-    // Poll mob events.
+    // Lifecycle events are diagnostic only; the exact response is already shown.
     let events = handle.poll_events(0, 50).await?;
     println!("\nMob events ({} total):", events.len());
     for event in &events {

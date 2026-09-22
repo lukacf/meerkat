@@ -15,7 +15,10 @@
 //!   --example 005-streaming-events --features jsonl-store
 //! ```
 
-use std::sync::Arc;
+use std::{
+    io::{self, Write},
+    sync::Arc,
+};
 
 use meerkat::{
     AgentBuilder, AgentEvent, AgentFactory, AnthropicClient, EventLoggerConfig, spawn_event_logger,
@@ -24,8 +27,37 @@ use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 use tokio::sync::mpsc;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    meerkat_runtime::host_stack::run_host("streaming-events", run)?
+}
+
+async fn process_events(
+    mut event_rx: mpsc::Receiver<AgentEvent>,
+    mut output: impl Write,
+) -> io::Result<()> {
+    let mut text_bytes = 0usize;
+    let mut tool_calls = 0usize;
+    while let Some(event) = event_rx.recv().await {
+        match &event {
+            AgentEvent::TextDelta { delta } => {
+                text_bytes += delta.len();
+                output.write_all(delta.as_bytes())?;
+                output.flush()?;
+            }
+            AgentEvent::ToolCallRequested { name, .. } => {
+                tool_calls += 1;
+                eprintln!("\n[tool requested: {name}]");
+            }
+            AgentEvent::TurnCompleted { .. } => {
+                eprintln!("\n[turn completed — {text_bytes} bytes, {tool_calls} tool calls]");
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
@@ -72,39 +104,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Option B: Custom event processing ---
     println!("\n=== Custom event handler ===\n");
-    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
-
-    let processor = tokio::spawn(async move {
-        let mut text_bytes = 0usize;
-        let mut tool_calls = 0usize;
-
-        while let Some(event) = event_rx.recv().await {
-            match &event {
-                AgentEvent::TextDelta { delta } => {
-                    text_bytes += delta.len();
-                    print!("{delta}");
-                }
-                AgentEvent::ToolCallRequested { name, .. } => {
-                    tool_calls += 1;
-                    eprintln!("\n[tool requested: {name}]");
-                }
-                AgentEvent::TurnCompleted { .. } => {
-                    eprintln!("\n[turn completed — {text_bytes} bytes, {tool_calls} tool calls]");
-                }
-                _ => {} // Many more event types available
-            }
-        }
-    });
+    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
+    let processor = tokio::spawn(process_events(event_rx, io::stdout()));
 
     let result = agent
         .run_with_events(
             "Now write a limerick about the same meerkat.".into(),
             event_tx,
         )
-        .await?;
+        .await;
 
-    processor.await?;
+    // Join even if the agent failed. On I/O failure the receiver drops, so the
+    // producer is not stranded waiting for an event consumer.
+    processor.await??;
+    let result = result?;
     println!("\n\nSession: {}", result.session_id);
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -25,15 +25,17 @@ export function buildFactionDefinition(team: Team, model: string): object {
   const H = HISTORICAL[team];
   const mobId = `diplomacy-${team}`;
   const others = TEAMS.filter(t => t !== team);
-  const peerAddr = (role: string, t: Team = team) => `diplomacy-${t}/${role}/${t}-${role}`;
+  const peerDescription = (role: string, t: Team = team) => `${TEAM_LABELS[t]} ${role} (${t}-${role})`;
+  const addressing = 'Call peers to discover the canonical peer_id for the described member. Use send_message with peer_id, body, and handling_mode: "queue". Never use a display address as identity. In structured dispatches, peer must be that same discovered peer_id.';
 
   const plannerSkill = `You are the strategic PLANNER for ${T}, channeling the cunning of ${H.leader}. You are ${H.style}.
 ${GAME_RULES}
 ${CYCLE_MODEL}
 
-YOUR PEERS (use these exact addresses with send_message):
-- Operator: ${peerAddr("operator")}
-- Ambassador: ${peerAddr("ambassador")}
+YOUR PEERS:
+- Operator: ${peerDescription("operator")}
+- Ambassador: ${peerDescription("ambassador")}
+${addressing}
 
 Do NOT act until you receive a turn message with game state.
 When you receive game state:
@@ -44,14 +46,15 @@ When you receive game state:
    - What lies or misdirection to use (e.g. "we shall march on Warsaw" when you intend Bohemia)
 3. Wait for diplomatic intelligence from your ambassador.
 4. Adjust plan if needed, then tell your OPERATOR to finalize.
-MESSAGE FORMAT: First line = one-sentence summary of the message. Then blank line. Then details (keep SHORT, 3-5 lines). Do not call peers().`;
+MESSAGE FORMAT: First line = one-sentence summary of the message. Then blank line. Then details (keep SHORT, 3-5 lines).`;
 
   const operatorSkill = `You are the military OPERATOR for ${T}. Cold, analytical, focused on winning — a true ${T} field marshal.
 ${GAME_RULES}
 ${CYCLE_MODEL}
 
-YOUR PEERS (use these exact addresses with send_message):
-- Planner: ${peerAddr("planner")}
+YOUR PEERS:
+- Planner: ${peerDescription("planner")}
+${addressing}
 
 CRITICAL PROTOCOL — follow exactly:
 - Do NOT act until your planner messages you.
@@ -65,15 +68,16 @@ When the planner discusses strategy:
 4. ONLY when the planner says to finalize, send a message containing:
    FINAL ORDER: target=<region-id> aggression=<0-100>
 
-MESSAGE FORMAT: First line = one-sentence summary. Then blank line. Then details (3-5 lines max). Do not call peers().`;
+MESSAGE FORMAT: First line = one-sentence summary. Then blank line. Then details (3-5 lines max).`;
 
   const ambassadorSkill = `You are the diplomatic AMBASSADOR for ${T}. A master of deception and persuasion at the Congress of Europe.
 ${GAME_RULES}
 ${CYCLE_MODEL}
 
-YOUR PEERS (use these exact addresses with send_message):
-- Planner (your sovereign): ${peerAddr("planner")}
-- Foreign ambassadors: ${others.map(t => `${TEAM_LABELS[t]} \u2192 ${peerAddr("ambassador", t)}`).join(", ")}
+YOUR PEERS:
+- Planner (your sovereign): ${peerDescription("planner")}
+- Foreign ambassadors: ${others.map(t => peerDescription("ambassador", t)).join(", ")}
+${addressing}
 
 Do NOT act until your planner briefs you.
 
@@ -89,7 +93,7 @@ When briefed by your planner:
 1. Contact foreign ambassadors. Pursue your planner's objectives through deception.
 2. Extract enemy intentions — who do they intend to attack? What coalitions are forming?
 3. Report back to your planner with intelligence and negotiation results.
-Use markdown: **bold** for key intel, bullet lists for proposals. Be concise. Do not call peers().`;
+Use markdown: **bold** for key intel, bullet lists for proposals. Be concise.`;
 
   // Structured output schema — extraction turn produces this after each agent wake cycle.
   // The headline is what appears in compact UI bubbles, so it must be engaging and
@@ -110,7 +114,7 @@ Use markdown: **bold** for key intel, bullet lists for proposals. Be concise. Do
           type: "object",
           additionalProperties: false,
           properties: {
-            peer: { type: "string", description: "Full peer address, e.g. 'diplomacy-france/operator/france-operator'" },
+            peer: { type: "string", description: "Canonical peer_id returned by peers for the message recipient" },
             summary: { type: "string", description: `Rewrite what you told THIS peer as a short SMS. Address them with "you." BAD: "Proposed alliance against Russia." GOOD: "We should hit Russia together — you take Crimea, we take Warsaw. Deal?" BAD: "Reported intelligence to planner." GOOD: "Prussia's bluffing about Burgundy — they're really going east. We should strike now."` },
           },
           required: ["peer", "summary"],

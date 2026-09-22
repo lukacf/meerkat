@@ -17,7 +17,9 @@ export interface ArchiveRecord {
 }
 
 const records = new Map<string, ArchiveRecord>();
-let activeTab: "cases" | "graph" = "cases";
+let activeTab: "cases" | "graph" | null = null;
+let visibleContent: HTMLElement | null = null;
+let visibleFooter: HTMLElement | null = null;
 
 // -- Parse archivist messages for record blocks --
 
@@ -61,6 +63,8 @@ export function upsertRecord(data: any): void {
       lastUpdated: Date.now(),
     });
   }
+  if (activeTab === "cases" && visibleContent && visibleFooter) renderCaseFiles(visibleContent, visibleFooter);
+  if (activeTab === "graph" && visibleContent) renderGraph(visibleContent);
 }
 
 // -- Public API --
@@ -69,20 +73,26 @@ export function getRecordCount(): number { return records.size; }
 export function getRecords(): ArchiveRecord[] { return [...records.values()]; }
 
 export function isKBVisible(): boolean { return activeTab === "cases" || activeTab === "graph"; }
-export function getActiveTab(): "cases" | "graph" { return activeTab; }
+export function getActiveTab(): "cases" | "graph" | null { return activeTab; }
 
 export function showCaseFiles(contentEl: HTMLElement, footerEl: HTMLElement): void {
   activeTab = "cases";
+  visibleContent = contentEl;
+  visibleFooter = footerEl;
   renderCaseFiles(contentEl, footerEl);
 }
 
 export function showGraph(container: HTMLElement): void {
   activeTab = "graph";
+  visibleContent = container;
+  visibleFooter = null;
   renderGraph(container);
 }
 
 export function hideKnowledgeBase(): void {
-  activeTab = "cases"; // reset but don't render
+  activeTab = null;
+  visibleContent = null;
+  visibleFooter = null;
   stopGraphAnimation();
 }
 

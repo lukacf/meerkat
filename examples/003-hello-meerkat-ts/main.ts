@@ -18,9 +18,9 @@ import { MeerkatClient } from "@rkat/sdk";
 
 async function main() {
   const client = new MeerkatClient();
-  await client.connect();
 
   try {
+    await client.connect();
     const session = await client.createSession(
       "What makes Rust's ownership model unique? Answer in two sentences.",
       { model: "claude-sonnet-4-6" },
@@ -36,4 +36,7 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

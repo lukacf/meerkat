@@ -74,7 +74,7 @@ check_hive_rpc_session() {
   local host="${HIVE_RPC_HOST:-127.0.0.1}"
   local port="${HIVE_RPC_PORT:-55010}"
 
-  python3 -c '
+  python3 - "${host}" "${port}" <<'PY'
 import json
 import socket
 import sys
@@ -105,7 +105,7 @@ with socket.create_connection((host, port), timeout=5) as sock:
             raise SystemExit("hive RPC returned no sessions")
         print("Hive RPC session: {}".format(sessions[0]["session_id"]))
         break
-' "${host}" "${port}"
+PY
 }
 
 smoke() {
@@ -163,6 +163,10 @@ run_tmux() {
   tmux new-session -d -s "${session_name}" -c "${example_dir}" "${cmd}"
   tmux attach -t "${session_name}"
 }
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return
+fi
 
 case "${1:-smoke}" in
   smoke) smoke ;;

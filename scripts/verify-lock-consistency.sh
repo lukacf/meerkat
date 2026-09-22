@@ -102,4 +102,8 @@ if (( failed != 0 )); then
   remediation
 fi
 
+if ! CARGO="$CARGO" "$PYTHON" "$SCRIPT_REPO/scripts/example-locks.py" check --root "$ROOT"; then
+  failed=1
+fi
+
 exit "$failed"

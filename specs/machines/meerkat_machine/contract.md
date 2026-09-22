@@ -606,6 +606,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TimeBudgetExceeded`(run_id: RunId)
 - `ForceCancelNoRun`
 - `RunCompleted`(run_id: RunId)
+- `CloseStandaloneTurn`(session_id: SessionId, run_id: RunId, terminal_phase: TurnPhase)
 - `ServiceTurnCommitted`(run_id: RunId)
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, machine_terminal_failure_observed: Bool, terminal_failure_source: Option<RunFailureSourceKind>, error: String)
 - `RunCancelled`(run_id: RunId)
@@ -10171,6 +10172,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `run_matches_binding`
 - To: `Running`
+
+### `CloseStandaloneTurn`
+- From: `Running`
+- On: `CloseStandaloneTurn`(session_id, run_id, terminal_phase)
+- Guards:
+  - `standalone_session_matches`
+  - `standalone_has_no_runtime_epoch`
+  - `standalone_has_no_placement`
+  - `standalone_pre_run_idle`
+  - `standalone_run_matches`
+  - `standalone_terminal_effect_matches`
+  - `standalone_turn_terminal`
+  - `standalone_completed_coherent`
+  - `standalone_cancelled_coherent`
+  - `standalone_failed_specific`
+  - `standalone_failed_coherent`
+  - `standalone_no_completion_obligation`
+- To: `Idle`
 
 ### `ServiceTurnCommittedRunningToIdle`
 - From: `Running`

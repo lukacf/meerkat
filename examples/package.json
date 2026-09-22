@@ -2,11 +2,16 @@
   "name": "meerkat-examples",
   "private": true,
   "type": "module",
+  "scripts": {
+    "check:sdk": "tsc --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext 003-hello-meerkat-ts/main.ts 008-structured-output-ts/main.ts 023-rpc-ide-integration-ts/main.ts 027-skills-v21-invoke-ts/main.ts",
+    "test:sdk": "node --test tests/sdk-examples.test.mjs"
+  },
   "dependencies": {
     "@rkat/sdk": "file:../sdks/typescript"
   },
   "devDependencies": {
     "@types/node": "^22",
+    "ajv": "^8.17.1",
     "tsx": "^4.20.6",
     "typescript": "^5.9.2"
   }

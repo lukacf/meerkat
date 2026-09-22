@@ -25,7 +25,7 @@ use meerkat_core::ToolCallView;
 use meerkat_core::ToolDispatchOutcome;
 use meerkat_store::{JsonlStore, StoreAdapter};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -37,12 +37,16 @@ struct WeatherArgs {
     /// City name (e.g. "San Francisco")
     city: String,
     /// Temperature unit: "celsius" or "fahrenheit"
-    #[serde(default = "default_unit")]
-    unit: String,
+    #[serde(default)]
+    unit: WeatherUnit,
 }
 
-fn default_unit() -> String {
-    "celsius".to_string()
+#[derive(Debug, Clone, Copy, Default, JsonSchema, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum WeatherUnit {
+    #[default]
+    Celsius,
+    Fahrenheit,
 }
 
 /// Arguments for unit conversion.
@@ -95,10 +99,9 @@ impl AgentToolDispatcher for WeatherAndConvertDispatcher {
                     "tokyo" => 28.0,
                     _ => 20.0,
                 };
-                let display_temp = if args.unit == "fahrenheit" {
-                    temp * 9.0 / 5.0 + 32.0
-                } else {
-                    temp
+                let display_temp = match args.unit {
+                    WeatherUnit::Celsius => temp,
+                    WeatherUnit::Fahrenheit => temp * 9.0 / 5.0 + 32.0,
                 };
 
                 let result = json!({
@@ -149,8 +152,11 @@ impl AgentToolDispatcher for WeatherAndConvertDispatcher {
 
 // ── Main ───────────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    meerkat_runtime::host_stack::run_host("custom-tools", run)?
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
@@ -193,3 +199,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

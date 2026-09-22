@@ -31,33 +31,23 @@ The packed definition declares five roles:
 | Scribe | Maintains the timeline, decisions, owners, and open questions |
 
 The definition is production-shaped, but this shell example stops at browser
-bootstrap assembly. A host application must separately import
-`mobpack/definition.json`, inline its referenced skills as described below,
-pass the prepared definition to `@rkat/web` `createMob()`, spawn the declared
+bootstrap assembly. A host application must separately load the generated
+`definition.inline.json`, pass it to `@rkat/web` `createMob()`, spawn the declared
 members, and add its own prompt and transcript UI before operators can use the
 team. Runtime initialization does not expose or instantiate the full packed
-definition.
-
-### Required browser skill preparation
-
-The source definition uses filesystem-backed `skills` entries, which browser
-member construction rejects. Before `createMob()` / `spawn()`, load each
-referenced skill's trusted text from `mobpack/skills/*.md` (paths here are
-relative to this example directory), or from the trust-verified pack. Replace
-each corresponding `definition.skills` entry with
-`{ source: "inline", content: skillText }`, preserving the entry's key and every
-profile's skill references. Bundle those trusted texts into the host or serve
-them as host-managed assets; the WASM runtime cannot read those filesystem paths.
-
-`initFromMobpack()` compiles verified pack skills into standalone session
-prompts. It does not supply filesystem skills to a separately imported
-`MobDefinition`; that definition still needs the explicit inlining step.
+definition. Source skills use filesystem paths, which browser member creation
+cannot read. The script emits inline copies of the exact markdown alongside
+the bundle; merely bootstrapping the mobpack does not convert a caller-supplied
+definition's paths.
 
 ## Prerequisites
 ```bash
-export ANTHROPIC_API_KEY=sk-...
 ./scripts/repo-cargo build -p rkat --bin rkat
 ```
+
+Python 3 is required to emit the inline definition. No provider credentials are
+needed for packaging; an integrated host needs credentials for model calls.
+All CLI roots are example-local under `.work/`.
 
 The script uses `sdks/web/wasm/meerkat_web_runtime_bg.wasm` by default. To
 rebuild that artifact after Rust changes, install Node.js and `wasm-pack`, then
@@ -87,7 +77,7 @@ The script:
 2. Packs it into `incident-war-room.mobpack`
 3. Inspects the artifact so you can see what was bundled
 4. Runs `rkat mob web build --wasm ...` to assemble a browser bundle
-5. Prints the derived `manifest.web.toml`
+5. Emits `definition.inline.json` and prints the derived `manifest.web.toml`
 6. Prints a realistic incident kickoff prompt from `prompts/incident-kickoff.md`
 
 Generated artifacts land under
@@ -98,6 +88,7 @@ Generated artifacts land under
 The browser bundle contains:
 - the Meerkat WASM runtime
 - the packed mob definition and skills
+- `definition.inline.json` for browser `createMob()` (source files remain unchanged)
 - a derived `manifest.web.toml`
 - static assets you can serve with any dumb HTTP server
 
@@ -119,9 +110,32 @@ until a host application creates sessions or mob members.
 
 ## Suggested Integration Exercise
 
-In a custom `@rkat/web` host, import `mobpack/definition.json`, replace its
-referenced path skills with inline trusted text as above, then create the mob
-and spawn its members. Add a prompt input that sends the kickoff scenario from
+In a custom `@rkat/web` host, load **`definition.inline.json` from the generated
+bundle**, not `mobpack/definition.json`. Once the host has initialized its
+`MeerkatRuntime`, start with the commander:
+
+```javascript
+const response = await fetch("./definition.inline.json");
+if (!response.ok) throw new Error(`Definition fetch failed: ${response.status}`);
+const definition = await response.json();
+const mob = await runtime.createMob(definition);
+const profile = definition.orchestrator.profile;
+const results = await mob.spawn([{
+  profile,
+  agent_identity: profile,
+}]);
+```
+
+`Mob.spawn()` rejects if a member fails to spawn. Successful results carry
+`mob_id`, `agent_identity`, and `member_ref`; the SDK does not expose the raw
+WASM `status` wrapper.
+
+The same profile/identity shape applies to specialists; full-team wiring and
+coordination are a separate host integration step, not exercised by this demo.
+Spawning can start model turns; the host owns credentials, lifecycle and teardown.
+The inline JSON is a separate host input, not trust-verified by verifying
+`mobpack.bin`; serve it with the same integrity controls as the host application.
+Then add a prompt input that sends the kickoff scenario from
 `prompts/incident-kickoff.md` to the commander. A good first turn is:
 
 ```text
@@ -144,3 +158,16 @@ Follow-up turns that make the example feel real:
 | `mobpack/skills/*.md` | Role-specific playbooks that make the team believable |
 | `prompts/incident-kickoff.md` | Ready-to-paste scenario prompt for a live drill |
 | `examples.sh` | The end-to-end pack → inspect → web-build workflow |
+
+## Offline Regression Test
+
+```bash
+node --test --test-force-exit examples/029-web-incident-war-room-sh/test_browser_skills.mjs
+```
+
+This covers both 029 and 030 with the current CLI and prebuilt WASM. It compares
+every inline skill to the source markdown and spawns each role in its own runtime
+using synthetic, in-process provider responses. This proves embedded skill
+assembly, not multi-member wiring, live incident reasoning or a finished UI.
+Node's `--test-force-exit` closes WASM timer handles after the test verdict;
+each fixture explicitly destroys its mob and runtime first.

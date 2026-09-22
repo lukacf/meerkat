@@ -5222,6 +5222,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             TimeBudgetExceeded { run_id: RunId },
             ForceCancelNoRun,
             RunCompleted { run_id: RunId },
+            CloseStandaloneTurn { session_id: SessionId, run_id: RunId, terminal_phase: Enum<TurnPhase> },
             ServiceTurnCommitted { run_id: RunId },
             RunFailed {
                 run_id: RunId,
@@ -19187,6 +19188,31 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.runtime_completion_result_resolved = false;
             }
             to Running
+        }
+
+        // Epochless standalone sessions have no runtime commit loop. A generated
+        // terminal effect may release their lifecycle without fabricating a
+        // durable service receipt or a runtime completion-publication batch.
+        transition CloseStandaloneTurn {
+            on input CloseStandaloneTurn { session_id, run_id, terminal_phase }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "standalone_session_matches" { self.session_id == Some(session_id) }
+            guard "standalone_has_no_runtime_epoch" { self.active_runtime_epoch_id == None }
+            guard "standalone_has_no_placement" { self.active_runtime_id == None }
+            guard "standalone_pre_run_idle" { self.pre_run_phase == Some(PreRunPhase::Idle) }
+            guard "standalone_run_matches" { self.current_run_id == Some(run_id) && self.turn_terminal_run_id == Some(run_id) }
+            guard "standalone_terminal_effect_matches" { self.turn_phase == terminal_phase }
+            guard "standalone_turn_terminal" { self.turn_phase == TurnPhase::Completed || self.turn_phase == TurnPhase::Failed || self.turn_phase == TurnPhase::Cancelled }
+            guard "standalone_completed_coherent" { self.turn_phase != TurnPhase::Completed || (self.terminal_outcome == Some(TurnTerminalOutcome::Completed) && self.terminal_cause_kind == None) }
+            guard "standalone_cancelled_coherent" { self.turn_phase != TurnPhase::Cancelled || (self.terminal_outcome == Some(TurnTerminalOutcome::Cancelled) && self.terminal_cause_kind == None) }
+            guard "standalone_failed_specific" { self.turn_phase != TurnPhase::Failed || (self.terminal_cause_kind != None && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)) }
+            guard "standalone_failed_coherent" { self.turn_phase != TurnPhase::Failed || self.terminal_outcome == Some(if self.terminal_cause_kind == Some(TurnTerminalCauseKind::BudgetExhausted) { TurnTerminalOutcome::BudgetExhausted } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::TimeBudgetExceeded) { TurnTerminalOutcome::TimeBudgetExceeded } else { if self.terminal_cause_kind == Some(TurnTerminalCauseKind::StructuredOutputValidationFailed) { TurnTerminalOutcome::StructuredOutputValidationFailed } else { TurnTerminalOutcome::Failed } } }) }
+            guard "standalone_no_completion_obligation" { self.runtime_completion_result_run_id == None && self.runtime_completion_result_resolved == true }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Idle
         }
 
         // Direct service turns still use the shared runtime turn-state handle

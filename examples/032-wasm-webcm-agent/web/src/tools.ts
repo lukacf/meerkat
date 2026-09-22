@@ -12,6 +12,7 @@
  */
 
 import type { WebCMHost } from "./webcm-host";
+import { shellQuote } from "./webcm-host";
 
 // ── Tool schemas (JSON Schema strings) ──────────────────────────────────────
 
@@ -102,8 +103,12 @@ export function registerWebCMTools(runtime: ToolRuntime, vm: WebCMHost): void {
     async (argsJson: string) => {
       const args = JSON.parse(argsJson);
       return serialized(async () => {
-        await vm.exec(`mkdir -p $(dirname ${args.path})`);
-        await vm.writeFile(args.path, args.content);
+        const slash = args.path.lastIndexOf("/");
+        const parent = slash < 0 ? "." : args.path.slice(0, slash) || "/";
+        const directory = await vm.exec(`mkdir -p -- ${shellQuote(parent)}`);
+        if (directory.exitCode !== 0) return toolResult(`Exit code ${directory.exitCode}\n${directory.output}`, true);
+        const written = await vm.writeFile(args.path, args.content);
+        if (written.exitCode !== 0) return toolResult(`Exit code ${written.exitCode}\n${written.output}`, true);
         return toolResult(`Wrote ${args.path}`);
       });
     },

@@ -23,8 +23,11 @@ use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 use tokio::sync::mpsc;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    meerkat_runtime::host_stack::run_host("013-context-compaction", async_main)?
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
@@ -42,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Configure compaction through the factory config ────────────────────
     //
-    // We set a LOW token threshold (2000) so compaction triggers during this
+    // We set a LOW token threshold (2000) so compaction can trigger during this
     // short demo. In production you'd use a much higher value (e.g. 100_000).
     let compaction_config = CompactionConfig {
         auto_compact_threshold: 2000,
@@ -60,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== Context Compaction Demo ===");
     println!("Compaction threshold: 2000 tokens (low for demo purposes)");
-    println!("Recent turns preserved: 2\n");
+    println!("Recent-turn retention budget: up to 2 (subject to progress and capacity)\n");
 
     let mut session = meerkat_core::Session::new();
     session.set_session_metadata(meerkat_core::SessionMetadata {
@@ -103,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
         .await?;
 
-    // Simulate a long conversation that will trigger compaction.
+    // Simulate a long conversation that may trigger compaction.
     // Each prompt asks for detailed explanations to accumulate tokens quickly.
     let topics = [
         "Explain Rust's ownership model in detail with code examples.",
@@ -114,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     // Monitor for compaction events — these will fire when the compactor
-    // detects that accumulated tokens exceed our 2000-token threshold.
+    // detects current context/last-request pressure above our threshold.
     let monitor = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             match &event {
@@ -137,10 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .run_with_events(topic.to_string().into(), event_tx.clone())
             .await?;
 
-        println!("Assistant: {}", &result.text[..result.text.len().min(200)]);
-        if result.text.len() > 200 {
-            println!("...");
-        }
+        println!("Assistant: {}", response_preview(&result.text, 200));
         println!(
             "(input tokens: {}, output tokens: {}, total: {})",
             result.usage.input_tokens,
@@ -159,14 +159,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         r"# .rkat/config.toml
 
 [compaction]
-# Trigger compaction when cumulative input tokens exceed this threshold
+# Trigger on current context/last-request token pressure, not lifetime usage
 auto_compact_threshold = 50000
 
 # Maximum tokens for the compaction summary
 max_summary_tokens = 1024
 
-# Number of most recent turns to always preserve verbatim
-# (the system prompt is always preserved automatically)
+# Upper bound on recent turns retained verbatim; compaction must remove at
+# least one live turn and may retain fewer under request-capacity pressure.
+# Unkeyed System messages and the latest version of each keyed prompt are
+# preserved in order; superseded keyed prompt versions can be compacted.
 recent_turn_budget = 4
 
 # Minimum number of turns between successive compactions
@@ -174,7 +176,7 @@ min_turns_between_compactions = 3
 
 # How compaction works:
 #
-# 1. Agent loop detects input token count >= auto_compact_threshold
+# 1. Agent loop detects current context/last-request token pressure
 # 2. Compactor selects messages to summarize (excluding preserved ones)
 # 3. LLM generates a concise summary of the selected messages
 # 4. Old messages are replaced with the summary
@@ -186,4 +188,34 @@ min_turns_between_compactions = 3
     );
 
     Ok(())
+}
+
+fn response_preview(text: &str, max_bytes: usize) -> String {
+    let end = text.floor_char_boundary(text.len().min(max_bytes));
+    if end < text.len() {
+        format!("{}...", &text[..end])
+    } else {
+        text.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::response_preview;
+
+    #[test]
+    fn preview_respects_utf8_and_only_marks_truncated_text() {
+        assert_eq!(response_preview("", 200), "");
+        assert_eq!(response_preview("—é", 200), "—é");
+        assert_eq!(response_preview(&"a".repeat(200), 200), "a".repeat(200));
+        assert_eq!(
+            response_preview(&"a".repeat(201), 200),
+            format!("{}...", "a".repeat(200))
+        );
+        assert_eq!(
+            response_preview(&format!("{}—tail", "a".repeat(199)), 200),
+            format!("{}...", "a".repeat(199))
+        );
+        assert_eq!(response_preview("é", 0), "...");
+    }
 }

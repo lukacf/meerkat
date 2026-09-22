@@ -636,23 +636,43 @@ pub(crate) async fn materialize_session_actor_unattached_with_reserved_admission
     request: CreateSessionRequest,
     reserved_admission: crate::RuntimeContextAdmissionGuard,
 ) -> Result<(RunResult, crate::LiveSessionActorWitnessSlot), SurfaceRuntimeMaterializeError> {
-    if let Some(witness) = adapter
-        .current_executor_attachment_witness(session.id())
+    require_unattached_session_actor(adapter, session.id()).await?;
+    let mut prepared = adapter
+        .prepare_session_materialization(session.id().clone())
         .await
-    {
-        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(
-            RuntimeDriverError::ValidationFailed {
-                reason: format!(
-                    "unattached actor materialization cannot replace committed attachment {witness:?}"
-                ),
-            },
-        ));
-    }
+        .map_err(SurfaceRuntimeMaterializeError::RuntimeBindings)?;
+    materialize_prepared_session_actor_unattached_with_actor_slot(
+        service,
+        adapter,
+        &mut prepared,
+        session,
+        request,
+        reserved_admission,
+    )
+    .await
+}
 
-    let (result, mut prepared, actor_witness_slot) =
-        materialize_unique_session_actor_transaction_with_admission(
+/// Materialize using the caller's exact registration claim. The caller retains
+/// the lease so cancellation can finish rollback before releasing its admission
+/// fence. Successful publication consumes the claim, as in ordinary promotion.
+pub async fn materialize_prepared_session_actor_unattached_with_actor_slot<
+    B: SessionAgentBuilder + 'static,
+>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    prepared: &mut PreparedSessionMaterialization,
+    session: Session,
+    request: CreateSessionRequest,
+    reserved_admission: crate::RuntimeContextAdmissionGuard,
+) -> Result<(RunResult, crate::LiveSessionActorWitnessSlot), SurfaceRuntimeMaterializeError> {
+    ensure_materialized_session_id_matches(prepared.session_id(), session.id())?;
+    require_unattached_session_actor(adapter, session.id()).await?;
+
+    let (result, actor_witness_slot) =
+        materialize_prepared_session_actor_transaction_with_admission(
             service,
             adapter,
+            prepared,
             session,
             request,
             reserved_admission,
@@ -662,7 +682,7 @@ pub(crate) async fn materialize_session_actor_unattached_with_reserved_admission
         .witness()
         .is_some_and(|witness| witness.session_id() == &result.session_id && witness.is_live());
     if !actor_witness_is_exact {
-        rollback_prepared_runtime_registration(&mut prepared, false).await;
+        rollback_prepared_runtime_registration(prepared, false).await;
         return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(
             RuntimeDriverError::ValidationFailed {
                 reason: format!(
@@ -674,6 +694,25 @@ pub(crate) async fn materialize_session_actor_unattached_with_reserved_admission
     }
     prepared.commit_actor_unattached().await?;
     Ok((result, actor_witness_slot))
+}
+
+async fn require_unattached_session_actor(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+) -> Result<(), SurfaceRuntimeMaterializeError> {
+    if let Some(witness) = adapter
+        .current_executor_attachment_witness(session_id)
+        .await
+    {
+        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(
+            RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "unattached actor materialization cannot replace committed attachment {witness:?}"
+                ),
+            },
+        ));
+    }
+    Ok(())
 }
 
 /// Reserved-admission actor reconstruction for a runtime executor that already
@@ -824,7 +863,7 @@ async fn materialize_unique_session_actor_transaction_with_admission<
     service: &Arc<PersistentSessionService<B>>,
     adapter: &Arc<MeerkatMachine>,
     session: Session,
-    mut request: CreateSessionRequest,
+    request: CreateSessionRequest,
     reserved_admission: crate::RuntimeContextAdmissionGuard,
 ) -> Result<
     (
@@ -844,6 +883,30 @@ async fn materialize_unique_session_actor_transaction_with_admission<
             return Err(SurfaceRuntimeMaterializeError::RuntimeBindings(error));
         }
     };
+    let (result, actor_witness_slot) =
+        materialize_prepared_session_actor_transaction_with_admission(
+            service,
+            adapter,
+            &mut prepared,
+            session,
+            request,
+            reserved_admission,
+        )
+        .await?;
+    Ok((result, prepared, actor_witness_slot))
+}
+
+async fn materialize_prepared_session_actor_transaction_with_admission<
+    B: SessionAgentBuilder + 'static,
+>(
+    service: &Arc<PersistentSessionService<B>>,
+    adapter: &Arc<MeerkatMachine>,
+    prepared: &mut PreparedSessionMaterialization,
+    session: Session,
+    mut request: CreateSessionRequest,
+    reserved_admission: crate::RuntimeContextAdmissionGuard,
+) -> Result<(RunResult, crate::LiveSessionActorWitnessSlot), SurfaceRuntimeMaterializeError> {
+    let prepared_session_id = session.id().clone();
     let actor_witness_slot = crate::LiveSessionActorWitnessSlot::default();
     if let Err(error) = install_prepared_runtime_interrupt_handle_for_actor_slot(
         service,
@@ -853,7 +916,7 @@ async fn materialize_unique_session_actor_transaction_with_admission<
     )
     .await
     {
-        rollback_prepared_runtime_registration(&mut prepared, false).await;
+        rollback_prepared_runtime_registration(prepared, false).await;
         return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
     }
 
@@ -874,7 +937,7 @@ async fn materialize_unique_session_actor_transaction_with_admission<
     let result = match create_result {
         Ok(result) => result,
         Err(error) => {
-            rollback_prepared_runtime_registration(&mut prepared, false).await;
+            rollback_prepared_runtime_registration(prepared, false).await;
             return Err(SurfaceRuntimeMaterializeError::Session(error));
         }
     };
@@ -882,7 +945,7 @@ async fn materialize_unique_session_actor_transaction_with_admission<
     if let Err(error) =
         ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
     {
-        rollback_prepared_runtime_registration(&mut prepared, false).await;
+        rollback_prepared_runtime_registration(prepared, false).await;
         return Err(error);
     }
 
@@ -910,7 +973,7 @@ async fn materialize_unique_session_actor_transaction_with_admission<
                         .await
                         .map_err(SurfaceRuntimeMaterializeError::RuntimeDriver)?;
                 } else {
-                    rollback_prepared_runtime_registration(&mut prepared, false).await;
+                    rollback_prepared_runtime_registration(prepared, false).await;
                 }
                 return Err(error);
             }
@@ -921,11 +984,11 @@ async fn materialize_unique_session_actor_transaction_with_admission<
     if let Err(error) =
         ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
     {
-        rollback_prepared_runtime_registration(&mut prepared, false).await;
+        rollback_prepared_runtime_registration(prepared, false).await;
         return Err(error);
     }
 
-    Ok((result, prepared, actor_witness_slot))
+    Ok((result, actor_witness_slot))
 }
 
 struct AttachedActorMaterializationMode {

@@ -1,203 +1,153 @@
-// ═══════════════════════════════════════════════════════════
-// Event Streaming — Poll WASM subscriptions, drive visuals
-// ═══════════════════════════════════════════════════════════
-
 import type { AgentId, RuntimeModule, AgentSub } from "./types";
 import { AGENT_IDS, CALL_COLORS } from "./types";
 import { setAgentState } from "./office/characters";
 import { showSpeechBubble, showThinkBubble, hideThinkBubble } from "./office/bubbles";
 import { startCall, endCallsForAgent } from "./office/phonelines";
 
-// ── Agent address → AgentId mapping ──
+const peerAgents = new Map<string, AgentId>();
+const seenEvents = new Set<string>();
+const awaitingExtraction = new Set<AgentId>();
+let requestSequence = 0;
 
-function addressToAgentId(addr: string): AgentId | null {
-  // Address format: the-office/{profile}/{agent_identity}
-  const parts = addr.split("/");
-  const agentIdentity = parts[parts.length - 1] || addr;
-  if (AGENT_IDS.includes(agentIdentity as AgentId)) return agentIdentity as AgentId;
-  // Try matching by profile name
-  for (const id of AGENT_IDS) {
-    if (agentIdentity === id) return id;
-  }
-  return null;
+export function resetEventState(): void {
+  peerAgents.clear();
+  seenEvents.clear();
+  awaitingExtraction.clear();
+  requestSequence = 0;
 }
 
-// ── Track seen tool call IDs to avoid duplicates ──
-
-const seenToolCallIds = new Set<string>();
-const seenApprovalDescs = new Set<string>();
-
-// ── Incident callback (set by incidents module) ──
+export async function resolvePeerAgents(mod: RuntimeModule, mobId: string): Promise<void> {
+  const resolved = new Map<string, AgentId>();
+  for (const id of AGENT_IDS) {
+    try {
+      const target = JSON.parse(String(await mod.mob_member_peer_target(mobId, id)));
+      const peerId = target?.external?.peer_id;
+      if (typeof peerId !== "string" || !peerId || resolved.has(peerId)) {
+        throw new Error("missing or duplicate canonical peer_id");
+      }
+      resolved.set(peerId, id);
+    } catch (error) {
+      throw new Error(`Resolve peer ${id}: ${String(error)}`);
+    }
+  }
+  peerAgents.clear();
+  for (const [peer, id] of resolved) peerAgents.set(peer, id);
+}
 
 type IncidentCallback = (from: AgentId | "system", to: AgentId | null, content: string, headline: string, category: string) => void;
 let onMessage: IncidentCallback | null = null;
+export function setOnMessage(cb: IncidentCallback): void { onMessage = cb; }
 
-export function setOnMessage(cb: IncidentCallback): void {
-  onMessage = cb;
+export interface ApprovalRequest {
+  request_id: string;
+  short_summary?: string;
+  action_description: string;
+  risk_level: string;
+  proposed_by: string;
 }
+let onApprovalNeeded: ((data: ApprovalRequest) => void) | null = null;
+export function setOnApprovalNeeded(cb: (data: ApprovalRequest) => void): void { onApprovalNeeded = cb; }
 
-// ── Gate approval callback ──
-
-type ApprovalCallback = (data: { short_summary?: string; action_description: string; risk_level: string; proposed_by: string }) => void;
-let onApprovalNeeded: ApprovalCallback | null = null;
-
-export function setOnApprovalNeeded(cb: ApprovalCallback): void {
-  onApprovalNeeded = cb;
-}
-
-function fireApproval(data: { short_summary?: string; action_description: string; risk_level: string; proposed_by: string }): void {
-  const key = data.action_description.slice(0, 60).toLowerCase();
-  if (seenApprovalDescs.has(key)) return;
-  seenApprovalDescs.add(key);
-  console.log("[APPROVAL] Detected:", data.short_summary || data.action_description.slice(0, 50));
-  onApprovalNeeded?.(data);
-}
-
-// ── Upsert record callback ──
-
-type UpsertRecordCallback = (data: any) => void;
-let onUpsertRecord: UpsertRecordCallback | null = null;
-
-export function setOnUpsertRecord(cb: UpsertRecordCallback): void {
-  onUpsertRecord = cb;
-}
-
-// ── Access control callback ──
+let onUpsertRecord: ((data: any) => void) | null = null;
+export function setOnUpsertRecord(cb: (data: any) => void): void { onUpsertRecord = cb; }
 
 type AccessControlCallback = (action: "revoke" | "restore", target: string, reason: string) => void;
 let onAccessControl: AccessControlCallback | null = null;
+export function setOnAccessControl(cb: AccessControlCallback): void { onAccessControl = cb; }
 
-export function setOnAccessControl(cb: AccessControlCallback): void {
-  onAccessControl = cb;
+function idle(id: AgentId): void {
+  hideThinkBubble(id);
+  endCallsForAgent(id);
+  setAgentState(id, "idle");
 }
 
-// ── Poll all subscriptions ──
+function summary(id: AgentId, output: unknown): void {
+  if (!output || typeof output !== "object") return;
+  const result = output as { headline?: unknown; category?: unknown };
+  if (typeof result.headline !== "string" || !result.headline) return;
+  showSpeechBubble(id, result.headline, 4000);
+  onMessage?.(id, null, result.headline, result.headline,
+    typeof result.category === "string" ? result.category : "response");
+}
 
 export function drainAllEvents(mod: RuntimeModule, subs: AgentSub[]): { events: number; errors: string[] } {
   let events = 0;
   const errors: string[] = [];
-
   for (const sub of subs) {
     try {
-      const raw = mod.poll_subscription(sub.handle);
-      const parsed: any[] = JSON.parse(raw);
-
+      const parsed: any[] = JSON.parse(mod.poll_subscription(sub.handle));
       for (const event of parsed) {
         if (!event?.payload) continue;
+        // Provider call IDs (notably fc_0) are reused across independent turns.
+        const key = typeof event.event_id === "string"
+          ? JSON.stringify([event.source?.kind, event.source?.session_id, event.event_id]) : null;
+        if (key && seenEvents.has(key)) continue;
+        if (key) {
+          seenEvents.add(key);
+          if (seenEvents.size > 4096) seenEvents.delete(seenEvents.values().next().value!);
+        }
         events++;
-        const payload = event.payload;
-
-        // ── Tool calls ──
-        if (payload.type === "tool_call_requested") {
-          const callId = payload.id;
-          if (callId && seenToolCallIds.has(callId)) continue;
-          if (callId) seenToolCallIds.add(callId);
-
-          const toolName = payload.name;
-
-          // ── Comms: agent used "send_message" (or legacy "send") ──
-          if (toolName === "send_message" || toolName === "send") {
-            try {
-              const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
-              const toAddr = args.to || "";
-              const body = args.body || "";
-              const recipientId = addressToAgentId(toAddr);
-
-              if (recipientId && body) {
-                const color = recipientId === "gate" ? CALL_COLORS.approval
-                  : recipientId === "archivist" ? CALL_COLORS.knowledge
-                  : CALL_COLORS.routing;
-
-                startCall(sub.agentId, recipientId, color);
-                setAgentState(sub.agentId, "on_call");
-
-                const preview = body.length > 50 ? body.slice(0, 47) + "..." : body;
-                showSpeechBubble(sub.agentId, preview, 5000);
-                onMessage?.(sub.agentId, recipientId, body, preview, "routing");
-              }
-            } catch (e) { console.debug("[events] parse error:", e); }
-          }
-
-          // ── Fire-and-forget: request_human_approval ──
-          if (toolName === "request_human_approval") {
-            try {
-              const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
-              console.log("[APPROVAL] Tool call from", sub.agentId, args);
-              fireApproval({
-                short_summary: args.short_summary,
-                action_description: args.action_description,
-                risk_level: args.risk_level,
-                proposed_by: args.proposed_by,
-              });
-            } catch (e) { console.debug("[events] parse error:", e); }
-          }
-
-          // ── Fire-and-forget: upsert_record ──
-          if (toolName === "upsert_record") {
-            try {
-              const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
-              console.log("[RECORD] Tool call from", sub.agentId, args);
-              onUpsertRecord?.(args);
-            } catch (e) { console.debug("[events] parse error:", e); }
-          }
-
-          // ── Fire-and-forget: revoke_access / restore_access ──
-          if (toolName === "revoke_access") {
-            try {
-              const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
-              console.log("[ACCESS CONTROL] revoke", args);
-              onAccessControl?.("revoke", args.target, args.reason || "");
-            } catch (e) { console.debug("[events] parse error:", e); }
-          }
-          if (toolName === "restore_access") {
-            try {
-              const args = typeof payload.args === "string" ? JSON.parse(payload.args) : payload.args;
-              console.log("[ACCESS CONTROL] restore", args);
-              onAccessControl?.("restore", args.target, args.reason || "");
-            } catch (e) { console.debug("[events] parse error:", e); }
-          }
-        }
-
-        // ── Run completed: structured output ──
-        if (payload.type === "run_completed" && payload.result) {
-          hideThinkBubble(sub.agentId);
-          endCallsForAgent(sub.agentId);
-          setAgentState(sub.agentId, "idle");
-
-          try {
-            const result = JSON.parse(payload.result);
-            if (result.headline) {
-              showSpeechBubble(sub.agentId, result.headline, 4000);
-              onMessage?.(sub.agentId, null, result.headline, result.headline, result.category || "response");
-
+        const p = event.payload;
+        if (p.type === "tool_call_requested") {
+          const args = typeof p.args === "string" ? JSON.parse(p.args) : p.args;
+          if (p.name === "send_message") {
+            const recipient = peerAgents.get(args.peer_id);
+            const body = typeof args.body === "string" ? args.body : "";
+            const preview = `Send requested: ${body.slice(0, 47)}`;
+            if (recipient && body) {
+              startCall(sub.agentId, recipient, recipient === "gate" ? CALL_COLORS.approval
+                : recipient === "archivist" ? CALL_COLORS.knowledge : CALL_COLORS.routing);
+              setAgentState(sub.agentId, "on_call");
+              showSpeechBubble(sub.agentId, preview, 5000);
             }
-          } catch (e) { console.debug("[events] JSON parse:", e); }
-        }
-
-        // ── Run failed ──
-        if (payload.type === "run_failed") {
-          hideThinkBubble(sub.agentId);
-          endCallsForAgent(sub.agentId);
-          setAgentState(sub.agentId, "idle");
-          const errMsg = payload.error || "Unknown error";
-          errors.push(`${sub.agentId}: ${errMsg}`);
-          showSpeechBubble(sub.agentId, `Error: ${errMsg.slice(0, 40)}`, 6000);
-        }
-
-        // ── Text delta (agent is generating) ──
-        if (payload.type === "text_delta") {
+            onMessage?.(sub.agentId, recipient ?? null, body,
+              recipient ? preview : "Send requested to unknown peer", "routing");
+          } else if (p.name === "request_human_approval") {
+            onApprovalNeeded?.({ ...args, request_id: key ?? `local-request-${requestSequence++}` });
+          } else if (p.name === "upsert_record") {
+            onUpsertRecord?.(args);
+          } else if (p.name === "revoke_access" || p.name === "restore_access") {
+            onAccessControl?.(p.name === "revoke_access" ? "revoke" : "restore", args.target, args.reason || "");
+          }
+        } else if (p.type === "run_started") {
+          awaitingExtraction.delete(sub.agentId);
+        } else if (p.type === "run_completed") {
+          idle(sub.agentId);
+          if (p.extraction_required) {
+            awaitingExtraction.add(sub.agentId);
+          } else {
+            awaitingExtraction.delete(sub.agentId);
+            let output = p.structured_output;
+            if (!output && p.result) {
+              try { output = JSON.parse(p.result); } catch { /* Plain text is not a headline object. */ }
+            }
+            summary(sub.agentId, output);
+          }
+        } else if (p.type === "extraction_succeeded") {
+          idle(sub.agentId);
+          if (awaitingExtraction.delete(sub.agentId)) summary(sub.agentId, p.structured_output);
+        } else if (p.type === "run_failed" || p.type === "extraction_failed") {
+          idle(sub.agentId);
+          awaitingExtraction.delete(sub.agentId);
+          const message = p.error_report?.message ?? p.reason ?? "Unspecified runtime failure";
+          errors.push(`${sub.agentId}: ${message}`);
+          showSpeechBubble(sub.agentId, `Error: ${message.slice(0, 40)}`, 6000);
+        } else if (p.type === "text_delta") {
           showThinkBubble(sub.agentId);
           setAgentState(sub.agentId, "thinking");
-
-        }
-
-        // ── Tool call start (agent called a tool) ──
-        if (payload.type === "tool_call_start") {
+        } else if (p.type === "tool_execution_started") {
           setAgentState(sub.agentId, "on_call");
+        } else if (p.type === "stream_truncated") {
+          const message = p.reason?.kind === "stream_lagged"
+            ? `Event stream lost ${p.reason.dropped} events; host tool effects may be missing. Restart the office.`
+            : "Event stream truncated; restart the office.";
+          errors.push(`${sub.agentId}: ${message}`);
+          onMessage?.("system", sub.agentId, message, message, "error");
         }
       }
-    } catch (e) { console.debug("[events] poll error:", e); }
+    } catch (error) {
+      errors.push(`${sub.agentId}: Event polling/handling failed: ${String(error)}`);
+    }
   }
-
   return { events, errors };
 }

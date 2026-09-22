@@ -12169,6 +12169,27 @@ RunCompleted(run_id) ==
     /\ UnchangedFrame_f7383567352f8519
 
 
+CloseStandaloneTurn(arg_session_id, run_id, terminal_phase) ==
+    /\ phase = "Running"
+    /\ (session_id = Some(arg_session_id))
+    /\ (active_runtime_epoch_id = None)
+    /\ (active_runtime_id = None)
+    /\ (pre_run_phase = Some("Idle"))
+    /\ ((current_run_id = Some(run_id)) /\ (turn_terminal_run_id = Some(run_id)))
+    /\ (turn_phase = terminal_phase)
+    /\ (IF (turn_phase = "Completed") THEN TRUE ELSE (IF (turn_phase = "Failed") THEN TRUE ELSE (turn_phase = "Cancelled")))
+    /\ (IF (turn_phase # "Completed") THEN TRUE ELSE ((terminal_outcome = Some("Completed")) /\ (terminal_cause_kind = None)))
+    /\ (IF (turn_phase # "Cancelled") THEN TRUE ELSE ((terminal_outcome = Some("Cancelled")) /\ (terminal_cause_kind = None)))
+    /\ (IF (turn_phase # "Failed") THEN TRUE ELSE ((terminal_cause_kind # None) /\ (terminal_cause_kind # Some("Unknown"))))
+    /\ (IF (turn_phase # "Failed") THEN TRUE ELSE (terminal_outcome = Some((IF (terminal_cause_kind = Some("BudgetExhausted")) THEN "BudgetExhausted" ELSE (IF (terminal_cause_kind = Some("TimeBudgetExceeded")) THEN "TimeBudgetExceeded" ELSE (IF (terminal_cause_kind = Some("StructuredOutputValidationFailed")) THEN "StructuredOutputValidationFailed" ELSE "Failed"))))))
+    /\ ((runtime_completion_result_run_id = None) /\ (runtime_completion_result_resolved = TRUE))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_phase' = None
+    /\ UnchangedFrame_97c7d3941fe77688
+
+
 ServiceTurnCommittedRunningToIdle(run_id) ==
     /\ phase = "Running"
     /\ (pre_run_phase = Some("Idle"))
@@ -33979,6 +34000,7 @@ Next ==
     \/ \E run_id \in RunIdValues : TimeBudgetExceeded(run_id)
     \/ ForceCancelNoRun
     \/ \E run_id \in RunIdValues : RunCompleted(run_id)
+    \/ \E arg_session_id \in SessionIdValues : \E run_id \in RunIdValues : \E terminal_phase \in TurnPhaseValues : CloseStandaloneTurn(arg_session_id, run_id, terminal_phase)
     \/ \E run_id \in RunIdValues : ServiceTurnCommittedRunningToIdle(run_id)
     \/ \E run_id \in RunIdValues : ServiceTurnCommittedRunningToAttached(run_id)
     \/ \E run_id \in RunIdValues : ServiceTurnCommittedRunningToRetired(run_id)

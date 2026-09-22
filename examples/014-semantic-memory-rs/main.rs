@@ -23,6 +23,7 @@
 //! ```
 
 use std::sync::Arc;
+use std::{io::Write, path::Path};
 
 use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, ToolGatewayBuilder};
 use meerkat_core::MemoryIndexableContent;
@@ -33,17 +34,32 @@ use meerkat_core::memory::{
 use meerkat_memory::{MemorySearchDispatcher, SimpleMemoryStore};
 use meerkat_store::{JsonlStore, StoreAdapter};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    meerkat_runtime::host_stack::run_host("014-semantic-memory", async_main)?
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
-    let _tmp = tempfile::tempdir()?;
-    let store_dir = _tmp.path().join("sessions");
+    let tmp = tempfile::tempdir_in(".")?;
+    run_with_client(
+        Arc::new(AnthropicClient::new(api_key)?),
+        tmp.path(),
+        &mut std::io::stdout(),
+    )
+    .await
+}
+
+async fn run_with_client(
+    client: Arc<dyn meerkat_client::LlmClient>,
+    directory: &Path,
+    output: &mut (impl Write + Send),
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let store_dir = directory.join("sessions");
     std::fs::create_dir_all(&store_dir)?;
 
     let factory = AgentFactory::new(store_dir.clone());
-    let client = Arc::new(AnthropicClient::new(api_key)?);
     let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
 
     let store = Arc::new(JsonlStore::new(store_dir));
@@ -114,7 +130,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         memory_store.index_scoped(request).await?;
     }
 
-    println!("Indexed {} facts into SimpleMemoryStore\n", facts.len());
+    writeln!(
+        output,
+        "Indexed {} facts into SimpleMemoryStore\n",
+        facts.len()
+    )?;
 
     // ── Step 3: Create the memory search tool dispatcher ─────────────────────
     //
@@ -166,7 +186,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Step 6: Ask the agent to recall from memory ──────────────────────────
 
-    println!("=== Asking the agent to recall from semantic memory ===\n");
+    writeln!(
+        output,
+        "=== Asking the agent to recall from semantic memory ===\n"
+    )?;
     let result = agent
         .run(
             "What programming languages does our team use? \
@@ -174,35 +197,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         )
         .await?;
-    println!("Agent: {}\n", result.text);
+    writeln!(output, "Agent: {}\n", result.text)?;
 
-    println!("=== Asking about deployment schedule ===\n");
+    writeln!(output, "=== Asking about deployment schedule ===\n")?;
     let result = agent
         .run("When do we deploy and where? Check your memory.".into())
         .await?;
-    println!("Agent: {}\n", result.text);
+    writeln!(output, "Agent: {}\n", result.text)?;
 
     // ── Architecture reference ───────────────────────────────────────────────
 
-    println!("=== Semantic Memory Architecture ===\n");
-    println!(
+    writeln!(output, "=== Semantic Memory Architecture ===\n")?;
+    writeln!(
+        output,
         r#"Memory data flow:
 
   Agent Loop
     |
-    |-- (compaction) --> MemoryStore::index()  --> stored entries
+    |-- (compaction) --> MemoryStore::index_scoped(request) --> scoped entries
     |
     |-- (tool call)  --> memory_search tool
                            |
                            v
-                         MemoryStore::search()  --> scored results
+                         MemoryStore::search(scope, query, limit) --> scoped results
 
 Two implementations:
   - SimpleMemoryStore: In-memory, keyword matching (this example)
   - HnswMemoryStore:   Persistent, vector embeddings (hnsw_rs + SQLite)
 
-Wiring in the factory (AgentFactory::build_agent):
-  1. Creates HnswMemoryStore from .rkat/memory/ directory
+Wiring in the factory (AgentFactory::build_agent), when memory is enabled:
+  1. Creates HnswMemoryStore in <factory store_path>/memory/
   2. Passes it into the core agent loop for compaction indexing
   3. Wraps it in MemorySearchDispatcher for the memory_search tool
   4. Composes into ToolGateway alongside other dispatchers
@@ -213,7 +237,157 @@ Direct Rust embedding:
 CLI usage:
   rkat run --tools full "What did I tell you about the API key?"
 "#
-    );
+    )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
+    use meerkat_core::{Message, Provider, StopReason};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct MemoryClient {
+        requests: Mutex<Vec<LlmRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for MemoryClient {
+        fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(&'a self, request: &'a LlmRequest) -> meerkat_client::types::LlmStream<'a> {
+            let call = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request.clone());
+                requests.len()
+            };
+            let mut events = Vec::new();
+            assert_eq!(request.model, "claude-sonnet-4-6");
+            assert!(
+                request
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name == "memory_search")
+            );
+            let stop_reason = match call {
+                1 | 3 => {
+                    events.push(Ok(LlmEvent::ToolCallComplete {
+                        id: format!("recall-{call}"),
+                        name: "memory_search".into(),
+                        args: serde_json::json!({
+                            "query": if call == 1 { "team database staging" } else { "deploy" },
+                            "limit": 5
+                        }),
+                        meta: None,
+                    }));
+                    StopReason::ToolUse
+                }
+                2 | 4 => {
+                    let Message::ToolResults { results, .. } = request.messages.last().unwrap()
+                    else {
+                        panic!("the real memory dispatcher must produce a tool result");
+                    };
+                    assert_eq!(results.len(), 1);
+                    assert!(!results[0].is_error);
+                    let rows: Vec<serde_json::Value> =
+                        serde_json::from_str(&results[0].text_content()).unwrap();
+                    assert_eq!(rows.len(), if call == 2 { 4 } else { 1 });
+                    assert!(rows.iter().all(|row| row["source_range"]["start"].is_u64()));
+                    let recalled = rows
+                        .iter()
+                        .map(|row| row["content"].as_str().unwrap())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    for fact in if call == 2 {
+                        vec![
+                            "Rust",
+                            "Python",
+                            "TypeScript",
+                            "PostgreSQL 16",
+                            "staging.example.com",
+                            "Alice",
+                            "Bob",
+                            "Carol",
+                        ]
+                    } else {
+                        vec!["Kubernetes", "AWS EKS", "Tuesdays", "Thursdays"]
+                    } {
+                        assert!(recalled.contains(fact), "missing indexed fact: {fact}");
+                    }
+                    // Answers are derived from actual scoped search results, not fixture prose.
+                    events.push(Ok(LlmEvent::TextDelta {
+                        delta: recalled,
+                        meta: None,
+                    }));
+                    StopReason::EndTurn
+                }
+                _ => panic!("unexpected request {call}"),
+            };
+            events.push(Ok(LlmEvent::UsageUpdate {
+                usage: meerkat_core::TurnUsage::host_declared(
+                    Provider::Anthropic,
+                    &request.model,
+                    meerkat_core::Usage::default(),
+                ),
+            }));
+            events.push(Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success { stop_reason },
+            }));
+            Box::pin(futures::stream::iter(events))
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn actual_demo_recalls_all_indexed_facts_through_same_session_tool_scope() {
+        meerkat_runtime::host_stack::HostStackBudget::default_budget()
+            .run("memory-demo-test", || async {
+                let directory = tempfile::tempdir_in(".").unwrap();
+                let path = directory.path().to_owned();
+                let client = Arc::new(MemoryClient::default());
+                let mut output = Vec::new();
+                tokio::time::timeout(
+                    Duration::from_secs(20),
+                    run_with_client(client.clone(), &path, &mut output),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let requests = client.requests.lock().unwrap();
+                assert_eq!(requests.len(), 4, "both turns must search, then answer");
+                assert_eq!(
+                    requests[2]
+                        .messages
+                        .iter()
+                        .filter(|m| matches!(m, Message::User(_)))
+                        .count(),
+                    2,
+                );
+                let output = String::from_utf8(output).unwrap();
+                assert!(output.contains("Indexed 5 facts"));
+                assert!(output.contains("Agent: "));
+                assert!(output.contains("PostgreSQL 16"));
+                assert!(output.contains("Tuesdays"));
+                assert!(output.contains("MemoryStore::index_scoped(request)"));
+                drop(directory);
+                assert!(
+                    !path.exists(),
+                    "example-owned session directory must be removed"
+                );
+            })
+            .unwrap();
+    }
 }

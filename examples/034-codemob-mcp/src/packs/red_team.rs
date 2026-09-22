@@ -29,13 +29,9 @@ impl Pack for RedTeamPack {
 
     fn definition(
         &self,
-        task: &str,
-        context: &str,
         overrides: &BTreeMap<String, String>,
         pp: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
-        let ctx = format_context(context);
-
         let mut profiles = BTreeMap::new();
         // Different providers for advocate/adversary ensures genuinely different reasoning
         profiles.insert(
@@ -91,7 +87,7 @@ impl Pack for RedTeamPack {
             StepId::from("advocate_case"),
             flow_step(
                 "advocate",
-                format!("Argue IN FAVOR:\n\n{task}{ctx}"),
+                format!("Argue IN FAVOR:\n\n{TASK_TEMPLATE}"),
                 &[],
                 300_000,
             ),
@@ -100,7 +96,7 @@ impl Pack for RedTeamPack {
             StepId::from("adversary_case"),
             flow_step(
                 "adversary",
-                format!("Argue AGAINST:\n\n{task}{ctx}"),
+                format!("Argue AGAINST:\n\n{TASK_TEMPLATE}"),
                 &[],
                 300_000,
             ),

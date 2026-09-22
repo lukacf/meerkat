@@ -16,6 +16,14 @@ The example intentionally uses `build_ephemeral_service` and in-memory mob
 storage. It does not ask the lead to spawn workers or merge worker results, and
 it does not demonstrate durable runtime-backed recovery.
 
+The lead explicitly uses `MobRuntimeMode::TurnDriven`: autonomous inbox delivery
+does not support this tracked-turn API. Its turn is admitted with
+`start_turn_bounded` and its exact committed
+answer is awaited with `wait_bounded` before printing it and retiring members.
+A 60-second observation deadline or turn failure is an error, not completion;
+the deadline does not itself cancel admitted work. Cleanup retires the members.
+Mob lifecycle events are displayed only as diagnostics, never as response proof.
+
 ## Mob Architecture
 ```
 User prompt -> lead-1 (claude-opus-4-8)

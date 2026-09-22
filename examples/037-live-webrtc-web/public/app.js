@@ -1,22 +1,22 @@
+import { LiveAttempt, fetchJson } from "./live-session.js";
+import { Transcript } from "./transcript.js";
+
 const $ = (id) => document.getElementById(id);
 const fmtTime = (d = new Date()) =>
   `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
 
-let pc;
-let dc;
-let localStream;
+let attempt;
 let remoteStream;
 let audioContext;
 let analyser;
 let meterTimer;
-let pollTimer;
-let activeChannelId;
 let observationCount = 0;
-let assistantDraft = "";
-let turnLog = [];
+const transcript = new Transcript();
+let turnLog = transcript.turns;
 let toolLog = [];
 let remoteAudioSuppressed = false;
 let interruptedResponseIds = new Set();
+let activeAudioResponseId;
 
 function setStatus(state, text) {
   $("status").dataset.state = state;
@@ -38,21 +38,6 @@ function setLiveControls(enabled) {
   }
 }
 
-async function fetchJson(url, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      "content-type": "application/json",
-      ...(options.headers ?? {}),
-    },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body.error || `${response.status} ${response.statusText}`);
-  }
-  return body;
-}
-
 function logEvent(text) {
   const el = document.createElement("div");
   el.className = "event";
@@ -63,32 +48,18 @@ function logEvent(text) {
   }
 }
 
-function waitForIceGatheringComplete(peerConnection) {
-  if (peerConnection.iceGatheringState === "complete") {
-    return Promise.resolve();
-  }
-  return new Promise((resolve) => {
-    const onStateChange = () => {
-      if (peerConnection.iceGatheringState === "complete") {
-        peerConnection.removeEventListener("icegatheringstatechange", onStateChange);
-        resolve();
-      }
-    };
-    peerConnection.addEventListener("icegatheringstatechange", onStateChange);
-  });
-}
-
 function setTransportField(id, value) {
   $(id).textContent = value || "-";
 }
 
 function resetUiForStart() {
   observationCount = 0;
-  assistantDraft = "";
-  turnLog = [];
+  transcript.reset();
+  turnLog = transcript.turns;
   toolLog = [];
   remoteAudioSuppressed = false;
   interruptedResponseIds = new Set();
+  activeAudioResponseId = undefined;
   $("transport-count").textContent = "0 obs";
   $("tool-count").textContent = "0";
   $("tools").innerHTML = "";
@@ -106,6 +77,8 @@ function resetUiForStart() {
 
 function suppressRemoteAudio(responseId) {
   if (responseId) interruptedResponseIds.add(responseId);
+  if (responseId && activeAudioResponseId && responseId !== activeAudioResponseId) return;
+  if (!responseId && activeAudioResponseId) interruptedResponseIds.add(activeAudioResponseId);
   remoteAudioSuppressed = true;
   const remote = $("remote");
   remote.pause();
@@ -115,6 +88,8 @@ function suppressRemoteAudio(responseId) {
 function maybeResumeRemoteAudio(obs = {}) {
   const responseId = obs.response_id;
   if (responseId && interruptedResponseIds.has(responseId)) return;
+  if (remoteAudioSuppressed && !responseId) return;
+  activeAudioResponseId = responseId;
   if (!remoteAudioSuppressed || !remoteStream) return;
   remoteAudioSuppressed = false;
   const remote = $("remote");
@@ -144,7 +119,7 @@ function renderTurns() {
         </div>
         <div class="turn__body${turn.draft ? " turn__body--draft" : ""}"></div>
       `;
-      el.querySelector(".turn__role").textContent = turn.role;
+      el.querySelector(".turn__role").textContent = turn.interrupted ? `${turn.role} (interrupted)` : turn.role;
       el.querySelector(".turn__time").textContent = turn.time;
       el.querySelector(".turn__body").textContent = turn.text;
       root.appendChild(el);
@@ -163,17 +138,6 @@ function commitTurn(role, text) {
     last.draft = false;
   } else {
     turnLog.push({ role, text: clean, time: fmtTime(), draft: false });
-  }
-  renderTurns();
-}
-
-function updateAssistantDraft(delta) {
-  assistantDraft += delta || "";
-  const last = turnLog[turnLog.length - 1];
-  if (last?.role === "assistant" && last.draft) {
-    last.text = assistantDraft;
-  } else {
-    turnLog.push({ role: "assistant", text: assistantDraft, time: fmtTime(), draft: true });
   }
   renderTurns();
 }
@@ -310,16 +274,19 @@ function handleObservation(obs) {
       break;
     case "assistant_text_delta":
     case "assistant_transcript_delta":
-      updateAssistantDraft(obs.delta);
+      transcript.delta(obs, obs.observation === "assistant_text_delta" ? "written" : "spoken", fmtTime());
+      renderTurns();
       break;
     case "assistant_transcript_final":
-      commitTurn("assistant", obs.text || assistantDraft);
-      assistantDraft = "";
+      transcript.final(obs, fmtTime());
+      renderTurns();
       break;
     case "assistant_audio_chunk":
       maybeResumeRemoteAudio(obs);
       break;
     case "assistant_transcript_truncated":
+      transcript.interrupt(obs, fmtTime(), true);
+      renderTurns();
       suppressRemoteAudio(obs.response_id);
       logEvent("assistant transcript truncated");
       break;
@@ -333,24 +300,25 @@ function handleObservation(obs) {
       logEvent(`tool requested: ${obs.tool_name}`);
       break;
     case "turn_completed":
-      if (assistantDraft) {
-        commitTurn("assistant", assistantDraft);
-        assistantDraft = "";
-      }
+      transcript.complete(obs);
+      renderTurns();
       logEvent("turn completed");
       break;
     case "turn_interrupted":
+      transcript.interrupt(obs, fmtTime());
+      renderTurns();
       suppressRemoteAudio(obs.response_id);
       logEvent(`turn interrupted${obs.response_id ? ` ${obs.response_id}` : ""}`);
       break;
     case "status_changed":
       logEvent(`status ${obs.status?.status || "changed"}`);
+      if (obs.status?.status === "closed" && attempt) void terminate(attempt, "idle", "channel closed");
       break;
     case "command_rejected":
       logEvent(`command rejected: ${obs.message}`);
       break;
     case "error":
-      setStatus("error", obs.message || "live error");
+      if (attempt) void terminate(attempt, "error", obs.message || "live error");
       logEvent(`error: ${obs.message || "unknown"}`);
       break;
     default:
@@ -359,11 +327,12 @@ function handleObservation(obs) {
   }
 }
 
-async function pollState() {
+async function pollState(owner = attempt) {
   try {
-    renderState(await fetchJson("/api/state"));
+    const state = await fetchJson("/api/state", owner ? { signal: owner.signal } : {});
+    if (owner === attempt && !owner?.disposed) renderState(state);
   } catch (error) {
-    logEvent(`state poll failed: ${error.message}`);
+    if (owner === attempt && !owner?.disposed) logEvent(`state poll failed: ${error.message}`);
   }
 }
 
@@ -394,123 +363,119 @@ function stopMeter() {
 }
 
 async function start() {
+  if (attempt) return;
   $("start").disabled = true;
+  $("stop").disabled = false;
   setStatus("pending", "creating session + microphone");
   resetUiForStart();
+  let owner;
   try {
-    const openPromise = fetchJson("/api/start", {
-      method: "POST",
-      body: JSON.stringify({
-        model: $("model").value,
-        workerModel: $("worker-model").value,
-        turningMode: $("turning-mode").value,
-      }),
+    owner = new LiveAttempt((error) => logEvent(`close failed: ${error.message}`));
+  } catch (error) {
+    setStatus("error", error.message);
+    setLiveControls(false);
+    $("start").disabled = false;
+    return;
+  }
+  attempt = owner;
+  const { pc, dc } = owner;
+  const current = () => attempt === owner && !owner.disposed;
+  const terminal = (state, message) => {
+    if (current()) void terminate(owner, state, message);
+  };
+  try {
+    owner.open({
+      model: $("model").value,
+      workerModel: $("worker-model").value,
+      turningMode: $("turning-mode").value,
     });
-
-    pc = new RTCPeerConnection();
-    pc.onconnectionstatechange = () => setTransportField("peer-state", pc.connectionState);
-    pc.oniceconnectionstatechange = () => setTransportField("ice-state", pc.iceConnectionState);
-    pc.onsignalingstatechange = () => setTransportField("signaling-state", pc.signalingState);
+    pc.onconnectionstatechange = () => {
+      if (!current()) return;
+      setTransportField("peer-state", pc.connectionState);
+      if (["failed", "closed"].includes(pc.connectionState)) terminal("error", `peer ${pc.connectionState}`);
+    };
+    pc.oniceconnectionstatechange = () => {
+      if (!current()) return;
+      setTransportField("ice-state", pc.iceConnectionState);
+      if (["failed", "closed"].includes(pc.iceConnectionState)) terminal("error", `ICE ${pc.iceConnectionState}`);
+    };
+    pc.onsignalingstatechange = () => {
+      if (current()) setTransportField("signaling-state", pc.signalingState);
+    };
     pc.ontrack = (event) => {
-      remoteStream = event.streams[0];
+      if (!current()) { event.track.stop(); return; }
+      remoteStream = owner.ownStream(event.streams[0] || new MediaStream([event.track]));
       if (!remoteAudioSuppressed) $("remote").srcObject = remoteStream;
       logEvent("remote audio track attached");
     };
-
-    dc = pc.createDataChannel("meerkat.live");
     dc.onopen = () => {
+      if (!current()) return;
       $("dc-state").textContent = "open";
-      $("composer").dataset.live = "true";
-      setStatus("live", "live");
       logEvent("data channel open");
     };
-    dc.onclose = () => {
-      $("dc-state").textContent = "closed";
-      $("composer").dataset.live = "false";
-      logEvent("data channel closed");
+    dc.onclose = () => terminal("idle", "data channel closed");
+    dc.onmessage = (message) => {
+      if (current()) handleObservation(JSON.parse(message.data));
     };
-    dc.onmessage = (message) => handleObservation(JSON.parse(message.data));
-
-    localStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-      video: false,
-    });
+    const localStream = await owner.microphone();
+    if (!current()) return;
     $("mic-state").textContent = "aec/noise/agc requested";
     $("audio-state").textContent = "microphone live";
+    owner.cleanups.push(stopMeter);
     startMeter(localStream);
     pc.addTrack(localStream.getAudioTracks()[0], localStream);
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await waitForIceGatheringComplete(pc);
-    const gatheredOffer = pc.localDescription;
     setStatus("pending", "signaling");
-    const open = await openPromise;
-    activeChannelId = open.channel_id;
-    renderState(await fetchJson("/api/state"));
-    const answer = await fetchJson("/api/webrtc/answer", {
-      method: "POST",
-      body: JSON.stringify({
-        channel_id: open.channel_id,
-        token: open.transport.token,
-        offer_sdp: gatheredOffer.sdp,
-      }),
-    });
-    $("sdp-state").textContent = `${gatheredOffer.sdp.length}/${answer.answer_sdp.length}`;
-    await pc.setRemoteDescription({ type: "answer", sdp: answer.answer_sdp });
+    const { open, offerSdp, answerSdp } = await owner.negotiate();
+    if (!current()) return;
+    $("sdp-state").textContent = `${offerSdp.length}/${answerSdp.length}`;
+    await owner.connected();
+    if (!current()) return;
+    setStatus("live", "live");
+    $("composer").dataset.live = "true";
     setLiveControls(true);
-    pollTimer = setInterval(pollState, 1200);
+    const pollTimer = setInterval(() => void pollState(owner), 1200);
+    owner.cleanups.push(() => clearInterval(pollTimer));
+    void pollState(owner);
     logEvent(`live tools: ${open.tools.join(", ")}`);
   } catch (error) {
-    setStatus("error", error.message);
-    await cleanup(false);
-  } finally {
-    $("start").disabled = false;
+    if (current()) await terminate(owner, "error", error.message);
+    else await owner.dispose();
   }
 }
 
 async function postLive(action, body = {}) {
-  if (!activeChannelId) throw new Error("no active channel");
-  return fetchJson(`/api/live/${encodeURIComponent(activeChannelId)}/${action}`, {
+  const owner = attempt;
+  if (!owner?.openResult || owner.disposed) throw new Error("no active channel");
+  return fetchJson(`/api/live/${encodeURIComponent(owner.openResult.channel_id)}/${action}`, {
     method: "POST",
     body: JSON.stringify(body),
+    signal: owner.signal,
   });
 }
 
-async function cleanup(callServer = true) {
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = undefined;
-  stopMeter();
-  dc?.close();
-  pc?.close();
-  localStream?.getTracks().forEach((track) => track.stop());
-  remoteStream?.getTracks().forEach((track) => track.stop());
-  if (callServer && activeChannelId) {
-    await postLive("close").catch((error) => logEvent(`close failed: ${error.message}`));
-  }
-  pc = undefined;
-  dc = undefined;
-  localStream = undefined;
+async function terminate(owner, state, message) {
+  if (attempt !== owner || owner.disposed) return;
+  setStatus(state, message);
+  setLiveControls(false);
+  $("remote").pause();
+  $("remote").srcObject = null;
   remoteStream = undefined;
-  activeChannelId = undefined;
   remoteAudioSuppressed = false;
   interruptedResponseIds = new Set();
-  setLiveControls(false);
   $("composer").dataset.live = "false";
   $("dc-state").textContent = "closed";
   $("mic-state").textContent = "idle";
   $("audio-state").textContent = "microphone idle";
+  await owner.dispose();
+  if (attempt === owner) {
+    attempt = undefined;
+    $("start").disabled = false;
+  }
 }
 
 $("start").onclick = start;
 $("stop").onclick = async () => {
-  setStatus("pending", "stopping");
-  await cleanup(true);
-  setStatus("idle", "stopped");
+  if (attempt) await terminate(attempt, "idle", "stopped");
 };
 $("interrupt").onclick = async () => {
   try {
@@ -562,8 +527,8 @@ $("text-form").onsubmit = async (event) => {
   const text = $("text-input").value.trim();
   if (!text) return;
   try {
-    if (dc?.readyState === "open") {
-      dc.send(JSON.stringify({ kind: "text", text }));
+    if (attempt?.dc.readyState === "open") {
+      attempt.dc.send(JSON.stringify({ kind: "text", text }));
       logEvent("data channel text chunk sent");
     } else {
       await postLive("text", { text });
@@ -576,9 +541,7 @@ $("text-form").onsubmit = async (event) => {
 };
 
 window.addEventListener("beforeunload", () => {
-  dc?.close();
-  pc?.close();
-  localStream?.getTracks().forEach((track) => track.stop());
+  if (attempt) void terminate(attempt, "idle", "stopped");
 });
 
 setStatus("idle", "idle");

@@ -64,11 +64,13 @@ pub enum Event {
     ClaimAcked {
         lease_id: String,
         tux_id: String,
+        now_ms: i64,
     },
     LeaseRenewed {
         lease_id: String,
         tux_id: String,
         new_expires_at_ms: i64,
+        now_ms: i64,
     },
     Released {
         reason: LeaseTerminationReason,
@@ -85,6 +87,7 @@ pub enum Event {
         recovery_window_ms: i64,
     },
     TargetAddressChanged,
+    TargetConnected,
     Tick {
         now_ms: i64,
     },
@@ -162,6 +165,28 @@ fn recovery_deadline(expires_at_ms: i64, now_ms: i64, recovery_window_ms: i64) -
 
 pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), TransitionError> {
     match (state, event) {
+        (
+            State::RecoveringClaim {
+                target_id,
+                lease,
+                tux_id,
+                expires_at_ms,
+                recover_deadline_ms,
+                ..
+            },
+            Event::TargetConnected,
+        ) => Ok((
+            State::RecoveringClaim {
+                target_id,
+                lease,
+                tux_id,
+                expires_at_ms,
+                recover_deadline_ms,
+                target_connected: true,
+            },
+            vec![],
+        )),
+        (state, Event::TargetConnected) => Ok((state, vec![])),
         (
             State::Available { target_id },
             Event::ClaimRequested {
@@ -274,11 +299,12 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 lease_id,
                 tux_id,
                 expires_at_ms,
-                ..
+                ack_deadline_ms,
             },
             Event::ClaimAcked {
                 lease_id: ack_lid,
                 tux_id: ack_tid,
+                now_ms,
             },
         ) => {
             if ack_lid != lease_id {
@@ -286,6 +312,13 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             }
             if ack_tid != tux_id {
                 return Err(err("AwaitingAck", "ClaimAcked", "tux_id mismatch"));
+            }
+            if now_ms >= expires_at_ms || now_ms >= ack_deadline_ms {
+                return Err(err(
+                    "AwaitingAck",
+                    "ClaimAcked",
+                    "lease or ack window expired",
+                ));
             }
             Ok((
                 State::Claimed {
@@ -338,7 +371,7 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
             },
             Event::Tick { now_ms },
         ) => {
-            if now_ms >= ack_deadline_ms {
+            if now_ms >= ack_deadline_ms || now_ms >= expires_at_ms {
                 Ok((
                     State::Available {
                         target_id: target_id.clone(),
@@ -438,12 +471,13 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 target_id,
                 lease_id,
                 tux_id,
-                ..
+                expires_at_ms,
             },
             Event::LeaseRenewed {
                 lease_id: ren_lid,
                 tux_id: ren_tid,
                 new_expires_at_ms,
+                now_ms,
             },
         ) => {
             if ren_lid != lease_id || ren_tid != tux_id {
@@ -452,6 +486,9 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                     "LeaseRenewed",
                     "lease_id or tux_id mismatch",
                 ));
+            }
+            if now_ms >= expires_at_ms || new_expires_at_ms <= now_ms {
+                return Err(err("Claimed", "LeaseRenewed", "lease expired"));
             }
             Ok((
                 State::Claimed {
@@ -567,16 +604,25 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                 tux_id,
                 expires_at_ms,
             },
-            Event::Tick { .. },
-        ) => Ok((
-            State::Claimed {
+            Event::Tick { now_ms },
+        ) => {
+            let state = State::Claimed {
                 target_id,
                 lease_id,
                 tux_id,
                 expires_at_ms,
-            },
-            vec![],
-        )),
+            };
+            if now_ms >= expires_at_ms {
+                transition(
+                    state,
+                    Event::Released {
+                        reason: LeaseTerminationReason::LeaseExpired,
+                    },
+                )
+            } else {
+                Ok((state, vec![]))
+            }
+        }
 
         (
             State::RecoveringClaim {
@@ -806,6 +852,11 @@ pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), Tr
                     reason: LeaseTerminationReason::TuxDisconnected,
                 });
             }
+            if !target_connected {
+                effects.push(Effect::DropTargetRecord {
+                    target_id: target_id.clone(),
+                });
+            }
             Ok((State::Available { target_id }, effects))
         }
         (state, event) => {
@@ -829,6 +880,113 @@ mod tests {
     use super::*;
 
     #[test]
+    fn connected_claim_expires_and_late_ack_or_renew_cannot_revive_it() {
+        let waiting = State::AwaitingAck {
+            target_id: "t".into(),
+            lease_id: "l".into(),
+            tux_id: "u".into(),
+            expires_at_ms: 100,
+            ack_deadline_ms: 50,
+        };
+        assert!(
+            transition(
+                waiting.clone(),
+                Event::ClaimAcked {
+                    lease_id: "l".into(),
+                    tux_id: "u".into(),
+                    now_ms: 50,
+                }
+            )
+            .is_err()
+        );
+        let (claimed, _) = transition(
+            waiting,
+            Event::ClaimAcked {
+                lease_id: "l".into(),
+                tux_id: "u".into(),
+                now_ms: 49,
+            },
+        )
+        .unwrap();
+        let (before, effects) = transition(claimed.clone(), Event::Tick { now_ms: 99 }).unwrap();
+        assert_eq!(before, claimed);
+        assert!(effects.is_empty());
+        let (renewed, effects) = transition(
+            claimed.clone(),
+            Event::LeaseRenewed {
+                lease_id: "l".into(),
+                tux_id: "u".into(),
+                now_ms: 99,
+                new_expires_at_ms: 200,
+            },
+        )
+        .unwrap();
+        assert!(effects.is_empty());
+        let (renewed, effects) = transition(renewed, Event::Tick { now_ms: 100 }).unwrap();
+        assert!(matches!(
+            renewed,
+            State::Claimed {
+                expires_at_ms: 200,
+                ..
+            }
+        ));
+        assert!(effects.is_empty());
+        assert!(
+            transition(
+                claimed.clone(),
+                Event::LeaseRenewed {
+                    lease_id: "l".into(),
+                    tux_id: "u".into(),
+                    now_ms: 100,
+                    new_expires_at_ms: 200,
+                }
+            )
+            .is_err()
+        );
+        let (available, effects) = transition(claimed, Event::Tick { now_ms: 100 }).unwrap();
+        assert!(matches!(available, State::Available { .. }));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendClaimReleasedToTux {
+                reason: LeaseTerminationReason::LeaseExpired,
+                ..
+            }
+        )));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::SendTargetReleased { .. }))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::RemoveLease { .. }))
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::DropTargetRecord { .. }))
+        );
+        assert!(
+            transition(
+                available.clone(),
+                Event::LeaseRenewed {
+                    lease_id: "l".into(),
+                    tux_id: "u".into(),
+                    now_ms: 100,
+                    new_expires_at_ms: 200,
+                }
+            )
+            .is_err()
+        );
+        let (_, repeated) = transition(available, Event::Tick { now_ms: 101 }).unwrap();
+        assert!(
+            repeated.is_empty(),
+            "expiration notifications must be emitted once"
+        );
+    }
+
+    #[test]
     fn claim_ack_goes_directly_to_claimed() {
         let state = State::AwaitingAck {
             target_id: "t".into(),
@@ -842,6 +1000,7 @@ mod tests {
             Event::ClaimAcked {
                 lease_id: "l".into(),
                 tux_id: "u".into(),
+                now_ms: 1,
             },
         )
         .unwrap();

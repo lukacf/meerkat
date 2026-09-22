@@ -14328,6 +14328,12 @@ pub mod inputs {
         pub run_id: RunId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CloseStandaloneTurn {
+        pub session_id: SessionId,
+        pub run_id: RunId,
+        pub terminal_phase: TurnPhase,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ServiceTurnCommitted {
         pub run_id: RunId,
     }
@@ -16017,6 +16023,7 @@ pub enum Input {
     TimeBudgetExceeded(inputs::TimeBudgetExceeded),
     ForceCancelNoRun(inputs::ForceCancelNoRun),
     RunCompleted(inputs::RunCompleted),
+    CloseStandaloneTurn(inputs::CloseStandaloneTurn),
     ServiceTurnCommitted(inputs::ServiceTurnCommitted),
     RunFailed(inputs::RunFailed),
     RunCancelled(inputs::RunCancelled),
@@ -16457,6 +16464,7 @@ impl Input {
             Self::TimeBudgetExceeded(_) => InputKind::TimeBudgetExceeded,
             Self::ForceCancelNoRun(_) => InputKind::ForceCancelNoRun,
             Self::RunCompleted(_) => InputKind::RunCompleted,
+            Self::CloseStandaloneTurn(_) => InputKind::CloseStandaloneTurn,
             Self::ServiceTurnCommitted(_) => InputKind::ServiceTurnCommitted,
             Self::RunFailed(_) => InputKind::RunFailed,
             Self::RunCancelled(_) => InputKind::RunCancelled,
@@ -16948,6 +16956,7 @@ pub enum InputKind {
     TimeBudgetExceeded,
     ForceCancelNoRun,
     RunCompleted,
+    CloseStandaloneTurn,
     ServiceTurnCommitted,
     RunFailed,
     RunCancelled,
@@ -20509,6 +20518,7 @@ pub enum TransitionId {
     TimeBudgetExceeded,
     ForceCancelNoRun,
     RunCompleted,
+    CloseStandaloneTurn,
     ServiceTurnCommittedRunningToIdle,
     ServiceTurnCommittedRunningToAttached,
     ServiceTurnCommittedRunningToRetired,

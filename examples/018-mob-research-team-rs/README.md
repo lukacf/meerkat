@@ -18,6 +18,14 @@ The example uses the standalone in-memory mob and session path. Use a
 runtime-backed surface when the mob must survive process restarts or accept
 durable external work.
 
+The lead explicitly uses `MobRuntimeMode::TurnDriven`, the lane supported by
+the tracked-turn API (not autonomous inbox delivery). Its exact tracked turn
+is awaited and its answer printed before member
+retirement (shared helper in `../017-mob-coding-swarm-rs/tracked_turn.rs`).
+Failure or a 60-second observation deadline is reported as an error; timeout
+does not prove cancellation or completion. Cleanup retires members. Historical
+mob lifecycle events do not satisfy the response wait.
+
 ## Profiles
 | Profile | Model | Role |
 |---------|-------|------|

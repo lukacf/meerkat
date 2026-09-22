@@ -16,6 +16,7 @@ meerkat-core = { path = "../../meerkat-core" }
 meerkat-mob = { path = "../../meerkat-mob" }
 meerkat-mob-mcp = { path = "../../meerkat-mob-mcp" }
 meerkat-session = { path = "../../meerkat-session" }
+meerkat-runtime = { path = "../../meerkat-runtime", default-features = false }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,3 +26,12 @@ uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5"
+
+[dev-dependencies]
+async-trait = "0.1"
+futures = "0.3"
+meerkat-client = { path = "../../meerkat-client" }
+
+# Exercise real multi-step provenance validation within the unchanged test deadlines.
+[profile.test.package.meerkat-mob]
+opt-level = 1

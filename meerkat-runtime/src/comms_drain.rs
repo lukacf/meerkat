@@ -88,6 +88,8 @@ const SUPERVISOR_RESPONSE_ROUTE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// The task runs until its idle timeout expires or the returned `JoinHandle`
 /// is aborted by the drain lifecycle authority. Lifecycle dismissal is a typed
 /// signal owned by that authority, never a peer message body.
+/// `None` uses the default idle timeout; `Duration::MAX` keeps a persistent
+/// drain waiting without installing a platform timer.
 ///
 /// The caller remains the lifetime owner of `comms_runtime`. The spawned task
 /// keeps only a weak reference and upgrades it for bounded active work, so an
@@ -203,6 +205,12 @@ pub fn spawn_comms_drain(
                 // unregisters its route. A later wake upgrades again at the top
                 // of the loop; if the host is gone, the drain exits.
                 drop(comms_runtime);
+                // PersistentHost is unbounded, not a finite timer: JS timers
+                // overflow Duration::MAX and can expire immediately on WASM.
+                if timeout_dur == Duration::MAX {
+                    notified.as_mut().await;
+                    continue;
+                }
                 if crate::tokio::time::timeout(timeout_dur, notified.as_mut())
                     .await
                     .is_err()
@@ -8669,6 +8677,74 @@ mod tests {
                 .is_err(),
             "an empty (Ok) inbox must idle, not exit promptly"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn persistent_idle_drain_survives_default_timeout_and_can_be_aborted() {
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter
+            .register_session(session_id.clone())
+            .await
+            .expect("register session");
+        let runtime = Arc::new(ClassifiedDrainOutcomeRuntime::new(false));
+        let drain =
+            spawn_authorized_test_comms_drain(adapter, session_id, runtime.clone(), Duration::MAX)
+                .await;
+        while runtime.claim_attempts() == 0 || Arc::strong_count(&runtime) != 1 {
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(DEFAULT_IDLE_TIMEOUT * 2).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !drain.is_finished(),
+            "a persistent idle drain must not expire"
+        );
+        drain.abort();
+        assert!(
+            drain.await.expect_err("aborted drain").is_cancelled(),
+            "persistent waiting must remain cancellable"
+        );
+        let weak_runtime = Arc::downgrade(&runtime);
+        drop(runtime);
+        assert!(weak_runtime.upgrade().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_and_explicit_idle_drain_timeouts_expire() {
+        for idle_timeout in [None, Some(Duration::from_millis(25))] {
+            let adapter = Arc::new(MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            adapter
+                .register_session(session_id.clone())
+                .await
+                .expect("register session");
+            let runtime = Arc::new(ClassifiedDrainOutcomeRuntime::new(false));
+            adapter
+                .test_authorize_direct_comms_drain_runtime(&session_id, runtime.clone())
+                .await
+                .expect("authorize drain");
+            let drain = spawn_comms_drain(adapter, session_id, runtime.clone(), idle_timeout);
+            while runtime.claim_attempts() == 0 || Arc::strong_count(&runtime) != 1 {
+                tokio::task::yield_now().await;
+            }
+
+            let duration = idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT);
+            let before_deadline = duration
+                .checked_sub(Duration::from_millis(1))
+                .expect("test timeout exceeds one millisecond");
+            tokio::time::advance(before_deadline).await;
+            tokio::task::yield_now().await;
+            assert!(
+                !drain.is_finished(),
+                "timed drain expired before its deadline"
+            );
+            tokio::time::advance(Duration::from_millis(2)).await;
+            drain
+                .await
+                .expect("timed drain must exit without panicking");
+        }
     }
 
     #[tokio::test]

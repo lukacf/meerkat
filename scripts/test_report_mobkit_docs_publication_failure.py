@@ -27,8 +27,8 @@ sys.modules[SPEC.name] = report
 SPEC.loader.exec_module(report)
 
 REPOSITORY = "lukacf/meerkat"
-TAG = "v0.8.30"
-BRANCH = "codex/publish-mobkit-docs-0.8.30-777"
+SOURCE = "main@1234567890ab"
+BRANCH = "codex/publish-mobkit-docs-1234567890ab-777"
 RUN_URL = "https://github.com/lukacf/meerkat/actions/runs/777"
 PULL_REQUEST_URL = "https://github.com/lukacf/meerkat/pull/5"
 
@@ -97,8 +97,8 @@ class ReportMobKitDocsPublicationFailureTests(unittest.TestCase):
             str(SCRIPT),
             "--repository",
             REPOSITORY,
-            "--tag",
-            TAG,
+            "--source",
+            SOURCE,
             "--branch",
             BRANCH,
             "--run-url",
@@ -115,9 +115,9 @@ class ReportMobKitDocsPublicationFailureTests(unittest.TestCase):
             return []
         return self.log.read_text(encoding="utf-8").splitlines()
 
-    def test_tracking_issue_title_is_stable_across_releases(self) -> None:
-        self.assertNotIn(TAG, report.TRACKING_ISSUE_TITLE)
-        self.assertNotIn("0.8", report.TRACKING_ISSUE_TITLE)
+    def test_tracking_issue_title_is_stable_across_publications(self) -> None:
+        self.assertNotIn(SOURCE, report.TRACKING_ISSUE_TITLE)
+        self.assertNotIn("1234567890ab", report.TRACKING_ISSUE_TITLE)
 
     def test_summary_names_the_pushed_branch_and_the_manual_pull_request_command(self) -> None:
         result = self.run_report()
@@ -126,10 +126,10 @@ class ReportMobKitDocsPublicationFailureTests(unittest.TestCase):
         self.assertIn(f"Pushed branch: `{BRANCH}`", summary)
         self.assertIn(
             f"gh pr create --repo {REPOSITORY} --base main --head {BRANCH} "
-            f'--title "docs: publish MobKit {TAG}"',
+            f'--title "docs: mirror MobKit {SOURCE}"',
             summary,
         )
-        self.assertIn(f"gh pr merge --repo {REPOSITORY} --auto --squash {BRANCH}", summary)
+        self.assertIn(f"gh pr merge --repo {REPOSITORY} --auto --merge {BRANCH}", summary)
         self.assertIn(RUN_URL, summary)
         self.assertIn("Allow GitHub Actions to create and approve pull requests", summary)
         self.assertIn("MOBKIT_DOCS_PR_TOKEN", summary)
@@ -137,8 +137,8 @@ class ReportMobKitDocsPublicationFailureTests(unittest.TestCase):
         # uses the dedicated token for `gh pr create` only, so a pull-request
         # scoped token is enough; auto-merge (which needs contents: write) runs
         # under the workflow's own token.
-        self.assertIn("Pull requests: read and write", summary)
-        self.assertIn("only to open the pull request", summary)
+        self.assertIn("Contents: read and write", summary)
+        self.assertIn("straight to main", summary)
 
     def test_opens_the_tracking_issue_when_none_is_open(self) -> None:
         result = self.run_report(issues=[])
@@ -175,7 +175,7 @@ class ReportMobKitDocsPublicationFailureTests(unittest.TestCase):
         result = self.run_report(pull_request_url=PULL_REQUEST_URL)
         self.assertEqual(result.returncode, 0, result.stderr)
         summary = self.summary.read_text(encoding="utf-8")
-        self.assertIn(f"gh pr merge --repo {REPOSITORY} --auto --squash {PULL_REQUEST_URL}", summary)
+        self.assertIn(f"gh pr merge --repo {REPOSITORY} --auto --merge {PULL_REQUEST_URL}", summary)
         self.assertNotIn("gh pr create", summary)
         self.assertIn(f"The pull request {PULL_REQUEST_URL} was opened", summary)
 

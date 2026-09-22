@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Fail when the docs.rkat.ai MobKit mirror lags the public MobKit releases.
+"""Fail when the docs.rkat.ai MobKit mirror lags MobKit main.
 
-docs/mobkit is a generated snapshot of one MobKit release, recorded in
-docs/mobkit/_source.json as `source_ref`. Publication of a newer release can
-fail after the release itself succeeded (the publish workflow could not open
-its pull request for ten days in 2026-08/09), and nothing else looked at the
-gap. This ratchet compares the mirrored ref with the published, non-draft,
-non-prerelease MobKit releases and fails when more than `--max-lag` releases
-were published after the mirrored one.
+docs/mobkit is a generated snapshot of one MobKit main commit, recorded in
+docs/mobkit/_source.json as `source_commit`. Every push to MobKit main that
+touches docs/ is supposed to regenerate the snapshot through the Publish
+MobKit docs workflow, but a dispatch can be lost or the publication can fail
+after the source moved on. This ratchet compares the mirrored commit with the
+head of MobKit main and fails when more than `--max-lag` commits that touch
+docs/ were pushed to main after the mirrored one.
+
+Why commits touching docs/ rather than all commits or wall-clock age: a code
+commit on MobKit main changes nothing the mirror renders, so counting it would
+page on a mirror that is in fact current; wall-clock age has the same problem
+in reverse (a stale mirror looks fine on a quiet week). A doc-touching commit
+that is not mirrored is exactly the defect.
 
 Usage:
-    gh api "repos/lukacf/meerkat-mobkit/releases?per_page=100" > releases.json
-    python3 scripts/check-mobkit-docs-lag.py --releases releases.json
+    gh api "repos/lukacf/meerkat-mobkit/compare/<mirrored>...main" > compare.json
+    python3 scripts/check-mobkit-docs-lag.py --compare compare.json
 """
 
 from __future__ import annotations
@@ -19,18 +25,21 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "docs" / "mobkit" / "_source.json"
+DOCS_PREFIX = "docs/"
 
 
-@dataclass(frozen=True, order=True)
-class Release:
-    published_at: datetime
-    tag_name: str
+@dataclass(frozen=True)
+class DocsLag:
+    """Commits on MobKit main after the mirrored commit, split by docs impact."""
+
+    ahead_by: int
+    docs_commits: tuple[str, ...]
+    head_sha: str
 
 
 class LagCheckError(Exception):
@@ -40,10 +49,13 @@ class LagCheckError(Exception):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--releases",
+        "--compare",
         required=True,
         type=Path,
-        help="JSON array as returned by `gh api repos/<owner>/<repo>/releases`",
+        help=(
+            "JSON object as returned by "
+            "`gh api repos/<owner>/<repo>/compare/<mirrored>...main`"
+        ),
     )
     parser.add_argument(
         "--manifest",
@@ -54,81 +66,97 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-lag",
         type=int,
-        default=1,
-        help="largest number of newer published releases tolerated (default: 1)",
+        default=0,
+        help="largest number of unmirrored docs-touching main commits tolerated (default: 0)",
     )
     return parser.parse_args()
 
 
-def published_releases(releases: object) -> list[Release]:
-    """Published, non-draft, non-prerelease releases, newest first.
+def manifest_source_commit(manifest_path: Path) -> str:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source_commit = manifest.get("source_commit") if isinstance(manifest, dict) else None
+    if not isinstance(source_commit, str) or not source_commit:
+        raise LagCheckError(f"{manifest_path} has no source_commit")
+    return source_commit
 
-    The releases API lists drafts (with a null `published_at`) and does not
-    order strictly by publication date, so the list order is not the lag.
+
+def docs_lag(compare: object) -> DocsLag:
+    """Read the compare payload for `<mirrored>...main`.
+
+    The compare endpoint reports the commits reachable from main but not from
+    the mirrored commit, and the files changed across that range. A commit
+    counts toward the lag only when it touches docs/; the per-commit file
+    lists are not in this payload, so each commit is attributed through the
+    range-level file list: when the range touches docs/ at all, every commit
+    in the range is listed as a candidate and the range-level count is what
+    the tolerance is compared with. This overstates a mixed range and never
+    understates a docs-only one, which is the safe direction for a ratchet.
     """
-    if not isinstance(releases, list):
-        raise LagCheckError("releases payload is not a JSON array")
-    published: list[Release] = []
-    for entry in releases:
-        if not isinstance(entry, dict):
-            raise LagCheckError("releases payload contains a non-object entry")
-        if entry.get("draft") is True or entry.get("prerelease") is True:
-            continue
-        tag_name = entry.get("tag_name")
-        published_at = entry.get("published_at")
-        if not isinstance(tag_name, str) or not isinstance(published_at, str):
-            continue
-        published.append(
-            Release(
-                published_at=datetime.fromisoformat(published_at.replace("Z", "+00:00")),
-                tag_name=tag_name,
+    if not isinstance(compare, dict):
+        raise LagCheckError("compare payload is not a JSON object")
+    status = compare.get("status")
+    if status not in {"identical", "ahead", "behind", "diverged"}:
+        raise LagCheckError(f"compare payload has unknown status {status!r}")
+    if status in {"behind", "diverged"}:
+        raise LagCheckError(
+            f"mirrored MobKit commit is not an ancestor of main (status {status}); "
+            "the mirror was generated from something other than main"
+        )
+    ahead_by = compare.get("ahead_by")
+    if not isinstance(ahead_by, int):
+        raise LagCheckError("compare payload has no ahead_by count")
+    commits = compare.get("commits")
+    if not isinstance(commits, list):
+        raise LagCheckError("compare payload has no commits array")
+    files = compare.get("files")
+    if not isinstance(files, list):
+        raise LagCheckError("compare payload has no files array")
+    head_sha = (
+        compare.get("base_commit", {}).get("sha") if status == "identical" else None
+    )
+    if commits:
+        head_sha = commits[-1].get("sha")
+    if not isinstance(head_sha, str):
+        raise LagCheckError("compare payload names no head commit")
+    touches_docs = any(
+        isinstance(entry, dict)
+        and isinstance(entry.get("filename"), str)
+        and (
+            entry["filename"].startswith(DOCS_PREFIX)
+            or (
+                isinstance(entry.get("previous_filename"), str)
+                and entry["previous_filename"].startswith(DOCS_PREFIX)
             )
         )
-    if not published:
-        raise LagCheckError("releases payload contains no published releases")
-    return sorted(published, reverse=True)
-
-
-def mirror_lag(source_ref: str, releases: list[Release]) -> int:
-    """Number of published releases newer than the mirrored release."""
-    for index, release in enumerate(releases):
-        if release.tag_name == source_ref:
-            return index
-    raise LagCheckError(
-        f"mirrored MobKit ref {source_ref} is not among the published releases "
-        f"(latest is {releases[0].tag_name})"
+        for entry in files
     )
-
-
-def manifest_source_ref(manifest_path: Path) -> str:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    source_ref = manifest.get("source_ref") if isinstance(manifest, dict) else None
-    if not isinstance(source_ref, str) or not source_ref:
-        raise LagCheckError(f"{manifest_path} has no source_ref")
-    return source_ref
+    docs_commits = (
+        tuple(str(commit.get("sha", ""))[:12] for commit in commits if isinstance(commit, dict))
+        if touches_docs
+        else ()
+    )
+    return DocsLag(ahead_by=ahead_by, docs_commits=docs_commits, head_sha=head_sha)
 
 
 def main() -> int:
     args = parse_args()
     try:
-        source_ref = manifest_source_ref(args.manifest)
-        releases = published_releases(json.loads(args.releases.read_text(encoding="utf-8")))
-        lag = mirror_lag(source_ref, releases)
+        source_commit = manifest_source_commit(args.manifest)
+        lag = docs_lag(json.loads(args.compare.read_text(encoding="utf-8")))
     except LagCheckError as error:
         print(f"mobkit-docs-lag: cannot determine lag: {error}")
         return 2
-    latest = releases[0]
+    unmirrored = len(lag.docs_commits)
     print(
-        f"mobkit-docs-lag: mirror documents {source_ref}; latest published release is "
-        f"{latest.tag_name} ({latest.published_at.isoformat()}); lag {lag} release(s), "
+        f"mobkit-docs-lag: mirror renders MobKit main at {source_commit[:12]}; main head is "
+        f"{lag.head_sha[:12]}; {lag.ahead_by} commit(s) ahead, {unmirrored} touching docs/, "
         f"tolerated {args.max_lag}"
     )
-    if lag > args.max_lag:
-        newer = ", ".join(release.tag_name for release in releases[:lag])
+    if unmirrored > args.max_lag:
         print(
-            f"mobkit-docs-lag: docs/mobkit is {lag} releases behind; published after "
-            f"{source_ref}: {newer}. Run the Publish MobKit docs workflow for "
-            f"{latest.tag_name} (or `make docs-sync-mobkit` from its clean tag)."
+            f"mobkit-docs-lag: docs/mobkit misses {unmirrored} docs-touching commit(s) on MobKit "
+            f"main: {', '.join(lag.docs_commits)}. Run the Publish MobKit docs workflow "
+            "(workflow_dispatch) or `make docs-sync-mobkit` from a clean MobKit main checkout."
         )
         return 1
     return 0

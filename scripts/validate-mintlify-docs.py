@@ -231,10 +231,12 @@ def main() -> int:
             if manifest.get("generated") is not True:
                 errors.append("docs/mobkit/_source.json does not identify a generated snapshot")
             if manifest.get("source_docs_dirty") is not False:
-                errors.append("generated MobKit docs must come from a clean release checkout")
-            source_version = manifest.get("source_version")
-            if manifest.get("source_ref") != f"v{source_version}":
-                errors.append("generated MobKit docs source ref does not match its version")
+                errors.append("generated MobKit docs must come from a clean main checkout")
+            # The mirror tracks MobKit main; documentation carries no version tag.
+            if manifest.get("source_branch") != "main" or manifest.get("source_ref") != "main":
+                errors.append("generated MobKit docs must be mirrored from MobKit main")
+            if not isinstance(manifest.get("source_version"), str) or not manifest["source_version"]:
+                errors.append("generated MobKit docs manifest names no MobKit workspace version")
             source_commit = manifest.get("source_commit")
             if not isinstance(source_commit, str) or not re.fullmatch(
                 r"[0-9a-f]{40}", source_commit

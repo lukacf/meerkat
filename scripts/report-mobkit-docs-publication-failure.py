@@ -18,7 +18,7 @@ comment to the open issue instead of creating a new one per run.
 
 Usage:
     python3 scripts/report-mobkit-docs-publication-failure.py \\
-        --repository lukacf/meerkat --tag v0.8.30 \\
+        --repository lukacf/meerkat --source main@1234567890ab \\
         --branch codex/publish-mobkit-docs-0.8.30-123 \\
         --run-url https://github.com/lukacf/meerkat/actions/runs/123 \\
         --summary "$GITHUB_STEP_SUMMARY" [--pull-request-url URL]
@@ -39,28 +39,28 @@ TRACKING_ISSUE_TITLE = "MobKit docs publication needs a human to open the pull r
 @dataclass(frozen=True)
 class PublicationFailure:
     repository: str
-    tag: str
+    source: str
     branch: str
     run_url: str
     pull_request_url: str | None
 
     def pull_request_title(self) -> str:
-        return f"docs: publish MobKit {self.tag}"
+        return f"docs: mirror MobKit {self.source}"
 
     def recovery_commands(self) -> list[str]:
         """Commands a maintainer runs from any checkout to finish the publication."""
         if self.pull_request_url:
             return [
-                f"gh pr merge --repo {self.repository} --auto --squash {self.pull_request_url}",
+                f"gh pr merge --repo {self.repository} --auto --merge {self.pull_request_url}",
             ]
         return [
             (
                 f"gh pr create --repo {self.repository} --base main --head {self.branch} "
                 f'--title "{self.pull_request_title()}" '
-                f'--body "Publish the immutable {self.tag} documentation snapshot '
+                f'--body "Mirror MobKit {self.source} documentation snapshot '
                 f'pushed by {self.run_url}."'
             ),
-            f"gh pr merge --repo {self.repository} --auto --squash {self.branch}",
+            f"gh pr merge --repo {self.repository} --auto --merge {self.branch}",
         ]
 
     def what_failed(self) -> str:
@@ -78,28 +78,27 @@ class PublicationFailure:
         heading = "#" * heading_level
         commands = "\n".join(self.recovery_commands())
         return (
-            f"{heading} MobKit {self.tag} docs publication needs a human\n\n"
+            f"{heading} MobKit {self.source} docs publication needs a human\n\n"
             f"{self.what_failed()}\n\n"
-            f"- MobKit release: `{self.tag}`\n"
+            f"- MobKit source: `{self.source}`\n"
             f"- Pushed branch: `{self.branch}`\n"
             f"- Failed run: {self.run_url}\n\n"
             "Finish the publication by hand:\n\n"
             f"```bash\n{commands}\n```\n\n"
-            "Stop this from repeating on the next release by doing one of:\n\n"
+            "Stop this from repeating on the next docs push by doing one of:\n\n"
             '1. Enable "Allow GitHub Actions to create and approve pull requests" '
             f"under Settings > Actions > General for `{self.repository}`.\n"
             "2. Add a `MOBKIT_DOCS_PR_TOKEN` repository secret holding a fine-grained "
-            f"token with Pull requests: read and write on `{self.repository}` "
-            "(Metadata: read is implied; nothing else). `publish-mobkit-docs.yml` uses "
-            "it only to open the pull request, prefers it over `github.token` when "
-            "present, and enables auto-merge with its own token.\n"
+            f"token held by a repository admin with Contents: read and write on `{self.repository}`. "
+            "`publish-mobkit-docs.yml` then pushes the guarded snapshot commit "
+            "(docs/mobkit/** and docs/docs.json only) straight to main.\n"
         )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", required=True, help="owner/name of this repository")
-    parser.add_argument("--tag", required=True, help="MobKit release tag being published")
+    parser.add_argument("--source", required=True, help="MobKit source being mirrored, e.g. main@abc123def456")
     parser.add_argument("--branch", required=True, help="publication branch that was pushed")
     parser.add_argument("--run-url", required=True, help="URL of the failed workflow run")
     parser.add_argument(
@@ -189,7 +188,7 @@ def main() -> int:
     args = parse_args()
     failure = PublicationFailure(
         repository=args.repository,
-        tag=args.tag,
+        source=args.source,
         branch=args.branch,
         run_url=args.run_url,
         pull_request_url=args.pull_request_url or None,

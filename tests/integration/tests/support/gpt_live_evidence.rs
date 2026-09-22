@@ -57,6 +57,8 @@ pub enum Stage {
     HandoffClose,
     HandoffTyped,
     HandoffBack,
+    // Shared: a silence hold right after an open or reopen (greeting check).
+    SilenceHold,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -371,6 +373,12 @@ pub enum Record {
         expected_packets: u64,
         ratio: f32,
     },
+    /// Host `/proc/loadavg` at a scenario moment (open, close), so provider
+    /// transcript loss can be correlated with machine load.
+    HostLoad {
+        moment: String,
+        loadavg: String,
+    },
     /// A tolerant (model-dependent) check: recorded with its outcome, never
     /// a gate on its own. The deterministic checks assert.
     Tolerant {
@@ -407,6 +415,9 @@ struct State {
     thinking_append_attempts: usize,
     /// Bounded copy of the attempted thinking-append texts, for echo checks.
     thinking_append_texts: Vec<String>,
+    /// Owned instructions-lane appends the provider acknowledged (matched an
+    /// owned client event id and was accepted).
+    instructions_acknowledged: usize,
     /// Owned instructions-lane attempts (one per wire fragment) and how many
     /// reassembled appends opened a framed summary.
     instructions_append_attempts: usize,
@@ -437,6 +448,9 @@ fn instructions_append_token(client_event_id: &str) -> Option<&str> {
 pub struct OwnerAppends {
     pub thinking_attempts: usize,
     pub instructions_attempts: usize,
+    /// Instructions-lane fragments the provider acknowledged as owned and
+    /// accepted.
+    pub instructions_acknowledged: usize,
     /// Instructions attempts that open a bootstrap summary (carry its framing).
     pub framed_summaries: usize,
 }
@@ -528,6 +542,7 @@ impl Journal {
                 attached_channels: Vec::new(),
                 session_attached_ms: Vec::new(),
                 instructions_append_texts: Vec::new(),
+                instructions_acknowledged: 0,
                 thinking_append_attempts: 0,
                 thinking_append_texts: Vec::new(),
                 instructions_append_attempts: 0,
@@ -717,6 +732,18 @@ impl Journal {
                     state.instructions_append_texts.push(text.clone());
                 }
             }
+            if let thinking_capture::EventKind::InstructionsAppended {
+                matched_owned: true,
+                accepted: true,
+                ..
+            } = &event.event
+            {
+                self.0
+                    .state
+                    .lock()
+                    .map_err(|_| Fault::Poisoned)?
+                    .instructions_acknowledged += 1;
+            }
             self.record(Record::Thinking { event })?;
         }
         if let Some(fault) = self.0.wire.fault() {
@@ -779,6 +806,7 @@ impl Journal {
         Ok(OwnerAppends {
             thinking_attempts: state.thinking_append_attempts,
             instructions_attempts: state.instructions_append_attempts,
+            instructions_acknowledged: state.instructions_acknowledged,
             framed_summaries: state.framed_summary_attempts,
         })
     }

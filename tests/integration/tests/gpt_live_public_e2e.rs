@@ -469,6 +469,70 @@ fn is_client_delegation(event: &Value) -> bool {
     event["type"] == "session.delegation.created" && event["delegation"]["target"] == "client"
 }
 
+/// Journal the host's `/proc/loadavg` at `moment` (open, close).
+fn record_host_load(evidence: &Journal, moment: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let loadavg = std::fs::read_to_string("/proc/loadavg")
+        .map(|text| text.trim().to_owned())
+        .unwrap_or_else(|_| "unavailable".to_owned());
+    println!("GPT_LIVE_HOST_LOAD moment={moment} loadavg={loadavg:?}");
+    evidence.record(EvidenceRecord::HostLoad {
+        moment: moment.to_owned(),
+        loadavg,
+    })?;
+    Ok(())
+}
+
+/// Hold `hold_ms` of digital silence right after an open or reopen and
+/// decide whether the assistant greeted on its own: any new decoded
+/// non-silent inbound frame, output transcript, or energy onset during the
+/// hold counts. Journals `Record::Greeting`; the caller gates.
+async fn silence_hold_greeting(
+    live: &mut PublicLiveHarness,
+    evidence: &Journal,
+    channel: u32,
+    scenario: &str,
+    hold_ms: u64,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    evidence.stage(EvidenceStage::SilenceHold)?;
+    let events_before = live.peer.events().await?.len();
+    let audio_before = live.peer.audio_evidence().await?;
+    let onsets_before = live
+        .peer
+        .energy()
+        .await?
+        .energy
+        .first_assistant_audio_ms
+        .len();
+    live.peer.silence(hold_ms).await?;
+    let audio = live.peer.audio_evidence().await?;
+    let events = live.peer.events().await?;
+    let transcript = output_transcript_text(&events, events_before);
+    let onsets = live
+        .peer
+        .energy()
+        .await?
+        .energy
+        .first_assistant_audio_ms
+        .len();
+    let greeted = audio.decoded_non_silent_frames > audio_before.decoded_non_silent_frames
+        || !transcript.trim().is_empty()
+        || onsets > onsets_before;
+    evidence.record(EvidenceRecord::Greeting {
+        channel,
+        greeted,
+        transcript: transcript.chars().take(400).collect(),
+    })?;
+    println!(
+        "GPT_LIVE_{scenario}_SILENCE channel={channel} hold_ms={hold_ms} greeted={greeted} decoded_non_silent_frames={} (before {}) decoded_non_silent_seconds={:.3} assistant_audio_onsets={} (before {onsets_before}) transcript={:?}",
+        audio.decoded_non_silent_frames,
+        audio_before.decoded_non_silent_frames,
+        audio.decoded_non_silent_seconds,
+        onsets,
+        transcript.trim()
+    );
+    Ok(greeted)
+}
+
 /// One tolerant check: journaled and printed; failures are summarized at
 /// the end of the scenario but do not fail it on their own.
 fn record_tolerant(
@@ -808,6 +872,7 @@ async fn open_public_live_with_summary(
         executor_instructions: None,
         extra_members: Vec::new(),
         instructions_preface: None,
+        summary_bootstrap: false,
     })
     .await
 }
@@ -837,6 +902,11 @@ struct PublicLiveOpen<'a> {
     /// instructions at open (roster, tools).
     instructions_preface:
         Option<Arc<dyn meerkat::experimental_gpt_live::PublicGptLiveInstructionsPreface>>,
+    /// Open (and reopen) with a concurrent bootstrap summary of the session's
+    /// canonical history, ungated, composed like the MobKit console's live
+    /// host (factory summarizer, 4 MiB / 16 KiB / 60 s, `Concurrent`).
+    /// Requires `evidence`; implies unmeasured playback.
+    summary_bootstrap: bool,
 }
 
 /// A second mob member for scenarios about "who else is around".
@@ -859,12 +929,16 @@ async fn open_public_live_with(
         executor_instructions,
         extra_members,
         instructions_preface,
+        summary_bootstrap,
     } = options;
-    let concurrent = bootstrap.is_some() || unmeasured_playback;
+    let concurrent = bootstrap.is_some() || unmeasured_playback || summary_bootstrap;
     let evidence = bootstrap
         .as_ref()
         .map(|bootstrap| bootstrap.evidence.clone())
         .or(evidence);
+    if let Some(evidence) = &evidence {
+        record_host_load(evidence, "open")?;
+    }
     let temp = tempfile::Builder::new()
         .prefix(temp_prefix)
         .tempdir_in(support::test_tmp_root()?)?;
@@ -1117,6 +1191,25 @@ async fn open_public_live_with(
                 )?
                 .with_bootstrap_mode(LiveContextBootstrapMode::Concurrent),
             ),
+            None if summary_bootstrap => {
+                let evidence = evidence
+                    .clone()
+                    .ok_or("summary_bootstrap requires an evidence journal")?;
+                member_host.with_context_summary_policy(
+                    LiveContextSummaryPolicy::new(
+                        Arc::new(FactoryContextSummarizer {
+                            factory: factory.clone(),
+                            config,
+                            auth_lease: runtime.generated_auth_lease_handle(),
+                            evidence,
+                        }),
+                        4 * 1024 * 1024,
+                        16 * 1024,
+                        Duration::from_secs(60),
+                    )?
+                    .with_bootstrap_mode(LiveContextBootstrapMode::Concurrent),
+                )
+            }
             None => member_host,
         });
         let coordinator = compose_experimental_live_delegation_coordinator_with_policy(
@@ -1713,9 +1806,9 @@ impl FactoryContextSummarizer {
             result.usage().output_tokens,
             text.len(),
         );
-        let job = SUMMARY_JOB.try_with(|job| *job).map_err(|_| {
-            LiveContextSummaryError::Producer("summary evidence has no job ordinal".into())
-        })?;
+        // Gated (S99) summaries run inside a numbered job scope; ungated
+        // bootstrap summaries (S104-style open with summary) record job 0.
+        let job = SUMMARY_JOB.try_with(|job| *job).unwrap_or(0);
         self.evidence
             .record(EvidenceRecord::Summary {
                 job,
@@ -2523,6 +2616,7 @@ async fn graceful_close(
     channel: u32,
     scenario: &str,
 ) -> Result<CloseOutcome, Box<dyn std::error::Error>> {
+    record_host_load(evidence, "close")?;
     evidence.channel(channel, evidence::ChannelAction::CloseRequested)?;
     let disconnect_started = Instant::now();
     let disconnected = live.peer.disconnect(DisconnectMode::Graceful).await?;
@@ -3171,6 +3265,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         ]),
         extra_members: Vec::new(),
         instructions_preface: None,
+        summary_bootstrap: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -3195,33 +3290,11 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         // (a) The user says nothing for 4 s. A continuing conversation must
         // not open with a fresh greeting: no decoded non-silent inbound
         // frames and no output transcript before the first user play.
-        evidence.stage(EvidenceStage::StandupSilence)?;
-        live.peer.silence(S100_SILENCE_HOLD_MS).await?;
-        let audio = live.peer.audio_evidence().await?;
-        let events = live.peer.events().await?;
-        let transcript_before_user = output_transcript_text(&events, 0);
-        let energy = live.peer.energy().await?;
-        let greeted = audio.decoded_non_silent_frames > 0
-            || !transcript_before_user.trim().is_empty()
-            || !energy.energy.first_assistant_audio_ms.is_empty();
-        evidence.record(EvidenceRecord::Greeting {
-            channel,
-            greeted,
-            transcript: transcript_before_user.chars().take(400).collect(),
-        })?;
-        println!(
-            "GPT_LIVE_S100_SILENCE hold_ms={S100_SILENCE_HOLD_MS} greeted={greeted} decoded_non_silent_frames={} decoded_non_silent_seconds={:.3} non_silent_frames={} assistant_audio_onsets={} transcript={:?}",
-            audio.decoded_non_silent_frames,
-            audio.decoded_non_silent_seconds,
-            audio.non_silent_frames,
-            energy.energy.first_assistant_audio_ms.len(),
-            transcript_before_user.trim()
-        );
+        let greeted =
+            silence_hold_greeting(&mut live, &evidence, channel, "S100", S100_SILENCE_HOLD_MS).await?;
         assert!(
             !greeted,
-            "the assistant spoke before the user did (greeting on a continuing conversation): decoded_non_silent_frames={} transcript={:?}",
-            audio.decoded_non_silent_frames,
-            transcript_before_user.trim()
+            "the assistant spoke before the user did (greeting on a continuing conversation)"
         );
 
         // (b) Request 1: notes folder, plan file, name it back.
@@ -3773,6 +3846,7 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             ),
         }],
         instructions_preface: Some(preface.clone()),
+        summary_bootstrap: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -3988,6 +4062,9 @@ const S103_BARGE_IN_OFFSET_MS: u64 = 1500;
 /// Overlap bound for the two interruptions (provider VAD/stop latency).
 const S103_BARGE_IN_OVERLAP_BOUND_MS: u64 = 2500;
 /// Tolerant bound: assistant energy off within this of the barge-in onset.
+/// Not achievable with this provider (measured 868 and 2248 ms here, 1200-1700
+/// ms in S100): kept as the design's target, reported, never a gate. The
+/// overlap gate stays at `S103_BARGE_IN_OVERLAP_BOUND_MS`.
 const S103_QUIET_BOUND_MS: i64 = 800;
 
 /// Wait until every delegated executor turn is terminal and the assistant
@@ -4031,9 +4108,14 @@ async fn wait_for_settled(
 /// into that readout the user barges in with a correction, and 300 ms after
 /// that clip ends corrects again.
 ///
-/// Deterministic: the monologue produces exactly one client delegation and
-/// its executor input carries all four planted tokens; the monologue
-/// fixture sees no assistant overlap (the provider did not answer a pause);
+/// Deterministic, but provider-dependent: the monologue produces exactly
+/// one client delegation and its executor input carries all four planted
+/// tokens, and the monologue fixture sees no assistant overlap. gpt-live-1
+/// has been observed (1 of 2 runs) to end the turn on a 700-900 ms pause and
+/// delegate mid-monologue, 10 s before the utterance ended, speaking 5.2 s
+/// over the user; the only legitimate lever against that is instruction
+/// text asking the model to let the user finish, never a runtime heuristic.
+/// The remaining deterministic checks:
 /// after the barge-in every assistant audio start follows a new input final
 /// or a commentary append (no duplicate readout, also a browser fault);
 /// overlap beyond the bound only inside the two interruption windows; close
@@ -4092,6 +4174,7 @@ async fn run_s103_interrupt_and_recover(
         ]),
         extra_members: Vec::new(),
         instructions_preface: None,
+        summary_bootstrap: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -4479,6 +4562,7 @@ async fn run_s107_stuck_close_convergence(
         ]),
         extra_members: Vec::new(),
         instructions_preface: None,
+        summary_bootstrap: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -4742,10 +4826,39 @@ const S104_TYPED_PROMPT: &str = "Typed while the voice call is down: remember th
 const S104_TYPED_TOKEN: &str = "osprey";
 /// The reopen must connect within this.
 const S104_REOPEN_BOUND: Duration = Duration::from_secs(30);
+/// Typed seed fact (history present before the first open with summary).
+const S104_SEED_TOKEN: &str = "Bartleby";
+/// Silence hold after each (re)open with summary: no greeting allowed.
+const S104_SILENCE_HOLD_MS: u64 = 4000;
 
-/// Scenario 104: the user starts a 20 s job by voice, the live channel is
-/// closed while it runs, a typed turn lands during the closure, then the
-/// channel reopens on the same session and the user asks what happened.
+/// Wait until the concurrent bootstrap summary has been appended and every
+/// owned instructions-lane fragment acknowledged, or `bound` passes; returns
+/// the owner-append counters either way.
+async fn wait_for_summary_appends(
+    evidence: &Journal,
+    bound: Duration,
+) -> Result<evidence::OwnerAppends, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + bound;
+    loop {
+        let owner = evidence.owner_appends()?;
+        if (owner.framed_summaries > 0
+            && owner.instructions_attempts > 0
+            && owner.instructions_acknowledged >= owner.instructions_attempts)
+            || Instant::now() >= deadline
+        {
+            return Ok(owner);
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Scenario 104: the session has typed history, the channel opens with a
+/// concurrent bootstrap summary (the MobKit console's composition), the
+/// user says nothing for 4 s (no fresh greeting allowed), starts a 20 s job
+/// by voice, the live channel is closed while it runs, a typed turn lands
+/// during the closure, then the channel reopens on the same session with a
+/// new summary (again no greeting during a 4 s hold) and the user asks what
+/// happened.
 ///
 /// Deterministic: the close converges within the 20 s bound (recorded, one
 /// attempt); the job reaches realized terminality during the closure and its
@@ -4795,7 +4908,13 @@ async fn run_s104_handoff_voice_typed_voice(
         operator_principal: "scenario-104-operator",
         execution_policy: LiveDelegationExecutionPolicy::ExistingMember,
         bootstrap: None,
-        seed_prompt: None,
+        // History is present before the first open, and the open requests a
+        // concurrent bootstrap summary of it: the composition the MobKit
+        // console uses, where the fresh-greeting regression was reported.
+        seed_prompt: Some(format!(
+            "For the record: the team mascot is a heron named {S104_SEED_TOKEN}. \
+             Just acknowledge in one short sentence."
+        )),
         evidence: Some(evidence.clone()),
         unmeasured_playback: true,
         executor_instructions: Some(vec![
@@ -4807,6 +4926,7 @@ async fn run_s104_handoff_voice_typed_voice(
         ]),
         extra_members: Vec::new(),
         instructions_preface: None,
+        summary_bootstrap: true,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -4820,6 +4940,28 @@ async fn run_s104_handoff_voice_typed_voice(
     let result = async {
         evidence.stage(EvidenceStage::Connected)?;
         live.assert_existing_text_identity().await?;
+
+        // Summary injection must not produce a fresh greeting: 4 s of
+        // silence right after the open with summary.
+        if silence_hold_greeting(&mut live, &evidence, channel, "S104", S104_SILENCE_HOLD_MS).await? {
+            deterministic_failures.push(
+                "the assistant greeted on its own after the open with summary".to_owned(),
+            );
+        }
+        let appends = wait_for_summary_appends(&evidence, Duration::from_secs(30)).await?;
+        println!(
+            "GPT_LIVE_S104_OPEN_APPENDS framed_summaries={} instructions_attempts={} instructions_acknowledged={} thinking_attempts={}",
+            appends.framed_summaries, appends.instructions_attempts, appends.instructions_acknowledged, appends.thinking_attempts
+        );
+        if appends.framed_summaries == 0 {
+            deterministic_failures.push("no framed bootstrap summary landed on the instructions lane after the open".to_owned());
+        }
+        if appends.instructions_acknowledged < appends.instructions_attempts {
+            deterministic_failures.push(format!(
+                "instructions-lane fragments not all acknowledged after the open: attempts={} acknowledged={}",
+                appends.instructions_attempts, appends.instructions_acknowledged
+            ));
+        }
 
         // The job by voice.
         evidence.stage(EvidenceStage::HandoffJob)?;
@@ -4944,11 +5086,31 @@ async fn run_s104_handoff_voice_typed_voice(
             }
         }
         let channel2 = evidence.current_channel()?;
-        let owner = evidence.owner_appends()?;
+        // The reopen re-injects a summary of everything so far (job result,
+        // typed turn): again no fresh greeting, and the fragments all
+        // acknowledged.
+        if silence_hold_greeting(&mut live, &evidence, channel2, "S104", S104_SILENCE_HOLD_MS).await? {
+            deterministic_failures.push(
+                "the assistant greeted on its own after the reopen with summary".to_owned(),
+            );
+        }
+        let owner = wait_for_summary_appends(&evidence, Duration::from_secs(30)).await?;
         println!(
-            "GPT_LIVE_S104_REOPEN_APPENDS instructions_attempts={} thinking_attempts={} framed_summaries={}",
-            owner.instructions_attempts, owner.thinking_attempts, owner.framed_summaries
+            "GPT_LIVE_S104_REOPEN_APPENDS framed_summaries={} instructions_attempts={} instructions_acknowledged={} thinking_attempts={}",
+            owner.framed_summaries, owner.instructions_attempts, owner.instructions_acknowledged, owner.thinking_attempts
         );
+        if owner.framed_summaries < 2 {
+            deterministic_failures.push(format!(
+                "the reopen did not land a second framed summary (framed_summaries={})",
+                owner.framed_summaries
+            ));
+        }
+        if owner.instructions_acknowledged < owner.instructions_attempts {
+            deterministic_failures.push(format!(
+                "instructions-lane fragments not all acknowledged after the reopen: attempts={} acknowledged={}",
+                owner.instructions_attempts, owner.instructions_acknowledged
+            ));
+        }
         evidence.stage(EvidenceStage::HandoffBack)?;
         let events_before_back = live.peer.events().await?.len();
         let (back, answer_back, _, back_start) = native_question(
@@ -5037,6 +5199,70 @@ async fn run_s104_handoff_voice_typed_voice(
     retained?;
     browser_flush?;
     Ok(())
+}
+
+// ===========================================================================
+// Scenarios 101, 105, 106: scaffolding, blocked on runtime fixes
+// ===========================================================================
+
+/// Scenario 101 (busy backend, voice ash): a deliberately slow executor job
+/// (shell sleep 25 s then a marker file), an unrelated quick question at
+/// job_start + 5 s, a second slow job at +12 s. Deterministic: the first job
+/// completes (marker present, completed in the journal) and is not cancelled
+/// by supersede; all three delegations commit final transcripts;
+/// CommentaryAppend for each finishing job arrives while the channel is
+/// live. Tolerant: quick question answered within 3 s median.
+///
+/// Blocked: `supersede_previous_delegation` cancels the running executor and
+/// the cancellation guard rejection tears the session down (S103 finding 2);
+/// lands after the WorkGraph scheduler on feat/workgraph-live-delegation.
+/// Not registered in e2e_lanes or the Turbo S list.
+#[tokio::test]
+#[ignore = "blocked: feat/workgraph-live-delegation (supersede cancels the running executor); scaffolding only"]
+async fn e2e_scenario_101_gpt_live_public_busy_backend() -> Result<(), Box<dyn std::error::Error>> {
+    Err("S101 is scaffolding: implement after the WorkGraph live-delegation scheduler lands".into())
+}
+
+/// Scenario 105 (fork and merge, voice echo): DurableFork policy; request A
+/// forks M1 and writes artifact A; request B (after A completes) doubles the
+/// number from A into a new file; a typed correction of the number; a voice
+/// recall. Deterministic: two forks, each retired after its delegation
+/// closes (mob/events member retirement); executor input for B equals the
+/// transcript; artifact B holds twice the value; the typed correction is
+/// reflected in the voice answer window. Tolerant: cache_read > 0 on the
+/// second fork when the executor provider reports usage. The parallel
+/// variant (A and B 4 s apart) follows the scheduler.
+///
+/// Blocked: a typed turn while a live channel has a delegation in flight
+/// fails with "no captured live actor authority" (S104 finding 3), and the
+/// executor-input equality check needs fix/delegation-input-settles.
+/// Not registered in e2e_lanes or the Turbo S list.
+#[tokio::test]
+#[ignore = "blocked: fix/delegation-input-settles and the typed-turn live actor authority fix; scaffolding only"]
+async fn e2e_scenario_105_gpt_live_public_fork_and_merge() -> Result<(), Box<dyn std::error::Error>>
+{
+    Err(
+        "S105 is scaffolding: implement after the delegation input and typed-turn fixes land"
+            .into(),
+    )
+}
+
+/// Scenario 106 (long haul, voice shimmer, ~8 min): ten exchanges with a 20 s
+/// silence hold after exchange 2 (zero inbound speech during the hold), an
+/// executor result over 1500 bytes so the append fragments at 500 B
+/// (fragment count matches, every fragment acked), two reopen cycles with
+/// summary (each followed by a 4 s silence hold asserting no greeting, as in
+/// S104), and a final "summarise everything we did" checked for three
+/// planted tokens (tolerant). session/history row count equals exchanges
+/// plus typed turns.
+///
+/// Blocked: the reopen cycles need the close path to converge while
+/// delegations may be in flight (S103/S104/S107 finding 1). Not registered
+/// in e2e_lanes or the Turbo S list.
+#[tokio::test]
+#[ignore = "blocked: live close convergence with a delegation in flight (S107); scaffolding only"]
+async fn e2e_scenario_106_gpt_live_public_long_haul() -> Result<(), Box<dyn std::error::Error>> {
+    Err("S106 is scaffolding: implement after the close convergence fix lands".into())
 }
 
 /// Scenario 98: the public Live lifecycle facts that no provider event

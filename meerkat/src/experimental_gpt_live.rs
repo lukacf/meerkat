@@ -369,9 +369,12 @@ pub use meerkat_openai::public_live::thinking_capture;
 /// an input frame stall, so waiting longer buys nothing while media flows.
 pub const LIVE_CLOSE_QUIET_APPEND_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// How long an accepted `session.close` may go unconfirmed by the provider
-/// before the owner retires the transport locally. Earlier close attempts
-/// keep the binding for retry so a slow but progressing drain can settle.
+/// How long a requested closure may go unsettled before the owner retires the
+/// transport locally: counted from an accepted `session.close` that the
+/// provider never confirms, and also from the first close request when the
+/// provider never accepts one (the remote side already hung up). Earlier
+/// close attempts keep the binding for retry so a slow but progressing drain
+/// can settle.
 pub const LIVE_CLOSE_CONFIRMATION_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Longest a spoken owner append waits for the provider to end an open user
@@ -2226,6 +2229,10 @@ struct ActiveExperimentalGptLiveBinding {
 #[derive(Default)]
 struct ExperimentalGptLiveDrain {
     requested: AtomicBool,
+    /// When closure was first requested by an owner. A provider that never
+    /// accepts `session.close` (the remote already hung up) never sets
+    /// `close_sent_at`, so the retirement bound also counts from here.
+    requested_at: std::sync::Mutex<Option<tokio::time::Instant>>,
     close_sent: AtomicBool,
     /// When `session.close` was accepted by the transport; the bound for
     /// owner-side termination of an unconfirmed closure counts from here.
@@ -2331,16 +2338,30 @@ impl ExperimentalGptLiveDrain {
         Ok(())
     }
 
-    /// Whether `session.close` was accepted at least `bound` ago and the
-    /// provider has still not confirmed closure.
+    fn mark_requested(&self) {
+        self.requested.store(true, Ordering::Release);
+        if let Ok(mut requested_at) = self.requested_at.lock()
+            && requested_at.is_none()
+        {
+            *requested_at = Some(tokio::time::Instant::now());
+        }
+    }
+
+    /// Whether closure has been pending for at least `bound` without the
+    /// drain settling: either `session.close` was accepted that long ago and
+    /// the provider never confirmed it, or closure was first requested that
+    /// long ago and the provider never accepted it at all (the remote side
+    /// already hung up, so nothing it could send will ever settle the drain).
     fn closure_unconfirmed_for(&self, bound: std::time::Duration) -> bool {
-        self.close_sent.load(Ordering::Acquire)
-            && self
-                .close_sent_at
+        let elapsed = |instant: &std::sync::Mutex<Option<tokio::time::Instant>>| {
+            instant
                 .lock()
                 .ok()
-                .and_then(|sent_at| *sent_at)
-                .is_some_and(|sent_at| sent_at.elapsed() >= bound)
+                .and_then(|at| *at)
+                .is_some_and(|at| at.elapsed() >= bound)
+        };
+        (self.close_sent.load(Ordering::Acquire) && elapsed(&self.close_sent_at))
+            || elapsed(&self.requested_at)
     }
 
     fn result(&self) -> Option<Result<ExperimentalGptLiveDrainOutcome, ProviderWebrtcBrokerError>> {
@@ -2399,6 +2420,17 @@ impl ExperimentalGptLiveDrain {
             }));
         }
         Ok(())
+    }
+
+    /// Whether the provider stream has already ended (EOF or reader fault
+    /// recorded). Once true, no `session.close` can be accepted or confirmed
+    /// by the provider: the remote side is gone and only local settlement
+    /// (canonical projection, control) remains.
+    fn remote_stream_ended(&self) -> bool {
+        self.reader
+            .lock()
+            .ok()
+            .is_some_and(|receipt| receipt.is_some())
     }
 
     fn finish_reader(
@@ -4945,7 +4977,7 @@ impl ExperimentalGptLiveWebrtcTransport {
                             .is_none_or(|sequence| current.answer_observation_sequence == sequence)
                 })
                 .map(|current| {
-                    current.drain.requested.store(true, Ordering::Release);
+                    current.drain.mark_requested();
                     (
                         Arc::clone(&current.sideband),
                         Arc::clone(&current.drain),
@@ -4996,19 +5028,28 @@ impl ExperimentalGptLiveWebrtcTransport {
             };
             match waited {
                 Ok(settled) => settled,
-                // The provider accepted `session.close` long ago and has not
-                // confirmed closure. Retaining the binding for retry is right
+                // Closure has been pending past the bound without the drain
+                // settling: either the provider accepted `session.close` and
+                // never confirmed it, or the remote side was already gone and
+                // never accepted it (the stream ended, or every close attempt
+                // was rejected). Retaining the binding for retry is right
                 // while the drain can still settle; past this bound nothing
-                // will, so the transport is retired locally. This is not
+                // will, so the transport is retired locally. Previously the
+                // bound only counted from an accepted `session.close`, so a
+                // dead remote kept every retry failing with the same
+                // unavailable error indefinitely. This is not
                 // provider-confirmed closure and is logged as such.
-                Err(ProviderWebrtcSignalingError::SidebandClose(
-                    ProviderWebrtcBrokerError::Unavailable,
-                )) if drain.closure_unconfirmed_for(LIVE_CLOSE_CONFIRMATION_BOUND) => {
+                Err(ProviderWebrtcSignalingError::SidebandClose(error))
+                    if drain.closure_unconfirmed_for(LIVE_CLOSE_CONFIRMATION_BOUND) =>
+                {
                     tracing::warn!(
+                        %error,
                         session_id = %binding.session_id(),
                         channel_id = %binding.channel_id(),
                         bound_secs = LIVE_CLOSE_CONFIRMATION_BOUND.as_secs(),
-                        "provider did not confirm closure within the bound after session.close; retiring the live transport locally without provider confirmation"
+                        close_accepted = drain.close_sent.load(Ordering::Acquire),
+                        provider_stream_ended = drain.remote_stream_ended(),
+                        "closure did not settle within the bound; retiring the live transport locally without provider confirmation"
                     );
                     (ExperimentalGptLiveDrainOutcome::Terminated, None)
                 }
@@ -10285,6 +10326,97 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn rejected_close_on_dead_remote_is_retired_locally_after_the_bound() {
+        // The remote already hung up: the provider stream ended with a
+        // transport fault and every `session.close` is rejected as
+        // unavailable, so `close_sent` can never become true. The local
+        // pipeline never settles either (projection and control stay
+        // unfinished). Before the fix the retirement bound only counted from
+        // an accepted `session.close`, so this state failed every retry with
+        // the same unavailable error indefinitely.
+        let transport = ExperimentalGptLiveWebrtcTransport::new();
+        let binding = ProviderWebrtcBinding::new(
+            meerkat_live::LiveChannelId::new("close-dead-remote"),
+            meerkat_core::SessionId::new(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let sideband = Arc::new(ControlledAmbiguousSideband::new());
+        sideband.fail_close.store(true, Ordering::Release);
+        let (retirement_tx, _retirement_rx) = mpsc::channel(1);
+        let active = spawn_sideband_actors(
+            binding.clone(),
+            Arc::clone(&sideband) as Arc<dyn ProviderWebrtcSidebandSession>,
+            test_deferred_adapter(),
+            1,
+            retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
+        );
+        let drain = Arc::clone(&active.drain);
+        active.observation_actor.abort();
+        active.adapter_pump.abort();
+        active.control_actor.abort();
+        active
+            .activation_gate
+            .committed
+            .store(true, Ordering::Release);
+        transport
+            .active_by_session
+            .lock()
+            .await
+            .insert(binding.session_id().clone(), active);
+        drain.finish_reader(Err(ProviderWebrtcBrokerError::Unavailable));
+        assert!(drain.remote_stream_ended());
+        let started = tokio::time::Instant::now();
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match transport.close_exact(&binding, None).await {
+                Ok(true) => break,
+                Ok(false) => panic!("binding vanished without a close outcome"),
+                Err(ProviderWebrtcSignalingError::SidebandClose(
+                    ProviderWebrtcBrokerError::Unavailable,
+                )) => {
+                    assert!(
+                        started.elapsed() < LIVE_CLOSE_CONFIRMATION_BOUND,
+                        "a dead remote must be retired once the bound has elapsed"
+                    );
+                    assert_eq!(
+                        transport.active_binding(binding.session_id()).await,
+                        Some(binding.clone()),
+                        "before the bound the binding is retained for retry"
+                    );
+                }
+                Err(other) => panic!("unexpected close error: {other:?}"),
+            }
+        }
+        assert!(
+            !drain.close_sent.load(Ordering::Acquire),
+            "the provider never accepted session.close"
+        );
+        assert!(sideband.close_started.load(Ordering::Acquire));
+        assert!(started.elapsed() >= LIVE_CLOSE_CONFIRMATION_BOUND);
+        assert!(
+            attempts >= 2,
+            "at least one retained attempt precedes local retirement"
+        );
+        assert!(
+            transport
+                .active_binding(binding.session_id())
+                .await
+                .is_none(),
+            "local retirement releases the binding"
+        );
+        assert!(
+            !transport
+                .close_exact(&binding, None)
+                .await
+                .expect("a repeated close of a retired binding is a no-op"),
+            "repeated close is idempotent"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn close_timeout_retains_binding_until_all_drain_receipts_and_allows_retry() {
         let transport = ExperimentalGptLiveWebrtcTransport::new();
         let binding = ProviderWebrtcBinding::new(
@@ -12627,6 +12759,33 @@ mod tests {
                     .close_live_channel(Some(authority.as_ref()), &channel_id)
                     .await
                     .expect("sequential prefix then close");
+                // A repeated close of a channel that already completed its
+                // close converges to Closed instead of a binding error, so a
+                // caller retrying after a dropped response or a dead remote
+                // terminates. A channel that was never opened stays a typed
+                // binding error.
+                assert!(
+                    matches!(
+                        member_host
+                            .close_live_channel(Some(authority.as_ref()), &channel_id)
+                            .await
+                            .expect("repeated close of a closed channel is idempotent"),
+                        meerkat_contracts::LiveCloseStatus::Closed
+                    ),
+                    "repeated close reports Closed"
+                );
+                assert!(
+                    matches!(
+                        member_host
+                            .close_live_channel(
+                                Some(authority.as_ref()),
+                                &meerkat_live::LiveChannelId::new("never-opened-channel"),
+                            )
+                            .await,
+                        Err(crate::surface::ExperimentalLiveChannelCloseError::BindingMismatch)
+                    ),
+                    "an unknown channel is a typed binding error"
+                );
                 continue;
             }
             if matches!(exit, ExitKind::UnmeasuredCut) {

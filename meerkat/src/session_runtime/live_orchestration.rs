@@ -3286,10 +3286,24 @@ mod orchestrator {
                 .await
                 .map_err(ExperimentalLiveChannelCloseError::PhysicalAuthority)?;
             if matches!(physical, ExperimentalLivePhysicalClose::NotBound) {
-                if close_custody
+                let already_closed = close_custody
                     .as_ref()
                     .is_some_and(|custody| custody.already_closed())
-                {
+                    // No pending receipt remains for this channel and the
+                    // transport holds no binding: the channel completed its
+                    // close earlier and the machine retains only its close
+                    // status. A repeated close is a no-op that succeeds, so
+                    // callers retrying after a transport fault, a dropped
+                    // response, or a dead remote converge instead of failing
+                    // forever with a binding error.
+                    || (matches!(purpose, ExperimentalLiveClosePurpose::Explicit)
+                        && close_custody.is_none()
+                        && self
+                            .runtime_adapter
+                            .live_session_for_active_channel(channel)
+                            .await
+                            .is_none());
+                if already_closed {
                     self.runtime_adapter
                         .retire_live_assistant_output_handles(&session, channel);
                     authority.unbind_channel(channel, &session).await;

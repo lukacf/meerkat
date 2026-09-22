@@ -47,10 +47,23 @@ them.
   `compose_public_session_instructions` documents the precedence. The host call
   is bounded by `PUBLIC_INSTRUCTIONS_PREFACE_BOUND` (2 s): on timeout the open
   proceeds without a preface and warns.
-- `RealtimeMessageOrigin` records `provider_item_id` (read through
-  `RealtimeMessageOrigin::provider_item_id`), the provider item a canonical
-  live transcript row materialized from, so a console that showed the live
-  deltas for that item can replace them with the committed row exactly.
+- `RealtimeMessageOrigin` records `provider_item_ids` (read through
+  `RealtimeMessageOrigin::provider_item_ids`, first id through
+  `provider_item_id`), every provider item a canonical live transcript row
+  materialized from: one for a user row, one per item of the committed
+  response group for an assistant row (a barge-in that re-keys speech into a
+  second item yields two). A console that showed the live deltas for any of
+  them can retire that rendering by id and replace it with the committed row.
+  Assistant rows streamed on a live channel now carry a channel
+  `realtime_origin` at all; before, only user rows and context-observed
+  assistant rows did, so plain assistant speech had no origin to match.
+- `DurableForkAtTurnBoundary`, `PersistentSessionService::
+  fork_durable_session_at_turn_boundary`, `MobSessionService::
+  fork_persisted_session_at_turn_boundary`, `MobHandle::
+  fork_member_at_turn_boundary` and `ForkMemberAtTurnBoundary`: a durable
+  fork that waits, bounded, for the source's turn-finalization boundary and
+  cuts the branch while still holding it, so a runtime lap queued behind the
+  wait cannot take the gate first.
 - `DelegationExecutionError::SourceBusy` names a delegation whose source
   member was still mid-turn after the bounded wait
   (`DelegationExecutionService::SOURCE_TURN_BOUNDARY_WAIT`).
@@ -66,9 +79,11 @@ them.
   user to speak. The instructions also allow the model to keep conversing while
   a delegated request runs.
 - A live delegation arriving while the backing member is mid-turn no longer
-  fails with `ForkSourceUnavailable { cause: Running }`. The durable fork waits,
-  bounded, for the member's turn boundary and forks from the committed
-  transcript; a member still running after the bound is reported as
+  fails with `ForkSourceUnavailable { cause: Running }`. The persistent fork
+  owner waits, bounded, for the member's turn-finalization boundary and forks
+  from the committed transcript while still holding that boundary (releasing
+  and re-locking would let a queued follow-up lap win the FIFO gate and refuse
+  the fork as `Busy`); a member still running after the bound is reported as
   `SourceBusy`.
 
 ### Breaking
@@ -78,17 +93,20 @@ them.
   (struct literals must add it); new public trait
   `PublicGptLiveInstructionsPreface` and constant
   `PUBLIC_INSTRUCTIONS_PREFACE_BOUND` in `experimental_gpt_live`.
-- `RealtimeMessageOrigin` gains the private field `provider_item_id` and the
-  public method `provider_item_id`; `RealtimeMaterializedRow` gains the public
-  field `provider_item_id`.
+- `RealtimeMessageOrigin` gains the private field `provider_item_ids` and the
+  public methods `provider_item_ids` and `provider_item_id`;
+  `RealtimeMaterializedRow` gains the public field `provider_item_ids`.
+- New public items: `meerkat_core::DurableForkAtTurnBoundary`,
+  `PersistentSessionService::fork_durable_session_at_turn_boundary`,
+  `MobSessionService::fork_persisted_session_at_turn_boundary` (trait method
+  with a default body), `MobHandle::fork_member_at_turn_boundary`,
+  `meerkat_mob::ForkMemberAtTurnBoundary`.
 - `DelegationExecutionError` gains the variant `SourceBusy`
   (`DelegationExecutionError::*` discriminants move).
 - `DelegationExecutionService` gains the associated constant
   `SOURCE_TURN_BOUNDARY_WAIT`.
-- `experimental_gpt_live` gains the public constant
-  `LIVE_INSTRUCTIONS_FRAGMENT_BYTES`; `LIVE_CONTEXT_BOOTSTRAP_FRAMING` is
-  reworded and shortened so the framing plus its no-greeting sentence fits one
-  wire fragment (consumers matching the old text must update).
+- `LIVE_CONTEXT_BOOTSTRAP_FRAMING` is reworded (consumers matching the old
+  text must update).
 
 ### Changed
 

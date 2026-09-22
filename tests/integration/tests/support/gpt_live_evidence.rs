@@ -2,6 +2,7 @@
 //! One private, continuously flushed file lives outside the scenario TempDir.
 //! Any Fault invalidates the entire journal, including an earlier Passed row.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -266,9 +267,27 @@ struct State {
     thinking_append_attempts: usize,
     /// Bounded copy of the attempted thinking-append texts, for echo checks.
     thinking_append_texts: Vec<String>,
-    /// Owned instructions-lane attempts and how many opened a framed summary.
+    /// Owned instructions-lane attempts (one per wire fragment) and how many
+    /// reassembled appends opened a framed summary.
     instructions_append_attempts: usize,
     framed_summary_attempts: usize,
+    /// Instructions appends being reassembled from their fragments, keyed by
+    /// the append token shared by every fragment's client event id
+    /// (`meerkat-instructions-<token>-<index>`).
+    instructions_appends: HashMap<String, InstructionsAppendReassembly>,
+}
+
+#[derive(Default)]
+struct InstructionsAppendReassembly {
+    text: String,
+    counted_as_framed: bool,
+}
+
+/// The append token of an owned instructions fragment's client event id.
+fn instructions_append_token(client_event_id: &str) -> Option<&str> {
+    let rest = client_event_id.strip_prefix("meerkat-instructions-")?;
+    let (token, _index) = rest.rsplit_once('-')?;
+    Some(token)
 }
 
 /// What the owner injected into the provider so far, by lane.
@@ -346,6 +365,7 @@ impl Journal {
                 thinking_append_texts: Vec::new(),
                 instructions_append_attempts: 0,
                 framed_summary_attempts: 0,
+                instructions_appends: HashMap::new(),
             }),
             started: Instant::now(),
             path,
@@ -480,13 +500,27 @@ impl Journal {
                     state.thinking_append_texts.push(text.clone());
                 }
             }
-            if let thinking_capture::EventKind::InstructionsAppendAttempt { text, .. } =
-                &event.event
+            if let thinking_capture::EventKind::InstructionsAppendAttempt {
+                client_event_id,
+                text,
+            } = &event.event
             {
                 let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
                 state.instructions_append_attempts += 1;
-                if text.starts_with(meerkat::experimental_gpt_live::LIVE_CONTEXT_BOOTSTRAP_FRAMING)
+                // The broker sends an append as ordered UTF-8 fragments; the
+                // framing is recognised on the reassembled text so its length
+                // is not bound to the fragment size.
+                let token = instructions_append_token(client_event_id)
+                    .unwrap_or(client_event_id.as_str())
+                    .to_string();
+                let append = state.instructions_appends.entry(token).or_default();
+                append.text.push_str(text);
+                if !append.counted_as_framed
+                    && append
+                        .text
+                        .starts_with(meerkat::experimental_gpt_live::LIVE_CONTEXT_BOOTSTRAP_FRAMING)
                 {
+                    append.counted_as_framed = true;
                     state.framed_summary_attempts += 1;
                 }
             }

@@ -2599,6 +2599,25 @@ async fn graceful_close(
     })
 }
 
+/// `graceful_close` whose failure becomes a recorded deterministic failure
+/// (the scenario keeps going to its history and delegation checks).
+async fn close_or_record(
+    live: &mut PublicLiveHarness,
+    evidence: &Journal,
+    channel: u32,
+    scenario: &str,
+    failures: &mut Vec<String>,
+) -> Result<Option<CloseOutcome>, Box<dyn std::error::Error>> {
+    match graceful_close(live, evidence, channel, scenario).await {
+        Ok(outcome) => Ok(Some(outcome)),
+        Err(error) => {
+            println!("GPT_LIVE_{scenario}_CLOSE_FAILED error={error}");
+            failures.push(format!("close did not converge: {error}"));
+            Ok(None)
+        }
+    }
+}
+
 /// Speak one question the assistant should answer natively (no delegation):
 /// schedule the fixture, wait for its input final, the answer's first audio
 /// and the end of that audio, and return the answer window transcript with
@@ -3458,8 +3477,9 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
 
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S100").await?;
-        let close = graceful_close(&mut live, &evidence, channel, "S100").await?;
-        let close_ms = close.ms;
+        let mut deterministic_failures: Vec<String> = Vec::new();
+        let close = close_or_record(&mut live, &evidence, channel, "S100", &mut deterministic_failures).await?;
+        let close_ms = close.map(|c| c.ms);
 
         // Canonical transcript at close. The executor is the same session as
         // the voice channel, so its history holds three kinds of user rows:
@@ -3469,7 +3489,6 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         // request's executor input equal to the user's final transcript.
         // Failures are collected and asserted together after the evidence
         // records are written.
-        let mut deterministic_failures: Vec<String> = Vec::new();
         let requests = [&request1, &request2, &request3];
         let spoken_inputs: Vec<String> = requests
             .iter()
@@ -3587,7 +3606,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         let mut faults = evidence.faults()?;
         faults.extend(live.peer.faults().await?);
         println!(
-            "GPT_LIVE_S100_OK total_ms={} connected_ms={connected_ms} exchanges={exchanges} greeted={greeted} r1_ms={:?} r2_ms={:?} barge_in_ms={:?} r3_ms={:?} goodbye_ms={:?} median_ms={median:?} r1_commentary_ms={:?} r2_commentary_ms={:?} r3_commentary_ms={:?} executor_done_at_ms=[{}, {}, {}] overlap_ms={overlap_ms} close_ms={close_ms} tolerant_failures={tolerant_failures:?} faults={faults:?} history_messages={}",
+            "GPT_LIVE_S100_OK total_ms={} connected_ms={connected_ms} exchanges={exchanges} greeted={greeted} r1_ms={:?} r2_ms={:?} barge_in_ms={:?} r3_ms={:?} goodbye_ms={:?} median_ms={median:?} r1_commentary_ms={:?} r2_commentary_ms={:?} r3_commentary_ms={:?} executor_done_at_ms=[{}, {}, {}] overlap_ms={overlap_ms} close_ms={close_ms:?} tolerant_failures={tolerant_failures:?} faults={faults:?} history_messages={}",
             started.elapsed().as_millis(),
             request1.timing.input_final_to_audio_ms(),
             request2.timing.input_final_to_audio_ms(),
@@ -3862,7 +3881,8 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
 
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S102").await?;
-        let close = graceful_close(&mut live, &evidence, channel, "S102").await?;
+        let mut deterministic_failures = Vec::new();
+        let close = close_or_record(&mut live, &evidence, channel, "S102", &mut deterministic_failures).await?;
 
         let timeline = live.peer.timeline().await?;
         let per_window = delegations_per_window(
@@ -3874,7 +3894,6 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             ],
         );
         println!("GPT_LIVE_S102_DELEGATIONS per_window={per_window:?}");
-        let mut deterministic_failures = Vec::new();
         for (label, count) in &per_window {
             let expected = usize::from(label == "question 3");
             if *count != expected {
@@ -3898,20 +3917,441 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
         }
         println!(
-            "GPT_LIVE_S102_OK total_ms={} connected_ms={connected_ms} q1_ms={:?} q2_ms={:?} q3_ms={:?} q3_commentary_ms={:?} executor_done_at_ms={} close_ms={} close_converged_before_host_close={} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            "GPT_LIVE_S102_OK total_ms={} connected_ms={connected_ms} q1_ms={:?} q2_ms={:?} q3_ms={:?} q3_commentary_ms={:?} executor_done_at_ms={} close_ms={:?} close_converged_before_host_close={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
             started.elapsed().as_millis(),
             q1.input_final_to_audio_ms(),
             q2.input_final_to_audio_ms(),
             request3.timing.input_final_to_audio_ms(),
             request3.timing.input_final_ms.map(|f| request3.commentary_audio_ms as i64 - f as i64),
             request3.executor_done_at_ms,
-            close.ms,
-            close.converged_before_host_close
+            close.map(|c| c.ms),
+            close.map(|c| c.converged_before_host_close)
         );
         println!("GPT_LIVE_S102_TIMELINE\n{}", format_timeline(&timeline));
         if !deterministic_failures.is_empty() {
             return Err(format!(
                 "S102 deterministic checks failed:\n  - {}",
+                deterministic_failures.join("\n  - ")
+            )
+            .into());
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+    let browser_flush = live.peer.stop_evidence().await;
+    let outcome = if result.is_ok() && browser_flush.is_ok() {
+        evidence.stage(EvidenceStage::Finished)?;
+        evidence::Outcome::Passed
+    } else {
+        evidence::Outcome::Failed
+    };
+    let retained = evidence.finish(outcome);
+    live.peer.close().await;
+    live.server_task.abort();
+    retained?;
+    browser_flush?;
+    result
+}
+
+// ===========================================================================
+// Scenario 103: interrupt and recover (long monologue, barge-in, corrections)
+// ===========================================================================
+
+/// Tokens the monologue plants; the single executor input must carry all.
+const S103_TOKENS: [&str; 4] = ["marigold", "tuesday", "copenhagen", "pelican"];
+/// The barge-in lands this long after the brief readout's first audio.
+const S103_BARGE_IN_OFFSET_MS: u64 = 1500;
+/// Overlap bound for the two interruptions (provider VAD/stop latency).
+const S103_BARGE_IN_OVERLAP_BOUND_MS: u64 = 2500;
+/// Tolerant bound: assistant energy off within this of the barge-in onset.
+const S103_QUIET_BOUND_MS: i64 = 800;
+
+/// Wait until every delegated executor turn is terminal and the assistant
+/// has produced no new event for `quiet`; bounded.
+async fn wait_for_settled(
+    live: &mut PublicLiveHarness,
+    quiet: Duration,
+    bound: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = live.shared()?.0.runtime.clone();
+    let deadline = Instant::now() + bound;
+    let mut last_len = live.peer.events().await?.len();
+    let mut quiet_since = Instant::now();
+    loop {
+        let events = live.peer.events().await?;
+        if events.len() != last_len {
+            last_len = events.len();
+            quiet_since = Instant::now();
+        }
+        let snapshots = runtime
+            .live_delegation_recovery_snapshots(&live.session_id)
+            .await?;
+        let all_terminal = snapshots.iter().all(|s| s.terminal().is_some());
+        if all_terminal && quiet_since.elapsed() >= quiet {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "session did not settle within {} s (all_terminal={all_terminal}, quiet_for_ms={})",
+                bound.as_secs(),
+                quiet_since.elapsed().as_millis()
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Scenario 103: a 27 s monologue with disfluencies and three 700-900 ms
+/// mid-sentence pauses ends in a request whose readout is long; 1500 ms
+/// into that readout the user barges in with a correction, and 300 ms after
+/// that clip ends corrects again.
+///
+/// Deterministic: the monologue produces exactly one client delegation and
+/// its executor input carries all four planted tokens; the monologue
+/// fixture sees no assistant overlap (the provider did not answer a pause);
+/// after the barge-in every assistant audio start follows a new input final
+/// or a commentary append (no duplicate readout, also a browser fault);
+/// overlap beyond the bound only inside the two interruption windows; close
+/// converges. Tolerant: assistant energy off within 800 ms of the barge-in
+/// onset; the last executor input carries "friday"; open -> connected < 5 s.
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_103_gpt_live_public_interrupt_and_recover()
+-> Result<(), Box<dyn std::error::Error>> {
+    let evidence = Journal::create_for("S103", "Pelican".to_owned())?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = timeout(
+        Duration::from_secs(720),
+        run_s103_interrupt_and_recover(evidence.clone()),
+    )
+    .await;
+    evidence.finish(match &result {
+        Ok(Ok(())) => evidence::Outcome::Passed,
+        Ok(Err(_)) => evidence::Outcome::Failed,
+        Err(_) => evidence::Outcome::TimedOut,
+    })?;
+    result.map_err(|_| "S103 overall deadline expired")?
+}
+
+async fn run_s103_interrupt_and_recover(
+    evidence: Journal,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+        )
+        .with_test_writer()
+        .try_init();
+    require_api_key()?;
+    let started = Instant::now();
+    evidence.stage(EvidenceStage::Opening)?;
+    let mut live = open_public_live_with(PublicLiveOpen {
+        temp_prefix: "gpt-live-public-interrupt-e2e-",
+        operator_principal: "scenario-103-operator",
+        execution_policy: LiveDelegationExecutionPolicy::ExistingMember,
+        bootstrap: None,
+        seed_prompt: None,
+        evidence: Some(evidence.clone()),
+        unmeasured_playback: true,
+        executor_instructions: Some(vec![
+            "You are the executor behind a voice assistant. Your current working directory is the \
+             scratch workspace; do every file operation there with the shell tool. When asked to write \
+             a brief, write it as a markdown file with one line per fact, then in your spoken answer \
+             read the whole brief back verbatim, line by line, at least eight sentences. When asked to \
+             change a detail, edit the file and confirm the change in one short sentence."
+                .to_owned(),
+        ]),
+        extra_members: Vec::new(),
+        instructions_preface: None,
+    })
+    .await?;
+    let connected_ms = started.elapsed().as_millis();
+    let workspace = live._temp.path().join("project");
+    let _server_guard = AbortScenarioServer(live.server_task.clone());
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let channel = evidence.current_channel()?;
+    let mut tolerant_failures = Vec::new();
+    let mut seen_executor_turns = std::collections::BTreeSet::new();
+    let result = async {
+        evidence.stage(EvidenceStage::Connected)?;
+        live.assert_existing_text_identity().await?;
+
+        // The monologue, then the brief's readout with the queued barge-in
+        // and correction: the barge-in arms when the commentary lands and
+        // fires 1500 ms after the readout's first audio; the correction is
+        // armed when the barge-in clip ends and fires 300 ms later.
+        evidence.stage(EvidenceStage::InterruptMonologue)?;
+        let monologue = live
+            .peer
+            .play_at(&PlayAt::new("interrupt_monologue", Anchor::Now, 0))
+            .await?;
+        let monologue_start_ms = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(30), "monologue fixture_start", |t| {
+                fixture_start_entry(t, monologue).map(|e| e.t_ms)
+            })
+            .await?;
+        let monologue_end = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(60), "monologue fixture_end", |t| {
+                fixture_end_entry(t, monologue).cloned()
+            })
+            .await?;
+        let monologue_overlap_ms = monologue_end.detail_u64("overlap_ms").unwrap_or(0);
+        let delegation_created_ms = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(60), "monologue delegation_created", |t| {
+                timeline_find(t, TimelineKind::DelegationCreated, monologue_start_ms).map(|e| e.t_ms)
+            })
+            .await?;
+        live.record_time_to_talk("S103", &mut tolerant_failures).await?;
+        let executor_done_at_ms = wait_executor_turn(&mut live, &mut seen_executor_turns, started).await?;
+        let commentary_ms = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(60), "brief commentary_appended", |t| {
+                timeline_find(t, TimelineKind::CommentaryAppended, delegation_created_ms).map(|e| e.t_ms)
+            })
+            .await?;
+        evidence.stage(EvidenceStage::InterruptBargeIn)?;
+        let scheduled = live
+            .peer
+            .queue(&[
+                PlayAt::new("interrupt_barge_in", Anchor::FirstAssistantAudio, S103_BARGE_IN_OFFSET_MS)
+                    .allow_active(true)
+                    .overlap_bound_ms(S103_BARGE_IN_OVERLAP_BOUND_MS),
+                PlayAt::new("interrupt_correction", Anchor::Now, 300)
+                    .overlap_bound_ms(S103_BARGE_IN_OVERLAP_BOUND_MS),
+            ])
+            .await?;
+        let (barge_in, correction) = (scheduled[0], scheduled[1]);
+        let monologue_timing = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(5), "monologue timing", |t| {
+                SpokenTurn::from_timeline(t, monologue)
+            })
+            .await?;
+        println!(
+            "GPT_LIVE_S103_MONOLOGUE fixture_start_ms={monologue_start_ms} overlap_ms={monologue_overlap_ms} input_final_to_delegation_ms={:?} input_final_to_commentary_ms={:?} executor_done_at_ms={executor_done_at_ms} heard={:?}",
+            monologue_timing.input_final_ms.map(|f| delegation_created_ms as i64 - f as i64),
+            monologue_timing.input_final_ms.map(|f| commentary_ms as i64 - f as i64),
+            monologue_timing.input_text
+        );
+        evidence.record(EvidenceRecord::Latency {
+            channel,
+            turn: 1,
+            input_final_to_audio_ms: monologue_timing.input_final_to_audio_ms(),
+            speech_end_to_audio_ms: monologue_timing.speech_end_to_audio_ms(),
+        })?;
+
+        let timeline = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(90), "barge-in and correction fixture_end", |t| {
+                fixture_end_entry(t, correction).map(|_| t.to_vec())
+            })
+            .await?;
+        let barge_in_start_ms = fixture_start_entry(&timeline, barge_in)
+            .map(|e| e.t_ms)
+            .ok_or("barge-in fixture_start")?;
+        let barge_in_overlap_ms = fixture_end_entry(&timeline, barge_in)
+            .and_then(|e| e.detail_u64("overlap_ms"))
+            .unwrap_or(0);
+        let correction_start_ms = fixture_start_entry(&timeline, correction)
+            .map(|e| e.t_ms)
+            .ok_or("correction fixture_start")?;
+        let correction_overlap_ms = fixture_end_entry(&timeline, correction)
+            .and_then(|e| e.detail_u64("overlap_ms"))
+            .unwrap_or(0);
+        // Let the corrections play out: the assistant may delegate the edit
+        // (one or two executor turns) or answer natively.
+        wait_for_settled(&mut live, Duration::from_secs(6), Duration::from_secs(150)).await?;
+        let timeline = live.peer.timeline().await?;
+        let assistant_quiet_after_onset_ms = timeline
+            .iter()
+            .filter(|e| e.kind == TimelineKind::AssistantAudioEnd && e.t_ms >= barge_in_start_ms)
+            .find_map(|e| e.detail_u64("last_active_ms"))
+            .map(|last_active| last_active as i64 - barge_in_start_ms as i64);
+        let first_input_delta_after_onset_ms = timeline
+            .iter()
+            .find(|e| e.kind == TimelineKind::InputFinal && e.t_ms >= barge_in_start_ms)
+            .and_then(|e| e.detail_u64("t_ms"))
+            .map(|t| t as i64 - barge_in_start_ms as i64);
+        let provider_events: Vec<String> = timeline
+            .iter()
+            .filter(|e| {
+                e.kind == TimelineKind::ProviderEvent
+                    && e.t_ms >= barge_in_start_ms
+                    && e.t_ms <= barge_in_start_ms + 5000
+            })
+            .map(|e| format!("+{} {}", e.t_ms - barge_in_start_ms, e.detail_str("type").unwrap_or("?")))
+            .collect();
+        evidence.record(EvidenceRecord::BargeIn {
+            channel,
+            onset_ms: barge_in_start_ms,
+            first_input_delta_after_onset_ms,
+            assistant_quiet_after_onset_ms,
+            overlap_ms: barge_in_overlap_ms,
+            overlap_bound_ms: S103_BARGE_IN_OVERLAP_BOUND_MS,
+            provider_events: provider_events.clone(),
+        })?;
+        let barge_in_timing = SpokenTurn::from_timeline(&timeline, barge_in);
+        let correction_timing = SpokenTurn::from_timeline(&timeline, correction);
+        if let Some(timing) = &barge_in_timing {
+            evidence.record(EvidenceRecord::Latency {
+                channel,
+                turn: 2,
+                input_final_to_audio_ms: timing.input_final_to_audio_ms(),
+                speech_end_to_audio_ms: timing.speech_end_to_audio_ms(),
+            })?;
+        }
+        if let Some(timing) = &correction_timing {
+            evidence.record(EvidenceRecord::Latency {
+                channel,
+                turn: 3,
+                input_final_to_audio_ms: timing.input_final_to_audio_ms(),
+                speech_end_to_audio_ms: timing.speech_end_to_audio_ms(),
+            })?;
+        }
+        println!(
+            "GPT_LIVE_S103_BARGE_IN onset_ms={barge_in_start_ms} overlap_ms={barge_in_overlap_ms} onset_to_assistant_quiet_ms={assistant_quiet_after_onset_ms:?} onset_to_input_final_ms={first_input_delta_after_onset_ms:?} provider_events={provider_events:?} heard={:?} correction_start_ms={correction_start_ms} correction_overlap_ms={correction_overlap_ms} correction_heard={:?}",
+            barge_in_timing.as_ref().map(|t| t.input_text.as_str()),
+            correction_timing.as_ref().map(|t| t.input_text.as_str())
+        );
+        record_tolerant(
+            &evidence,
+            channel,
+            "S103",
+            "assistant_quiet_within_800ms_of_barge_in",
+            assistant_quiet_after_onset_ms.is_some_and(|ms| ms <= S103_QUIET_BOUND_MS),
+            format!("onset_to_assistant_quiet_ms={assistant_quiet_after_onset_ms:?}"),
+            &mut tolerant_failures,
+        )?;
+
+        // Readout integrity after the barge-in: every assistant audio start
+        // follows a new input final or a commentary append since the
+        // previous assistant audio end.
+        let mut unprompted_starts = Vec::new();
+        let mut last_end_ms = 0u64;
+        for (index, entry) in timeline.iter().enumerate() {
+            match entry.kind {
+                TimelineKind::AssistantAudioEnd => last_end_ms = entry.t_ms,
+                TimelineKind::AssistantAudioStart if entry.t_ms >= barge_in_start_ms => {
+                    let prompted = timeline[..index].iter().any(|e| {
+                        e.t_ms >= last_end_ms.min(entry.t_ms)
+                            && e.t_ms <= entry.t_ms
+                            && matches!(e.kind, TimelineKind::InputFinal | TimelineKind::CommentaryAppended)
+                    });
+                    if !prompted {
+                        unprompted_starts.push(entry.t_ms);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        evidence.stage(EvidenceStage::Closing)?;
+        live.record_uplink("S103").await?;
+        let mut deterministic_failures = Vec::new();
+        let close = close_or_record(&mut live, &evidence, channel, "S103", &mut deterministic_failures).await?;
+
+        // Canonical history: executor inputs.
+        let history = live
+            .rpc
+            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+            .await?;
+        let rows = s100_user_rows(&history);
+        let markdown = s100_markdown_files(&workspace);
+        let brief = markdown
+            .last()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_default();
+        println!(
+            "GPT_LIVE_S103_HISTORY executor_inputs={:?} spoken_rows={:?} markdown_files={:?} brief_lines={}",
+            rows.executor_inputs,
+            rows.spoken,
+            markdown.iter().filter_map(|p| p.strip_prefix(&workspace).ok()).collect::<Vec<_>>(),
+            brief.lines().count()
+        );
+        let per_window = delegations_per_window(
+            &timeline,
+            &[
+                ("monologue", monologue_start_ms),
+                ("barge-in", barge_in_start_ms),
+                ("correction", correction_start_ms),
+            ],
+        );
+        println!("GPT_LIVE_S103_DELEGATIONS per_window={per_window:?}");
+        if per_window.first().map(|(_, c)| *c) != Some(1) {
+            deterministic_failures.push(format!(
+                "the monologue must produce exactly one client delegation; per window: {per_window:?}"
+            ));
+        }
+        match rows.executor_inputs.first() {
+            Some(input) => {
+                let missing: Vec<&str> = S103_TOKENS
+                    .iter()
+                    .copied()
+                    .filter(|token| !input.contains(token))
+                    .collect();
+                if !missing.is_empty() {
+                    deterministic_failures.push(format!(
+                        "the monologue's executor input lacks planted tokens {missing:?}: {input:?}"
+                    ));
+                }
+            }
+            None => deterministic_failures.push("no executor input row in the canonical history".to_owned()),
+        }
+        if monologue_overlap_ms > 0 {
+            deterministic_failures.push(format!(
+                "the assistant spoke {monologue_overlap_ms} ms over the monologue (answered a pause)"
+            ));
+        }
+        if barge_in_overlap_ms > S103_BARGE_IN_OVERLAP_BOUND_MS
+            || correction_overlap_ms > S103_BARGE_IN_OVERLAP_BOUND_MS
+        {
+            deterministic_failures.push(format!(
+                "interruption overlap beyond the bound: barge_in={barge_in_overlap_ms} correction={correction_overlap_ms} bound={S103_BARGE_IN_OVERLAP_BOUND_MS}"
+            ));
+        }
+        if !unprompted_starts.is_empty() {
+            deterministic_failures.push(format!(
+                "assistant audio started without a new input final or commentary at ms {unprompted_starts:?} (duplicate readout)"
+            ));
+        }
+        record_tolerant(
+            &evidence,
+            channel,
+            "S103",
+            "last_executor_input_carries_friday",
+            rows.executor_inputs.last().is_some_and(|input| input.contains("friday"))
+                || rows.spoken.iter().any(|row| row.contains("friday")),
+            format!("executor_inputs={:?}", rows.executor_inputs),
+            &mut tolerant_failures,
+        )?;
+
+        let report = live.peer.energy().await?;
+        evidence.record(EvidenceRecord::Energy {
+            channel,
+            windows: report.downsampled_windows(3000),
+        })?;
+        evidence.record(EvidenceRecord::Timeline {
+            channel,
+            entries: timeline.clone(),
+        })?;
+        let mut faults = evidence.faults()?;
+        faults.extend(live.peer.faults().await?);
+        if !faults.is_empty() {
+            deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
+        }
+        println!(
+            "GPT_LIVE_S103_OK total_ms={} connected_ms={connected_ms} monologue_overlap_ms={monologue_overlap_ms} barge_in_overlap_ms={barge_in_overlap_ms} correction_overlap_ms={correction_overlap_ms} onset_to_quiet_ms={assistant_quiet_after_onset_ms:?} executor_done_at_ms={executor_done_at_ms} close_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            started.elapsed().as_millis(),
+            close.map(|c| c.ms)
+        );
+        println!("GPT_LIVE_S103_TIMELINE\n{}", format_timeline(&timeline));
+        if !deterministic_failures.is_empty() {
+            return Err(format!(
+                "S103 deterministic checks failed:\n  - {}",
                 deterministic_failures.join("\n  - ")
             )
             .into());

@@ -45,6 +45,9 @@ pub enum Stage {
     WhoAreYouCapabilities,
     WhoAreYouRoster,
     WhoAreYouAsk,
+    // S103 interrupt and recover.
+    InterruptMonologue,
+    InterruptBargeIn,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

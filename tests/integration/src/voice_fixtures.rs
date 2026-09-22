@@ -405,6 +405,16 @@ pub struct FixtureEntry {
     pub voice: String,
     /// Exact spoken script.
     pub text: String,
+    /// When non-empty, the script is minted segment by segment and the
+    /// segments are joined with `pauses_ms` of digital silence, so a
+    /// deliberate mid-utterance pause survives the internal-silence
+    /// compression (which is applied within each segment only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<String>,
+    /// Silence between consecutive segments; `pauses_ms.len()` must be
+    /// `segments.len() - 1`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pauses_ms: Vec<u32>,
     /// SHA-256 of the committed WAV bytes.
     pub sha256: String,
     /// Decoded PCM duration.
@@ -551,9 +561,33 @@ pub async fn mint_fixture(
     trailing_silence_ms_floor: u32,
     entry: &mut FixtureEntry,
 ) -> Result<WavPcm16Mono, VoiceFixtureError> {
-    let raw =
-        synthesize_openai_tts_pcm(api_key, OPENAI_TTS_MODEL, &entry.voice, &entry.text).await?;
-    let prepared = prepare_tts_pcm_for_live_vad(&raw);
+    let prepared = if entry.segments.is_empty() {
+        let raw =
+            synthesize_openai_tts_pcm(api_key, OPENAI_TTS_MODEL, &entry.voice, &entry.text).await?;
+        prepare_tts_pcm_for_live_vad(&raw)
+    } else {
+        if entry.pauses_ms.len() + 1 != entry.segments.len() {
+            return Err(VoiceFixtureError::Wav {
+                path: fixture_dir.join(&entry.file),
+                reason: format!(
+                    "{} segments need {} pauses, manifest has {}",
+                    entry.segments.len(),
+                    entry.segments.len() - 1,
+                    entry.pauses_ms.len()
+                ),
+            });
+        }
+        let mut joined = Vec::new();
+        for (index, segment) in entry.segments.iter().enumerate() {
+            if index > 0 {
+                joined = append_pcm_trailing_silence(&joined, entry.pauses_ms[index - 1] as usize);
+            }
+            let raw =
+                synthesize_openai_tts_pcm(api_key, OPENAI_TTS_MODEL, &entry.voice, segment).await?;
+            joined.extend_from_slice(&prepare_tts_pcm_for_live_vad(&raw));
+        }
+        joined
+    };
     let pcm = append_pcm_trailing_silence(&prepared, trailing_silence_ms_floor as usize);
     let bytes = encode_wav(manifest_sample_rate_hz, &pcm);
     let path = fixture_dir.join(&entry.file);

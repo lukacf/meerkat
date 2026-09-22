@@ -177,6 +177,50 @@
       "sample_rate_hz": 24000,
       "trailing_silence_ms": 1580,
       "notes": "S102 question 3 at assistant_quiet+300 ms: exactly one client delegation; the executor relays the question to the other member over comms. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, sage), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "interrupt_monologue",
+      "file": "interrupt-monologue.wav",
+      "voice": "verse",
+      "text": "Okay so, um, let me just think out loud for a second here. The client is the Marigold account, and, uh, they want the kickoff moved. Not next week, they want it on Tuesday, in the afternoon if we can manage it. And the venue, uh, the venue is the Copenhagen office, the one downstairs, not the big hall. Um, the codename for the deck is Pelican, don't ask me why, marketing picked it. Oh and, uh, we should keep the budget line as it was, no changes there. So, um, yeah. Write all of that up as a short kickoff brief in a markdown file, and then read the whole brief back to me, slowly, every line.",
+      "segments": [
+        "Okay so, um, let me just think out loud for a second here. The client is the Marigold account, and, uh, they want the kickoff moved. Not next week,",
+        "they want it on Tuesday, in the afternoon if we can manage it. And the venue, uh, the venue is the Copenhagen office, the one downstairs, not the big hall.",
+        "Um, the codename for the deck is Pelican, don't ask me why, marketing picked it. Oh and, uh, we should keep the budget line as it was, no changes there.",
+        "So, um, yeah. Write all of that up as a short kickoff brief in a markdown file, and then read the whole brief back to me, slowly, every line."
+      ],
+      "pauses_ms": [
+        800,
+        900,
+        700
+      ],
+      "sha256": "35581100436a85b7e7dbf903312549becaf5ddf526b06f556c60184397bb2062",
+      "duration_ms": 41942,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1545,
+      "notes": "S103 monologue (~27 s) with disfluencies and three 700-900 ms mid-sentence pauses kept verbatim between minted segments (server VAD must not split it), planting Marigold, Tuesday, Copenhagen, Pelican; ends with a request whose readout is long. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, verse), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "interrupt_barge_in",
+      "file": "interrupt-barge-in.wav",
+      "voice": "verse",
+      "text": "Wait, stop, make it Thursday instead.",
+      "sha256": "66e02c2646b145e572ad8f050bb81c5425084a3001e4771134c948fe0490bd87",
+      "duration_ms": 4450,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S103 barge-in at first assistant audio + 1500 ms of the brief readout. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, verse), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "interrupt_correction",
+      "file": "interrupt-correction.wav",
+      "voice": "verse",
+      "text": "Actually, Friday.",
+      "sha256": "43f8055d70677e040d8e5fa11b56ad779d9ebca356c306bd50c63beeaab567b3",
+      "duration_ms": 3139,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S103 second correction 300 ms after the barge-in clip ends; the final executor input must carry Friday. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, verse), VAD-normalised, 1500 ms trailing-silence floor."
     }
   ]
 }

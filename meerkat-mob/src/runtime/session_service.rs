@@ -1291,14 +1291,22 @@ pub trait MobSessionService:
         ))
     }
 
-    /// Wait, bounded, for the source's turn-finalization boundary and fork
-    /// while still holding it.
+    /// Wait, bounded, for the source's turn-finalization boundary, then fork.
     ///
-    /// The default acquires the boundary through
-    /// [`Self::acquire_runtime_turn_finalization_guard`] and forks under it
-    /// with [`Self::fork_persisted_session`]. Services whose fork authority
-    /// takes that same boundary itself (the persistent store owner) override
-    /// this so the held guard is handed over instead of re-locked.
+    /// The persistent store owner overrides this to cut the branch while it
+    /// still holds the boundary it waited for, which closes the race with a
+    /// runtime lap queued behind the wait. Decorators that forward
+    /// [`Self::fork_persisted_session`] to such a service must forward this
+    /// method too, or they fall back to this default.
+    ///
+    /// The default cannot hold the boundary across
+    /// [`Self::fork_persisted_session`]: for a service whose fork authority
+    /// takes that same non-reentrant boundary itself (the persistent owner
+    /// behind a forwarding decorator) that would self-deadlock with no bound
+    /// applied. It therefore waits under the bound, releases the boundary,
+    /// and forks with the ordinary `Quiescent` admission, which refuses a
+    /// source that started another turn in between with `Busy` instead of
+    /// hanging.
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         source_session_id: &SessionId,
@@ -1318,7 +1326,12 @@ pub trait MobSessionService:
                 waited: started.elapsed(),
             });
         };
-        let _turn_finalization_guard = guard?;
+        drop(guard?);
+        tracing::debug!(
+            session_id = %source_session_id,
+            "turn-boundary fork on a session service without held-boundary fork authority; \
+             forking after the wait with quiescent admission"
+        );
         self.fork_persisted_session(source_session_id, message_count, tool_access_policy, target)
             .await
             .map(meerkat_core::DurableForkAtTurnBoundary::Forked)

@@ -84,7 +84,12 @@ them.
   from the committed transcript while still holding that boundary (releasing
   and re-locking would let a queued follow-up lap win the FIFO gate and refuse
   the fork as `Busy`); a member still running after the bound is reported as
-  `SourceBusy`.
+  `SourceBusy`. The RPC server's session service forwards the turn-boundary
+  fork to the persistent owner explicitly. The `MobSessionService` trait
+  default releases the boundary before it forks: it cannot hold the owner's
+  non-reentrant boundary across the owner's own fork, which self-deadlocked a
+  live delegation against an idle member behind a forwarding host with no
+  bound applied.
 
 ### Breaking
 

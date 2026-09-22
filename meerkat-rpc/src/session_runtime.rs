@@ -1444,6 +1444,29 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    // Forwarded explicitly: the trait default cannot hold the persistent
+    // owner's boundary across its fork (self-deadlock), so only this
+    // forwarder gives a live delegation the fork-under-held-boundary
+    // semantics.
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::fork_persisted_session_at_turn_boundary(
+            &self.service,
+            source_session_id,
+            message_count,
+            tool_access_policy,
+            target,
+            bound,
+        )
+        .await
+    }
+
     async fn load_revivable_retired_session(
         &self,
         session_id: &SessionId,

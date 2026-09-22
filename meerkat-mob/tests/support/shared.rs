@@ -1104,6 +1104,34 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
         self.inner.load_revivable_retired_session(session_id).await
     }
 
+    // The host decorator shape (RPC server, CLI): the persistent owner's fork
+    // and turn boundary are forwarded one method at a time, and the
+    // turn-boundary fork is deliberately NOT forwarded so tests can exercise
+    // the trait default behind such a decorator.
+    async fn fork_persisted_session(
+        &self,
+        source_session_id: &meerkat_core::SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+    ) -> Result<meerkat_core::SessionForkResult, meerkat_core::service::SessionError> {
+        self.inner
+            .fork_persisted_session(source_session_id, message_count, tool_access_policy, target)
+            .await
+    }
+
+    async fn acquire_runtime_turn_finalization_guard(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<
+        Box<dyn meerkat_core::lifecycle::CoreExecutorTurnFinalizationGuard>,
+        meerkat_core::service::SessionError,
+    > {
+        self.inner
+            .acquire_runtime_turn_finalization_guard(session_id)
+            .await
+    }
+
     async fn session_known_to_archive_authority(
         &self,
         session_id: &meerkat_core::SessionId,

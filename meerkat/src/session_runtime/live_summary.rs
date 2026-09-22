@@ -110,21 +110,63 @@ impl LiveContextSummaryPolicy {
         config: &RealtimeSessionOpenConfig,
         source_reader: Arc<dyn LiveSummarySource>,
     ) -> Result<LiveContextSummaryCapture, LiveContextSummaryError> {
-        let revision = session.canonical_context_revision()?;
+        let cursor = session.messages().len();
+        self.capture_prefix(
+            session,
+            cursor,
+            config.seed_messages().to_vec(),
+            config.llm_identity.clone(),
+            source_reader,
+        )
+    }
+
+    /// Seal the first `cursor` rows of `source` as the summarized prefix.
+    /// `seed_messages` is the model-boundary projection of exactly that prefix.
+    fn capture_prefix(
+        &self,
+        source: Session,
+        cursor: usize,
+        seed_messages: Vec<Message>,
+        source_identity: SessionLlmIdentity,
+        source_reader: Arc<dyn LiveSummarySource>,
+    ) -> Result<LiveContextSummaryCapture, LiveContextSummaryError> {
+        let revision = source.canonical_context_prefix_revision(cursor)?;
         let projection_digest = LiveContextSummarySourceDigest(
-            meerkat_core::session::transcript_messages_digest(config.seed_messages())?,
+            meerkat_core::session::transcript_messages_digest(&seed_messages)?,
         );
-        let rewrite_generation = session.transcript_rewrite_generation()?;
+        let rewrite_generation = source.transcript_rewrite_generation()?;
         Ok(LiveContextSummaryCapture {
-            source: Arc::new(session),
-            source_identity: config.llm_identity.clone(),
-            messages: config.seed_messages().to_vec(),
+            source: Arc::new(source),
+            cursor,
+            source_identity,
+            messages: seed_messages,
             revision,
             projection_digest,
             rewrite_generation,
             source_reader,
             policy: self.clone(),
         })
+    }
+
+    /// Admit a concurrent summary against a body-free committed boundary. The
+    /// prefix body is read and proved inside the preparation job, so the open
+    /// that mints this value never materializes the transcript.
+    pub(crate) fn admit_committed_boundary(
+        &self,
+        session_id: &SessionId,
+        boundary: &meerkat_session::LiveContextCommittedBoundary,
+        llm_identity: SessionLlmIdentity,
+        source_reader: Arc<dyn LiveSummarySource>,
+    ) -> LiveContextSummaryBoundary {
+        LiveContextSummaryBoundary {
+            session_id: session_id.clone(),
+            canonical_message_cursor: boundary.message_count(),
+            transcript_revision: boundary.transcript_revision().to_string(),
+            rewrite_generation: boundary.rewrite_generation(),
+            llm_identity,
+            source_reader,
+            policy: self.clone(),
+        }
     }
 
     pub(crate) async fn summarize(
@@ -139,9 +181,64 @@ impl LiveContextSummaryPolicy {
     }
 }
 
-/// Exact source custody, not evidence of provider knowledge.
+/// Body-free admission of the exact committed prefix one concurrent summary
+/// will cover: minted at open from the store-issued boundary, resolved to a
+/// [`LiveContextSummaryCapture`] inside the preparation job.
+pub(crate) struct LiveContextSummaryBoundary {
+    session_id: SessionId,
+    canonical_message_cursor: u64,
+    transcript_revision: String,
+    rewrite_generation: u64,
+    llm_identity: SessionLlmIdentity,
+    source_reader: Arc<dyn LiveSummarySource>,
+    policy: LiveContextSummaryPolicy,
+}
+
+impl std::fmt::Debug for LiveContextSummaryBoundary {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LiveContextSummaryBoundary([REDACTED])")
+    }
+}
+
+impl LiveContextSummaryBoundary {
+    pub(crate) fn canonical_message_cursor(&self) -> u64 {
+        self.canonical_message_cursor
+    }
+
+    /// Read the committed source and seal exactly the admitted prefix.
+    ///
+    /// Rows committed after admission are expected and stay outside the
+    /// capture: the live-context owner catches them up from the reserved
+    /// cursor. Anything that changes the admitted rows themselves, their
+    /// rewrite generation, or the durable identity is a stale snapshot, even
+    /// when the row count is unchanged.
+    pub(crate) async fn capture(
+        self,
+    ) -> Result<LiveContextSummaryCapture, LiveContextSummaryError> {
+        let (current, identity) = self.source_reader.read(&self.session_id).await?;
+        let cursor = usize::try_from(self.canonical_message_cursor)
+            .map_err(|_| LiveContextSummaryError::StaleSnapshot)?;
+        if current.id() != &self.session_id
+            || identity != self.llm_identity
+            || current.messages().len() < cursor
+            || current.transcript_prefix_digest(cursor)? != self.transcript_revision
+            || current.transcript_rewrite_generation()? != self.rewrite_generation
+        {
+            return Err(LiveContextSummaryError::StaleSnapshot);
+        }
+        let seed_messages = current.messages_for_model_boundary_prefix(cursor)?;
+        self.policy
+            .capture_prefix(current, cursor, seed_messages, identity, self.source_reader)
+    }
+}
+
+/// Exact source custody, not evidence of provider knowledge. `source` is the
+/// committed document that was read; only its first `cursor` rows are the
+/// summarized prefix.
 pub(crate) struct LiveContextSummaryCapture {
     source: Arc<Session>,
+    /// Always at most `source.messages().len()`: sealed by `capture_prefix`.
+    cursor: usize,
     source_identity: SessionLlmIdentity,
     messages: Vec<Message>,
     revision: CanonicalContextRevision,
@@ -159,7 +256,7 @@ impl std::fmt::Debug for LiveContextSummaryCapture {
 
 impl LiveContextSummaryCapture {
     pub(crate) fn canonical_message_cursor(&self) -> u64 {
-        self.source.messages().len() as u64
+        self.cursor as u64
     }
 
     pub(crate) async fn generate(self) -> Result<LiveContextSummary, LiveContextSummaryError> {
@@ -200,6 +297,7 @@ impl LiveContextSummaryCapture {
         }
         Ok(LiveContextSummary {
             source: self.source,
+            cursor: self.cursor,
             source_identity: self.source_identity,
             revision: self.revision,
             projection_digest: self.projection_digest,
@@ -262,8 +360,12 @@ impl Drop for LiveContextSummaryJob {
 }
 
 impl LiveContextSummaryJob {
+    /// Spawn the capture/generation job for one admitted boundary. The job
+    /// owns the O(document) source read: it captures the admitted prefix,
+    /// advances generated authority from `Capturing` to `Generating`, produces
+    /// the summary, and delivers it behind exact media activation.
     pub(crate) fn spawn(
-        capture: LiveContextSummaryCapture,
+        boundary: LiveContextSummaryBoundary,
         lease: meerkat_runtime::live_execution::LiveContextPreparationLease,
         runtime: Arc<meerkat_runtime::MeerkatMachine>,
     ) -> Self {
@@ -278,6 +380,48 @@ impl LiveContextSummaryJob {
         });
         let task = tokio::spawn(async move {
             let cancellation = lease.cancellation_token();
+            let capturing = std::panic::AssertUnwindSafe(boundary.capture()).catch_unwind();
+            let captured = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return,
+                result = capturing => result,
+            };
+            let capture = match captured {
+                Ok(Ok(capture)) => capture,
+                Ok(Err(error)) => {
+                    record_preparation_failure(&runtime, &lease, preparation_failure(&error)).await;
+                    return;
+                }
+                Err(_) => {
+                    record_preparation_failure(
+                        &runtime,
+                        &lease,
+                        LiveContextPreparationFailure::Capture,
+                    )
+                    .await;
+                    return;
+                }
+            };
+            if let Err(error) = runtime
+                .mark_live_context_preparation_generating(&lease)
+                .await
+            {
+                // The capture itself succeeded; generated runtime authority
+                // refused to move this lease from `Capturing` to `Generating`
+                // (the lease no longer names the exact current preparation on
+                // the session's active channel). Record the authority verdict,
+                // not a capture failure.
+                if !cancellation.is_cancelled() {
+                    tracing::error!(%error, "live context preparation could not enter generation");
+                    record_preparation_failure(
+                        &runtime,
+                        &lease,
+                        LiveContextPreparationFailure::AuthorityRejected,
+                    )
+                    .await;
+                }
+                return;
+            }
             let generation = std::panic::AssertUnwindSafe(capture.generate()).catch_unwind();
             let generated = tokio::select! {
                 biased;
@@ -396,6 +540,8 @@ async fn record_preparation_failure(
 #[derive(Clone)]
 pub struct LiveContextSummary {
     source: Arc<Session>,
+    /// Always at most `source.messages().len()`: sealed by `capture_prefix`.
+    cursor: usize,
     source_identity: SessionLlmIdentity,
     revision: CanonicalContextRevision,
     projection_digest: LiveContextSummarySourceDigest,
@@ -484,7 +630,15 @@ impl LiveContextSummary {
     }
 
     pub fn canonical_message_cursor(&self) -> u64 {
-        self.source.messages().len() as u64
+        self.cursor as u64
+    }
+
+    /// The summarized rows: the admitted prefix of the read source document.
+    fn source_prefix(&self) -> &[Message] {
+        self.source
+            .messages()
+            .get(..self.cursor)
+            .unwrap_or_else(|| self.source.messages())
     }
 
     pub fn source_revision(&self) -> &CanonicalContextRevision {
@@ -497,9 +651,9 @@ impl LiveContextSummary {
     /// invalidate this opening snapshot even when the row count is unchanged.
     pub(crate) async fn validate_provider_source(&self) -> Result<(), LiveContextSummaryError> {
         let (current, identity) = self.source_reader.read(self.session_id()).await?;
+        let prefix = self.source_prefix();
         if current.id() != self.source.id()
-            || current.messages().get(..self.source.messages().len())
-                != Some(self.source.messages())
+            || current.messages().get(..prefix.len()) != Some(prefix)
             || current.transcript_rewrite_generation()? != self.rewrite_generation
             || identity != self.source_identity
         {
@@ -532,9 +686,12 @@ impl LiveContextSummary {
         if session_id != self.source.id()
             || config.canonical_message_cursor() != self.canonical_message_cursor()
             || config.transcript_rewrite_generation != self.rewrite_generation
-            || config.seed_messages() != self.source.messages_for_model_boundary()
+            || config.seed_messages()
+                != self
+                    .source
+                    .messages_for_model_boundary_prefix(self.cursor)?
             || config.canonical_system_messages_ref()
-                != RealtimeSessionOpenConfig::canonical_system_messages(self.source.messages())
+                != RealtimeSessionOpenConfig::canonical_system_messages(self.source_prefix())
         {
             return Err(LiveContextSummaryError::ConflictingProjection);
         }
@@ -888,6 +1045,145 @@ mod tests {
         assert_eq!(producer.calls.load(Ordering::SeqCst), 1);
         assert_eq!(summary.canonical_message_cursor(), 2);
         summary.validate_provider_source().await.unwrap();
+    }
+
+    fn boundary_for(
+        policy: &LiveContextSummaryPolicy,
+        admitted: &Session,
+        identity: SessionLlmIdentity,
+        current: Session,
+    ) -> LiveContextSummaryBoundary {
+        LiveContextSummaryBoundary {
+            session_id: admitted.id().clone(),
+            canonical_message_cursor: admitted.messages().len() as u64,
+            transcript_revision: admitted.transcript_revision().unwrap(),
+            rewrite_generation: admitted.transcript_rewrite_generation().unwrap(),
+            llm_identity: identity.clone(),
+            source_reader: Arc::new(Source(current, identity)),
+            policy: policy.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_boundary_capture_covers_exactly_the_admitted_prefix() {
+        let (admitted, config) = source("The historical code is Violet.");
+        let producer = producer("The historical code was Violet.");
+        let policy =
+            LiveContextSummaryPolicy::new(producer.clone(), 4096, 100, Duration::from_secs(1))
+                .unwrap()
+                .with_bootstrap_mode(LiveContextBootstrapMode::Concurrent);
+        // Two rows commit between admission and the deferred read.
+        let mut current = admitted.clone();
+        current.push(Message::User(meerkat_core::types::UserMessage::text(
+            "Newer code: Amber.",
+        )));
+        current.push(Message::User(meerkat_core::types::UserMessage::text(
+            "Newest code: Cyan.",
+        )));
+        let boundary = boundary_for(&policy, &admitted, config.llm_identity.clone(), current);
+        assert_eq!(boundary.canonical_message_cursor(), 2);
+        let capture = boundary.capture().await.unwrap();
+        assert_eq!(capture.canonical_message_cursor(), 2);
+        assert_eq!(capture.messages, config.seed_messages());
+        assert_eq!(capture.source.messages().len(), 4);
+        assert_eq!(producer.calls.load(Ordering::SeqCst), 0);
+        let summary = capture.generate().await.unwrap();
+        assert_eq!(producer.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(summary.canonical_message_cursor(), 2);
+        assert_eq!(
+            summary.source_revision(),
+            &admitted.canonical_context_revision().unwrap()
+        );
+        summary.validate_projection(admitted.id(), &config).unwrap();
+        summary.validate_provider_source().await.unwrap();
+        assert_eq!(summary.provenance().canonical_message_cursor(), 2);
+    }
+
+    #[tokio::test]
+    async fn deferred_boundary_capture_refuses_a_source_that_no_longer_matches_admission() {
+        let (admitted, config) = source("Compare tables.");
+        let policy = LiveContextSummaryPolicy::new(
+            producer("Comparing tables."),
+            4096,
+            100,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        // Same row count, different body under the admitted cursor.
+        let mut replacement = Session::with_id(admitted.id().clone());
+        replacement.append_system_message("background instructions");
+        replacement.push(Message::User(meerkat_core::types::UserMessage::text(
+            "Delete tables.",
+        )));
+        let boundary = boundary_for(&policy, &admitted, config.llm_identity.clone(), replacement);
+        assert!(matches!(
+            boundary.capture().await,
+            Err(LiveContextSummaryError::StaleSnapshot)
+        ));
+
+        // Fewer committed rows than admitted.
+        let boundary = boundary_for(
+            &policy,
+            &admitted,
+            config.llm_identity.clone(),
+            admitted.fork_at(1),
+        );
+        assert!(matches!(
+            boundary.capture().await,
+            Err(LiveContextSummaryError::StaleSnapshot)
+        ));
+
+        // Durable identity moved.
+        let mut moved = config.llm_identity.clone();
+        moved.model = "gpt-5.4".into();
+        let mut boundary = boundary_for(
+            &policy,
+            &admitted,
+            config.llm_identity.clone(),
+            admitted.clone(),
+        );
+        boundary.source_reader = Arc::new(Source(admitted.clone(), moved));
+        assert!(matches!(
+            boundary.capture().await,
+            Err(LiveContextSummaryError::StaleSnapshot)
+        ));
+
+        // Rewrite generation moved while the row count stayed.
+        let mut boundary = boundary_for(
+            &policy,
+            &admitted,
+            config.llm_identity.clone(),
+            admitted.clone(),
+        );
+        boundary.rewrite_generation += 1;
+        assert!(matches!(
+            boundary.capture().await,
+            Err(LiveContextSummaryError::StaleSnapshot)
+        ));
+
+        // Source read failure stays a typed session error.
+        struct Failing;
+        #[async_trait::async_trait]
+        impl LiveSummarySource for Failing {
+            async fn read(
+                &self,
+                id: &SessionId,
+            ) -> Result<(Session, SessionLlmIdentity), LiveContextSummaryError> {
+                Err(meerkat_core::service::SessionError::NotFound { id: id.clone() }.into())
+            }
+        }
+        let mut boundary = boundary_for(
+            &policy,
+            &admitted,
+            config.llm_identity.clone(),
+            admitted.clone(),
+        );
+        boundary.source_reader = Arc::new(Failing);
+        assert!(matches!(
+            boundary.capture().await,
+            Err(LiveContextSummaryError::Session(_))
+        ));
     }
 
     #[tokio::test]

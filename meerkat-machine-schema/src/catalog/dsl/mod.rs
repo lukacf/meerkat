@@ -1206,6 +1206,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "DeliveryRejected",
                     "DeliveryAmbiguous",
                     "Cancelled",
+                    "AuthorityRejected",
                 ],
             ),
             NamedTypeBinding::string_enum(

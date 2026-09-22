@@ -1112,11 +1112,20 @@ mod orchestrator {
         /// realtime-open paths can resolve it. Materializes a deferred
         /// staged session in place; falls back to durable-snapshot
         /// rebuild for fully archived-but-resumable sessions.
+        ///
+        /// Presence is read without an actor command: a live member that is
+        /// mid-turn answers none until the turn ends, and the channel mint
+        /// only needs the registration to exist and the store's lifecycle
+        /// authority to still be live.
         pub async fn recover_live_session_for_realtime_open(
             &self,
             session_id: &SessionId,
         ) -> Result<(), SessionError> {
-            if self.service.has_live_session(session_id).await? {
+            if self
+                .service
+                .live_session_present_for_realtime_open(session_id)
+                .await?
+            {
                 return Ok(());
             }
 
@@ -1294,6 +1303,14 @@ mod orchestrator {
             })
         }
 
+        /// Admit a concurrent (open-media-first) summary bootstrap.
+        ///
+        /// Only the live session recovery the channel mint needs (stale live
+        /// discard, staged or durable rematerialization) and a body-free read
+        /// of the committed boundary happen here. The transcript body is read,
+        /// proved against that boundary, and summarized inside the preparation
+        /// job after the pending channel has been handed back, so an open on a
+        /// large or busy session never waits on session materialization.
         #[cfg(feature = "openai-live")]
         pub(crate) async fn live_open_concurrent_summary_projection_for_session(
             &self,
@@ -1303,33 +1320,24 @@ mod orchestrator {
         ) -> Result<
             (
                 RealtimeSessionOpenProjection,
-                super::live_summary::LiveContextSummaryCapture,
+                super::live_summary::LiveContextSummaryBoundary,
             ),
             RealtimeSessionOpenProjectionError,
         > {
             Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
-            let (session, identity) = self
+            let committed = self
                 .service
-                .export_live_context_summary_snapshot(session_id)
+                .observe_live_context_committed_boundary(session_id)
                 .await?;
-            let generation = session
-                .transcript_rewrite_generation()
-                .map_err(super::live_summary::LiveContextSummaryError::from)?;
-            let source_config = RealtimeSessionOpenConfig::for_open_from_messages(
-                turning_mode,
+            let identity = self.service.live_session_llm_identity(session_id).await?;
+            let boundary = policy.admit_committed_boundary(
+                session_id,
+                &committed,
                 identity.clone(),
-                Vec::new(),
-                session.messages_for_model_boundary(),
-                session.messages(),
-            )?
-            .with_transcript_rewrite_generation(generation);
-            let capture = policy.capture(
-                session,
-                &source_config,
                 Arc::new(super::live_summary::ConcurrentServiceLiveSummarySource(
                     Arc::clone(self.service),
                 )),
-            )?;
+            );
             let lease = RealtimeOpenProjectionAdmission::global()
                 .try_acquire()
                 .map_err(|error| {
@@ -1338,7 +1346,7 @@ mod orchestrator {
             let config =
                 RealtimeSessionOpenConfig::new(turning_mode, identity, Vec::new(), Vec::new())?
                     .with_open_projection_lease(lease)
-                    .with_transcript_rewrite_generation(generation);
+                    .with_transcript_rewrite_generation(committed.rewrite_generation());
             Ok((
                 RealtimeSessionOpenProjection {
                     open_config: config,
@@ -1346,7 +1354,7 @@ mod orchestrator {
                     owner_session_id: session_id.clone(),
                     summary: None,
                 },
-                capture,
+                boundary,
             ))
         }
 
@@ -2172,20 +2180,20 @@ mod orchestrator {
                 .await
                 .map_err(super::ExperimentalLiveChannelOpenError::Authority)?;
             let turning_mode = turning_mode.unwrap_or(RealtimeTurningMode::ProviderManaged);
-            let (mut projection, capture) = match summary {
+            let (mut projection, boundary) = match summary {
                 Some(policy)
                     if policy.bootstrap_mode()
                         == super::live_summary::LiveContextBootstrapMode::Concurrent =>
                 {
                     pending.enable_concurrent_context()?;
-                    let (projection, capture) = self
+                    let (projection, boundary) = self
                         .live_open_concurrent_summary_projection_for_session(
                             session_id,
                             turning_mode,
                             policy,
                         )
                         .await?;
-                    (projection, Some(capture))
+                    (projection, Some(boundary))
                 }
                 Some(policy) => (
                     self.live_open_summary_projection_for_session(session_id, turning_mode, policy)
@@ -2240,13 +2248,13 @@ mod orchestrator {
                     error.to_string(),
                 ));
             }
-            let staged = match capture.as_ref() {
-                Some(capture) => self
+            let staged = match boundary.as_ref() {
+                Some(boundary) => self
                     .runtime_adapter
                     .stage_experimental_live_execution_with_preparation(
                         session_id,
                         &channel_id,
-                        capture.canonical_message_cursor(),
+                        boundary.canonical_message_cursor(),
                     )
                     .await
                     .map(|(stage, lease)| (stage, Some(lease))),
@@ -2277,9 +2285,9 @@ mod orchestrator {
                     return Err(super::ExperimentalLiveChannelOpenError::Authority(binding));
                 }
             };
-            if let (Some(capture), Some(lease)) = (capture, preparation_lease)
+            if let (Some(boundary), Some(lease)) = (boundary, preparation_lease)
                 && let Err(error) = self
-                    .start_live_context_preparation(pending.as_mut(), lease, capture)
+                    .start_live_context_preparation(pending.as_mut(), lease, boundary)
                     .await
             {
                 authority.unbind_channel(&channel_id, session_id).await;
@@ -2316,27 +2324,24 @@ mod orchestrator {
             })
         }
 
+        /// Hand the admitted boundary to its preparation job. The job owns the
+        /// source read and the `Capturing` to `Generating` transition; nothing
+        /// here materializes the transcript.
         #[cfg(feature = "openai-live")]
         pub(crate) async fn start_live_context_preparation(
             &self,
             pending: &mut dyn crate::experimental_gpt_live::ExperimentalLivePendingOpen,
             lease: meerkat_runtime::live_execution::LiveContextPreparationLease,
-            capture: super::live_summary::LiveContextSummaryCapture,
+            boundary: super::live_summary::LiveContextSummaryBoundary,
         ) -> Result<(), super::ExperimentalLiveChannelOpenError> {
-            if lease.reserved_cursor() != capture.canonical_message_cursor() {
+            if lease.reserved_cursor() != boundary.canonical_message_cursor() {
                 return Err(
                     super::live_summary::LiveContextSummaryError::ConflictingProjection.into(),
                 );
             }
-            self.runtime_adapter
-                .mark_live_context_preparation_generating(&lease)
-                .await
-                .map_err(|error| {
-                    super::ExperimentalLiveChannelOpenError::ExecutionProfile(error.to_string())
-                })?;
             pending.retain_context_preparation_job(
                 super::live_summary::LiveContextSummaryJob::spawn(
-                    capture,
+                    boundary,
                     lease,
                     Arc::clone(self.runtime_adapter),
                 ),

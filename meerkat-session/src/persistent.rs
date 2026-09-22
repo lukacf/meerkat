@@ -2327,6 +2327,61 @@ struct SessionMutationGuard {
     _recovery_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
+/// Body-free description of the committed transcript boundary a concurrent
+/// live-context summary is admitted against.
+///
+/// The three facts are exactly what the asynchronous summary owner needs to
+/// prove, later and from a full materialization, that the rows it summarizes
+/// are the rows committed at admission: how many there were, the format-2
+/// transcript digest of exactly those rows, and the transcript rewrite
+/// generation they belonged to. It reserves nothing and is not a Session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveContextCommittedBoundary {
+    message_count: u64,
+    transcript_revision: String,
+    rewrite_generation: u64,
+}
+
+impl LiveContextCommittedBoundary {
+    fn from_committed_session(session: &Session) -> Result<Self, SessionError> {
+        let transcript_revision = session.transcript_revision().map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "committed live context boundary for session {} has no transcript revision: {error}",
+                session.id()
+            )))
+        })?;
+        let rewrite_generation = session.transcript_rewrite_generation().map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "committed live context boundary for session {} has no rewrite generation: {error}",
+                session.id()
+            )))
+        })?;
+        Ok(Self {
+            message_count: session.messages().len() as u64,
+            transcript_revision,
+            rewrite_generation,
+        })
+    }
+
+    /// Committed live rows at admission; the summary covers exactly `[0, n)`.
+    #[must_use]
+    pub const fn message_count(&self) -> u64 {
+        self.message_count
+    }
+
+    /// `transcript_messages_digest` of exactly those committed rows.
+    #[must_use]
+    pub fn transcript_revision(&self) -> &str {
+        &self.transcript_revision
+    }
+
+    /// Transcript rewrite generation the committed rows belong to.
+    #[must_use]
+    pub const fn rewrite_generation(&self) -> u64 {
+        self.rewrite_generation
+    }
+}
+
 /// Small identity of the exact physical runtime session boundary prepared by
 /// this service. WholeBlob binds the candidate blob digest; HeadCanonical
 /// binds the successor physical-head token. Store-issued committed authority
@@ -4324,26 +4379,72 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     && let Some(RuntimeSessionAuthority::HeadCanonical(store_authority)) =
                         store_authority
                     && store_authority.session_id() == id
-                    && usize::try_from(store_authority.boundary_head().message_count).ok()
-                        == Some(live_authority.message_count())
-                    && store_authority.boundary_head().head_revision.as_str()
-                        == live_authority.transcript_revision()
                 {
-                    let (kind, _) = Self::classify_live_session_authority_observations(
-                        id, false, false, false,
+                    let head = store_authority.boundary_head();
+                    let stored_message_count = usize::try_from(head.message_count).ok();
+                    let revisions_match =
+                        head.head_revision.as_str() == live_authority.transcript_revision();
+                    if stored_message_count == Some(live_authority.message_count())
+                        && revisions_match
+                    {
+                        let (kind, _) = Self::classify_live_session_authority_observations(
+                            id, false, false, false,
+                        )?;
+                        return match kind {
+                            LiveSessionAuthorityKind::LiveAuthoritative => {
+                                Ok(LiveSessionAuthority::LiveAuthoritative {
+                                    snapshot: live_authority,
+                                })
+                            }
+                            LiveSessionAuthorityKind::DurableAuthoritative => {
+                                Err(SessionError::Agent(AgentError::InternalError(format!(
+                                    "generated session document authority rejected an exact active live/store boundary for session {id}"
+                                ))))
+                            }
+                        };
+                    }
+                    // Unequal boundaries (typically an actor one committed turn
+                    // ahead of the store) classify from the same bounded facts
+                    // the full-body compare derived: the head row's digest and
+                    // row count against the actor's, plus the store-owned
+                    // archive terminal. Neither document is materialized or
+                    // exported; only a DurableAuthoritative verdict loads the
+                    // committed body, because only its consumers synchronize
+                    // the live actor from it.
+                    let stored_is_archived =
+                        self.session_archived_by_runtime_store_authority(id).await?;
+                    let live_has_uncommitted_transcript = stored_message_count
+                        .is_some_and(|stored| live_authority.message_count() > stored);
+                    let (kind, reason) = Self::classify_live_session_authority_observations(
+                        id,
+                        !revisions_match,
+                        live_has_uncommitted_transcript,
+                        stored_is_archived,
                     )?;
-                    return match kind {
+                    match kind {
                         LiveSessionAuthorityKind::LiveAuthoritative => {
-                            Ok(LiveSessionAuthority::LiveAuthoritative {
+                            return Ok(LiveSessionAuthority::LiveAuthoritative {
                                 snapshot: live_authority,
-                            })
+                            });
                         }
                         LiveSessionAuthorityKind::DurableAuthoritative => {
-                            Err(SessionError::Agent(AgentError::InternalError(format!(
-                                "generated session document authority rejected an exact active live/store boundary for session {id}"
-                            ))))
+                            let Some(stored) = self
+                                .load_committed_runtime_session_for_body(
+                                    id,
+                                    "live session authority classification",
+                                )
+                                .await?
+                            else {
+                                return Ok(LiveSessionAuthority::LiveAuthoritative {
+                                    snapshot: live_authority,
+                                });
+                            };
+                            return Ok(LiveSessionAuthority::DurableAuthoritative {
+                                session: Box::new(stored),
+                                reason,
+                            });
                         }
-                    };
+                    }
                 }
             }
 
@@ -5810,9 +5911,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// an exact WholeBlob payload, or the exact HeadCanonical head materialized
     /// by the incremental store. The identity comes from that same document.
     /// Actor-local changes and provisional tails ahead of the boundary are not
-    /// committed context and are never substituted for it. If the committed
-    /// HeadCanonical head is no longer materializable, its typed conflict is
-    /// returned rather than waiting for a turn or serving a different head.
+    /// committed context and are never substituted for it. A HeadCanonical
+    /// head superseded between authority observation and materialization is
+    /// re-observed within the counted observation budget; a head that stays
+    /// unmaterializable returns its typed conflict rather than waiting for a
+    /// turn or serving a different head.
     ///
     /// This read takes no session mutation/recovery/turn-finalization guard,
     /// sends no actor command, performs no synchronization, and leaves media
@@ -5842,14 +5945,84 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok((session, identity))
     }
 
+    /// Observe the committed transcript boundary for a concurrent live-context
+    /// summary without materializing message bodies.
+    ///
+    /// HeadCanonical serves the store-issued head row alone: its live message
+    /// count, the `transcript_messages_digest` of exactly those rows, and the
+    /// adopted rewrite count, which the row-lineage replay pins to the
+    /// transcript rewrite generation of that head. WholeBlob has no body-free
+    /// head and decodes its committed snapshot. Like
+    /// [`Self::export_live_context_summary_snapshot`], this read takes no
+    /// mutation/recovery/turn-finalization guard and sends no actor command,
+    /// so an in-flight turn or its finalization never serializes the caller.
+    ///
+    /// The boundary reserves nothing. The asynchronous owner must prove the
+    /// materialized prefix against this digest and generation before use.
+    pub async fn observe_live_context_committed_boundary(
+        &self,
+        id: &SessionId,
+    ) -> Result<LiveContextCommittedBoundary, SessionError> {
+        match self.runtime_store.session_persistence_profile() {
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                let authority = self
+                    .observe_persisted_session_authority(id)
+                    .await?
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                if self.session_archived_by_runtime_store_authority(id).await? {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                }
+                let head = authority
+                    .head_canonical()
+                    .ok_or_else(|| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "live context boundary loaded non-HeadCanonical authority for session {id}"
+                        )))
+                    })?
+                    .boundary_head();
+                Ok(LiveContextCommittedBoundary {
+                    message_count: head.message_count,
+                    transcript_revision: head.head_revision.clone(),
+                    rewrite_generation: head.rewrite_count,
+                })
+            }
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                let (session, _authority) = self.load_live_context_committed_source(id).await?;
+                LiveContextCommittedBoundary::from_committed_session(&session)
+            }
+            profile => Err(SessionError::Agent(AgentError::InternalError(format!(
+                "unsupported runtime session persistence profile {profile} while observing the live context boundary for session {id}"
+            )))),
+        }
+    }
+
+    /// Load the committed live-context source: the current store-issued
+    /// authority and the exact body it names.
+    ///
+    /// Authority observation and HeadCanonical materialization are two store
+    /// reads. A writer that commits between them makes the observed head
+    /// unmaterializable and the store reports the typed revision conflict; the
+    /// read then re-observes the now-current authority within the same counted
+    /// budget as every other observation racing a head-canonical writer. It
+    /// never waits for a turn and never serves any head other than the one the
+    /// store issued for that attempt.
     async fn load_live_context_committed_source(
         &self,
         id: &SessionId,
     ) -> Result<(Session, RuntimeSessionAuthority), SessionError> {
-        let (session, authority) = self
+        let mut result = self
             .load_committed_runtime_session_with_authority(id, "live context source")
-            .await?
-            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            .await;
+        for _ in 1..OBSERVATION_LOAD_ATTEMPTS {
+            if !Self::is_transcript_revision_conflict(&result) {
+                break;
+            }
+            result = self
+                .load_committed_runtime_session_with_authority(id, "live context source")
+                .await;
+        }
+        let (session, authority) =
+            result?.ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
         if self.session_archived_by_authority(id, &session).await? {
             return Err(SessionError::NotFound { id: id.clone() });
         }
@@ -5990,6 +6163,31 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<meerkat_core::SessionLlmIdentity, SessionError> {
         self.inner.live_session_llm_identity(id).await
+    }
+
+    /// Live presence for the realtime open path, without an actor command.
+    ///
+    /// The channel mint needs exactly two facts before it can proceed: a live
+    /// actor and runtime registration exist for this session, and the store's
+    /// lifecycle authority has not retired or archived it (in which case the
+    /// stale actor is discarded and the caller rematerializes from durable
+    /// truth). Both are answered from the live registry and the RuntimeStore
+    /// alone. The general [`SessionService::has_live_session`] classification
+    /// observes the actor's transcript authority, and the actor serves no
+    /// command while a turn is running, so an open on a busy member would wait
+    /// for that turn to finish; this read does not.
+    pub async fn live_session_present_for_realtime_open(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        if !self.inner.has_live_session(id).await? {
+            return Ok(false);
+        }
+        if self.session_archived_by_runtime_store_authority(id).await? {
+            self.discard_live_session(id).await?;
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// Read live-session authority while the runtime loop already owns the
@@ -23204,6 +23402,19 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(committed_authority.session_id(), &id);
+        let boundary = service
+            .observe_live_context_committed_boundary(&id)
+            .await
+            .unwrap();
+        assert_eq!(boundary.message_count(), committed.messages().len() as u64);
+        assert_eq!(
+            boundary.transcript_revision(),
+            committed.transcript_revision().unwrap()
+        );
+        assert_eq!(
+            boundary.rewrite_generation(),
+            committed.transcript_rewrite_generation().unwrap()
+        );
 
         let admission = service.reserve_runtime_turn_admission(&id).await.unwrap();
         let turn_service = Arc::clone(&service);

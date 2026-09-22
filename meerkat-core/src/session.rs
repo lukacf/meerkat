@@ -4867,8 +4867,32 @@ impl Session {
     /// only the latest version is selected. No request-local System message is
     /// synthesized or repositioned at this boundary.
     pub fn messages_for_model_boundary(&self) -> Vec<Message> {
-        let prompts = crate::types::materialize_latest_system_prompt_versions(self.messages());
-        match materialize_instruction_activation_messages(self.id(), &prompts) {
+        Self::project_model_boundary(self.id(), self.messages())
+    }
+
+    /// [`Self::messages_for_model_boundary`] over the first `count` live
+    /// messages only.
+    ///
+    /// Owners that summarize an admitted transcript prefix while later rows
+    /// keep committing need the projection of exactly that prefix. A request
+    /// past the end fails closed like [`Self::transcript_prefix_digest`]
+    /// instead of projecting a shorter transcript.
+    pub fn messages_for_model_boundary_prefix(
+        &self,
+        count: usize,
+    ) -> Result<Vec<Message>, serde_json::Error> {
+        let messages = self.messages.get(..count).ok_or_else(|| {
+            <serde_json::Error as serde::ser::Error>::custom(format!(
+                "model boundary projection requested for {count} messages but the transcript has {}",
+                self.messages.len()
+            ))
+        })?;
+        Ok(Self::project_model_boundary(self.id(), messages))
+    }
+
+    fn project_model_boundary(id: &SessionId, messages: &[Message]) -> Vec<Message> {
+        let prompts = crate::types::materialize_latest_system_prompt_versions(messages);
+        match materialize_instruction_activation_messages(id, &prompts) {
             Ok(messages) => messages,
             Err(_) => prompts,
         }
@@ -6313,6 +6337,18 @@ impl Session {
         &self,
     ) -> Result<crate::CanonicalContextRevision, serde_json::Error> {
         self.transcript_revision()
+            .map(crate::CanonicalContextRevision::from_transcript_revision)
+    }
+
+    /// Mint the live context revision of the first `count` live messages: the
+    /// same digest a committed head carried when exactly those rows were its
+    /// whole transcript. Fails closed past the end like
+    /// [`Self::transcript_prefix_digest`].
+    pub fn canonical_context_prefix_revision(
+        &self,
+        count: usize,
+    ) -> Result<crate::CanonicalContextRevision, serde_json::Error> {
+        self.transcript_prefix_digest(count)
             .map(crate::CanonicalContextRevision::from_transcript_revision)
     }
 
@@ -14356,6 +14392,48 @@ mod tests {
             }
             other => unreachable!("expected BlockAssistant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn model_boundary_prefix_and_prefix_revision_follow_the_full_projection() {
+        let mut session = Session::new();
+        session.append_system_message("background instructions");
+        session.push(Message::User(crate::types::UserMessage::text("first")));
+        session.push(Message::User(crate::types::UserMessage::text("second")));
+        let count = session.messages().len();
+        assert_eq!(
+            session.messages_for_model_boundary_prefix(count).unwrap(),
+            session.messages_for_model_boundary()
+        );
+        assert_eq!(
+            session.messages_for_model_boundary_prefix(2).unwrap(),
+            session.fork_at(2).messages_for_model_boundary()
+        );
+        assert!(
+            session
+                .messages_for_model_boundary_prefix(count + 1)
+                .is_err()
+        );
+        assert_eq!(
+            session.canonical_context_prefix_revision(count).unwrap(),
+            session.canonical_context_revision().unwrap()
+        );
+        assert_eq!(
+            session
+                .canonical_context_prefix_revision(2)
+                .unwrap()
+                .as_str(),
+            transcript_messages_digest(&session.messages()[..2]).unwrap()
+        );
+        assert_ne!(
+            session.canonical_context_prefix_revision(2).unwrap(),
+            session.canonical_context_revision().unwrap()
+        );
+        assert!(
+            session
+                .canonical_context_prefix_revision(count + 1)
+                .is_err()
+        );
     }
 
     #[test]

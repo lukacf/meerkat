@@ -6811,6 +6811,14 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+    #[cfg(all(
+        feature = "session-store",
+        feature = "memory-store",
+        feature = "test-realtime-fixtures",
+        not(target_arch = "wasm32")
+    ))]
+    mod deferred_summary_open;
+
     fn unmeasured_fragments(session: &meerkat_core::Session) -> impl Iterator<Item = &str> {
         session
             .messages()

@@ -1924,19 +1924,19 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
     ) -> Result<
         (
             RealtimeSessionOpenProjection,
-            Option<crate::session_runtime::live_summary::LiveContextSummaryCapture>,
+            Option<crate::session_runtime::live_summary::LiveContextSummaryBoundary>,
         ),
         ExperimentalLiveContextRecoveryError,
     > {
-        let (mut projection, capture) = match &self.context_summary_policy {
+        let (mut projection, boundary) = match &self.context_summary_policy {
             Some(policy) if policy.bootstrap_mode()
                 == crate::session_runtime::live_summary::LiveContextBootstrapMode::Concurrent => {
                 pending.enable_concurrent_context()?;
-                let (projection, capture) = self.orchestrator()
+                let (projection, boundary) = self.orchestrator()
                     .live_open_concurrent_summary_projection_for_session(
                         session, RealtimeTurningMode::ProviderManaged, policy,
                     ).await?;
-                (projection, Some(capture))
+                (projection, Some(boundary))
             }
             Some(policy) => {
                 (self.orchestrator()
@@ -1956,7 +1956,7 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             pending.set_context_summary(summary.clone())?;
         }
         pending.apply_execution_identity(&mut projection);
-        Ok((projection, capture))
+        Ok((projection, boundary))
     }
 
     #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
@@ -2046,12 +2046,12 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         let mut pending = authority
             .prepare_open(recovery.session_id(), &execution_identity)
             .await?;
-        let (projection, capture) = self
+        let (projection, boundary) = self
             .prepare_strict_replacement_projection(recovery.session_id(), pending.as_mut())
             .await?;
         let provider_seed_cursor = projection.open_config.canonical_message_cursor();
-        let reserved_cursor = capture.as_ref().map_or(provider_seed_cursor, |capture| {
-            capture.canonical_message_cursor()
+        let reserved_cursor = boundary.as_ref().map_or(provider_seed_cursor, |boundary| {
+            boundary.canonical_message_cursor()
         });
         if reserved_cursor != recovery.canonical_seed_cursor() {
             return Err(ExperimentalLiveContextRecoveryError::SeedCursorMismatch);
@@ -2076,9 +2076,9 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 &replacement_channel_id,
                 pending.execution_profile().clone(),
                 provider_seed_cursor,
-                capture
+                boundary
                     .as_ref()
-                    .map(|capture| capture.canonical_message_cursor()),
+                    .map(|boundary| boundary.canonical_message_cursor()),
             )
             .await
         {
@@ -2107,10 +2107,10 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             }
         };
 
-        if let (Some(capture), Some(lease)) = (capture, preparation_lease)
+        if let (Some(boundary), Some(lease)) = (boundary, preparation_lease)
             && let Err(error) = self
                 .orchestrator()
-                .start_live_context_preparation(pending.as_mut(), lease, capture)
+                .start_live_context_preparation(pending.as_mut(), lease, boundary)
                 .await
         {
             self.orchestrator()
@@ -2198,12 +2198,12 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         let mut pending = authority
             .prepare_open(recovery.session_id(), &execution_identity)
             .await?;
-        let (projection, capture) = self
+        let (projection, boundary) = self
             .prepare_strict_replacement_projection(recovery.session_id(), pending.as_mut())
             .await?;
         let provider_seed_cursor = projection.open_config.canonical_message_cursor();
-        let reserved_cursor = capture.as_ref().map_or(provider_seed_cursor, |capture| {
-            capture.canonical_message_cursor()
+        let reserved_cursor = boundary.as_ref().map_or(provider_seed_cursor, |boundary| {
+            boundary.canonical_message_cursor()
         });
         if reserved_cursor != recovery.canonical_seed_cursor() {
             return Err(ExperimentalLiveContextRecoveryError::SeedCursorMismatch);
@@ -2228,9 +2228,9 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 &replacement_channel_id,
                 pending.execution_profile().clone(),
                 provider_seed_cursor,
-                capture
+                boundary
                     .as_ref()
-                    .map(|capture| capture.canonical_message_cursor()),
+                    .map(|boundary| boundary.canonical_message_cursor()),
             )
             .await
         {
@@ -2259,10 +2259,10 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             }
         };
 
-        if let (Some(capture), Some(lease)) = (capture, preparation_lease)
+        if let (Some(boundary), Some(lease)) = (boundary, preparation_lease)
             && let Err(error) = self
                 .orchestrator()
-                .start_live_context_preparation(pending.as_mut(), lease, capture)
+                .start_live_context_preparation(pending.as_mut(), lease, boundary)
                 .await
         {
             self.orchestrator()

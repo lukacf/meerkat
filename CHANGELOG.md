@@ -67,6 +67,53 @@ them.
 - `DelegationExecutionError::SourceBusy` names a delegation whose source
   member was still mid-turn after the bounded wait
   (`DelegationExecutionService::SOURCE_TURN_BOUNDARY_WAIT`).
+- `PersistentSessionService::observe_live_context_committed_boundary` and
+  `LiveContextCommittedBoundary`: a body-free read of the committed transcript
+  boundary (row count, transcript digest of exactly those rows, rewrite
+  generation). HeadCanonical serves it from the store-issued head row without
+  materializing messages; WholeBlob decodes its snapshot.
+- `Session::messages_for_model_boundary_prefix` and
+  `Session::canonical_context_prefix_revision`: the model-boundary projection
+  and live context revision of the first `n` live messages, for owners that
+  summarize an admitted prefix while later rows keep committing.
+
+### Changed
+
+- Concurrent (open-media-first) GPT Live context bootstrap no longer reads the
+  committed transcript body on the open path. The strict open admits the
+  summary against the body-free committed boundary and hands back the pending
+  channel; the preparation job then reads the body, proves the admitted prefix
+  against that boundary (digest, row count, rewrite generation, durable
+  identity), moves generated authority from `Capturing` to `Generating`, and
+  summarizes exactly the pre-open rows. Rows committed after admission are
+  never summarized and are delivered live behind the summary as before. On a
+  HeadCanonical session with 241 committed rows (about 1 MB) the open dropped
+  from 116 ms to 15 ms with the body read undelayed, and from 1.62 s to 15 ms
+  with the body read slowed by 1.5 s; a slow or failed body read now surfaces
+  as the existing `LiveContextPreparationFailure` on the channel (`SourceRead`,
+  `StaleSnapshot`, `Capture`) instead of delaying or failing the open.
+- Realtime open no longer waits for a member's in-flight turn. Live-session
+  recovery on the open path reads presence from the live registry and the
+  RuntimeStore lifecycle authority
+  (`PersistentSessionService::live_session_present_for_realtime_open`) instead
+  of the actor-observing `has_live_session` classification; the actor serves no
+  command while a turn runs, so the old read blocked until the turn ended and
+  then materialized both bodies to compare them. With a turn parked for 3 s on
+  the same 241-row session the open dropped from 3.13 s (1 body
+  materialization) to about 15 ms (none). Stale-live discard and staged or
+  durable rematerialization stay on the open path.
+- `live_session_authority` classifies an actor that is ahead of (or diverged
+  from) the committed HeadCanonical boundary from the head row's digest and row
+  count plus the store-owned archive terminal, the same facts the full-body
+  compare derived, and materializes the committed body only for a
+  `DurableAuthoritative` verdict, whose consumers synchronize the actor from
+  it. WholeBlob keeps decoding its snapshot; no body-free head exists there.
+- The committed live-context source read (`export_live_context_summary_snapshot`
+  and the mirror catch-up boundary) re-observes the current store authority
+  when a HeadCanonical commit lands between authority observation and head
+  materialization, within the same counted observation budget the service uses
+  for every read racing a head-canonical writer. It still never waits for a
+  turn.
 
 ### Fixed
 

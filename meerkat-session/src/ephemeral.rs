@@ -2950,6 +2950,26 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .is_some_and(|handle| !handle.command_tx.is_closed())
     }
 
+    /// Abort the registered actor task for `id` while leaving its registry
+    /// entry in place, then wait until the actor's command receiver is gone.
+    ///
+    /// Models an actor whose task exited without the registry observing it,
+    /// so callers can prove that registry-only reads do not mistake the
+    /// stale entry for a live actor. Returns `false` when no entry exists.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) async fn abort_live_session_actor_task_for_test(&self, id: &SessionId) -> bool {
+        let command_tx = {
+            let sessions = self.sessions.read().await;
+            let Some(handle) = sessions.get(id) else {
+                return false;
+            };
+            handle.task_handle.abort();
+            handle.command_tx.clone()
+        };
+        command_tx.closed().await;
+        true
+    }
+
     /// Capture the exact currently registered live actor incarnation.
     ///
     /// This is a registry observation only.  Persistent/runtime-backed

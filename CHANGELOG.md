@@ -76,6 +76,12 @@ them.
   `Session::canonical_context_prefix_revision`: the model-boundary projection
   and live context revision of the first `n` live messages, for owners that
   summarize an admitted prefix while later rows keep committing.
+- `LiveContextPreparationFailure::AuthorityRejected` (generated
+  `MeerkatMachine` vocabulary): the runtime authority refused to move a live
+  context preparation from `Capturing` to `Generating` because the lease no
+  longer names the exact current preparation on the session's active channel.
+  The summary job records this verdict instead of misreporting it as
+  `Capture`.
 
 ### Changed
 
@@ -89,9 +95,11 @@ them.
   never summarized and are delivered live behind the summary as before. On a
   HeadCanonical session with 241 committed rows (about 1 MB) the open dropped
   from 116 ms to 15 ms with the body read undelayed, and from 1.62 s to 15 ms
-  with the body read slowed by 1.5 s; a slow or failed body read now surfaces
-  as the existing `LiveContextPreparationFailure` on the channel (`SourceRead`,
-  `StaleSnapshot`, `Capture`) instead of delaying or failing the open.
+  with the body read slowed by 1.5 s; a slow, stale, or failed body read now
+  surfaces as a typed `LiveContextPreparationFailure` on the channel
+  (`SourceRead`, `StaleSnapshot`, `Capture`, or `AuthorityRejected` when the
+  runtime refuses the `Generating` transition) instead of delaying or failing
+  the open.
 - Realtime open no longer waits for a member's in-flight turn. Live-session
   recovery on the open path reads presence from the live registry and the
   RuntimeStore lifecycle authority

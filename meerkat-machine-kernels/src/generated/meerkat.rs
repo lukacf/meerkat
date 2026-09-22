@@ -3999,6 +3999,8 @@ pub enum LiveContextPreparationFailure {
     DeliveryAmbiguous,
     #[serde(rename = "Cancelled")]
     Cancelled,
+    #[serde(rename = "AuthorityRejected")]
+    AuthorityRejected,
 }
 impl LiveContextPreparationFailure {
     pub fn as_str(&self) -> &'static str {
@@ -4016,6 +4018,7 @@ impl LiveContextPreparationFailure {
             Self::DeliveryRejected => "DeliveryRejected",
             Self::DeliveryAmbiguous => "DeliveryAmbiguous",
             Self::Cancelled => "Cancelled",
+            Self::AuthorityRejected => "AuthorityRejected",
         }
     }
 }
@@ -4036,6 +4039,7 @@ impl std::convert::TryFrom<&str> for LiveContextPreparationFailure {
             "DeliveryRejected" => Ok(Self::DeliveryRejected),
             "DeliveryAmbiguous" => Ok(Self::DeliveryAmbiguous),
             "Cancelled" => Ok(Self::Cancelled),
+            "AuthorityRejected" => Ok(Self::AuthorityRejected),
             other => Err(format!(
                 "invalid LiveContextPreparationFailure value `{other}`"
             )),

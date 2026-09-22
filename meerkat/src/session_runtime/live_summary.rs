@@ -406,12 +406,17 @@ impl LiveContextSummaryJob {
                 .mark_live_context_preparation_generating(&lease)
                 .await
             {
+                // The capture itself succeeded; generated runtime authority
+                // refused to move this lease from `Capturing` to `Generating`
+                // (the lease no longer names the exact current preparation on
+                // the session's active channel). Record the authority verdict,
+                // not a capture failure.
                 if !cancellation.is_cancelled() {
                     tracing::error!(%error, "live context preparation could not enter generation");
                     record_preparation_failure(
                         &runtime,
                         &lease,
-                        LiveContextPreparationFailure::Capture,
+                        LiveContextPreparationFailure::AuthorityRejected,
                     )
                     .await;
                 }

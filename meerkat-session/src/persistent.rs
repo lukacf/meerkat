@@ -6176,11 +6176,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// observes the actor's transcript authority, and the actor serves no
     /// command while a turn is running, so an open on a busy member would wait
     /// for that turn to finish; this read does not.
+    ///
+    /// A registry entry alone is not presence. The registry witness is absent
+    /// once the actor's command channel has closed (its task exited) and
+    /// revoked once the registry has retired that incarnation; either way no
+    /// actor could serve the minted channel, so the session reports absent
+    /// and the caller rematerializes instead of minting against a dead actor.
     pub async fn live_session_present_for_realtime_open(
         &self,
         id: &SessionId,
     ) -> Result<bool, SessionError> {
-        if !self.inner.has_live_session(id).await? {
+        let Some(witness) = self.inner.live_session_actor_witness(id).await else {
+            return Ok(false);
+        };
+        if !witness.is_live() {
             return Ok(false);
         }
         if self.session_archived_by_runtime_store_authority(id).await? {
@@ -23493,6 +23502,177 @@ mod tests {
                 .any(|message| matches!(message, Message::System(system) if system.content == "actor-only pending context")),
             "the read must not synchronize away actor-local pending context"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn realtime_open_presence_requires_a_live_actor_behind_the_registry_entry() {
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .unwrap();
+        let id = created.session_id;
+        assert!(
+            service
+                .live_session_present_for_realtime_open(&id)
+                .await
+                .unwrap()
+        );
+
+        // The actor task exits while its registry entry remains. The registry
+        // still names the session, but no actor could serve a minted channel;
+        // the old actor-observing read failed such an open with "Session task
+        // has exited", and this read must report absent instead.
+        assert!(
+            service
+                .inner
+                .abort_live_session_actor_task_for_test(&id)
+                .await
+        );
+        assert!(
+            meerkat_core::service::SessionService::has_live_session(service.inner.as_ref(), &id)
+                .await
+                .unwrap(),
+            "the registry entry must survive for this test to prove anything"
+        );
+        assert!(
+            service
+                .inner
+                .live_session_actor_witness(&id)
+                .await
+                .is_none(),
+            "a closed command channel must retire the registry witness"
+        );
+        assert!(
+            !service
+                .live_session_present_for_realtime_open(&id)
+                .await
+                .unwrap(),
+            "a registry entry without a live actor is not realtime-open presence"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_context_committed_boundary_head_canonical_pins_head_row_to_materialized_transcript()
+     {
+        let directory = tempfile::Builder::new()
+            .prefix(".committed-boundary-")
+            .tempdir_in(".")
+            .unwrap();
+        let database_path = directory.path().join("runtime.sqlite3");
+        let runtime_store = Arc::new(
+            meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database_path).unwrap(),
+        );
+        let store = Arc::new(meerkat_store::SqliteSessionStore::open(&database_path).unwrap());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            store,
+            runtime_store,
+            memory_blob_store(),
+        );
+        let committed = service
+            .persist_detached_head_canonical_session(
+                live_context_summary_source(),
+                "committed boundary fixture",
+            )
+            .await
+            .unwrap();
+        let id = committed.id().clone();
+        let seeded_rows = committed.messages().len();
+        assert!(seeded_rows > 2, "fixture must have rows to compact away");
+        assert_head_canonical_boundary_matches_materialized_transcript(
+            &service,
+            &id,
+            0,
+            seeded_rows,
+        )
+        .await;
+
+        // An adopted compaction rewrites the same session in place: the head
+        // row must advance its rewrite count with the materialized generation
+        // and re-digest exactly the surviving rows, or the body-free boundary
+        // would admit a summary against rows that no longer exist.
+        let mut compacted = committed.clone();
+        let parent_revision = compacted.transcript_revision().unwrap();
+        compacted
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange {
+                    start: 1,
+                    end: seeded_rows,
+                },
+                vec![Message::BlockAssistant(
+                    meerkat_core::BlockAssistantMessage::new(
+                        vec![meerkat_core::AssistantBlock::Text {
+                            text: "compacted assistant trace".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                    ),
+                )],
+                TranscriptRewriteReason::new("compaction"),
+                Some("test".to_string()),
+                Some(parent_revision),
+            )
+            .unwrap();
+        let compacted = service
+            .persist_detached_head_canonical_session(compacted, "same-session transcript rewrite")
+            .await
+            .unwrap();
+        assert_eq!(compacted.id(), &id);
+        assert_eq!(compacted.messages().len(), 2);
+        assert_head_canonical_boundary_matches_materialized_transcript(&service, &id, 1, 2).await;
+    }
+
+    /// The HeadCanonical head row is the body-free boundary the realtime open
+    /// admits against; it must agree exactly with the materialized transcript
+    /// it stands for, and the observed boundary must be that row verbatim.
+    async fn assert_head_canonical_boundary_matches_materialized_transcript(
+        service: &PersistentSessionService<DummyBuilder>,
+        id: &SessionId,
+        expected_generation: u64,
+        expected_rows: usize,
+    ) {
+        let head = service
+            .incremental
+            .as_ref()
+            .expect("head-canonical service has an incremental store")
+            .load_head(id)
+            .await
+            .expect("load head row")
+            .expect("head row exists");
+        let materialized = service
+            .load_committed_runtime_session_for_body(id, "committed boundary invariant")
+            .await
+            .unwrap()
+            .expect("committed session materializes");
+        assert_eq!(materialized.messages().len(), expected_rows);
+        assert_eq!(head.message_count, expected_rows as u64);
+        assert_eq!(
+            materialized.transcript_rewrite_generation().unwrap(),
+            expected_generation
+        );
+        assert_eq!(head.rewrite_count, expected_generation);
+        assert_eq!(
+            head.head_revision,
+            materialized
+                .transcript_prefix_digest(expected_rows)
+                .unwrap()
+        );
+        let boundary = service
+            .observe_live_context_committed_boundary(id)
+            .await
+            .unwrap();
+        assert_eq!(boundary.message_count(), head.message_count);
+        assert_eq!(boundary.transcript_revision(), head.head_revision);
+        assert_eq!(boundary.rewrite_generation(), head.rewrite_count);
     }
 
     fn live_context_summary_source() -> Session {

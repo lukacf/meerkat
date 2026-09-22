@@ -1645,6 +1645,7 @@ pub enum LiveContextPreparationFailure {
     DeliveryRejected,
     DeliveryAmbiguous,
     Cancelled,
+    AuthorityRejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

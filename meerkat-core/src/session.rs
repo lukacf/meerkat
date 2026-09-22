@@ -4410,6 +4410,9 @@ impl Session {
                     if let Some(observation_id) = row.context_observation_id {
                         origin = origin.with_context_observation(observation_id);
                     }
+                    if let Some(item_id) = row.provider_item_id {
+                        origin = origin.with_provider_item_id(item_id);
+                    }
                     match &mut message {
                         Message::User(user) => user.identity.realtime_origin = Some(origin),
                         Message::BlockAssistant(assistant) => {

@@ -580,6 +580,10 @@ pub struct RealtimeMaterializedRow {
     pub message: Message,
     pub source_channel: Option<crate::LiveChannelId>,
     pub context_observation_id: Option<crate::LiveContextObservationId>,
+    /// The provider item this row materialized from, so a console that
+    /// showed the live transcript deltas for that item can replace them with
+    /// the canonical row exactly, not by channel order.
+    pub provider_item_id: Option<String>,
 }
 
 /// Authorize a durable snapshot through the canonical SessionDocument
@@ -2239,6 +2243,10 @@ fn materialize_realtime_transcript_ready_items(
     let mut pending_stop_reason: Option<StopReason> = None;
     let mut pending_usage: Option<crate::types::TurnUsage> = None;
     let mut pending_observation: Option<crate::LiveContextObservationId> = None;
+    // The provider item the pending assistant blocks belong to. A response
+    // can span several items; the row records the first, which is the one a
+    // live console keyed its provisional row on.
+    let mut pending_item_id: Option<String> = None;
 
     loop {
         let order = realtime_transcript_order(state);
@@ -2313,6 +2321,7 @@ fn materialize_realtime_transcript_ready_items(
                         pending_stop_reason,
                         &mut pending_usage,
                         &mut pending_observation,
+                        &mut pending_item_id,
                     );
                     pending_response_id = None;
                     if let Some(item) = state.items.get_mut(&item_id) {
@@ -2333,6 +2342,7 @@ fn materialize_realtime_transcript_ready_items(
                                     .and_then(|item| item.source_channel.clone())
                             }),
                         context_observation_id: state.context_observations.get(&item_id).cloned(),
+                        provider_item_id: Some(item_id.clone()),
                     });
                     materialized
                         .push(RealtimeTranscriptMaterializedMessage::User { item_id, text });
@@ -2360,6 +2370,7 @@ fn materialize_realtime_transcript_ready_items(
                             pending_stop_reason,
                             &mut pending_usage,
                             &mut pending_observation,
+                            &mut pending_item_id,
                         );
                         pending_response_id = None;
                     }
@@ -2392,6 +2403,9 @@ fn materialize_realtime_transcript_ready_items(
                         pending_stop_reason = stop_reason;
                         pending_usage = usage.clone();
                     }
+                    if pending_item_id.is_none() {
+                        pending_item_id = Some(item_id.clone());
+                    }
                     pending_observation = observation;
                     pending_blocks.push(block);
                     materialized.push(RealtimeTranscriptMaterializedMessage::Assistant {
@@ -2414,6 +2428,7 @@ fn materialize_realtime_transcript_ready_items(
         pending_stop_reason,
         &mut pending_usage,
         &mut pending_observation,
+        &mut pending_item_id,
     );
 
     Ok(RealtimeTranscriptApplyCommit {
@@ -2449,6 +2464,7 @@ fn flush_pending_assistant_blocks(
     pending_stop_reason: Option<StopReason>,
     pending_usage: &mut Option<crate::types::TurnUsage>,
     pending_observation: &mut Option<crate::LiveContextObservationId>,
+    pending_item_id: &mut Option<String>,
 ) {
     if pending_blocks.is_empty() {
         *pending_usage = None;
@@ -2465,6 +2481,7 @@ fn flush_pending_assistant_blocks(
             .as_ref()
             .map(|source| source.channel_id().clone()),
         context_observation_id: pending_observation.take(),
+        provider_item_id: pending_item_id.take(),
     });
     if let Some(turn_usage) = pending_usage.take() {
         let mut cumulative = crate::types::CumulativeUsage::from_usage(committed_usage.clone());

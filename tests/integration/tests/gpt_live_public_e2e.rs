@@ -806,6 +806,8 @@ async fn open_public_live_with_summary(
         evidence: None,
         unmeasured_playback: false,
         executor_instructions: None,
+        extra_members: Vec::new(),
+        instructions_preface: None,
     })
     .await
 }
@@ -828,6 +830,19 @@ struct PublicLiveOpen<'a> {
     unmeasured_playback: bool,
     /// Replaces the default pwd-oriented executor instructions.
     executor_instructions: Option<Vec<String>>,
+    /// Further turn-driven members spawned into the mob (same executor
+    /// profile) before the channel opens.
+    extra_members: Vec<ExtraMember>,
+    /// Per-session host knowledge prepended to the public session
+    /// instructions at open (roster, tools).
+    instructions_preface:
+        Option<Arc<dyn meerkat::experimental_gpt_live::PublicGptLiveInstructionsPreface>>,
+}
+
+/// A second mob member for scenarios about "who else is around".
+struct ExtraMember {
+    identity: &'static str,
+    instructions: String,
 }
 
 async fn open_public_live_with(
@@ -842,6 +857,8 @@ async fn open_public_live_with(
         evidence,
         unmeasured_playback,
         executor_instructions,
+        extra_members,
+        instructions_preface,
     } = options;
     let concurrent = bootstrap.is_some() || unmeasured_playback;
     let evidence = bootstrap
@@ -957,6 +974,17 @@ async fn open_public_live_with(
         60,
     )
     .await?;
+    for member in &extra_members {
+        rpc.call(
+            "mob/spawn",
+            json!({"mob_id":mob_id,"profile":"executor","agent_identity":member.identity,
+                "runtime_mode":"turn_driven",
+                "additional_instructions":[member.instructions],
+                "auth_binding":{"realm":REALM,"binding":BINDING}}),
+            60,
+        )
+        .await?;
+    }
     let status = rpc
         .call(
             "mob/member_status",
@@ -1008,7 +1036,7 @@ async fn open_public_live_with(
             // "Voice session access denied", not a validation error.
             voice: "marin".to_string(),
             session_instructions: None,
-            session_instructions_preface: None,
+            session_instructions_preface: instructions_preface,
         })?;
     let open_authority = Arc::new(if concurrent {
         open_authority
@@ -2472,6 +2500,175 @@ async fn s99_existing_member_work(
     Ok(())
 }
 
+/// Outcome of a graceful client disconnect followed by host close
+/// convergence.
+#[derive(Debug, Clone, Copy)]
+struct CloseOutcome {
+    converged_before_host_close: bool,
+    ms: u64,
+}
+
+/// Client disconnect to host-observed Closed.
+const CLOSE_CONVERGENCE_BOUND: Duration = Duration::from_secs(20);
+
+/// Disconnect the browser peer gracefully, give the host a moment to notice
+/// on its own, otherwise close the channel from the host, and require custody
+/// to converge to Closed within the bound. Journals `CloseConvergence`.
+async fn graceful_close(
+    live: &mut PublicLiveHarness,
+    evidence: &Journal,
+    channel: u32,
+    scenario: &str,
+) -> Result<CloseOutcome, Box<dyn std::error::Error>> {
+    evidence.channel(channel, evidence::ChannelAction::CloseRequested)?;
+    let disconnect_started = Instant::now();
+    let disconnected = live.peer.disconnect(DisconnectMode::Graceful).await?;
+    println!("GPT_LIVE_{scenario}_DISCONNECT {disconnected}");
+    let (shared, exact) = live.shared()?;
+    let custody_closed = |shared: &SharedPublicLive, exact: &ExactChannel| {
+        let member_host = shared.member_host.clone();
+        let id = exact.id.clone();
+        let receipt = exact.pending_receipt.clone();
+        async move {
+            member_host
+                .validate_experimental_live_channel_custody(&id, &receipt)
+                .await
+                .map(|custody| custody.phase() == &ExperimentalLiveChannelPhaseStatus::Closed)
+        }
+    };
+    let mut converged_before_host_close = false;
+    while disconnect_started.elapsed() < Duration::from_secs(5) {
+        if custody_closed(shared, exact).await? {
+            converged_before_host_close = true;
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    if !converged_before_host_close {
+        let remaining = CLOSE_CONVERGENCE_BOUND.saturating_sub(disconnect_started.elapsed());
+        match timeout(
+            remaining,
+            shared.member_host.close_experimental_live_active_channel(
+                shared.authority.as_ref(),
+                &exact.id,
+                &exact.activation_receipt,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(status)) => assert_eq!(status, LiveCloseStatus::Closed),
+            Ok(Err(error)) => {
+                if !custody_closed(shared, exact).await? {
+                    return Err(
+                        format!("host close after client disconnect failed: {error}").into(),
+                    );
+                }
+            }
+            Err(_) => {
+                return Err(format!(
+                    "host close did not return within the {} s convergence bound",
+                    CLOSE_CONVERGENCE_BOUND.as_secs()
+                )
+                .into());
+            }
+        }
+    }
+    while !custody_closed(shared, exact).await? {
+        if disconnect_started.elapsed() >= CLOSE_CONVERGENCE_BOUND {
+            return Err(format!(
+                "channel custody did not converge to Closed within {} s of the client disconnect",
+                CLOSE_CONVERGENCE_BOUND.as_secs()
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    let ms = u64::try_from(disconnect_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    evidence.channel(channel, evidence::ChannelAction::Closed)?;
+    evidence.record(EvidenceRecord::CloseConvergence {
+        channel,
+        converged_before_host_close,
+        ms,
+    })?;
+    println!(
+        "GPT_LIVE_{scenario}_CLOSE converged_before_host_close={converged_before_host_close} ms={ms}"
+    );
+    Ok(CloseOutcome {
+        converged_before_host_close,
+        ms,
+    })
+}
+
+/// Speak one question the assistant should answer natively (no delegation):
+/// schedule the fixture, wait for its input final, the answer's first audio
+/// and the end of that audio, and return the answer window transcript with
+/// the turn timing.
+async fn native_question(
+    live: &mut PublicLiveHarness,
+    scenario: &str,
+    label: &str,
+    spec: PlayAt,
+) -> Result<(SpokenTurn, String, usize, u64), Box<dyn std::error::Error>> {
+    let events_before = live.peer.events().await?.len();
+    let schedule_id = live.peer.play_at(&spec).await?;
+    let fixture_start_ms = live
+        .peer
+        .wait_for_timeline(
+            Duration::from_secs(60),
+            &format!("{label} fixture_start"),
+            |t| fixture_start_entry(t, schedule_id).map(|e| e.t_ms),
+        )
+        .await?;
+    let timeline = live
+        .peer
+        .wait_for_timeline(
+            Duration::from_secs(60),
+            &format!("{label} input_final, then assistant_audio_start and assistant_audio_end"),
+            |t| {
+                let input_final = timeline_find(t, TimelineKind::InputFinal, fixture_start_ms)?;
+                let start = timeline_find(t, TimelineKind::AssistantAudioStart, input_final.t_ms)?;
+                timeline_find(t, TimelineKind::AssistantAudioEnd, start.t_ms).map(|_| t.to_vec())
+            },
+        )
+        .await?;
+    let timing = SpokenTurn::from_timeline(&timeline, schedule_id).ok_or("turn timing")?;
+    let events = live.peer.events().await?;
+    let answer = answer_transcript_text(&events, events_before);
+    println!(
+        "GPT_LIVE_{scenario}_QUESTION label={label} fixture_start_ms={fixture_start_ms} input_final_to_audio_ms={:?} speech_end_to_audio_ms={:?} heard={:?} answer={:?}",
+        timing.input_final_to_audio_ms(),
+        timing.speech_end_to_audio_ms(),
+        timing.input_text,
+        answer.trim()
+    );
+    Ok((timing, answer, events_before, fixture_start_ms))
+}
+
+/// Client delegations created inside each `[start_i, start_{i+1})` window of
+/// the given labelled fixture starts (sorted by time; the last window is
+/// open-ended).
+fn delegations_per_window(
+    timeline: &[TimelineEntry],
+    starts: &[(&str, u64)],
+) -> Vec<(String, usize)> {
+    let mut starts: Vec<(&str, u64)> = starts.to_vec();
+    starts.sort_by_key(|(_, t)| *t);
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, (label, start))| {
+            let end = starts.get(index + 1).map_or(u64::MAX, |(_, t)| *t);
+            let count = timeline
+                .iter()
+                .filter(|e| {
+                    e.kind == TimelineKind::DelegationCreated && e.t_ms >= *start && e.t_ms < end
+                })
+                .count();
+            ((*label).to_owned(), count)
+        })
+        .collect()
+}
+
 // ===========================================================================
 // Scenario 100: morning standup (timed multi-turn voice session)
 // ===========================================================================
@@ -2491,8 +2688,6 @@ const S100_FOLLOW_UP_GAP_MS: u64 = 300;
 /// user onset to the assistant going quiet; beyond this the assistant talked
 /// over the user. The measured value is always printed and journaled.
 const S100_BARGE_IN_OVERLAP_BOUND_MS: u64 = 2500;
-/// Client disconnect to host-observed Closed.
-const S100_CLOSE_CONVERGENCE_BOUND: Duration = Duration::from_secs(20);
 /// Tolerant bound on the median input_final -> first assistant audio.
 const S100_MEDIAN_LATENCY_BOUND_MS: i64 = 3000;
 /// Prefix the mob runtime renders in front of a delegated voice request
@@ -2501,14 +2696,14 @@ const S100_DELEGATION_CONTEXT_PREFIX: &str = "Live delegation execution context:
 
 /// Timing of one spoken turn read off the browser timeline.
 #[derive(Debug)]
-struct S100Turn {
+struct SpokenTurn {
     speech_end_ms: u64,
     input_final_ms: Option<u64>,
     input_text: String,
     first_audio_ms: Option<u64>,
 }
 
-impl S100Turn {
+impl SpokenTurn {
     fn from_timeline(timeline: &[TimelineEntry], schedule_id: u64) -> Option<Self> {
         let start = timeline.iter().find(|entry| {
             entry.kind == TimelineKind::FixtureStart && entry.schedule_id() == Some(schedule_id)
@@ -2543,7 +2738,7 @@ impl S100Turn {
     }
 }
 
-fn s100_find(
+fn timeline_find(
     timeline: &[TimelineEntry],
     kind: TimelineKind,
     not_before_ms: u64,
@@ -2553,13 +2748,13 @@ fn s100_find(
         .find(|entry| entry.kind == kind && entry.t_ms >= not_before_ms)
 }
 
-fn s100_fixture_start(timeline: &[TimelineEntry], schedule_id: u64) -> Option<&TimelineEntry> {
+fn fixture_start_entry(timeline: &[TimelineEntry], schedule_id: u64) -> Option<&TimelineEntry> {
     timeline.iter().find(|entry| {
         entry.kind == TimelineKind::FixtureStart && entry.schedule_id() == Some(schedule_id)
     })
 }
 
-fn s100_fixture_end(timeline: &[TimelineEntry], schedule_id: u64) -> Option<&TimelineEntry> {
+fn fixture_end_entry(timeline: &[TimelineEntry], schedule_id: u64) -> Option<&TimelineEntry> {
     timeline.iter().find(|entry| {
         entry.kind == TimelineKind::FixtureEnd && entry.schedule_id() == Some(schedule_id)
     })
@@ -2567,7 +2762,7 @@ fn s100_fixture_end(timeline: &[TimelineEntry], schedule_id: u64) -> Option<&Tim
 
 /// Lowercased words only: transcript punctuation and casing differ between
 /// the browser-derived input final and the committed executor input.
-fn s100_normalize(text: &str) -> String {
+fn normalize_words(text: &str) -> String {
     text.chars()
         .map(|c| {
             if c.is_alphanumeric() {
@@ -2624,13 +2819,13 @@ struct S100UserRows {
 }
 
 fn s100_user_rows(history: &Value) -> S100UserRows {
-    let prefix = s100_normalize(S100_DELEGATION_CONTEXT_PREFIX);
+    let prefix = normalize_words(S100_DELEGATION_CONTEXT_PREFIX);
     let mut rows = S100UserRows::default();
     for message in history["messages"].as_array().into_iter().flatten() {
         if message["role"].as_str() != Some("user") {
             continue;
         }
-        let text = s100_normalize(&history_text(&json!({"messages":[message]})));
+        let text = normalize_words(&history_text(&json!({"messages":[message]})));
         match text.strip_prefix(prefix.as_str()) {
             Some(rest) => rows.executor_inputs.push(rest.trim().to_owned()),
             None => rows.spoken.push(text),
@@ -2649,18 +2844,18 @@ fn s100_markdown_headings(text: &str) -> Vec<String> {
 
 /// What one delegated spoken request produced, on the browser clock.
 #[derive(Debug)]
-struct S100Request {
+struct DelegatedRequest {
     fixture_start_ms: u64,
     commentary_audio_ms: u64,
     executor_done_at_ms: u128,
-    timing: S100Turn,
+    timing: SpokenTurn,
     events_before: usize,
     barge_in: Option<u64>,
 }
 
 /// Wait until a delegated executor turn not yet in `seen` reaches realized
 /// terminality on the existing member, and record it.
-async fn s100_wait_executor(
+async fn wait_executor_turn(
     live: &mut PublicLiveHarness,
     seen: &mut std::collections::BTreeSet<String>,
     started: Instant,
@@ -2708,14 +2903,15 @@ async fn s100_wait_executor(
 /// require a client delegation, wait for the executor's realized
 /// terminality, the commentary append, and the commentary readout's first
 /// audio. `barge_in` is armed the moment the commentary lands.
-async fn s100_delegated_request(
+async fn delegated_request(
     live: &mut PublicLiveHarness,
     started: Instant,
+    scenario: &str,
     label: &str,
     spec: PlayAt,
     barge_in: Option<PlayAt>,
     seen_executor_turns: &mut std::collections::BTreeSet<String>,
-) -> Result<S100Request, Box<dyn std::error::Error>> {
+) -> Result<DelegatedRequest, Box<dyn std::error::Error>> {
     let events_before = live.peer.events().await?.len();
     let schedule_id = live.peer.play_at(&spec).await?;
     let fixture_start_ms = live
@@ -2723,14 +2919,14 @@ async fn s100_delegated_request(
         .wait_for_timeline(
             Duration::from_secs(60),
             &format!("{label} fixture_start"),
-            |t| s100_fixture_start(t, schedule_id).map(|e| e.t_ms),
+            |t| fixture_start_entry(t, schedule_id).map(|e| e.t_ms),
         )
         .await?;
     live.peer
         .wait_for_timeline(
             Duration::from_secs(30),
             &format!("{label} fixture_end"),
-            |t| s100_fixture_end(t, schedule_id).map(|_| ()),
+            |t| fixture_end_entry(t, schedule_id).map(|_| ()),
         )
         .await?;
     let delegation_created_ms = match live
@@ -2738,7 +2934,7 @@ async fn s100_delegated_request(
         .wait_for_timeline(
             Duration::from_secs(60),
             &format!("{label} delegation_created (client delegation)"),
-            |t| s100_find(t, TimelineKind::DelegationCreated, fixture_start_ms).map(|e| e.t_ms),
+            |t| timeline_find(t, TimelineKind::DelegationCreated, fixture_start_ms).map(|e| e.t_ms),
         )
         .await
     {
@@ -2748,7 +2944,7 @@ async fn s100_delegated_request(
             // natively, stayed silent, or delegated elsewhere.
             let (packets_sent, now_ms) = live.peer.uplink().await?;
             println!(
-                "GPT_LIVE_S100_UPLINK_AT_FAILURE packets_sent={packets_sent} browser_now_ms={now_ms} expected_packets_since_t0={}",
+                "GPT_LIVE_{scenario}_UPLINK_AT_FAILURE packets_sent={packets_sent} browser_now_ms={now_ms} expected_packets_since_t0={}",
                 now_ms / 20
             );
             let events = live.peer.events().await?;
@@ -2774,14 +2970,14 @@ async fn s100_delegated_request(
             .into());
         }
     };
-    let executor_done_at_ms = s100_wait_executor(live, seen_executor_turns, started).await?;
+    let executor_done_at_ms = wait_executor_turn(live, seen_executor_turns, started).await?;
     let commentary_ms = live
         .peer
         .wait_for_timeline(
             Duration::from_secs(60),
             &format!("{label} commentary_appended after delegation_created"),
             |t| {
-                s100_find(t, TimelineKind::CommentaryAppended, delegation_created_ms)
+                timeline_find(t, TimelineKind::CommentaryAppended, delegation_created_ms)
                     .map(|e| e.t_ms)
             },
         )
@@ -2818,11 +3014,11 @@ async fn s100_delegated_request(
     let timing = live
         .peer
         .wait_for_timeline(Duration::from_secs(5), &format!("{label} timing"), |t| {
-            S100Turn::from_timeline(t, schedule_id)
+            SpokenTurn::from_timeline(t, schedule_id)
         })
         .await?;
     println!(
-        "GPT_LIVE_S100_REQUEST label={label} fixture_start_ms={fixture_start_ms} input_final_to_ack_audio_ms={:?} input_final_to_delegation_ms={:?} input_final_to_commentary_event_ms={:?} input_final_to_commentary_audio_ms={:?} executor_done_at_ms={executor_done_at_ms} heard={:?}",
+        "GPT_LIVE_{scenario}_REQUEST label={label} fixture_start_ms={fixture_start_ms} input_final_to_ack_audio_ms={:?} input_final_to_delegation_ms={:?} input_final_to_commentary_event_ms={:?} input_final_to_commentary_audio_ms={:?} executor_done_at_ms={executor_done_at_ms} heard={:?}",
         timing.input_final_to_audio_ms(),
         timing
             .input_final_ms
@@ -2835,7 +3031,7 @@ async fn s100_delegated_request(
             .map(|f| commentary_audio_ms as i64 - f as i64),
         timing.input_text
     );
-    Ok(S100Request {
+    Ok(DelegatedRequest {
         fixture_start_ms,
         commentary_audio_ms,
         executor_done_at_ms,
@@ -2847,17 +3043,17 @@ async fn s100_delegated_request(
 
 /// Wait for the assistant to fall quiet after the commentary readout began,
 /// then return the answer window's transcript for this request.
-async fn s100_answer_window(
+async fn answer_window(
     live: &mut PublicLiveHarness,
     label: &str,
-    request: &S100Request,
+    request: &DelegatedRequest,
 ) -> Result<String, Box<dyn std::error::Error>> {
     live.peer
         .wait_for_timeline(
             Duration::from_secs(60),
             &format!("{label} assistant_audio_end after the commentary readout"),
             |t| {
-                s100_find(
+                timeline_find(
                     t,
                     TimelineKind::AssistantAudioEnd,
                     request.commentary_audio_ms,
@@ -2940,6 +3136,8 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
              exact file name; when asked to read headings, say the heading text verbatim."
                 .to_owned(),
         ]),
+        extra_members: Vec::new(),
+        instructions_preface: None,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -2995,9 +3193,10 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
 
         // (b) Request 1: notes folder, plan file, name it back.
         evidence.stage(EvidenceStage::StandupOpen)?;
-        let request1 = s100_delegated_request(
+        let request1 = delegated_request(
             &mut live,
             started,
+            "S100",
             "request 1 (standup_notes)",
             PlayAt::new("standup_notes", Anchor::Now, 0),
             None,
@@ -3026,7 +3225,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                 )
             })?;
         live.record_time_to_talk("S100", &mut tolerant_failures).await?;
-        let answer1 = s100_answer_window(&mut live, "request 1", &request1).await?;
+        let answer1 = answer_window(&mut live, "request 1", &request1).await?;
         evidence.record(EvidenceRecord::Latency {
             channel,
             turn: 1,
@@ -3040,12 +3239,12 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             .to_owned();
         // Spoken numerals are transcribed as words ("twenty twenty six"), so
         // the check is on the file stem's alphabetic words.
-        let stem_words: Vec<String> = s100_normalize(&plan_stem)
+        let stem_words: Vec<String> = normalize_words(&plan_stem)
             .split(' ')
             .filter(|word| word.len() >= 3 && word.chars().all(char::is_alphabetic))
             .map(str::to_owned)
             .collect();
-        let normalized_answer1 = s100_normalize(&answer1);
+        let normalized_answer1 = normalize_words(&answer1);
         record_tolerant(
             &evidence,
             channel,
@@ -3059,9 +3258,10 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         // Request 2 at assistant_quiet + 300 ms: "that file" resolves through
         // the previous exchange; the barge-in lands 600 ms into the readout.
         evidence.stage(EvidenceStage::StandupDelegation)?;
-        let request2 = s100_delegated_request(
+        let request2 = delegated_request(
             &mut live,
             started,
+            "S100",
             "request 2 (standup_testing)",
             PlayAt::new("standup_testing", Anchor::AssistantQuiet, S100_FOLLOW_UP_GAP_MS)
                 .quiet_ms(1200)
@@ -3097,12 +3297,12 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         let timeline = live
             .peer
             .wait_for_timeline(Duration::from_secs(45), "barge-in fixture_end (standup_barge_in)", |t| {
-                s100_fixture_end(t, barge_in).map(|_| t.to_vec())
+                fixture_end_entry(t, barge_in).map(|_| t.to_vec())
             })
             .await?;
-        let barge_in_end = s100_fixture_end(&timeline, barge_in).ok_or("barge-in fixture_end")?;
+        let barge_in_end = fixture_end_entry(&timeline, barge_in).ok_or("barge-in fixture_end")?;
         let overlap_ms = barge_in_end.detail_u64("overlap_ms").unwrap_or(0);
-        let barge_in_start_ms = s100_fixture_start(&timeline, barge_in)
+        let barge_in_start_ms = fixture_start_entry(&timeline, barge_in)
             .map(|e| e.t_ms)
             .ok_or("barge-in fixture_start")?;
         let timeline = live
@@ -3111,13 +3311,13 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                 Duration::from_secs(45),
                 "barge-in input_final then a re-issued assistant_audio_start and assistant_audio_end",
                 |t| {
-                    let input_final = s100_find(t, TimelineKind::InputFinal, barge_in_start_ms)?;
-                    let restart = s100_find(t, TimelineKind::AssistantAudioStart, input_final.t_ms)?;
-                    s100_find(t, TimelineKind::AssistantAudioEnd, restart.t_ms).map(|_| t.to_vec())
+                    let input_final = timeline_find(t, TimelineKind::InputFinal, barge_in_start_ms)?;
+                    let restart = timeline_find(t, TimelineKind::AssistantAudioStart, input_final.t_ms)?;
+                    timeline_find(t, TimelineKind::AssistantAudioEnd, restart.t_ms).map(|_| t.to_vec())
                 },
             )
             .await?;
-        let barge_in_timing = S100Turn::from_timeline(&timeline, barge_in).ok_or("barge-in timing")?;
+        let barge_in_timing = SpokenTurn::from_timeline(&timeline, barge_in).ok_or("barge-in timing")?;
         let assistant_quiet_after_barge_in_ms = timeline
             .iter()
             .filter(|e| e.kind == TimelineKind::AssistantAudioEnd && e.t_ms >= barge_in_start_ms)
@@ -3184,9 +3384,10 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
 
         // Request 3 at assistant_quiet + 300 ms: read the headings back.
         evidence.stage(EvidenceStage::StandupReadback)?;
-        let request3 = s100_delegated_request(
+        let request3 = delegated_request(
             &mut live,
             started,
+            "S100",
             "request 3 (standup_headings)",
             PlayAt::new("standup_headings", Anchor::AssistantQuiet, S100_FOLLOW_UP_GAP_MS)
                 .quiet_ms(1200)
@@ -3195,7 +3396,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             &mut seen_executor_turns,
         )
         .await?;
-        let answer3 = s100_answer_window(&mut live, "request 3", &request3).await?;
+        let answer3 = answer_window(&mut live, "request 3", &request3).await?;
         evidence.record(EvidenceRecord::Latency {
             channel,
             turn: 4,
@@ -3225,7 +3426,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         let goodbye_start = live
             .peer
             .wait_for_timeline(Duration::from_secs(60), "goodbye fixture_start (standup_close)", |t| {
-                s100_fixture_start(t, goodbye).map(|e| e.t_ms)
+                fixture_start_entry(t, goodbye).map(|e| e.t_ms)
             })
             .await?;
         let timeline = live
@@ -3234,13 +3435,13 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                 Duration::from_secs(45),
                 "goodbye input_final then assistant_audio_start and assistant_audio_end",
                 |t| {
-                    let input_final = s100_find(t, TimelineKind::InputFinal, goodbye_start)?;
-                    let start = s100_find(t, TimelineKind::AssistantAudioStart, input_final.t_ms)?;
-                    s100_find(t, TimelineKind::AssistantAudioEnd, start.t_ms).map(|_| t.to_vec())
+                    let input_final = timeline_find(t, TimelineKind::InputFinal, goodbye_start)?;
+                    let start = timeline_find(t, TimelineKind::AssistantAudioStart, input_final.t_ms)?;
+                    timeline_find(t, TimelineKind::AssistantAudioEnd, start.t_ms).map(|_| t.to_vec())
                 },
             )
             .await?;
-        let goodbye_timing = S100Turn::from_timeline(&timeline, goodbye).ok_or("goodbye timing")?;
+        let goodbye_timing = SpokenTurn::from_timeline(&timeline, goodbye).ok_or("goodbye timing")?;
         evidence.record(EvidenceRecord::Latency {
             channel,
             turn: 5,
@@ -3257,74 +3458,8 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
 
         evidence.stage(EvidenceStage::Closing)?;
         live.record_uplink("S100").await?;
-        evidence.channel(channel, evidence::ChannelAction::CloseRequested)?;
-        let disconnect_started = Instant::now();
-        let disconnected = live.peer.disconnect(DisconnectMode::Graceful).await?;
-        println!("GPT_LIVE_S100_DISCONNECT {disconnected}");
-        let (shared, exact) = live.shared()?;
-        let custody_closed = |shared: &SharedPublicLive, exact: &ExactChannel| {
-            let member_host = shared.member_host.clone();
-            let id = exact.id.clone();
-            let receipt = exact.pending_receipt.clone();
-            async move {
-                member_host
-                    .validate_experimental_live_channel_custody(&id, &receipt)
-                    .await
-                    .map(|custody| custody.phase() == &ExperimentalLiveChannelPhaseStatus::Closed)
-            }
-        };
-        // Give the host a moment to notice the peer went away on its own.
-        let mut converged_before_host_close = false;
-        while disconnect_started.elapsed() < Duration::from_secs(5) {
-            if custody_closed(shared, exact).await? {
-                converged_before_host_close = true;
-                break;
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-        if !converged_before_host_close {
-            let remaining = S100_CLOSE_CONVERGENCE_BOUND.saturating_sub(disconnect_started.elapsed());
-            match timeout(
-                remaining,
-                shared.member_host.close_experimental_live_active_channel(
-                    shared.authority.as_ref(),
-                    &exact.id,
-                    &exact.activation_receipt,
-                ),
-            )
-            .await
-            {
-                Ok(Ok(status)) => assert_eq!(status, LiveCloseStatus::Closed),
-                Ok(Err(error)) => {
-                    if !custody_closed(shared, exact).await? {
-                        return Err(format!("host close after client disconnect failed: {error}").into());
-                    }
-                }
-                Err(_) => {
-                    return Err(format!(
-                        "host close did not return within the {} s convergence bound",
-                        S100_CLOSE_CONVERGENCE_BOUND.as_secs()
-                    )
-                    .into());
-                }
-            }
-        }
-        while !custody_closed(shared, exact).await? {
-            if disconnect_started.elapsed() >= S100_CLOSE_CONVERGENCE_BOUND {
-                return Err("channel custody did not converge to Closed within 20 s of the client disconnect".into());
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-        let close_ms = u64::try_from(disconnect_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        evidence.channel(channel, evidence::ChannelAction::Closed)?;
-        evidence.record(EvidenceRecord::CloseConvergence {
-            channel,
-            converged_before_host_close,
-            ms: close_ms,
-        })?;
-        println!(
-            "GPT_LIVE_S100_CLOSE converged_before_host_close={converged_before_host_close} ms={close_ms}"
-        );
+        let close = graceful_close(&mut live, &evidence, channel, "S100").await?;
+        let close_ms = close.ms;
 
         // Canonical transcript at close. The executor is the same session as
         // the voice channel, so its history holds three kinds of user rows:
@@ -3338,7 +3473,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         let requests = [&request1, &request2, &request3];
         let spoken_inputs: Vec<String> = requests
             .iter()
-            .map(|r| s100_normalize(&r.timing.input_text))
+            .map(|r| normalize_words(&r.timing.input_text))
             .collect();
         let exchanges = 1 + requests.len() + 2; // seed, requests, barge-in, goodbye
         let history_deadline = Instant::now() + Duration::from_secs(20);
@@ -3397,23 +3532,16 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         // entries between each request's fixture start and the next fixture
         // start (the barge-in and goodbye windows are reported, not gated).
         let timeline = live.peer.timeline().await?;
-        let mut starts: Vec<(&str, u64)> = vec![
-            ("request 1", request1.fixture_start_ms),
-            ("request 2", request2.fixture_start_ms),
-            ("barge-in", barge_in_start_ms),
-            ("request 3", request3.fixture_start_ms),
-            ("goodbye", goodbye_start),
-        ];
-        starts.sort_by_key(|(_, t)| *t);
-        let mut delegations_per_window = Vec::new();
-        for (index, (label, start)) in starts.iter().enumerate() {
-            let end = starts.get(index + 1).map_or(u64::MAX, |(_, t)| *t);
-            let count = timeline
-                .iter()
-                .filter(|e| e.kind == TimelineKind::DelegationCreated && e.t_ms >= *start && e.t_ms < end)
-                .count();
-            delegations_per_window.push((*label, count));
-        }
+        let delegations_per_window = delegations_per_window(
+            &timeline,
+            &[
+                ("request 1", request1.fixture_start_ms),
+                ("request 2", request2.fixture_start_ms),
+                ("barge-in", barge_in_start_ms),
+                ("request 3", request3.fixture_start_ms),
+                ("goodbye", goodbye_start),
+            ],
+        );
         println!("GPT_LIVE_S100_DELEGATIONS per_window={delegations_per_window:?}");
         for (label, count) in &delegations_per_window {
             if label.starts_with("request") && *count != 1 {
@@ -3481,6 +3609,309 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         if !deterministic_failures.is_empty() {
             return Err(format!(
                 "S100 deterministic checks failed:\n  - {}",
+                deterministic_failures.join("\n  - ")
+            )
+            .into());
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+    let browser_flush = live.peer.stop_evidence().await;
+    let outcome = if result.is_ok() && browser_flush.is_ok() {
+        evidence.stage(EvidenceStage::Finished)?;
+        evidence::Outcome::Passed
+    } else {
+        evidence::Outcome::Failed
+    };
+    let retained = evidence.finish(outcome);
+    live.peer.close().await;
+    live.server_task.abort();
+    retained?;
+    browser_flush?;
+    result
+}
+
+// ===========================================================================
+// Scenario 102: who are you (capabilities, roster, ask another member)
+// ===========================================================================
+
+/// Planted second member and its planted tool: test oracles the roster
+/// preface carries and the answer windows are checked for.
+const S102_MEMBER: &str = "analyst-pemberton";
+const S102_MEMBER_TOKEN: &str = "pemberton";
+const S102_TOOL: &str = "tide_ledger";
+
+/// Test-owned host knowledge for the public session instructions: the
+/// backing member, its peers, and their tools. Records every resolution so
+/// the scenario can assert the preface was resolved once, for the right
+/// session, before the channel connected.
+struct RosterPreface {
+    text: String,
+    resolved: std::sync::Mutex<Vec<(meerkat_core::SessionId, Instant)>>,
+}
+
+#[async_trait::async_trait]
+impl meerkat::experimental_gpt_live::PublicGptLiveInstructionsPreface for RosterPreface {
+    async fn preface(&self, session_id: &meerkat_core::SessionId) -> Option<String> {
+        if let Ok(mut resolved) = self.resolved.lock() {
+            resolved.push((session_id.clone(), Instant::now()));
+        }
+        Some(self.text.clone())
+    }
+}
+
+/// Scenario 102: the user asks what the assistant can do, who else is
+/// around, and then to ask them something.
+///
+/// Deterministic: the roster preface is resolved exactly once, for the
+/// executor's canonical session, before the channel connects; the first two
+/// answers produce no delegation; the third produces exactly one, completed
+/// by the existing member with a commentary readout; the close converges.
+/// Tolerant: the second answer window names the planted member; the first
+/// answer window mentions files or the shell (the executor's tools from the
+/// preface); open request -> connected under 5 s.
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_102_gpt_live_public_who_are_you() -> Result<(), Box<dyn std::error::Error>> {
+    let evidence = Journal::create_for("S102", S102_MEMBER_TOKEN.to_owned())?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = timeout(
+        Duration::from_secs(600),
+        run_s102_who_are_you(evidence.clone()),
+    )
+    .await;
+    evidence.finish(match &result {
+        Ok(Ok(())) => evidence::Outcome::Passed,
+        Ok(Err(_)) => evidence::Outcome::Failed,
+        Err(_) => evidence::Outcome::TimedOut,
+    })?;
+    result.map_err(|_| "S102 overall deadline expired")?
+}
+
+async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+        )
+        .with_test_writer()
+        .try_init();
+    require_api_key()?;
+    let started = Instant::now();
+    evidence.stage(EvidenceStage::Opening)?;
+    let preface = Arc::new(RosterPreface {
+        text: format!(
+            "Backing agent roster for this session. You speak for the mob member voice-executor \
+             (tools: shell, file reads and writes in its workspace, comms messaging to other members). \
+             The other member in this mob is {S102_MEMBER} (tools: {S102_TOOL}, comms). \
+             When the user asks what you can do, describe these capabilities briefly in your own words. \
+             When the user asks who else is around, name {S102_MEMBER}. \
+             When the user asks you to ask another member something, delegate it to your executor."
+        ),
+        resolved: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut live = open_public_live_with(PublicLiveOpen {
+        temp_prefix: "gpt-live-public-whoareyou-e2e-",
+        operator_principal: "scenario-102-operator",
+        execution_policy: LiveDelegationExecutionPolicy::ExistingMember,
+        bootstrap: None,
+        seed_prompt: None,
+        evidence: Some(evidence.clone()),
+        unmeasured_playback: true,
+        executor_instructions: Some(vec![format!(
+            "You are the executor behind a voice assistant in a mob with another member named {S102_MEMBER}. \
+             When asked to ask them something, send them exactly one request with the comms send_request tool \
+             and wait for the reply; if no reply arrives within the tool's timeout, say so. \
+             Answer in one or two short spoken sentences, quoting their answer if you got one."
+        )]),
+        extra_members: vec![ExtraMember {
+            identity: S102_MEMBER,
+            instructions: format!(
+                "You are {S102_MEMBER}, an analyst in this mob. Your special tool is called {S102_TOOL} \
+                 (it is described here only; do not call tools). When another member asks what time \
+                 you think it is, reply over comms with one short sentence giving the current UTC hour \
+                 and mention {S102_TOOL}."
+            ),
+        }],
+        instructions_preface: Some(preface.clone()),
+    })
+    .await?;
+    let connected_ms = started.elapsed().as_millis();
+    let _server_guard = AbortScenarioServer(live.server_task.clone());
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let channel = evidence.current_channel()?;
+    let mut tolerant_failures = Vec::new();
+    let mut seen_executor_turns = std::collections::BTreeSet::new();
+    let result = async {
+        evidence.stage(EvidenceStage::Connected)?;
+        live.assert_existing_text_identity().await?;
+
+        // Preface: resolved once, for the right session, before connect.
+        let resolutions = preface
+            .resolved
+            .lock()
+            .map(|r| r.clone())
+            .map_err(|_| "preface record poisoned")?;
+        let answer_delivered_at = live.shared()?.1.marks.answer_delivered_at;
+        println!(
+            "GPT_LIVE_S102_PREFACE resolutions={} session_match={} before_connect={}",
+            resolutions.len(),
+            resolutions.iter().all(|(id, _)| id == &live.session_id),
+            resolutions.iter().all(|(_, at)| *at <= answer_delivered_at)
+        );
+        assert_eq!(resolutions.len(), 1, "the roster preface must be resolved exactly once per open");
+        assert_eq!(resolutions[0].0, live.session_id, "the preface must be resolved for the executor's canonical session");
+        assert!(resolutions[0].1 <= answer_delivered_at, "the preface must be resolved before the channel connects");
+        let owner = evidence.owner_appends()?;
+        println!(
+            "GPT_LIVE_S102_OWNER_APPENDS instructions_attempts={} thinking_attempts={} framed_summaries={}",
+            owner.instructions_attempts, owner.thinking_attempts, owner.framed_summaries
+        );
+
+        // Q1: capabilities, native.
+        evidence.stage(EvidenceStage::WhoAreYouCapabilities)?;
+        let (q1, answer1, _, q1_start) = native_question(
+            &mut live,
+            "S102",
+            "question 1 (whoareyou_capabilities)",
+            PlayAt::new("whoareyou_capabilities", Anchor::Now, 0),
+        )
+        .await?;
+        live.record_time_to_talk("S102", &mut tolerant_failures).await?;
+        evidence.record(EvidenceRecord::Latency {
+            channel,
+            turn: 1,
+            input_final_to_audio_ms: q1.input_final_to_audio_ms(),
+            speech_end_to_audio_ms: q1.speech_end_to_audio_ms(),
+        })?;
+        let lower1 = answer1.to_lowercase();
+        record_tolerant(
+            &evidence,
+            channel,
+            "S102",
+            "answer_1_mentions_executor_tools",
+            lower1.contains("file") || lower1.contains("shell") || lower1.contains("command"),
+            format!("answer={:?}", answer1.trim()),
+            &mut tolerant_failures,
+        )?;
+
+        // Q2: roster, native; the planted member token is the oracle.
+        evidence.stage(EvidenceStage::WhoAreYouRoster)?;
+        let (q2, answer2, _, q2_start) = native_question(
+            &mut live,
+            "S102",
+            "question 2 (whoareyou_roster)",
+            PlayAt::new("whoareyou_roster", Anchor::AssistantQuiet, 300)
+                .quiet_ms(1200)
+                .require_speech(false),
+        )
+        .await?;
+        evidence.record(EvidenceRecord::Latency {
+            channel,
+            turn: 2,
+            input_final_to_audio_ms: q2.input_final_to_audio_ms(),
+            speech_end_to_audio_ms: q2.speech_end_to_audio_ms(),
+        })?;
+        record_tolerant(
+            &evidence,
+            channel,
+            "S102",
+            "answer_2_names_planted_member",
+            answer2.to_lowercase().contains(S102_MEMBER_TOKEN),
+            format!("token={S102_MEMBER_TOKEN:?} answer={:?}", answer2.trim()),
+            &mut tolerant_failures,
+        )?;
+
+        // Q3: ask them, delegated.
+        evidence.stage(EvidenceStage::WhoAreYouAsk)?;
+        let request3 = delegated_request(
+            &mut live,
+            started,
+            "S102",
+            "question 3 (whoareyou_ask)",
+            PlayAt::new("whoareyou_ask", Anchor::AssistantQuiet, 300)
+                .quiet_ms(1200)
+                .require_speech(false),
+            None,
+            &mut seen_executor_turns,
+        )
+        .await?;
+        let answer3 = answer_window(&mut live, "question 3", &request3).await?;
+        evidence.record(EvidenceRecord::Latency {
+            channel,
+            turn: 3,
+            input_final_to_audio_ms: request3.timing.input_final_to_audio_ms(),
+            speech_end_to_audio_ms: request3.timing.speech_end_to_audio_ms(),
+        })?;
+        println!("GPT_LIVE_S102_ANSWER3 answer={:?}", answer3.trim());
+        record_tolerant(
+            &evidence,
+            channel,
+            "S102",
+            "answer_3_relays_member_or_time",
+            {
+                let lower = answer3.to_lowercase();
+                lower.contains(S102_MEMBER_TOKEN)
+                    || lower.contains("utc")
+                    || lower.contains("o'clock")
+                    || lower.contains(" time")
+                    || lower.contains(S102_TOOL.replace('_', " ").as_str())
+            },
+            format!("answer={:?}", answer3.trim()),
+            &mut tolerant_failures,
+        )?;
+
+        evidence.stage(EvidenceStage::Closing)?;
+        live.record_uplink("S102").await?;
+        let close = graceful_close(&mut live, &evidence, channel, "S102").await?;
+
+        let timeline = live.peer.timeline().await?;
+        let per_window = delegations_per_window(
+            &timeline,
+            &[
+                ("question 1", q1_start),
+                ("question 2", q2_start),
+                ("question 3", request3.fixture_start_ms),
+            ],
+        );
+        println!("GPT_LIVE_S102_DELEGATIONS per_window={per_window:?}");
+        let mut deterministic_failures = Vec::new();
+        for (label, count) in &per_window {
+            let expected = usize::from(label == "question 3");
+            if *count != expected {
+                deterministic_failures.push(format!(
+                    "{label} produced {count} client delegations ({expected} required); per window: {per_window:?}"
+                ));
+            }
+        }
+        let report = live.peer.energy().await?;
+        evidence.record(EvidenceRecord::Energy {
+            channel,
+            windows: report.downsampled_windows(3000),
+        })?;
+        evidence.record(EvidenceRecord::Timeline {
+            channel,
+            entries: timeline.clone(),
+        })?;
+        let mut faults = evidence.faults()?;
+        faults.extend(live.peer.faults().await?);
+        if !faults.is_empty() {
+            deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
+        }
+        println!(
+            "GPT_LIVE_S102_OK total_ms={} connected_ms={connected_ms} q1_ms={:?} q2_ms={:?} q3_ms={:?} q3_commentary_ms={:?} executor_done_at_ms={} close_ms={} close_converged_before_host_close={} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            started.elapsed().as_millis(),
+            q1.input_final_to_audio_ms(),
+            q2.input_final_to_audio_ms(),
+            request3.timing.input_final_to_audio_ms(),
+            request3.timing.input_final_ms.map(|f| request3.commentary_audio_ms as i64 - f as i64),
+            request3.executor_done_at_ms,
+            close.ms,
+            close.converged_before_host_close
+        );
+        println!("GPT_LIVE_S102_TIMELINE\n{}", format_timeline(&timeline));
+        if !deterministic_failures.is_empty() {
+            return Err(format!(
+                "S102 deterministic checks failed:\n  - {}",
                 deterministic_failures.join("\n  - ")
             )
             .into());

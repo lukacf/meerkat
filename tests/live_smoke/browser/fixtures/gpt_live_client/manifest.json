@@ -144,6 +144,39 @@
       "sample_rate_hz": 24000,
       "trailing_silence_ms": 1657,
       "notes": "S100 turn 4 after quiet, followed by a graceful client-side disconnect and host close. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, coral), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "whoareyou_capabilities",
+      "file": "whoareyou-capabilities.wav",
+      "voice": "sage",
+      "text": "So, um, what can you actually do for me in here?",
+      "sha256": "738bacd2f9c3cb1b236082b562293e2d352a63e65bc0e01fc6fdb796c3d60b19",
+      "duration_ms": 4552,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S102 question 1 right after connect: answered natively from the session instructions and roster preface, no delegation. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, sage), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "whoareyou_roster",
+      "file": "whoareyou-roster.wav",
+      "voice": "sage",
+      "text": "And who else is around?",
+      "sha256": "90f16462be9c71e22febd40986e526d5bb3d39c9542fe3036f19a0363d768f8d",
+      "duration_ms": 3119,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S102 question 2 at assistant_quiet+300 ms: the answer window should name the planted second member (test oracle on a planted token). Minted with `voice_fixtures mint` (gpt-4o-mini-tts, sage), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "whoareyou_ask",
+      "file": "whoareyou-ask.wav",
+      "voice": "sage",
+      "text": "Okay, ask them what time they think it is.",
+      "sha256": "eb490d0df198f77cc2a3803c0c32794dde3abc602ef4b0495a09c48e835f2b0c",
+      "duration_ms": 4917,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S102 question 3 at assistant_quiet+300 ms: exactly one client delegation; the executor relays the question to the other member over comms. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, sage), VAD-normalised, 1500 ms trailing-silence floor."
     }
   ]
 }

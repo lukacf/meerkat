@@ -41,6 +41,10 @@ pub enum Stage {
     StandupBargeIn,
     StandupReadback,
     StandupFarewell,
+    // S102 who are you.
+    WhoAreYouCapabilities,
+    WhoAreYouRoster,
+    WhoAreYouAsk,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

@@ -945,6 +945,7 @@ rust_test(
         "required-feature",
     ],
     data = [
+        ":package_runfiles",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
     ],

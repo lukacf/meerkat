@@ -47,7 +47,10 @@ may apply explicit presets of their own.
 | `skill_invoke_function` | Skills | No | `skills` + explicit tool policy | Invoke a skill-defined function |
 | `tool_catalog_search` | Control plane | Adaptive | exact deferred catalog | Search deferred tool-catalog entries |
 | `tool_catalog_load` | Control plane | Adaptive | exact deferred catalog | Stage deferred tool-catalog entries for visibility |
+| `brain_swap` | Model routing | Conditional | realization host + multiple reachable models + tool policy | Stage a model switch for a later input |
 | `delegate` | Mob | Yes | `mob` + generated authority | Run one bounded helper task in an implicit mob |
+| `fork_off` | Mob | Yes | `mob` + generated authority | Run a bounded task in a durable transcript-forked member |
+| `council` | Mob | Yes | `mob` + generated authority | Convene a bounded temporary council forked from existing members |
 | `conclude_objective` | Mob | Yes | `mob` + kickoff objective | Conclude the pre-addressed kickoff objective |
 | `mob_create` | Mob | Yes | `mob` + generated authority | Create an explicit mob |
 | `mob_destroy` | Mob | Yes | `mob` + mob scope | Destroy an explicit mob |
@@ -213,13 +216,23 @@ Servers being removed transition through `Active → Removing (draining) → Rem
 Mob flow steps can restrict tools for a single turn via `TurnToolOverlay`:
 
 ```rust
-TurnToolOverlay {
-    allowed_tools: Option<Vec<String>>,  // allow-list for this turn
-    blocked_tools: Option<Vec<String>>,  // deny-list for this turn
-}
+let overlay = TurnToolOverlay {
+    allowed_tools: Some(vec!["shell".into()]),
+    blocked_tools: Some(vec!["task_create".into()]),
+    ..Default::default()
+};
 ```
 
-Set on `StartTurnRequest.turn_tool_overlay` by the flow engine and other per-turn producers. Ephemeral — cleared after the turn completes. Composes with the external filter using most-restrictive semantics.
+The native allow/deny fields are `Option<Vec<ToolName>>`; `.into()` converts
+the names above. The default supplies an empty host-only `dispatch_context`.
+Set the overlay on `StartTurnRequest.runtime.turn_tool_overlay` by the flow
+engine or another trusted per-turn producer. It is ephemeral — cleared after
+the turn completes — and composes with the external filter using
+most-restrictive semantics.
+
+Public wire requests use the caller-safe `PublicTurnToolOverlay` shape:
+`allowed_tools` and `blocked_tools` contain string names. They do not accept
+the internal `dispatch_context` field.
 
 **Source:** `meerkat-core/src/service/mod.rs`, `meerkat-mob/src/runtime/flow.rs`
 </Accordion>
@@ -273,10 +286,29 @@ effect at the next boundary, not during the current tool call.
 `meerkat-core/src/tool_catalog.rs`
 </Accordion>
 
+## Model-switch tool
+
+`brain_swap` is available only when the host can realize committed model
+handoffs, more than one distinct model is reachable, and tool policy permits
+it. Its required `target_model` argument selects from that reachable set.
+
+The tool returns `staged` or `already_staged`; it does not change the model
+during the current run. A clean run completion commits the request, which the
+runtime attempts to realize before processing the next input. Failed,
+interrupted, or hook-denied runs do not commit the switch, and later
+realization can still be denied or held. A staging result is not proof that
+the model has changed.
+
+**Source:** `meerkat-tools/src/builtin/brain_swap.rs`,
+`meerkat-tools/src/builtin/composite.rs`,
+`meerkat-core/src/agent/state.rs`, `meerkat-runtime/src/service_ext.rs`
+
 ## Mob tools
 
 `AgentMobToolSurface` is composed only for sessions with generated MobMachine
-authority. It always defines the 11 core tools in the inventory above. Realm
+authority. It defines the 13 core tools in the inventory above, including
+`fork_off` for durable transcript-forked work and `council` for bounded
+discussion among temporary forks of existing members. Realm
 profile storage adds five profile CRUD tools; a parent-owned snapshot provider
 also adds `mob_profile_list_sources`. Admission is then checked again at each
 dispatch against the current typed mob, spawn, profile-mutation, or objective
@@ -828,14 +860,14 @@ Get the current date and time. Returns ISO 8601 formatted datetime and Unix time
 
 ```json
 {
-  "iso8601": "2025-01-15T14:30:00+01:00",
+  "iso8601": "2025-01-15T14:30:00+00:00",
   "date": "2025-01-15",
   "time": "14:30:00",
-  "timezone": "+01:00",
-  "unix_timestamp": 1736949000,
-  "year": 2025,
-  "month": 1,
-  "day": 15,
+  "timezone": "UTC",
+  "unix_timestamp": 1736951400,
+  "year": "2025",
+  "month": "01",
+  "day": "15",
   "weekday": "Wednesday"
 }
 ```

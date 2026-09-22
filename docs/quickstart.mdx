@@ -107,13 +107,19 @@ model explicitly or configure a binding `default_model` when needed.
   </Tab>
   <Tab title="Python">
     ```python
+    import asyncio
     from meerkat import MeerkatClient
 
-    async with MeerkatClient() as client:
-        session = await client.create_session(
-            "What is the capital of France? Answer in one sentence."
-        )
-        print(session.text)
+
+    async def main():
+        async with MeerkatClient() as client:
+            session = await client.create_session(
+                "What is the capital of France? Answer in one sentence."
+            )
+            print(session.text)
+
+
+    asyncio.run(main())
     ```
   </Tab>
   <Tab title="TypeScript">
@@ -146,8 +152,21 @@ rkat-rpc --state-root /srv/meerkat/realms --realm team-alpha
 ```
 
 ```python
-client = MeerkatClient()
-await client.connect(realm_id="team-alpha", state_root="/srv/meerkat/realms")
+import asyncio
+from meerkat import MeerkatClient
+
+
+async def main():
+    client = MeerkatClient()
+    try:
+        await client.connect(realm_id="team-alpha", state_root="/srv/meerkat/realms")
+        session = await client.create_session("Draft a release note")
+        print(session.text)
+    finally:
+        await client.close()
+
+
+asyncio.run(main())
 ```
 
 ```typescript

@@ -62,7 +62,9 @@ that branch. Consequences worth stating plainly:
 The council creates a **real** mob whose id is derived deterministically from
 the council id (`council--<council_id>`). That is what makes a retry after a
 crash find the same mob instead of creating a second one, and it is why the
-temporary mob shows up in `rkat mob list` while the council runs.
+temporary mob appears in the same runtime's ordinary mob registry while
+present, observable through the host `mob/list` operation. Observing that mob
+does not add a host or CLI endpoint for invoking a council.
 
 Your `definition_template` is used verbatim apart from its `id`, which is
 replaced with the deterministic council mob id. Every participant's
@@ -130,19 +132,23 @@ status — never an error.
 ## Host Bootstrap
 
 A HOST-owned participant can only be seated once its owning host is bound into
-the temporary mob. The coordinator cannot mint or copy that binding from the
-source mob, because a host binding descriptor carries a one-time ceremony
-token that has already been spent.
+the temporary mob. A descriptor's one-time ceremony token cannot be copied
+from the source mob and reused after it has been spent.
 
-So the caller declares it, and it lives **outside** the request:
+For a host not yet bound to the temporary mob, the coordinator automatically
+asks the source owner for a fresh delegated host-binding descriptor scoped to
+the exact temporary mob id and its supervisor. It then binds that host before
+seating the participant. The source must authorize this handoff; automatic
+orchestration does not bypass source authority.
 
-- it is not fingerprinted, so an honest retry is still a retry rather than a
-  conflicting request, and
-- it is not persisted, so credential-like material never enters the durable
-  council record.
+Callers supply the council request, not a separate bootstrap object.
+Credential-like descriptor and delegated-proof material stays internal and is
+not exposed in results or persisted in the council record.
 
-A replay or a joined caller reuses the owning task's bootstrap and ignores the
-one it presented.
+If descriptor handoff or host binding is refused or fails, the sealed result
+reports a typed `participant_seating_failed` exit reason. Expiry of the
+remaining deadline reports `deadline_exceeded`; neither case fabricates a
+successfully seated participant.
 
 ## Idempotency
 

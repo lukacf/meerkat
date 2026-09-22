@@ -335,6 +335,8 @@ Pass tagged `skill_refs` in API requests to resolve and inject skills for a spec
 
 ```json
 {
+  "jsonrpc": "2.0",
+  "id": 2,
   "method": "turn/start",
   "params": {
     "session_id": "...",
@@ -358,6 +360,8 @@ Pass `preload_skills` to inject skills into the system prompt at session creatio
 
 ```json
 {
+  "jsonrpc": "2.0",
+  "id": 1,
   "method": "session/create",
   "params": {
     "prompt": "Hello!",
@@ -391,7 +395,7 @@ Skill introspection lets you see all skills — including shadowed ones — with
 | REST | `GET /skills` | List skills |
 | MCP | `meerkat_skills` tool (`action: "list"` or `"inspect"`) | List skills or inspect one by typed `skill_key` |
 | Rust SDK | `SkillRuntime::list_all_with_provenance()` | Programmatic access |
-| Rust SDK | `SkillRuntime::load_from_source()` | Load a skill body by typed key (optional source-name filter) |
+| Rust SDK | `SkillRuntime::load_from_source()` | Load a skill body by typed key (optional lineage-aware source UUID selector) |
 
 ### Shadowing
 
@@ -444,8 +448,9 @@ if let Some(runtime) = factory.build_skill_runtime(&config).await? {
         );
     }
 
-    // Load a specific skill's body. The SkillKey already pins the source
-    // UUID; the optional second argument filters by repository *name*.
+    // Load a specific skill's body. The SkillKey pins the source UUID.
+    // In the factory-built runtime, the legacy-named `source_name` argument
+    // accepts a UUID string resolved through lineage, not a display name.
     let key = SkillKey::new(
         SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
         SkillName::parse("task-workflow")?,

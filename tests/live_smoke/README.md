@@ -59,7 +59,7 @@ catalog:
 ```bash
 make e2e-smoke
 make e2e-smoke TEST=e2e_smoke_mob_live_smoke
-make e2e-smoke SCENARIO=62
+make e2e-smoke SCENARIO=16
 make e2e-smoke SUITE=mob-live-smoke
 ```
 
@@ -70,7 +70,7 @@ same harness with nested cargo builds disabled:
 ```bash
 MEERKAT_E2E_EXECUTION_MODE=prebuilt make e2e-smoke
 MEERKAT_E2E_EXECUTION_MODE=prebuilt make e2e-smoke TEST=e2e_smoke_mob_live_smoke
-MEERKAT_E2E_EXECUTION_MODE=prebuilt make e2e-smoke SCENARIO=62
+MEERKAT_E2E_EXECUTION_MODE=prebuilt make e2e-smoke SCENARIO=16
 MEERKAT_E2E_EXECUTION_MODE=prebuilt make e2e-smoke SUITE=mob-live-smoke
 ```
 

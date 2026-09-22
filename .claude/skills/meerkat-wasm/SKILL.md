@@ -47,7 +47,7 @@ mod filesystem_module;
 | Field | Skips | wasm32 default |
 |-------|-------|---------------|
 | `tool_dispatcher_override` | Shell/file/project tool resolution | `CompositeDispatcher::new_wasm()` |
-| `session_store_override` | Feature-flag store creation | No-op store |
+| `session_store_override` | Feature-flag store creation | `StoreAdapter` backed by `meerkat_store::MemoryStore` |
 | `hook_engine_override` | Filesystem hook config | `None` |
 | `skill_engine_override` | Filesystem/git skill resolution | `None` |
 
@@ -88,11 +88,29 @@ runtime-committed session projection behavior.
 ```bash
 # Standalone proxy
 ANTHROPIC_API_KEY=sk-... npx @rkat/web proxy --port 3100
-
-# Or compose into existing Node.js server
-import { createProxyHandler } from '@rkat/web/proxy';
-app.use('/anthropic', createProxyHandler('anthropic'));
 ```
+
+For a server with Fetch-style routing, set `ANTHROPIC_API_KEY` in that server's
+environment. Pass a `Request` and the path with the provider prefix removed,
+then return the resulting `Response`:
+
+```typescript
+import { createProxyHandler } from '@rkat/web/proxy';
+
+const anthropicProxy = createProxyHandler('anthropic');
+
+export function handleRequest(request: Request): Promise<Response> {
+  const { pathname } = new URL(request.url);
+  if (pathname !== '/anthropic' && !pathname.startsWith('/anthropic/')) {
+    return Promise.resolve(new Response('Not found', { status: 404 }));
+  }
+  return anthropicProxy(request, pathname.slice('/anthropic'.length) || '/');
+}
+```
+
+This is not Express middleware. A Node/Express host must adapt its request to
+the Fetch API and stream the returned response back; `startProxy` in
+`sdks/web/proxy/index.mjs` demonstrates that adapter.
 
 WASM client uses per-provider base URLs to point at the proxy natively — no fetch override needed:
 ```typescript
@@ -104,16 +122,25 @@ const runtime = await MeerkatRuntime.init(wasm, {
 
 ### Browser auth model
 
-For OAuth, cloud IAM, or any flow more dynamic than a static global key, use the external auth resolver path. The selected realm binding must use the WASM external-resolver credential source; the agent factory inside the WASM bundle then calls back into the host page via `register_external_auth_resolver` to obtain a typed `ExternalAuthLease` for a given `authBinding`:
+Stock `MeerkatRuntime.init()` and `initFromMobpack()` accept provider keys and
+base URLs, not realm/binding configuration. They synthesize `InlineSecret`
+bindings in the in-memory `global` realm. Use keys or a server-side auth proxy
+with that stock bootstrap; registering a callback does not create a realm or
+convert an `InlineSecret` binding to external auth. Native realm config files
+are not loaded by these browser exports.
+
+The external resolver API is a **custom Rust/WASM composition seam**. To use
+it, the custom bootstrap must supply a binding whose credential source is
+`CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`. Only then
+does the factory call the registered host callback for a typed
+`ExternalAuthLease`. The following is a callback-registration fragment, not
+a runnable external-binding setup for the stock npm bundle:
 
 ```typescript
-import {
-  MeerkatRuntime,
-  registerExternalAuthResolver,
-  withAuthBinding,
-} from '@rkat/web';
+import { registerExternalAuthResolver } from '@rkat/web';
 import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 
+await wasm.default(); // Load the wasm-pack web binary before invoking an export.
 registerExternalAuthResolver(wasm, async (authBinding) => {
   const token = await myHostFetchToken(authBinding);
   return {
@@ -123,28 +150,23 @@ registerExternalAuthResolver(wasm, async (authBinding) => {
     expires_at: token.expiresAt,
   };
 });
-
-const runtime = await MeerkatRuntime.init(wasm, {
-  anthropicApiKey: 'proxy',
-  anthropicBaseUrl: '/proxy/anthropic',
-});
-// withAuthBinding takes (authBinding, config) and returns config with `authBinding` set;
-// you can also set `authBinding` directly on the config object.
-const session = runtime.createSession(withAuthBinding(
-  authBinding,
-  { model: 'claude-sonnet-4-6' },
-));
 ```
+
+Register before building the externally bound session. First runtime
+installation preserves a registration made after loading the binary, but
+replacing an existing runtime clears it; re-register after that bootstrap.
+`withAuthBinding(authBinding, config)` only sets the structural selector on
+the config. It cannot install the binding required by a custom composition.
 
 Notes:
 
 - WASM synthesizes its api-key binding section under the reserved `global` realm (`GLOBAL_REALM_SLUG`) in `meerkat-web-runtime/src/lib.rs`. A session built without an explicit `authBinding` uses `global` as its explicit head; this is a degenerate single-realm chain with no filesystem doc or parent edges. Do not synthesize under any other slug.
 - `authBinding` is structural and supported on `runtime.createSession({...})`, `mob.spawnHelper(...)`, and `mob.forkHelper(...)`. Plain `mob.spawn([...])` specs do not currently carry an auth binding.
 - `mob.spawnHelper(...)` and `mob.forkHelper(...)` options require `resultLabel` and `maxTextBytes` (wire `result_label` / `max_text_bytes`); the helper result carries required `output`, `tokens_used`, `agent_identity`, `member_ref`, `bounded_result`, `session_id`, `usage`, `turns`, and `tool_calls`, plus optional `retirement_error`.
-- `RuntimeConfig` in `@rkat/web` still exposes `apiKey` / `baseUrl` compatibility fields, but the current raw WASM config contract is provider-specific snake_case (`anthropic_api_key` / `openai_api_key` / `gemini_api_key` and matching base URLs). Do not add `apiKey` / `baseUrl` to `SessionConfig`; per-session credentials were removed in 0.6.
+- `RuntimeConfig` uses `anthropicApiKey` / `anthropicBaseUrl`, `openaiApiKey` / `openaiBaseUrl`, and `geminiApiKey` / `geminiBaseUrl`. Raw WASM uses `anthropic_api_key` / `anthropic_base_url`, `openai_api_key` / `openai_base_url`, and `gemini_api_key` / `gemini_base_url`. Generic `apiKey` / `baseUrl` compatibility fields are deleted at both runtime and session boundaries; per-session credentials are not accepted.
 - Use `clearExternalAuthResolver(wasm)` from `@rkat/web`, or pass `JsValue::NULL` / `undefined` to the raw WASM export, to clear the registration.
-- `register_tool_callback` registers promise-returning JS callbacks, while `register_js_tool` registers fire-and-forget tools that immediately return `"acknowledged"`. Both require initialized runtime state; prefer the instance methods after `MeerkatRuntime.init(...)`.
-- `destroy_runtime` zeroes runtime state, sessions, subscriptions, and the resolver — call it on host teardown.
+- `register_tool_callback` registers promise-returning JS callbacks. `register_js_tool` registration is synchronous, but dispatch reports pending detached host work, not completion. The host observes `ToolCallRequested`, performs the action, and reports any actual completion/result through a later session/mob message. Both registrations require initialized runtime state; prefer the instance methods after `MeerkatRuntime.init(...)`.
+- `destroy_runtime` clears subscriptions and the resolver and drops `RuntimeState`, invalidating its browser-local handles. Call it on host teardown; it does not certify durable cleanup or cancel already-dispatched external side effects.
 
 For repository smoke coverage, browser/WASM scenarios are owned by the Rust lane
 harness in `tests/integration/src/e2e_lanes.rs`. Prefer
@@ -181,7 +203,7 @@ BuildBuddy path exposes `scripts/buildbuddy-dev wasm-check` and
 3. **cfg inside async_trait**: May not propagate. Move cfg-gated logic to standalone functions outside the impl.
 4. **Feature unioning**: Workspace `tokio = { features = ["full"] }` pulls mio which fails on wasm32. Each crate needs target-specific deps.
 5. **MobBuilder**: Requires `.allow_ephemeral_sessions(true)` for the embedded ephemeral substrate used in WASM.
-6. **Flow JSON**: Flow engine parses step output as JSON. Prompts must match or use `expected_schema_ref`.
+6. **Flow output format**: Without `output_format` or `expected_schema_ref`, a step defaults to text. With a schema and no explicit format, it defaults to JSON; explicit `output_format` selects the format. Require JSON-compatible output for JSON steps rather than assuming every flow output is JSON.
 
 ## Subsystem Availability on wasm32
 

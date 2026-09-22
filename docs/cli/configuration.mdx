@@ -36,8 +36,10 @@ they dispatch before runtime-scope resolution. `rkat mob host` also rejects
 | `rkat-mcp` | New opaque realm (`realm-...`) |
 
 If you want CLI + RPC to share the same state, pass both the same explicit
-`--realm` and the same `--state-root`, or launch the server with a matching
-`--context-root` so both surfaces resolve the same project-local root.
+`--realm` and the same `--state-root`, resolving to the same physical store
+and provider. A matching server `--context-root` assists project-local
+candidate discovery; it does not select the CLI's realm identity or guarantee
+the same root. Without `--realm`, RPC still creates an isolated realm.
 
 For CLI commands, the default invocation context is the current directory. The
 project-local state root is `<project-root>/.rkat/realms`, where the project
@@ -91,11 +93,19 @@ Resolution starts at the selected realm, follows each explicit parent, and
 appends the reserved `global` realm only when it is configured. Child values
 add to or override parent values. State never inherits: sessions, jobs,
 schedules, WorkGraph data, blobs, artifacts, and runtime rows remain owned by
-the selected realm. Credential reads inherit. A credential write must
-explicitly target the realm that owns the binding; a child-addressed inherited
-write is rejected with the owner identity. Named MCP, hook, and other
-union-by-name collections have no tombstones, so an empty child table does not
-delete an inherited entry.
+the selected realm. Credential reads inherit. `HostAuthService` and RPC/REST
+credential writes enforce strict ownership: a child-addressed inherited write
+is rejected with the owner identity.
+
+**Current CLI logout exception:** when the loaded config resolves
+`child:<binding>` to an inherited owner, `rkat auth logout child:<binding>`
+can clear that owner's stored credential, including a shared credential account
+used by other routes. Explicitly address the true owner instead. A bare logout
+binding means `global`; `--realm` does not retarget it. This does not change
+the raw-head read/write split of `config get` / `set` / `patch`.
+
+Inherited MCP servers, hook entries, and skill sources have no removal
+tombstones, so an empty child collection does not delete inherited entries.
 
 Common tool gates:
 
@@ -111,8 +121,11 @@ default_timeout = "10m"
 max_concurrent = 10
 
 [tools.tool_timeouts]
-shell = "2m"
+shell = { secs = 120, nanos = 0 }
 ```
+
+`default_timeout` accepts humantime strings; per-tool timeout values use
+Serde's duration representation with `secs` and `nanos`.
 
 `tools.mcp_servers` is also accepted in runtime config, although the CLI's
 user/project MCP convention files are managed separately as described below.
@@ -319,19 +332,20 @@ Project servers override user servers with the same name.
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Internal error |
-| 2 | Budget exhausted |
+| 1 | Generic command failure, including configuration and internal errors |
+| 2 | Usage/argument errors, host-runtime startup failure, or the graceful agent-budget error mapping |
 | 45 | Mob control scope denied |
 | 46 | Mob member host unavailable |
 | 47 | Mob event cursor is stale |
 | 48 | Mob fence or generation is stale |
 
 Codes 45-48 are used only by mob-family commands that carry the matching typed
-multi-host error. Most richer session/provider/runtime failures are reported
-through structured error payloads and stderr text rather than a large exit-code
-taxonomy. In particular, session persistence/compaction disabled conditions are
-informational at the CLI transport layer and do not map to dedicated non-zero
-exit codes.
+multi-host error. Code 2 alone does not establish budget exhaustion, and not
+every budget/deadline stop necessarily maps to 2. Inspect the diagnostic or an
+available typed error payload rather than classifying the failure solely by its
+numeric code; not every CLI error has structured JSON. In particular, session
+persistence/compaction disabled conditions are informational at the CLI
+transport layer and do not map to dedicated non-zero exit codes.
 
 ## See also
 

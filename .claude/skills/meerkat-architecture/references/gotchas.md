@@ -56,7 +56,22 @@ Load this reference as the first review lens when touching runtime, mob, comms, 
 
 44. **Durable-tail recovery dispositions are machine-minted, never-discard.** `SessionDocumentMachine` classifies, `MeerkatMachine` authorizes (persisted lifecycle facts + prior-commit receipt comparison + input evidence), `RuntimeStore` realizes one fenced atomic boundary. No shell predicate may downgrade a commit authorization to a hold, and no path may discard or shrink a durable tail. A dangling `tool_use` classifies Ambiguous and HOLDS — never synthesize tool results for it (the repair seam fails closed in release too: a call proves intent, not execution). Held/quarantined resume surfaces the typed `SessionError::DurableTailHeldForRecovery` / `DurableEvidenceQuarantined` variants, not `InternalError` prose.
 
-45. **`CoreApplyOutput`'s commit is sealed; never re-pair bytes and typed session.** The snapshot/session pair is one private `BoundSessionCommit` field — construct via `CoreApplyOutput::new` / `with_untyped_snapshot`, read via `committed()` / `snapshot_bytes()` / `session()` / `into_parts()`. `with_session` is the only typed mint (it serializes the session itself, replacing any uncertified bytes wholesale). Likewise `DurableTailRecoveryRequest::from_classification` is the only constructor and demands the classifier's `DurableTailClassified` effect — do not add bypass constructors or make the fields public.
+45. **`CoreApplyOutput`'s commit is sealed and profile-aware; never re-pair authority.**
+    Its private `BoundSessionCommit` is a disjoint carrier: typed/untyped
+    WholeBlob, a prepared HeadCanonical boundary, or receipt-only provisional
+    promotion. `with_session` seals a typed WholeBlob lazily, replacing any
+    uncertified bytes; `whole_blob_bytes()` performs fallible on-demand
+    encoding and rejects HeadCanonical/promotion carriers, which have no
+    whole-blob representation. `with_bound_session` installs an already sealed
+    carrier and preserves its exact predecessor CAS and suffix proof; do not
+    discard that proof by reminting from only a `Session`. Read through
+    `committed()` and, for a typed WholeBlob, `session()`; `into_parts()` keeps
+    the carrier sealed across the handoff. Recovery enters through
+    `recover_durable_tail(store, session_id)`: evidence is proved and classified
+    internally, then a profile-specific `PreparedRuntimeSessionCommit` is
+    realized by `RuntimeStore::commit_prepared_session_boundary`. Do not inject
+    caller-assembled classification, receipts, or CAS tokens; preserve the
+    exact store fences and typed hold/quarantine outcomes.
 
 46. **Fenced `RuntimeStore` records enforce their fence IN the writing transaction.** Implementations applying `InputStatePersistenceRecord.expected_row_digest` / `MachineLifecycleExpectedVersion` must check inside the same transaction that writes, failing the whole boundary with the typed conflict variants (`InputRowVersionConflict`, `MachineLifecycleVersionConflict`). `Missing` means "demand continued absence", not "skip the check". Run→input bindings persist at staging, BEFORE execution — do not defer them to the boundary commit.
 

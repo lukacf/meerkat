@@ -85,9 +85,11 @@ The table below is the current **session transport** mapping (`SessionError::cod
 | `Agent` | `AGENT_ERROR` | by cause (see below) | tool error | exit 1 (exit 2 on budget exhaustion) |
 | `FailedWithData` | `SESSION_ERROR` | -32603 | tool error | exit 1 |
 
-`Agent` errors map per typed cause to the canonical contracts codes: provider
-failures -32010, budget exhaustion -32011, hook denial -32012, cancellation
--32005, config errors -32602, everything else -32603.
+In `session_error_to_rpc`, `Agent` errors map per typed cause to the canonical
+contracts codes: provider failures -32010, budget exhaustion -32011, hook denial
+-32012, cancellation -32005, config errors -32602,
+`AgentError::SessionNotFound` -32001, `AgentError::SkillResolutionFailed` -32022,
+and remaining causes -32603.
 
 Temporary councils are agent-internal mob orchestration, not a public wire
 family. The `council` agent tool returns structured results through the ordinary
@@ -325,11 +327,21 @@ output are derived projections.
 
 | Capability | Description | Anthropic | OpenAI | Gemini |
 |------------|-------------|-----------|--------|--------|
-| `vision` | Model can process image content in user messages | Yes | Yes | Yes |
-| `image_tool_results` | Model can process image content in tool results | Yes | Yes for current chat and Responses rows; no for `gpt-realtime-2` | Yes |
+| `vision` | Model can process image content in user messages | Yes | Yes for chat, Responses, and `gpt-realtime-2`; no for GPT Live rows | Yes |
+| `image_tool_results` | Model can process image content in tool results | Yes | Yes for current chat and Responses rows; no for `gpt-realtime-2` or GPT Live rows | Yes |
 | `inline_video` | Model can process video content in user messages, including inline bytes and provider-readable URI references | No | No | Yes |
-| `realtime` | Model can back a caller-initiated live channel | No | `gpt-realtime-2` only | No current catalog row |
-| `supports_web_search` | Model supports provider-native web search tools | Yes | Yes for chat catalog rows; not `gpt-realtime-2` / Codex | Yes |
+| `realtime` | Model can back a caller-initiated live channel | No | `gpt-realtime-2` (Realtime), `gpt-live-1` (stable public Live), `gpt-live-1-codex` (experimental/private Live) | No current catalog row |
+| `supports_web_search` | Model supports provider-native web search tools | Yes | Yes for chat catalog rows; not `gpt-realtime-2`, GPT Live, or Codex | Yes |
+
+Catalog eligibility is not host availability. `gpt-realtime-2` uses the
+`openai-realtime` composition. Both GPT Live rows need the separate
+`openai-live` composition, a host-installed and advertised `execution_identity`
+authority with the appropriate host-owned binding/profile, and an explicit
+`transport: "webrtc"` on `live/open`. Transport flags alone do not install that
+authority, and these rows are not interchangeable `--live-ws` targets.
+`gpt-live-1-codex` additionally requires the `experimental-gpt-live` feature
+and private experimental admission. Both Live rows currently use
+provider-managed turns, with no vision or explicit-commit capability.
 
 These fields are set in `meerkat-models/src/capabilities/**` (the types live in `meerkat-core/src/model_profile/**`) and exposed via `ModelProfile`. They control:
 
@@ -350,7 +362,7 @@ adapter projection never rewrites that transcript.
 | Standard OpenAI Responses | Ordinary ordered input item | Preserved |
 | OpenAI-compatible Chat Completions | Ordinary ordered message | Preserved |
 | OpenAI Realtime | Ordinary ordered conversation item | Preserved |
-| Anthropic Messages | Distinct top-level system blocks | Leading prefix only |
+| Anthropic Messages | Distinct top-level blocks for the leading prefix; later `role=system` messages on capable models | Model-gated placement (see below) |
 | Gemini `generateContent` | Distinct `systemInstruction.parts` | Leading prefix only |
 | Private ChatGPT Responses | Singular instruction string | One leading row only |
 
@@ -358,8 +370,17 @@ Provider limitations never redefine Session validity. Meerkat authors every
 System row as ordinary ordered history. A limited provider request projection
 returns a typed, non-retryable error when the resulting transcript is
 unrepresentable; rebinding to an exact provider can execute the same Session
-unchanged. Adapters never hoist, merge, or delimiter-join distinct canonical
-System rows.
+unchanged. Adapters never hoist later System rows into a top-level prefix or
+merge or delimiter-join distinct canonical System rows.
+
+Anthropic's `supports_mid_conversation_system_messages` catalog capability
+gates later System rows. Supported placements must follow a user turn
+(including user-role notice/tool-result projections) or an assistant whose last
+block is a `web_search_tool_result` server-tool result. Turn-scoped instructions
+authored before their governing User can be placed after that User and before
+the Assistant in the wire request only; authored durable order is unchanged.
+Unsupported models or unrepresentable placements return a typed
+`InvalidInputShape` error. Leading System rows remain distinct top-level blocks.
 
 Realtime reconstruction applies the same ordered replay-window policy to every
 role and replays each retained System row as an in-conversation System item.
@@ -417,8 +438,17 @@ When `session-compaction` is enabled:
   request-budget crossing does not bypass it: tool definitions and the output
   reserve survive compaction, so a crossing they cause is a cost decision, not a
   recovery one.
-- **Failure**: Non-fatal. `CompactionFailed` event emitted, agent continues with uncompacted history.
+- **Failure**: Ordinary recoverable failures preserve uncompacted history and
+  normally emit `CompactionFailed`, allowing continuation. A typed provider
+  `PolicyStop` or unresolved durable compaction-stage authority/cleanup error
+  terminates the run fail-closed. Preserved history can still exceed provider
+  capacity, so the next request is not guaranteed to succeed.
 - **Budget**: Compaction LLM call draws from the same token budget as regular turns.
+
+The exact staged transcript-rewrite/memory transaction is not the optional
+asynchronous event-audit projection. An audit append failure does not undo an
+already-committed turn; unresolved compaction-stage authority must not be
+suppressed on that basis.
 
 Events emitted: `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`.
 

@@ -6,22 +6,30 @@ icon: "key"
 
 Meerkat's auth story has two layers. The **fast path** is environment variables
 (`RKAT_ANTHROPIC_API_KEY`, `RKAT_OPENAI_API_KEY`,
-`RKAT_GEMINI_API_KEY`, or the matching provider-native names) - set them and
-`rkat run` works. The **powerful path** is realm-scoped bindings:
+`RKAT_GEMINI_API_KEY`, or the matching provider-native names) - set a key
+matching the effective model/provider. A no-hint `rkat run` does not select
+a provider by discovering whichever key is present. The **powerful path** is
+realm-scoped bindings:
 declare a realm in your config, register global credentials via `rkat auth
 login` or binding-scoped credentials through REST/RPC, and pass `--auth-binding
 <realm>:<binding>` for a session or structural `auth_binding` on a mob-member
 spawn.
 
 <Note>
-`rkat auth login` provisions the reserved `global` realm in the home-rooted doc
-at `~/.rkat/config.toml`. Once configured, `global` is the implicit tail of a
+Interactive OAuth/device `rkat auth login` provisions nonsecret declarations
+for the reserved `global` realm in the home-rooted doc at
+`~/.rkat/config.toml`; tokens are stored separately through TokenStore.
+Scripted API-key login only stores a token and needs matching binding config.
+Once configured, `global` is the implicit tail of a
 workspace realm's chain, so a single sign-in is inherited by every workspace
 realm (credential reads inherit down the chain). For a binding owned by a
 specific realm such as
-`prod:openai`, manage that realm's config entries directly; credential *writes*
-are strict-owner and must explicitly target the realm that defines the binding.
-A child-addressed inherited write is rejected with the owner identity. See
+`prod:openai`, manage that realm's config entries directly. `HostAuthService`
+and RPC/REST credential writes are strict-owner and reject a child-addressed
+inherited write with the owner identity. The current
+[CLI logout exception](#cli-logout-ownership) can clear an ancestor's stored
+credential when the loaded config resolves a child address to that owner;
+explicitly address the true owner instead. See
 [Realm inheritance](/concepts/realm-inheritance).
 </Note>
 
@@ -43,12 +51,17 @@ ephemeral, is not a durable realm, and cannot participate in inheritance.
 
 ```bash
 export RKAT_ANTHROPIC_API_KEY=sk-ant-...
-rkat run "What's the weather like in 2026?"
+rkat run --provider anthropic "What's the weather like in 2026?"
 ```
 
-That's it. Meerkat synthesizes an ephemeral binding that reads the key, then
-uses the normal backend/auth compatibility and provider-resolution path.
-`RKAT_*` variants take precedence over provider-native names.
+On an otherwise unconfigured setup, Meerkat synthesizes an ephemeral binding
+that reads the key, then uses the normal backend/auth compatibility and
+provider-resolution path. `RKAT_*` variants take precedence over
+provider-native names. With no model/provider/binding hints or configured
+model, the catalog default is OpenAI `gpt-6-astra`, so an Anthropic key alone
+does not make that default run work. Explicit models, binding defaults, and
+compatible configured models retain their normal selection precedence;
+configured bindings can supply credentials instead of this environment path.
 
 | Provider | Resolution order |
 |----------|------------------|
@@ -90,8 +103,8 @@ and provider bindings. It lets you:
 ### Realm shape
 
 ```toml
-# The owning realm's config document:
-# <state-root>/prod/config.toml
+# From the workspace directory, save the owning realm's document as:
+# ./.rkat/realms/prod/config.toml
 
 [realm.prod.backend.anthropic_primary]
 provider = "anthropic"
@@ -144,18 +157,48 @@ default_model   = "gpt-5.5" # Azure deployment name
 ### Log in
 
 ```bash
-# Interactive OAuth (opens a browser; stores refresh token in the
-# local TokenStore credentials file, 0600 on Unix).
+# Interactive OAuth (opens a browser; stores tokens through TokenStore).
 rkat auth login anthropic
-
-# Scripted (api_key):
-rkat auth login openai --non-interactive --secret "$OPENAI_KEY"
 ```
 
 Interactive `rkat auth login openai` provisions the ChatGPT OAuth backend.
-The non-interactive API-key example provisions the public OpenAI API backend.
-They can expose different model sets because they use different account
-systems.
+Interactive login uses the provider's fixed OAuth/device flow; `--backend`
+and `--method` are accepted but ignored in this mode.
+
+For scripted API-key storage, first add a compatible managed-store binding to
+`~/.rkat/config.toml` (or reuse matching existing declarations):
+
+```toml
+[realm.global.backend.openai_api]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.global.auth.openai_apikey]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "managed_store" }
+
+[realm.global.binding.default_openai]
+backend_profile = "openai_api"
+auth_profile = "openai_apikey"
+default_model = "gpt-5.5" # choose a model available to your API account
+```
+
+Then store the key and explicitly select that configured binding:
+
+```bash
+rkat auth login openai --non-interactive --secret "$OPENAI_KEY"
+rkat run --auth-binding global:default_openai "Summarize this change"
+```
+
+The scripted command saves a token under `global:default_openai`; it does
+**not** provision a backend/auth/binding or materialize a global config
+section. In this mode, `--method` chooses an allowed persisted-secret mode
+(default `api_key`), and `--backend` is recorded in token metadata, not used
+to provision or fully validate a runtime backend/auth pair. Without the
+matching managed-store declarations, use the environment-key fast path
+instead. Public OpenAI API keys and interactive ChatGPT OAuth belong to
+different account systems and can expose different model sets.
 
 GitHub Copilot uses device authorization and provisions three routes over one
 shared credential account:
@@ -188,41 +231,76 @@ CLI. GitHub may change or restrict that contract. Use it only with an account
 entitled to GitHub Copilot and review GitHub's current terms before deployment.
 </Warning>
 
-`rkat auth login` persists credentials and the matching `[realm.global]`
-binding section into the home-rooted `global` realm doc (`~/.rkat/config.toml`),
-so the sign-in is inherited by every workspace realm via the chain tail. To use
-a binding owned by another realm (for example `prod:openai`), declare that
+Interactive login writes nonsecret backend/auth/binding declarations to the
+home-rooted `global` doc (`~/.rkat/config.toml`), so configured sign-in is
+inherited by workspace realms via the chain tail. Secret tokens are separate:
+the stock CLI's file-backed TokenStore uses
+`<platform-config>/meerkat/credentials/global/<credential-stem>.json`,
+where `<platform-config>` is `dirs::config_dir()`. Files are created with mode
+0600 on Unix. `--user-config-root` relocates the config doc, not this token
+root; custom hosts may choose a keyring or another TokenStore.
+
+To use a binding owned by another realm (for example `prod:openai`), declare that
 binding in the owning realm's config and use an external source such as the env
 profiles above, or complete login through REST/RPC with explicit `realm_id`,
 `binding_id`, and `profile_id`. CLI login never populates a `prod` managed-store
-profile; credential writes are strict-owner.
+profile; the host/RPC/REST write paths require the true owner.
 
 ### Use the binding
 
 ```bash
 export PROD_ANTHROPIC_API_KEY="..."
 export PROD_OPENAI_API_KEY="..."
-rkat run --auth-binding prod:default "hello"
-rkat run --auth-binding prod:openai   "hello"
+rkat --state-root "$PWD/.rkat/realms" --realm prod run \
+  --auth-binding prod:default "hello"
+rkat --state-root "$PWD/.rkat/realms" --realm prod run \
+  --auth-binding prod:openai "hello"
 ```
 
+Run these from the workspace directory where you wrote
+`./.rkat/realms/prod/config.toml`; adjust both paths together if you choose a
+different root. `--realm prod` selects that config head and session realm.
+`--auth-binding` selects an already-configured credential identity, not a
+config file or the session realm.
+
 ## Subcommands
+
+For CLI auth administration, `--realm prod` is an owner-section selector inside
+the scope's already-loaded effective config, normally the workspace/global
+chain. Unlike `run --realm prod`, it does not by itself load a separate
+`<state-root>/prod/config.toml` or inherit missing profiles/bindings for
+`profile`, `status`, `test`, or `refresh`. The default owner section is
+`global`; already-loaded multi-section documents also work.
+
+The `prod` examples below require its sections to be reachable first. For the
+separate file above, add `parent = "prod"` to the
+`[realm.<workspace-realm-id>]` section of the workspace head's
+`config.toml`, with both documents under `$PWD/.rkat/realms`. Find that
+workspace ID with:
+
+```bash
+rkat --state-root "$PWD/.rkat/realms" realm current
+```
+
+Alternatively, place the `prod` sections in the already-loaded workspace or
+global document. Merely passing `auth --realm prod` is not this setup.
 
 <Steps>
   <Step title="Login and profile management">
     ```bash
     rkat auth realms                       # list realms defined in config
-    rkat auth profiles --realm prod        # list profiles/backends/bindings
-    rkat auth profile --realm prod <id>    # inspect one profile
-    rkat auth login <provider>             # start OAuth or api_key flow
+    rkat --state-root "$PWD/.rkat/realms" auth profiles --realm prod
+    rkat --state-root "$PWD/.rkat/realms" auth profile --realm prod <id>
+    rkat auth login <provider>             # interactive OAuth/device authorization
+    rkat auth login <provider> --non-interactive --secret <secret> # store a secret; matching config required
     rkat auth logout [<realm>:]<binding_id> # clear persisted credentials; bare means global
     ```
   </Step>
   <Step title="Status and refresh">
     ```bash
-    rkat auth status --realm prod <profile_id>    # TokenStore state + expiry
-    rkat auth test --realm prod <binding_id>      # dry-run the binding
-    rkat auth refresh --realm prod <profile_id>   # force-refresh OAuth tokens
+    rkat --state-root "$PWD/.rkat/realms" auth status --realm prod <profile_id>
+    rkat --state-root "$PWD/.rkat/realms" auth test --realm prod <binding_id>
+    rkat --state-root "$PWD/.rkat/realms" auth refresh --realm prod <profile_id>
     ```
 
     `rkat auth refresh` is a no-op for `api_key` / `azure_api_key` / `static_bearer`
@@ -232,10 +310,24 @@ rkat run --auth-binding prod:openai   "hello"
   </Step>
   <Step title="Delete">
     ```bash
-    rkat auth profile-delete --realm prod <profile_id> -y
+    rkat --state-root "$PWD/.rkat/realms" auth profile-delete --realm prod <profile_id> -y
     ```
   </Step>
 </Steps>
+
+### CLI logout ownership
+
+**Current CLI exception:** if the loaded config resolves `child:<binding>`
+to an inherited owner, `rkat auth logout child:<binding>` can clear that
+owner's stored credential. This includes a shared credential account used by
+other routes. Explicitly address the true owner when signing out.
+
+A local same-name binding shadows its ancestor. If config resolution fails,
+logout falls back to the literal requested token key; a missing child is not
+automatically an inherited deletion. A bare logout binding means `global`,
+and `--realm` does not retarget it. `HostAuthService` and RPC/REST still enforce
+strict-owner credential writes, and config `get` / `set` / `patch` retain the
+raw-head read/write split.
 
 ## Release auth smoke
 
@@ -445,14 +537,22 @@ The browser flow is split for native UI:
 
 ## Refresh coordination
 
-Refresh semantics are owned by the `AuthMachine` DSL (one instance
-per `<realm>:<binding>`). On resolve, the runtime:
+For managed credentials, refresh semantics are owned by the `AuthMachine`
+DSL. AuthMachine leases, TokenStore lookup, and refresh coordination share one
+credential identity: the owning realm plus binding and optional profile by
+default, or the owning realm plus a configured `credential_account`. The
+latter deliberately shares lifecycle and refresh across multiple route
+bindings; binding identity still selects the route. This is the managed
+runtime contract, not a claim that every CLI administrative path or
+non-managed cloud authorizer uses identical account resolution.
+
+On resolve, the runtime:
 
 1. Checks `expires_at`. If present and within the refresh window
    (`AUTH_LEASE_TTL_REFRESH_WINDOW_SECS`, 60 seconds before expiry),
    marks the lease `Expiring` via the DSL.
 2. Under `Expiring`, the next resolve triggers `BeginRefresh`.
-   In-process dedup ensures only one refresh HTTP call per binding
+   In-process dedup ensures only one refresh HTTP call per credential identity
    even under concurrent resolves; cross-process dedup via filesystem
    lockfile when `refresh-file-lock` is enabled.
 3. On successful refresh, fires `CompleteRefresh` and updates
@@ -467,32 +567,51 @@ The lifecycle is TLC-verified in `specs/machines/auth/`.
 Every accepted lifecycle transition emits a structured tracing event:
 
 - `target = "meerkat::auth::audit"`
-- Fields: `binding_key`, `action`, `from_phase`, `to_phase`
+- Fields: `lease_key`, `realm`, optional `binding` / `account` / `profile`
+  projections, `action`, `from_phase`, `to_phase`
 
 REST and RPC surfaces also emit audit events for user-initiated
 actions: `create_profile`, `delete_profile`, `login_oauth_complete`,
-`login_device_complete`, `logout`. Filter any `tracing::Subscriber`
-on the `meerkat::auth::audit` target to build a persistent audit log.
+`login_device_complete`, `logout`. These surface events have their own field
+shapes (for example `binding_key` on a user-action event), not the lifecycle
+transition schema. Filter any `tracing::Subscriber` on the
+`meerkat::auth::audit` target to build a persistent audit log without assuming
+every event on that target has the same fields.
 
 ## Feature flags
 
-The `meerkat-providers` crate gates optional auth methods behind
-features so you only pay for what you use:
+`meerkat-providers` is a compatibility shim. Its feature aliases forward
+shared auth primitives to `meerkat-auth-core`; they do not select provider
+clients or activate provider-owned backend/auth branches:
 
-| Feature          | Enables |
-|------------------|---------|
-| `oauth`          | OAuth flows (Claude.ai, ChatGPT, Code Assist) |
-| `native-keyring` | OS keychain storage for tokens |
-| `refresh-file-lock` | Cross-process refresh dedup |
-| `aws-auth`       | Bedrock backend + SigV4 signing |
-| `google-oauth`   | Vertex + Code Assist + ADC |
-| `azure-auth`     | Foundry backend + Azure AD |
+| Compatibility feature | Forwarded `meerkat-auth-core` feature | Shared primitive |
+|-----------------------|--------------------------------------|------------------|
+| `oauth` | `oauth` | OAuth flow support |
+| `native-keyring` | `keyring` | OS keychain storage support |
+| `refresh-file-lock` | `file-lock` | Cross-process refresh locking |
+| `aws-auth` | `aws-sigv4` | AWS signing/auth primitives |
+| `google-oauth` | `gcp-auth` | Google cloud auth primitives |
+| `azure-auth` | `azure-ad` | Azure AD auth primitives |
+
+The following native methods also require their provider-owned feature on a
+non-WASM target:
+
+| Method | Required provider feature |
+|--------|---------------------------|
+| Anthropic `bedrock_aws_sigv4` | `meerkat-anthropic/bedrock` |
+| Anthropic `vertex_google_auth` | `meerkat-anthropic/vertex` |
+| Anthropic `foundry_azure_ad` | `meerkat-anthropic/foundry` |
+| Gemini `adc`, `compute_adc` | `meerkat-gemini/adc` |
+| Gemini `google_oauth` | `meerkat-gemini/oauth` |
+
+These requirements concern the named methods, not every bearer, API-key, or
+external-authorizer route to the same backend. Enabling the features does not
+make native credential mechanisms available in a browser/WASM runtime.
 
 The shipped `rkat` CLI enables Anthropic, OpenAI, Gemini, OAuth,
 `native-keyring`, and refresh-file locking in its dependency graph, while its
-stock TokenStore profile remains file-backed. Bedrock, Vertex, and Foundry
-transport features live on the corresponding provider crates and must be
-selected deliberately in a custom build.
+stock TokenStore profile remains file-backed. Select the corresponding
+provider-owned features when a custom build needs the native methods above.
 
 ## See also
 

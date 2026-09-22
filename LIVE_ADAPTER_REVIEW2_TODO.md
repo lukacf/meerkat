@@ -671,4 +671,8 @@ review uncovered four issues with that model.
 - **P2 (must-fix):** 2 items (R6-R7) — all closed
 - **P3 (cleanup):** 1 item (R8) — closed
 - **Round-3 follow-ups:** 4 items (R9-R12)
-- **Total actionable:** 12 (8 closed + 4 open)
+- **Total actionable:** 12 (8 closed + 4 open) — original recorded summary
+
+Recorded-state reconciliation: the R1-R12 checkboxes in this document record
+12 fixed and verified items, not four unchecked items. This is a count of the
+historical recorded states, not a new test certification.

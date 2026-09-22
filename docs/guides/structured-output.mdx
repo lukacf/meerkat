@@ -27,7 +27,10 @@ When `output_schema` is configured on an agent, the execution flow is:
     The agent processes the prompt, calls tools, and iterates until no more tool calls remain.
   </Step>
   <Step title="Extraction turn fires">
-    An additional LLM call is made with no tools, temperature `0.0` for deterministic output, and a prompt asking for valid JSON matching the schema.
+    An additional LLM call is made with no tools and a prompt asking for valid
+    JSON matching the schema. Extraction requests temperature `0.0` where the
+    provider/model supports it; lowering may omit unsupported parameters.
+    This does not guarantee deterministic output.
   </Step>
   <Step title="Validation">
     The response is parsed as JSON and validated against the schema using the `jsonschema` crate's `Validator`.
@@ -236,7 +239,9 @@ The extraction turn logic:
 1. **Max attempts** = `structured_output_retries + 1` (default: 2 + 1 = 3 attempts).
 2. **First attempt prompt**: `"Provide the final output as valid JSON matching the required schema. Output ONLY the JSON, no additional text or markdown formatting."` (overridable via the `extraction_prompt` config field)
 3. **Retry prompt** (on validation failure): `"The previous output was invalid: {error}. Please provide valid JSON matching the schema. Output ONLY the JSON, no additional text."`
-4. LLM is called with **no tools** and **temperature 0.0**.
+4. LLM is called with **no tools**. Core requests **temperature 0.0**; provider
+   lowering may omit it when unsupported by the model. Output is not
+   guaranteed to be deterministic.
 5. Response text is trimmed, then markdown code fences are stripped (handles `` ```json `` and `` ``` `` wrappers).
 6. Parsed as JSON via `serde_json::from_str`.
 7. Validated against the compiled schema via `jsonschema::Validator`.
@@ -314,6 +319,7 @@ Schema warnings are collected during compilation and included in `RunResult.sche
     ```json
     {
       "jsonrpc": "2.0",
+      "id": 1,
       "method": "session/create",
       "params": {
         "prompt": "Analyze this code",
@@ -431,7 +437,7 @@ let schema = OutputSchema::from_type::<AnalysisResult>()?;
 ### Handling the result
 
 ```rust
-let result: RunResult = agent.run("Analyze this code").await?;
+let result: RunResult = agent.run("Analyze this code".into()).await?;
 
 if let Some(structured) = &result.structured_output {
     let analysis: AnalysisResult = serde_json::from_value(structured.clone())?;

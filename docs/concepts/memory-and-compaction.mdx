@@ -65,10 +65,13 @@ memory projection, and commit. Curator failure has no LLM fallback and leaves
 history untouched.
 
 The built-in LLM path has one capacity-recovery exception. If the summary call
-itself fails because its request is over the provider context or byte limit,
-Meerkat uses a deterministic mechanical handoff summary so the oversized
-session can still shed old rows. Other LLM failures preserve the original
-transcript. This fallback never applies to a host curator.
+itself fails with a recognized provider context or request-size error,
+Meerkat can use a deterministic mechanical handoff summary to shed old rows,
+but only when current history has no protected, unsummarized assistant
+transcript observations with source `SpokenUnmeasured`. If those observations
+are present, the compaction attempt fails and preserves history instead of
+mechanically discarding their content. Other LLM failures also preserve the
+original transcript. This fallback never applies to a host curator.
 
 ## Memory lifecycle
 

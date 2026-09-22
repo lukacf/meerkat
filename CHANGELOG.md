@@ -11,17 +11,22 @@ release that breaks public API declares it under a `### Breaking` heading
 naming the changed signatures.
 
 **What the `semver-breaks` gate actually enforces**, so this file does not
-claim more than it measures: it runs cargo-semver-checks over the publishable
-crates whose source or declared dependency specs differ from the published
-baseline tag (crates proven identical to the baseline are recorded as reached
-by equivalence, since the tool reports on a crate's own items), and it fails
-the release unless (1) every crate the release publishes was reached, (2) every break
+claim more than it measures: it runs cargo-semver-checks over eligible published
+non-proc-macro library crates with a comparison baseline, checking those whose
+source or declared dependency specs differ from the published baseline tag
+(crates proven identical to the baseline are recorded as reached by equivalence,
+since the tool reports on a crate's own items), and it fails the release unless
+(1) every eligible published non-proc-macro library crate with a comparison
+baseline was reached, (2) every break
 the tool reports is NAMED in the pending section's `### Breaking` body at the
 granularity of the individual finding, and (3) that pending section is stamped
 `## [VERSION] - DATE` against the version being released. "Named" means the
 symbols of the finding appear in the `### Breaking` body: a type gaining a
 field and the same type losing a derive are two findings, and naming one does
 not declare the other.
+
+Proc-macro packages, packages without a library target, and first-publication
+packages without a comparison baseline are not measured by the tool or this gate.
 
 Behaviour-only breaks - a public signature that keeps its shape and changes
 what it does - are invisible to cargo-semver-checks and therefore invisible to
@@ -471,6 +476,9 @@ them.
   budget, and the nightly `make stack-budget-release` runs the router harness
   on 1 MiB release stacks. Release behavior is unchanged; the shipped
   `rkat-rpc` worker stack is still 32 MiB pending a documented budget.
+  Release clarification: the 32 MiB statement above describes the intermediate
+  refactor before the shared-budget change. As released, 0.8.39 defaults to
+  8 MiB, subject to the overrides described in its Changed subsection.
 - Release crate publication now waits for the moment crates.io names in its
   429 response (burst of new versions exhausted, refill about one per
   minute) and allows 12 attempts instead of five 15-second retries, which
@@ -10788,6 +10796,9 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 ## [0.2.0] - 2026-02-12
 
+> Archival navigation: the original tag/release destinations for 0.1.0 and 0.2.0
+> are unavailable; their historical notes are retained with unlinked headings.
+
 ### Added
 
 #### Contracts and Capabilities
@@ -11083,6 +11094,4 @@ Initial development release.
 [0.3.3]: https://github.com/lukacf/meerkat/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/lukacf/meerkat/compare/v0.3.0...v0.3.2
 [0.3.1]: https://github.com/lukacf/meerkat/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/lukacf/meerkat/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/lukacf/meerkat/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/lukacf/meerkat/releases/tag/v0.1.0
+[0.3.0]: https://github.com/lukacf/meerkat/tree/v0.3.0

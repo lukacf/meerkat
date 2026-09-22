@@ -65,8 +65,9 @@ Use `workgraph_link` to describe relationships.
 ```
 
 For `blocks`, the target is not ready until the blocker reaches `completed`.
-Use `related`, `parent`, `supersedes`, or `derived_from` when readiness should
-not be blocked.
+Use `related`, `supersedes`, or `derived_from` for relationships that do not
+gate readiness. Hierarchical `parent` edges do affect readiness through the
+parent/child join described next.
 
 ### Join Parent And Child Work
 
@@ -120,11 +121,17 @@ Use `workgraph_claim` before doing durable work. Include the current
 }
 ```
 
-Omit both lease fields for a non-expiring claim. For an expiring claim, use
-exactly one of `lease_seconds` or absolute RFC3339 `lease_expires_at`.
-Relative leases must be 1-31,536,000 seconds (at most 365 days). Lease expiry
-alone does not mutate the item: a Schedule-owned sweep or another trusted host
-must observe it, after which WorkGraph commits the release and a
+The model-facing `workgraph_claim` schema exposes only `lease_seconds`. Omit
+it for a non-expiring claim, or use 1-31,536,000 seconds (at most 365 days)
+from the store's claim observation time.
+
+For compatibility, Rust's `ClaimWorkItemRequest` and direct tool dispatch
+also accept absolute RFC3339 `lease_expires_at` instead. It must be strictly
+later than the store's claim observation time. Supplying both lease fields
+is rejected; the absolute field is not advertised in the model-facing schema.
+
+Lease expiry alone does not mutate the item: a Schedule-owned sweep or another
+trusted host must observe it, after which WorkGraph commits the release and a
 `lease_expired` fact atomically.
 
 If a write returns a stale revision error, reload with `workgraph_get` or
@@ -210,9 +217,15 @@ with the mutation that proved it. WorkGraph is a ledger, not a timer: Schedule
 owns recurring readiness and lease-expiry sweeps.
 
 For long execution, keep the ownership split. A durable job owns attempts and
-results, then `JobTerminalEvidenceProjector` can add typed terminal evidence
-and request WorkGraph closure. A Mob Flow binding follows the same rule: Mob
-owns the run, WorkGraph owns evidence and completion policy.
+results. When composed by a host, `JobTerminalEvidenceProjector` adds typed
+terminal evidence only; it does not request closure. An authorized host or
+agent must separately request closure with the current item revision under
+WorkGraph's normal completion policy. Job success is not itself the required
+confirmation, and jobs can run without WorkGraph.
+
+A Mob Flow binding has a separate execution bridge: it projects terminal
+evidence and, for a completed run, requests WorkGraph closure. Mob owns the
+run; WorkGraph still owns evidence and the closure decision.
 
 ## Observe From Host Surfaces
 

@@ -18,18 +18,23 @@ are the exact JS-visible identifiers in the Rust binding.
 | `destroy_runtime` | — | `()` | Tear down all runtime state (sessions, mob state, subscriptions) |
 | `runtime_version` | — | version string | Returns `CARGO_PKG_VERSION` for JS/WASM version validation |
 | `register_tool_callback` | name, description, schema JSON, callback | `()` | Register a promise-returning JS tool callback; requires initialized runtime state |
-| `register_js_tool` | name, description, schema JSON | `()` | Register a fire-and-forget JS tool that returns `"acknowledged"` immediately; requires initialized runtime state |
+| `register_js_tool` | name, description, schema JSON | `()` | Synchronous registration; dispatch reports pending detached host work, not completion; requires initialized runtime state |
 | `clear_tool_callbacks` | — | `()` | Clear all registered JS tool callbacks |
 | `register_external_auth_resolver` | callback (or `undefined` / `null` to clear) | `()` | Register a JS-side resolver that the agent factory calls to obtain a typed `ExternalAuthLease` for a given `authBinding`. Subsequent calls overwrite. Defined in `meerkat-web-runtime/src/external_auth.rs`. |
 | `has_external_auth_resolver` | — | bool | Check whether a JS-side external auth resolver is registered |
+
+For a fire-and-forget tool, the host observes `ToolCallRequested`, performs the
+action asynchronously, and reports any actual completion/result through a later
+session/mob message. Observing the request is not evidence that the action
+completed.
 
 ### Session Lifecycle
 
 | Export | Params | Returns | Notes |
 |--------|--------|---------|-------|
-| `create_session` | mobpack bytes, config JSON | handle (u32) | Direct AgentFactory path |
-| `create_session_simple` | config JSON | handle (u32) | No mobpack, uses registered tool callbacks |
-| `start_turn` | handle, prompt | RunResult JSON | async, single LLM turn (no third options arg) |
+| `create_session` | mobpack bytes, config JSON | handle (u32) | Trust-verifies the pack, then creates a session through the shared `WasmStandaloneSessionService` |
+| `create_session_simple` | config JSON | handle (u32) | Same shared service; uses registered tools and any verified bootstrap pack's prompt |
+| `start_turn` | handle, prompt JSON string | RunResult JSON | async; tagged `{"text": ...}` or `{"blocks": [...]}` input (no third options arg) |
 | `append_system_context` | handle, request JSON | result JSON | async, append session system context |
 | `get_session_state` | handle | JSON | Session metadata |
 | `destroy_session` | handle | `()` | Remove session |
@@ -38,7 +43,19 @@ are the exact JS-visible identifiers in the Rust binding.
 `config` for `create_session` / `create_session_simple` accepts an optional
 `auth_binding` that scopes credential resolution to a realm/binding through the
 provider runtime registry. If the selected binding uses the WASM external
-resolver source, the registered resolver is invoked (see auth section).
+resolver source, the registered resolver is invoked (see auth section). Stock
+bootstrap only supplies inline-key bindings in `global`, not arbitrary realms
+or external-resolver bindings.
+
+The raw export requires tagged JSON even for text:
+
+```typescript
+await wasm.start_turn(handle, JSON.stringify({ text: 'Hello' }));
+await wasm.start_turn(handle, JSON.stringify({ blocks: contentBlocks }));
+```
+
+In contrast, `Session.turn('Hello')` and `Session.turn(contentBlocks)` perform
+that serialization in the SDK.
 
 ### Mob Lifecycle (delegates to MobMcpState)
 
@@ -46,15 +63,15 @@ resolver source, the registered resolver is invoked (see auth section).
 |--------|--------|---------|-------|
 | `mob_create` | definition JSON | mob_id string | async |
 | `mob_status` | mob_id | JSON | async |
-| `mob_list` | — | MobSummary[] JSON | async |
-| `mob_lifecycle` | mob_id, action string | `()` | async; stop/resume/complete/destroy |
+| `mob_list` | — | MobListResult JSON: `{mobs: [...]}` | async |
+| `mob_lifecycle` | mob_id, action string | MobLifecycleResult JSON | async; stop/resume/complete/reset/destroy; includes `mob_id`, `action`, `ok`, and optional `destroy_report` |
 | `mob_events` | mob_id, after_cursor (string), limit (u32) | MobEvent[] JSON | async |
 | `mob_spawn` | mob_id, specs JSON | result JSON | async, batch spawn |
 | `mob_retire` | mob_id, agent_identity | `()` | async |
 | `mob_respawn` | mob_id, agent_identity, initial_message? | result JSON | async, retire + re-spawn same profile |
 | `mob_force_cancel` | mob_id, agent_identity | `()` | async, force-cancel an in-flight turn |
 | `mob_member_status` | mob_id, agent_identity | JSON | async, execution status snapshot |
-| `mob_member_send` | mob_id, agent_identity, payload JSON | `()` | async, send a message to a member |
+| `mob_member_send` | mob_id, agent_identity, payload JSON | delivery receipt JSON | async; receipt keys: `mob_id`, `agent_identity`, `member_ref`, `handling_mode` (`queue` or `steer`) |
 | `mob_member_peer_target` | mob_id, member | peer target JSON | async, resolve a member name to its canonical comms peer target; wrapped by `Member.peerTarget()` in `@rkat/web` |
 | `mob_list_members` | mob_id | RosterEntry[] JSON | async |
 | `mob_append_system_context` | mob_id, agent_identity, request JSON | result JSON | async, append context to a member's system prompt |
@@ -63,8 +80,13 @@ resolver source, the registered resolver is invoked (see auth section).
 | `mob_spawn_helper` | mob_id, request JSON (requires `result_label`, `max_text_bytes`) | result JSON | async, helper spawn with auto-wait |
 | `mob_fork_helper` | mob_id, request JSON (requires `result_label`, `max_text_bytes`) | result JSON | async, fork-from-source helper spawn |
 | `mob_run_flow` | mob_id, flow_id, params JSON | run_id string | async |
-| `mob_flow_status` | mob_id, run_id | MobRun JSON | async |
+| `mob_flow_status` | mob_id, run_id | MobFlowStatusResult JSON: `{run: MobRun \| null}` | async |
 | `mob_cancel_flow` | mob_id, run_id | `()` | async |
+
+These raw JSON results are JavaScript strings. The SDK's `runtime.listMobs()`
+unwraps `mobs`, and `mob.flowStatus()` unwraps `run` (or returns `null`).
+`mob.lifecycle()` retains the parsed lifecycle result; inspect its
+`destroy_report` rather than discarding the cleanup receipt.
 
 ### Subscriptions
 
@@ -90,7 +112,8 @@ available to agents during turns.
 
 ## Web SDK auth model
 
-Browser-hosted authentication is done through three concepts:
+Browser-hosted authentication has three related APIs, but stock bootstrap
+supports only the inline-key/proxy path:
 
 1. **`authBinding`** (structural): `runtime.createSession({...})`,
    `mob.spawnHelper(...)`, and `mob.forkHelper(...)` accept an optional
@@ -103,23 +126,33 @@ Browser-hosted authentication is done through three concepts:
    page provides a function that maps an `AuthBindingRef` to a typed
    `ExternalAuthLease` (`inline_secret`, `static_headers`,
    `dynamic_authorizer`, or `none`). The WASM agent factory calls this resolver
-   when the selected binding uses the WASM external-resolver credential source.
+   when a custom Rust/WASM bootstrap supplies a binding with
+   `CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`.
 3. **Per-runtime credentials** (init-only): `init_runtime` /
    `init_runtime_from_config` accept provider-specific keys and base URLs
    (`anthropic_api_key`, `openai_api_key`, `gemini_api_key`,
    `anthropic_base_url`, `openai_base_url`, `gemini_base_url`). The
-   `@rkat/web` wrapper still exposes `apiKey` / `baseUrl` compatibility fields,
-   but current raw WASM config should use provider-specific fields. Per-session
-   `apiKey` / `baseUrl` fields were removed in 0.6.
+   `@rkat/web` wrapper uses `anthropicApiKey` / `anthropicBaseUrl`,
+   `openaiApiKey` / `openaiBaseUrl`, and `geminiApiKey` / `geminiBaseUrl`.
+   Generic `apiKey` / `baseUrl` fields are deleted at both runtime and session
+   boundaries; per-session credentials are not accepted.
+
+`MeerkatRuntime.init()` / `initFromMobpack()` and their raw bootstrap exports
+do not accept realm/binding configuration or read native realm files. They
+synthesize `InlineSecret` bindings under `global`. A callback registration
+neither creates a realm nor converts an existing inline binding to an external
+source, and `withAuthBinding(authBinding, config)` only sets a selector. Use a
+provider key or proxy sentinel for runnable stock-browser sessions.
+
+The following fragment illustrates resolver registration for a **custom
+composition**, not a complete external-auth setup using the stock npm bundle.
+The custom bootstrap must install the external-source binding described above:
 
 ```typescript
-import {
-  MeerkatRuntime,
-  registerExternalAuthResolver,
-  withAuthBinding,
-} from '@rkat/web';
+import { registerExternalAuthResolver } from '@rkat/web';
 import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 
+await wasm.default(); // Load the wasm-pack web binary before invoking an export.
 registerExternalAuthResolver(wasm, async (authBinding) => {
   const token = await myHostFetchToken(authBinding);
   return {
@@ -129,19 +162,11 @@ registerExternalAuthResolver(wasm, async (authBinding) => {
     expires_at: token.expiresAt,
   };
 });
-
-const runtime = await MeerkatRuntime.init(wasm, {
-  anthropicApiKey: 'proxy',
-  anthropicBaseUrl: 'https://my-proxy.example/anthropic',
-});
-
-// withAuthBinding(authBinding, config) returns a config with `authBinding` set;
-// alternatively just set the field directly on the config object.
-const session = runtime.createSession(withAuthBinding(
-  authBinding,
-  { model: 'claude-sonnet-4-6' },
-));
 ```
+
+Register before the externally bound session is built. First runtime
+installation preserves a registration made after binary initialization;
+replacing an existing runtime clears it, so re-register after that bootstrap.
 
 Surface notes:
 
@@ -175,11 +200,9 @@ calls a server-side provider proxy that injects the real credential.
 ```json
 {
   "model": "claude-sonnet-4-6",
-  "auth_binding": { "realm": "team-alpha", "binding": "claude" },
   "system_prompt": "You are helpful.",
   "max_tokens": 4096,
   "comms_name": "browser-agent",
-  "keep_alive": true,
   "labels": { "surface": "web" },
   "additional_instructions": ["Be concise."],
   "app_context": { "tenant": "team-alpha" }
@@ -187,33 +210,55 @@ calls a server-side provider proxy that injects the real credential.
 ```
 
 `SessionConfig` does not accept `api_key` or `base_url`; credentials come from
-bootstrap-populated realm config or from the selected `auth_binding`.
+bootstrap-populated realm config or an existing selected `auth_binding`.
+Omitting that selector uses the stock bootstrap's `global` bindings. External
+bindings require the custom composition described above.
+
+Direct Web sessions require explicit host-driven turns. Both
+`"keep_alive": true` and `"keep_alive": false` are rejected with
+`unsupported_session_option`; omit the field entirely. Mob
+`runtime_mode: "autonomous_host"` is a separate in-memory member-host path,
+not a direct-session keep-alive option.
 
 ## State Architecture
 
 ```
 thread_local! {
-    REGISTRY: RefCell<RuntimeRegistry>              // Direct session handles
-    RUNTIME_STATE: RefCell<Option<RuntimeState>>    // Service-based infrastructure
+    RUNTIME_STATE: RefCell<Option<RuntimeState>>    // Shared service and handle map
     SUBSCRIPTIONS: RefCell<SubscriptionRegistry>    // Event subscription handles
     EXTERNAL_AUTH_RESOLVER: RefCell<Option<Function>>
 }
 
+WasmStandaloneSessionService = EphemeralSessionService<FactoryAgentBuilder>
+
 RuntimeState {
-    mob_state: Arc<MobMcpState>,                    // All mob operations
-    session_service: Arc<WasmSessionService>,       // Concrete service for subscriptions
-    sessions: BTreeMap<u32, RuntimeHandleSession>,  // Browser-local handles to runtime sessions
+    mob_state: Arc<MobMcpState>,                         // All mob operations
+    session_service: Arc<WasmStandaloneSessionService>,  // Direct sessions and mob members
+    sessions: BTreeMap<u32, StandaloneHandleSession>,     // Browser-local handle map
     next_handle: u32,
-    js_tools: Vec<JsToolEntry>,                     // wasm32 only
+    bootstrap_mobpack: Option<BootstrapMobpack>,          // Verified id + name + skills
+    mobpack_trust: MobpackTrustConfig,                    // Bootstrap trust policy/store
+    js_tools: Vec<JsToolEntry>,                          // wasm32 only
+}
+
+StandaloneHandleSession {
+    session_id: SessionId,
+    mob_id: String,
+    event_rx: WasmSessionEventReceiver,
 }
 ```
 
 `MobMcpState::new(service, MobControlPrincipal::Owner)` wraps
-`EphemeralSessionService<FactoryAgentBuilder>` as an embedded, single-owner substrate. All
-mob operations create sessions through that same service, but runtime-owned surface semantics like
-`keep_alive` still belong to the hosting runtime layer.
+the shared `WasmStandaloneSessionService` as an embedded, single-owner
+substrate. Both direct handles and mob members use this
+`EphemeralSessionService<FactoryAgentBuilder>`, whose builder injects a
+`StoreAdapter` backed by `meerkat_store::MemoryStore`. A direct handle is not a
+separate directly owned agent or a native runtime-backed session.
 
-`destroy_runtime` zeroes `RUNTIME_STATE` and `REGISTRY`, closes outstanding subscriptions, and clears the external auth resolver.
+`destroy_runtime` clears the subscription registry and external auth resolver,
+then drops `RuntimeState`, invalidating its browser-local handles. This is
+in-memory teardown, not a durable cleanup receipt or a guarantee that
+already-dispatched external host side effects have been cancelled.
 
 ## Mob Spawn Spec Format
 
@@ -280,21 +325,10 @@ Note: Profile has no `system_prompt` field — prompts are built from `skills` d
 The `@rkat/web` npm package provides a camelCase TypeScript wrapper:
 
 ```typescript
-import {
-  MeerkatRuntime,
-  registerExternalAuthResolver,
-  withAuthBinding,
-} from '@rkat/web';
+import { MeerkatRuntime } from '@rkat/web';
 import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 
-// Optional: register external auth resolver before any session build
-registerExternalAuthResolver(wasm, async (ref) => ({
-  kind: 'inline_secret',
-  secret: await hostAuth.freshAccessToken(ref),
-  metadata: {},
-}));
-
-// Initialize
+// Stock key/proxy bootstrap also loads the WASM binary.
 const runtime = await MeerkatRuntime.init(wasm, {
   anthropicApiKey: 'proxy',
   anthropicBaseUrl: 'http://localhost:3100/anthropic',
@@ -318,7 +352,7 @@ const mobWide = await mob.subscribeEvents();
 // Direct sessions
 const session = runtime.createSession({ model: 'claude-sonnet-4-6' });
 const result = await session.turn('Hello');
-const sessionEvents = session.subscribe();   // sync, returns EventSubscription<EventEnvelope>
+const sessionEvents = session.subscribe();   // sync, returns EventSubscription<SessionEvent>
 sessionEvents.poll();
 session.destroy();
 ```
@@ -332,5 +366,5 @@ session.destroy();
 - `SpawnResult` is identity-native: `mob_id`, `agent_identity`, `member_ref`
 - `MobMember` is identity-native and no longer exposes legacy bridge/session handle fields
 - `MobStatus` carries `mob_id` + `status` only; the deprecated `state` compatibility projection was deleted
-- Per-session `apiKey` / `baseUrl` fields were removed; use runtime init-time provider keys/proxy URLs and/or `registerExternalAuthResolver` plus `authBinding`
-- `start_turn` now takes only `(handle, prompt)`; the legacy options-JSON third argument was removed
+- Per-session `apiKey` / `baseUrl` fields were removed; use runtime init-time provider keys/proxy URLs. `registerExternalAuthResolver` plus `authBinding` requires the custom bootstrap described in the auth section.
+- Raw `start_turn` takes only `(handle, promptJson)`, where `promptJson` is `JSON.stringify({ text: 'Hello' })` or `JSON.stringify({ blocks: contentBlocks })`; there is no third options argument. SDK `Session.turn('Hello')` / `Session.turn(contentBlocks)` handles this encoding.

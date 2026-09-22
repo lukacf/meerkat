@@ -9,28 +9,30 @@ Meerkat ships a REST server for running and managing agent sessions over HTTP. T
 ## Getting started
 
 <Steps>
-  <Step title="Start the server">
-    <CodeGroup>
-    ```bash Installed binary
-    rkat-rest --realm team-alpha
-    ```
-
-    </CodeGroup>
-  </Step>
   <Step title="Configure provider credentials">
     For the simplest environment-backed setup, export the key for your chosen
-    provider. Realm auth profiles and bindings are the persistent alternative:
+    provider before launching the server. [Realm auth profiles and
+    bindings](/guides/auth) are the persistent alternative:
 
     ```bash
     export ANTHROPIC_API_KEY="sk-..."
-    # or OPENAI_API_KEY, GOOGLE_API_KEY
+    ```
+  </Step>
+  <Step title="Start the server">
+    In that same configured terminal, start the installed binary:
+
+    ```bash
+    rkat-rest --realm team-alpha
     ```
   </Step>
   <Step title="Send a request">
+    Leave the server running and use another terminal for `curl`. Select an
+    Anthropic model to match the key above:
+
     ```bash
     curl -X POST http://127.0.0.1:8080/sessions \
       -H "Content-Type: application/json" \
-      -d '{"prompt": "Hello, Meerkat!"}'
+      -d '{"prompt": "Hello, Meerkat!", "model": "claude-opus-5", "provider": "anthropic"}'
     ```
   </Step>
 </Steps>
@@ -56,8 +58,9 @@ is authoritative.
 The REST server has no general inbound HTTP authentication layer. The `auth/*`
 routes manage outbound provider credentials; they do not authenticate callers
 to this API. Keep the listener on loopback or put it behind an authenticated,
-encrypted reverse proxy. The webhook-secret check applies only to the external
-event route.
+encrypted reverse proxy. The optional webhook-secret check protects only
+`POST /sessions/{id}/external-events` and
+`POST /sessions/{id}/peer-response-terminal`, not the other routes.
 </Warning>
 
 ## Endpoint overview
@@ -122,6 +125,10 @@ This overview follows the generated OpenAPI artifact at
 | `POST` | `/mob/{id}/wait-kickoff` | Wait for kickoff completion (mob feature) |
 | `POST` | `/mob/{id}/wire-members-batch` | Wire multiple mob members in one request (mob feature) |
 | `GET` | `/mob/{id}/members/{agent_identity}/status` | Read member status (mob feature) |
+| `GET` | `/mob/{id}/members/{agent_identity}/tool-declaration` | Read durable tool declaration and convergence status as `MobMemberToolDeclarationResult` (mob feature) |
+| `PUT` | `/mob/{id}/members/{agent_identity}/tool-declaration` | Apply a declaration with exact-revision CAS: `RestApplyMemberToolDeclarationRequest` → `MobApplyMemberToolDeclarationResult` (mob feature) |
+| `POST` | `/mob/{id}/members/{agent_identity}/identity-adoption` | Adopt an existing member under an expected-absent precondition: `RestAdoptMemberIdentityDeclarationRequest` → `MobAdoptMemberIdentityDeclarationResult` (mob feature) |
+| `POST` | `/mob/{id}/members/{agent_identity}/tool-convergence/resolve` | Resolve blocked identity convergence against desired/active revisions: `RestResolveIdentityConvergenceBlockRequest` → `MobResolveIdentityConvergenceBlockResult` (mob feature) |
 | `POST` | `/mob/{id}/members/{agent_identity}/cancel` | Force-cancel a member (mob feature) |
 | `POST` | `/mob/{id}/members/{agent_identity}/respawn` | Respawn a member (mob feature) |
 | `GET` | `/mob/{id}/members/{agent_identity}/history` | Read a mob member transcript page by identity (mob feature) |
@@ -298,7 +305,7 @@ Create and run a new session.
 }
 ```
 
-```json Response
+```json Response (minimal request)
 {
   "session_id": "01936f8a-7b2c-7000-8000-000000000001",
   "text": "Response text",
@@ -308,17 +315,17 @@ Create and run a new session.
     "input_tokens": 50,
     "output_tokens": 200,
     "total_tokens": 250
-  },
-  "structured_output": null,
-  "schema_warnings": null
+  }
 }
 ```
 </CodeGroup>
 
 #### Request fields
 
-<ParamField body="prompt" type="string" required>
-  The user prompt to send to the agent.
+<ParamField body="prompt" type="ContentInput (string | ContentBlock[])" required>
+  The user prompt: a string or a typed content-block array, for example
+  `[{"type":"text","text":"Hello"}]`. Media blocks depend on the selected
+  model/provider; see [model capabilities](/reference/capability-matrix).
 </ParamField>
 
 <ParamField body="injected_context" type="ContentInput[] | null" default="null">
@@ -349,6 +356,15 @@ Create and run a new session.
 
 <ParamField body="provider" type="string | null" default="inferred from model">
   Provider: `"anthropic"`, `"openai"`, `"gemini"`, `"self_hosted"`, `"other"`.
+</ParamField>
+
+<ParamField body="auth_binding" type="WireAuthBindingRef | null" default="null">
+  Optional structural credential selector, for example
+  `{"realm":"prod","binding":"anthropic","profile":"claude_oauth"}`.
+  `realm` and `binding` are required when supplied; `profile` is optional.
+  Configure the referenced [realm, binding, and auth profile](/guides/auth)
+  first. Omission/`null` lets the create resolver select credentials. This is
+  an object, not the CLI's colon-delimited string; provenance is server-owned.
 </ParamField>
 
 <ParamField body="max_tokens" type="u32 | null" default="config default">
@@ -425,13 +441,26 @@ Create and run a new session.
   Token usage breakdown.
 </ResponseField>
 
-<ResponseField name="structured_output" type="object | null">
-  Parsed structured output (when `output_schema` was provided).
+<ResponseField name="structured_output" type="JSON (optional)">
+  Parsed structured output when extraction succeeds. Omitted when absent.
 </ResponseField>
 
-<ResponseField name="schema_warnings" type="array | null">
-  Schema compatibility warnings per provider.
+<ResponseField name="extraction_error" type="ExtractionError (optional)">
+  Post-turn extraction failure details: `last_output` is the committed
+  main-turn assistant text that extraction attempted to transform, `attempts`
+  is the number of extraction attempts made, and `reason` describes the
+  failure. Omitted when absent.
 </ResponseField>
+
+<ResponseField name="schema_warnings" type="SchemaWarning[] (optional)">
+  Schema compatibility warnings per provider. Omitted when absent.
+</ResponseField>
+
+A successful response can contain committed `text` even if post-turn
+structured-output extraction fails. Inspect both `structured_output` and
+`extraction_error`; missing structured output does not prove extraction was
+never requested. These optional REST fields are omitted when absent, not
+filled with `null`.
 
 ### GET /sessions/{id}/history
 
@@ -515,12 +544,21 @@ List sessions. Supports optional label filters via query parameters.
   "sessions": [
     {
       "session_id": "01936f8a-7b2c-7000-8000-000000000001",
-      "state": "idle",
-      "created_at": "2025-01-15T10:30:00Z"
+      "created_at": 1736937000,
+      "updated_at": 1736937060,
+      "message_count": 4,
+      "total_tokens": 500,
+      "is_active": false
     }
   ]
 }
 ```
+
+Each row is a `WireSessionSummary`. `created_at` and `updated_at` are Unix
+seconds. `is_active` is the reported session activity flag, not a full
+runtime-state enum; use the status endpoint for runtime state. Optional
+`session_ref` and non-empty `labels` may also be present. The separate
+`GET /sessions/{id}` detail response retains its RFC3339 timestamp strings.
 
 ### POST /sessions/\{id\}/messages
 
@@ -544,9 +582,7 @@ Continue an existing session.
     "input_tokens": 100,
     "output_tokens": 150,
     "total_tokens": 250
-  },
-  "structured_output": null,
-  "schema_warnings": null
+  }
 }
 ```
 </CodeGroup>
@@ -557,8 +593,10 @@ Continue an existing session.
   Session ID (must match the path `{id}`).
 </ParamField>
 
-<ParamField body="prompt" type="string" required>
-  Follow-up prompt.
+<ParamField body="prompt" type="ContentInput (string | ContentBlock[])" required>
+  Follow-up prompt as text or typed content blocks, for example
+  `[{"type":"text","text":"Continue"}]`. Media support is model/provider
+  dependent; see [model capabilities](/reference/capability-matrix).
 </ParamField>
 
 <ParamField body="injected_context" type="ContentInput[] | null" default="null">
@@ -625,8 +663,19 @@ Same shape as `POST /sessions`.
 Interrupt an in-flight turn. No-op if the session is idle.
 
 ```json Response
-{"interrupted": true}
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "interrupted": true,
+  "result": "interrupted"
+}
 ```
+
+`interrupted` is derived from the typed `result`. The public classifier also
+reports `"interrupted"`/`true` for an existing idle session's no-op; it is not
+proof that a live turn was cancelled. The shared result type also has
+`"staged_noop"`/`false` for staged sessions on RPC's deferred-create path;
+REST does not expose deferred creation. Typed failures remain HTTP errors,
+not successful interrupt results.
 
 ### POST /requests/\{request_id\}/cancel
 
@@ -656,16 +705,16 @@ Queue an external event through the runtime-backed admission path.
 
 <CodeGroup>
 ```bash Without auth (localhost only)
-curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
+curl -X POST http://localhost:8080/sessions/01936f8a-7b2c-7000-8000-000000000001/external-events \
   -H "Content-Type: application/json" \
-  -d '{"alert": "CPU spike", "host": "web-03"}'
+  -d '{"kind": "generic_json", "event_type": "monitor.alert", "payload": {"alert": "CPU spike", "host": "web-03"}}'
 ```
 
 ```bash With webhook secret
-curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
+curl -X POST http://localhost:8080/sessions/01936f8a-7b2c-7000-8000-000000000001/external-events \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: my-secret" \
-  -d '{"alert": "deployment failed"}'
+  -d '{"kind": "generic_json", "event_type": "deployment.alert", "payload": {"alert": "deployment failed"}}'
 ```
 
 ```json Response (202 Accepted)
@@ -674,13 +723,27 @@ curl -X POST http://localhost:8080/sessions/sid_abc/external-events \
 </CodeGroup>
 
 <Note>
-This route keeps the optional `RKAT_WEBHOOK_SECRET` header auth used for webhook
-delivery, but the admitted event now flows through runtime input acceptance
-instead of a surface-local injector path.
+When `RKAT_WEBHOOK_SECRET` is configured on the server, this route requires
+the `X-Webhook-Secret` header. Admission queues the event without waking an
+idle session. Correlated terminal peer responses use
+`POST /sessions/{id}/peer-response-terminal`, not this generic event route.
 </Note>
 
-<ParamField body="(body)" type="any JSON" required>
-  Any JSON payload. Pretty-printed and injected as an event into the agent's inbox.
+<ParamField body="kind" type="string" required>
+  Must be `"generic_json"`. The `"peer_response_terminal"` tag is reserved
+  and rejected here.
+</ParamField>
+
+<ParamField body="event_type" type="string" required>
+  Event classification, for example `"monitor.alert"`.
+</ParamField>
+
+<ParamField body="payload" type="JSON" required>
+  Application payload inside the tagged envelope, not a flat request body.
+</ParamField>
+
+<ParamField body="blocks" type="WireContentBlock[] | null" default="null">
+  Optional typed content blocks accompanying the event.
 </ParamField>
 
 <ParamField header="X-Webhook-Secret" type="string">
@@ -696,11 +759,15 @@ instead of a surface-local injector path.
 
 ### POST /sessions/\{id\}/peer-response-terminal
 
-Admit a terminal peer response through the typed runtime ingress.
+Admit a terminal peer response through the typed runtime ingress. Like
+`external-events`, this route requires `X-Webhook-Secret` when the server has
+`RKAT_WEBHOOK_SECRET` configured; a missing or invalid secret returns HTTP
+`401`. The following example assumes that secret is enabled:
 
-```bash
-curl -X POST http://localhost:8080/sessions/sid_abc/peer-response-terminal \
+```bash With webhook secret
+curl -X POST http://localhost:8080/sessions/01936f8a-7b2c-7000-8000-000000000001/peer-response-terminal \
   -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: my-secret" \
   -d '{
     "peer_id": "00000000-0000-4000-8000-000000000161",
     "display_name": "analyst",
@@ -709,6 +776,11 @@ curl -X POST http://localhost:8080/sessions/sid_abc/peer-response-terminal \
     "result": {"token": "silver harbor"}
   }'
 ```
+
+<ParamField header="X-Webhook-Secret" type="string">
+  Required when `RKAT_WEBHOOK_SECRET` is set on the server; omit only when
+  webhook-secret authentication is disabled.
+</ParamField>
 
 <ParamField body="peer_id" type="string" required>
   Canonical peer routing ID. Display names are not accepted as routing identity.
@@ -776,16 +848,18 @@ Event types:
 | `hook_denied` | Hook blocked operation |
 | `skills_resolved` | Skills loaded for turn |
 | `skill_resolution_failed` | Skill resolution failed |
-| `stream_truncated` | The bounded live subscriber lagged; the event carries the dropped count |
+| `stream_truncated` | An upstream bounded subscriber reported lag and a dropped count; not guaranteed for REST transport loss |
 | `done` | Emitted when the broadcast channel closes |
 
-The live SSE subscription is bounded and best-effort. A slow subscriber gets a
-typed `stream_truncated` marker and then retained live events. Built-in
+The live SSE subscription is bounded and best-effort. Upstream
+`stream_truncated` envelopes can be forwarded, but the REST transport's own
+broadcast receiver can also lose events without a marker or dropped count.
+Do not infer completeness from the absence of a lag marker. Built-in
 realm-backed persistent sessions can feed an optional durable audit projector
-through a separate unbounded queue, so SSE lag does not drop its input. The
-audit log is asynchronous derived state. Reconnect and reconcile from session
-history/status, or use the JSON-RPC `events/*` methods when that replay surface
-is healthy.
+through a separate unbounded queue, so SSE lag does not drop its input. That
+audit log is asynchronous derived state, not a guaranteed complete replay.
+Reconnect and reconcile from session history/status, or use the JSON-RPC
+`events/*` methods when that optional replay surface is installed and healthy.
 
 ### GET /skills
 
@@ -871,7 +945,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response (abbreviated)
 {
-  "contract_version": "0.8.40",
+  "contract_version": {"major": 0, "minor": 8, "patch": 40},
   "providers": [
     {
       "provider": "anthropic",
@@ -1102,9 +1176,28 @@ Begin a loopback OAuth login. The server owns the OAuth state and PKCE verifier.
 ```json Request
 {
   "provider": "anthropic",
-  "redirect_uri": "http://127.0.0.1:53682/callback"
+  "redirect_uri": "http://127.0.0.1:53682/callback",
+  "realm_id": "prod",
+  "binding_id": "anthropic",
+  "profile_id": "claude_oauth"
 }
 ```
+
+<ParamField body="realm_id" type="string" required>
+  Configured credential-owner realm; the server's active realm is not an
+  automatic substitute.
+</ParamField>
+
+<ParamField body="binding_id" type="string" required>
+  Configured binding to receive the OAuth credentials.
+</ParamField>
+
+<ParamField body="profile_id" type="string | null">
+  Optional explicit auth profile override.
+</ParamField>
+
+Start and complete must address the same configured credential
+owner/binding/profile. See [authentication setup](/guides/auth).
 
 ### POST /auth/login/complete
 
@@ -1141,9 +1234,28 @@ Begin a device-code OAuth login.
 
 ```json Request
 {
-  "provider": "google"
+  "provider": "google",
+  "realm_id": "prod",
+  "binding_id": "google",
+  "profile_id": "gemini_oauth"
 }
 ```
+
+<ParamField body="realm_id" type="string" required>
+  Configured credential-owner realm, explicitly supplied even when it matches
+  the server's active realm.
+</ParamField>
+
+<ParamField body="binding_id" type="string" required>
+  Configured binding to receive the device-flow credentials.
+</ParamField>
+
+<ParamField body="profile_id" type="string | null">
+  Optional explicit auth profile override.
+</ParamField>
+
+Use that same credential owner/binding/profile for device completion; the
+example explicitly selects `gemini_oauth` in both requests.
 
 ### POST /auth/login/device/complete
 
@@ -1217,80 +1329,94 @@ Push a canonical comms command into a running session. Requires the `comms` feat
   "kind": "peer_message",
   "to": "01936f8a-7b2c-7000-8000-000000000002",
   "body": "Please review the latest diff",
-  "handling_mode": "queue",
-  "source": "ci-pipeline"
+  "handling_mode": "queue"
 }
 ```
 
-```json Response (202 Accepted)
-{"queued": true}
+```json Response (200 OK, acknowledged transport)
+{
+  "kind": "peer_message_sent",
+  "envelope_id": "01936f8a-7b2c-7000-8000-000000000003",
+  "delivery": "acked"
+}
 ```
 </CodeGroup>
 
-<ParamField body="session_id" type="string" required>
-  Session ID to dispatch the comms command to.
-</ParamField>
+#### Closed request variants
 
-<ParamField body="kind" type="string" required>
-  Command kind: `"input"`, `"peer_message"`, `"peer_lifecycle"`, `"peer_request"`, or `"peer_response"`.
-</ParamField>
+`CommsSendParams` is a flat, `kind`-tagged union, not a shared bag of optional
+fields. Every variant requires a string `session_id` identifying the sending
+or receiving local session and rejects unknown fields. `to` is a canonical
+peer ID, never a display name.
 
-<ParamField body="to" type="string | null">
-  Canonical peer ID to send to (required for `peer_message`, `peer_lifecycle`, `peer_request`, and `peer_response`).
-</ParamField>
+| `kind` | Required fields in addition to `session_id` and `kind` | Optional fields |
+|--------|------------------------------------------------------|-----------------|
+| `input` | `body` (string) | `blocks`, `source`, `stream`, `handling_mode`, `allow_self_session` |
+| `peer_message` | `to`, `body` (string) | `blocks`, `content_taint`, `handling_mode` |
+| `peer_lifecycle` | `to`, `lifecycle_kind`, `params` | None |
+| `peer_request` | `to`, `intent`, `params` | `blocks`, `content_taint`, `handling_mode`, `stream` |
+| `peer_response` | `to`, `in_reply_to`, `status` | `result`, `blocks`, `content_taint`, `handling_mode` |
 
-<ParamField body="body" type="string | null">
-  Message body (required for `input` and `peer_message`).
-</ParamField>
+- `blocks` is a typed `ContentBlock` array, not arbitrary JSON.
+- `source` belongs only to `input`: `"tcp"`, `"uds"`, `"stdin"`, `"webhook"`,
+  or `"rpc"` (default `"rpc"`). It is not a free-text source label.
+- `stream` accepts `"none"` (default) or `"reserve_interaction"` on `input`
+  and `peer_request`.
+- `allow_self_session` is an input-only boolean, default `false`.
+- `content_taint` is the typed `SendTaintOverride` on content-bearing peer
+  variants; omission inherits the runtime's outbound declaration.
+- `handling_mode` accepts `"queue"` or `"steer"`. Omission/`null` defaults to
+  `"queue"` for `input`, `peer_message`, and `peer_request`. It is forbidden
+  on machine-classified progress responses. A terminal `peer_response` may
+  specify it or inherit the recorded inbound request's mode and requires
+  that recorded request to still be repliable.
 
-<ParamField body="handling_mode" type="string | null">
-  Handling mode for `input`, `peer_message`, `peer_request`, and `peer_response`. Local callers must provide `"queue"` or `"steer"`.
-</ParamField>
+`peer_message` is the ordinary collaboration primitive. `peer_lifecycle`
+is a one-way topology notification: its `lifecycle_kind` is
+`"mob.peer_added"`, `"mob.peer_retired"`, `"mob.peer_unwired"`, or
+`"mob.dismiss"`. `mob.dismiss` is supervisor-directed; accepting that enum
+value does not grant the caller dismissal authority. Its required
+`CommsPeerLifecycleParams` object contains `peer` (string) and optional
+`role`, `description`, and typed `peer_spec` (`BridgePeerSpec`).
+
+`peer_request` is a structured ask with correlated replies. Its closed intent
+vocabulary is `"supervisor.bridge"` or `"checksum_token"`, not arbitrary
+application labels such as `"review"` or `"delegate"`. Required `params`
+must match the intent: a typed `BridgeCommand` for `supervisor.bridge`, or
+`{"subject":"..."}` for `checksum_token`.
+
+`peer_response.in_reply_to` is the request correlation ID. `status` accepts
+`"accepted"`, `"completed"`, or `"failed"`. Optional `result` is a typed
+`BridgeReply` or a checksum result
+`{"request_intent":"checksum_token","request_subject":"...","token":"..."}`,
+not a free-form object. The canonical bridge shapes are
+`meerkat_contracts::wire::supervisor_bridge::{BridgeCommand, BridgeReply,
+BridgePeerSpec}` and their generated schema definitions.
+
+#### Send receipts
+
+Success returns HTTP `200` with a `CommsSendResult` selected by `kind`:
+
+| Result `kind` | Fields |
+|---------------|--------|
+| `input_accepted` | `interaction_id`, `stream_reserved` |
+| `peer_message_sent` | `envelope_id`, `delivery` |
+| `peer_lifecycle_sent` | `envelope_id`, `delivery` |
+| `peer_request_sent` | `envelope_id`, `interaction_id`, `request_id` (same value as `envelope_id`), `stream_reserved`, `delivery` |
+| `peer_response_sent` | `envelope_id`, `in_reply_to`, `delivery` |
+
+`delivery` records the selected transport's strongest proven delivery fact:
+`acked`, `volatile_handed_off`, `queued`, or a `durably_resolved` object with
+its typed ingress `outcome`. An acknowledgement does not prove completion of
+the recipient's agent turn; a queued send does not prove receiver admission.
+This is distinct from the webhook routes' `202`/`{"queued":true}` admission
+response.
 
 <Note>
-`peer_message` is the default collaboration primitive. `peer_lifecycle` is a one-way topology notification. `peer_request` is only a structured ask with correlated replies.
-</Note>
-
-<ParamField body="lifecycle_kind" type="string | null">
-  Lifecycle event kind: `"mob.peer_added"`, `"mob.peer_retired"`, or `"mob.peer_unwired"` (required for `peer_lifecycle`).
-</ParamField>
-
-<ParamField body="intent" type="string | null">
-  Request intent (required for `peer_request`, e.g. `"review"`, `"delegate"`).
-</ParamField>
-
-<ParamField body="params" type="object | null">
-  Request parameters (optional for `peer_request`).
-</ParamField>
-
-<ParamField body="in_reply_to" type="string | null">
-  ID of the request being responded to (required for `peer_response`).
-</ParamField>
-
-<ParamField body="status" type="string | null">
-  Response status: `"accepted"`, `"completed"`, or `"failed"` (for `peer_response`).
-</ParamField>
-
-<ParamField body="result" type="object | null">
-  Response result data (optional for `peer_response`).
-</ParamField>
-
-<ParamField body="source" type="string | null">
-  Optional source label.
-</ParamField>
-
-<ParamField body="stream" type="string | null">
-  Optional input stream mode: `"none"` or `"reserve_interaction"` (for `input` and `peer_request`).
-</ParamField>
-
-<ParamField body="allow_self_session" type="bool | null">
-  Allow the session to send a message to itself (default: false).
-</ParamField>
-
-<Note>
-Unlike `POST /sessions/{id}/external-events` (which uses `RKAT_WEBHOOK_SECRET`
-header auth), `/comms/send` has **no authentication**. It is intended for
-trusted internal callers that already know the session ID.
+Unlike the two webhook ingress routes (which optionally check
+`X-Webhook-Secret` against `RKAT_WEBHOOK_SECRET`), `/comms/send` has **no
+authentication**. It is intended for trusted internal callers that already
+know the session ID.
 </Note>
 
 ### GET /comms/peers
@@ -1345,7 +1471,8 @@ List discoverable peers for a session. Requires the `comms` feature.
 
 ## Error responses
 
-All errors are returned as JSON with an HTTP status code:
+The ordinary REST `ApiError` adapter returns an HTTP status and a JSON
+envelope:
 
 ```json
 {
@@ -1357,17 +1484,28 @@ All errors are returned as JSON with an HTTP status code:
 | HTTP Status | Code | When |
 |-------------|------|------|
 | 400 | `BAD_REQUEST` | Invalid parameters, session ID mismatch, keep_alive without comms |
-| 403 | `HOOK_DENIED` | Hook blocked the operation |
-| 404 | `SESSION_NOT_FOUND` | Session does not exist |
-| 404 | `SKILL_NOT_FOUND` | Requested skill does not exist |
-| 409 | `SESSION_BUSY` | Turn already in progress |
-| 409 | `SESSION_NOT_RUNNING` | Session not in running state |
-| 422 | `SKILL_RESOLUTION_FAILED` | Skill resolution error |
-| 429 | `BUDGET_EXHAUSTED` | Resource limits reached |
+| 401 | `UNAUTHORIZED` | Missing or invalid webhook secret |
+| 404 | `NOT_FOUND` | Resource not found |
+| 409 | `CONFLICT` | Operation conflicts with current state |
+| 409 | `DUPLICATE_INPUT` | Duplicate runtime input; response also carries top-level `existing_id` |
+| 409 | `DUPLICATE_REQUEST_ID` | Request ID is already in flight |
+| 410 | `GONE` | Resource is no longer available |
+| 499 | `REQUEST_CANCELLED` | Request cancellation won before committed success; may include `details` |
+| 500 | `CONFIGURATION_ERROR` | Server/configuration resolution failure |
 | 500 | `AGENT_ERROR` | LLM provider error, tool dispatch failure, agent loop error |
 | 500 | `INTERNAL_ERROR` | Store initialization failure, unexpected server error |
-| 501 | `CAPABILITY_UNAVAILABLE` | Required capability not compiled in or disabled |
-| 502 | `PROVIDER_ERROR` | LLM provider issue (missing key, auth failure) |
+| 503 | `SERVICE_UNAVAILABLE` | Required service or capacity is unavailable |
+
+The adapter's data-bearing bad-request/internal variants use HTTP `400`/`500`
+with a route-supplied typed `code` and `details`. Other route-specific typed
+projections retain their own codes and statuses. This table is not the
+canonical cross-surface [ErrorCode index](/reference/api-reference#error-code-reference)
+applied wholesale: for example, create-time `SessionError::Busy` currently
+maps to `BAD_REQUEST`/`400`, not a universal `SESSION_BUSY`/`409`.
+
+Do not require this envelope on every failure. Auth routes may return only
+`{"error":"..."}`; webhook admission has route-specific error projections,
+and framework JSON/path extraction errors can use different bodies.
 
 For a session that was durably created but whose first turn failed, the server
 returns `SESSION_CREATED_WITH_TURN_FAILURE` with resumable session identity in
@@ -1381,7 +1519,7 @@ kind should accept the new value. Known non-retryable LLM failures can still use
 ```json Session not found
 {
   "error": "Session not found: 01936f8a-7b2c-7000-8000-000000000099",
-  "code": "SESSION_NOT_FOUND"
+  "code": "NOT_FOUND"
 }
 ```
 

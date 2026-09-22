@@ -247,9 +247,11 @@ execution.
 ### WorkGraph
 
 `JobWorkGraphLink` associates a job with a commitment.
-`JobTerminalEvidenceProjector` projects typed terminal evidence and requests
-closure, but WorkGraph still applies its completion policy. Job execution must
-also work when WorkGraph is disabled.
+When composed by a host, `JobTerminalEvidenceProjector` projects typed terminal
+evidence only; it neither requests closure nor closes the item. An authorized
+host or agent must separately request WorkGraph closure with the current item
+revision under the normal completion policy. Job success is not itself the
+required confirmation. Job execution also works when WorkGraph is disabled.
 
 ### Waiting Sessions
 

@@ -226,7 +226,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "meerkat_machine",
                     "MeerkatMachine",
                     "meerkat-runtime/src/meerkat_machine/mod.rs",
-                    "authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, deferred session stage, deferred session keep-alive update, deferred session promotion, deferred session archive, deferred session drop, mob operator access resolution/restoration/profile mutation/create scope/manage scope/spawn-profile scope, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify input terminality, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, peer ready operation, peer request, peer response, peer ingress, peer endpoint projection, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, completion consumer cursors, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, recover/advance completion consumer cursors, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure",
+                    "authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, deferred session stage, deferred session keep-alive update, deferred session promotion, deferred session archive, deferred session drop, mob operator access resolution/restoration/profile mutation/create scope/manage scope/spawn-profile scope, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify input terminality, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, runtime Reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, MCP server lifecycle, peer ready operation, peer request, peer response, peer ingress, peer endpoint projection, session context advancement, interaction stream, product turn, ingress, supervisor trust-edge publication/revocation, trust reconcile, ops barrier, local endpoint, admission, completion, completion consumer cursors, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, recover/advance completion consumer cursors, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure",
                     CoverageClaims::none()
                         .transitions(&[
                             "Initialize",
@@ -470,7 +470,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "realtime_connection_projection",
-                    "project realtime intent, begin replace detach binding, require reattach, publish signal, reconnect progress, MCP server connect/connected/failed/disconnected/reload, advance session context, interaction stream reserved/attached/completed/expired/closed early, freshness, policy, and binding rotation",
+                    "MCP server connection outcomes and reload, session context advancement, and interaction stream reservation, attachment, completion, expiry, and early closure in the Attached runtime phase",
                     CoverageClaims::none().transitions(&[
                         "McpServerConnectedAttached",
                         "McpServerFailedAttached",
@@ -486,7 +486,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "product_turn_streaming",
-                    "product turn in flight, committed, output started, interrupted, terminal, realtime projection advance/refreshed/reset, client input submitted, mid turn activity, and turn terminated classification",
+                    "runtime Reset from Initializing, Idle, Attached, or Retired returns to Idle and emits the Reset runtime notice",
                     CoverageClaims::none().transitions(&["Reset"]),
                 ),
                 scenario(
@@ -513,7 +513,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "live_topology_and_supervision",
-                    "begin live topology reconfigure, mark detached, apply identity or visibility, complete/abort/fail topology, bind/authorize/revoke supervisor, publish/revoke trust edge, comms trust reconcile, and local endpoint publish or clear",
+                    "supervisor trust-edge publication and revocation through PublishSupervisorTrustEdge and RevokeSupervisorTrustEdge",
                     CoverageClaims::none()
                         .effects(&["PublishSupervisorTrustEdge", "RevokeSupervisorTrustEdge"]),
                 ),
@@ -2109,7 +2109,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "work_attention_lifecycle",
                 "WorkAttentionLifecycleMachine",
                 "meerkat-workgraph/src/machine.rs",
-                "WorkAttentionMachine domain-facing lifecycle transition seam over Pause, Resume, Stop, and Supersede; effects Paused, Resumed, Stopped, Superseded; invariants active_has_no_pause_deadline, paused_has_pause_deadline, stopped_has_stop_time, superseded_has_target; revision, timed pause eligibility, stopped state, and supersession target ownership",
+                "WorkAttentionMachine domain-facing lifecycle transition seam over Pause, Resume, Stop, and Supersede; effects AttentionPaused, AttentionResumed, AttentionStopped, AttentionSuperseded; invariants live_has_no_terminal_time, paused_has_pause_state, superseded_records_successor; Paused may have no deadline; revision, timed pause eligibility, stopped state, and supersession target ownership",
                 CoverageClaims::none()
                     .transitions(&[
                         "PauseActive",
@@ -2770,7 +2770,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
             &[
                 scenario(
                     "revision-supersede-route",
-                    "revision-affecting schedule updates supersede pending future occurrences through the explicit route",
+                    "revision-affecting schedule updates (including deletion) supersede all outstanding nonterminal occurrences of the schedule from older revisions at commit time, including overdue Pending and in-flight Claimed/Dispatching/AwaitingCompletion, through typed occurrence Supersede and reciprocal OccurrencesSuperseded -> ConfirmOccurrencesSuperseded acknowledgement; supersession does not promise cancellation of already-dispatched external work",
                     CoverageClaims::none(),
                 ),
                 scenario(

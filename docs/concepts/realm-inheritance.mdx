@@ -36,8 +36,18 @@ Rules:
 - Unrelated sibling realms are never searched.
 - The maximum chain depth is 16.
 
-Resolution fails closed on a cycle, missing non-global parent, a parent of
-`env_default`, a parent on `global`, or excessive depth.
+Traversal of explicit parent edges fails closed on a cycle, missing
+non-global parent, a parent of `env_default`, a parent on `global`, or
+excessive depth.
+
+<Warning>
+The current implicit-global append has a validation gap: it does not inspect
+`global.parent` or recheck depth after appending the tail. A chain of sixteen
+non-global nodes can therefore return seventeen nodes after that append.
+Keep `global` parentless and the entire chain within sixteen nodes; these
+remain configuration requirements, not relaxed limits. Do not rely on the
+implicit-tail path to enforce those two checks.
+</Warning>
 
 An absent head is legal for internal default-selection paths: it contributes no
 config and may still reach a configured `global` tail before environment
@@ -69,12 +79,16 @@ resolved chain from root to head, then applies per-request overrides.
 
 | Section | Inheritance behavior |
 |---------|----------------------|
-| Scalar and optional settings | Child wins when the field is explicitly present |
+| Optional settings such as `max_tokens` and `agent.max_tokens_per_turn` | Child wins when the value is present |
+| Other scalar settings | Section-specific rules; many override only when nondefault |
+| `tools`, `retry`, and `skills` overrides | Filesystem-backed docs use raw TOML presence for supported fields; non-filesystem sources without raw TOML retain value-based merge behavior |
 | Per-provider model defaults | Union by provider, child wins per provider |
 | Limits | Child wins per field, so one limit can change while others inherit |
+| `shell`, `store`, `comms`, `compaction`, `rest` | A nondefault child section replaces the whole section, including defaults for omitted child fields |
 | MCP servers | Union by server name; child can add or replace a same-named server |
-| Hooks | Append parent-first, then child |
+| Hooks | Entries append parent-first, then child; scalar settings override only when nondefault |
 | Skill sources | Append parent-first; canonical source identity governs shadowing |
+| `model_fallback` | A nondefault child table replaces the whole table; empty/default-valued tables inherit, while explicit `enabled = false` replaces and disables |
 | Realm backend/auth/binding maps | Binding resolution retains the realm that owns the complete section; profile maps are not spliced across owners |
 
 There are no removal tombstones for inherited MCP servers, hooks, or skill
@@ -83,7 +97,8 @@ sources. An empty child section does not delete a parent entry.
 `config get`, `config set`, and `config patch` operate on the raw head
 document. Runtime agent construction reads the composed effective config. This
 read/write split prevents a read-modify-write from flattening inherited entries
-into the child.
+into the child. RFC 7396 `config patch` updates the raw document; it is distinct
+from these realm-composition rules.
 
 ## Credentials Read Down, Write To The Owner
 
@@ -92,12 +107,23 @@ reference records the realm that defines it:
 
 - **Reads inherit.** Runtime resolution walks the chain and can select a
   matching ancestor binding.
-- **Writes are strict-owner and explicitly addressed.** Login, logout, refresh,
-  and managed credential persistence must target the binding's owning realm. A
-  child-addressed write to an inherited binding is rejected and reports the
-  owner so the caller can retarget; it is never forwarded automatically.
-- **Leases use owner provenance.** Managed-store and OAuth lease keys are based
-  on that owning realm and binding.
+- **HostAuthService and RPC/REST writes are strict-owner and explicitly
+  addressed.** A child-addressed credential write to an inherited binding is
+  rejected and reports the owner so the caller can retarget; those services do
+  not forward it automatically.
+- **Managed leases use owner provenance.** AuthMachine, TokenStore, and refresh
+  coordination use the owning realm plus binding and optional profile by
+  default. A configured `credential_account` instead uses the owning realm
+  plus account, sharing the credential lifecycle across route bindings.
+
+<Warning>
+**Current CLI logout exception:** when the loaded config resolves
+`child:<binding>` to an inherited owner, `rkat auth logout child:<binding>`
+can clear that owner's stored credential, including a shared account used by
+other routes. Explicitly address the true owner instead. A bare logout binding
+means `global`; `--realm` does not retarget logout. This exception does not
+change the strict-owner host/RPC/REST contract or the config read/write split.
+</Warning>
 
 Environment, inline-secret, and command sources still resolve their material at
 use time, but the configured binding itself retains owner provenance.
@@ -114,10 +140,12 @@ binding or silently replace one half of an inherited pair.
 ~/.rkat/config.toml
 ```
 
-`rkat auth login` provisions a binding in this document and stores its
-credential under the global binding identity. Once a `[realm.global]` section
-exists, it becomes the implicit tail for workspace realms without another
-explicit terminal parent.
+Interactive OAuth/device `rkat auth login` provisions nonsecret binding
+configuration in this document and stores its credential separately through
+TokenStore under the global credential identity. Scripted API-key login only
+stores a token and requires matching managed-store config. Once a
+`[realm.global]` section exists, it becomes the implicit tail for workspace
+realms without another explicit terminal parent.
 
 The global realm is different from `env_default`:
 

@@ -42,7 +42,11 @@ Turn / drain / admission:
 
 Tool surface:
 
-- `tool_visibility_owner: Arc<dyn ToolVisibilityOwner>` — tool visibility projection
+- `tool_visibility_owner: GeneratedToolVisibilityOwner` — generated-authority
+  carrier for tool visibility; `tool_visibility_owner()` returns
+  `&GeneratedToolVisibilityOwner`. The underlying `ToolVisibilityOwner` trait
+  delegates behind that carrier; a raw `Arc<dyn ToolVisibilityOwner>` is not a
+  substitute for the runtime-minted installation authority.
 - `external_tool_surface: Arc<dyn ExternalToolSurfaceHandle>` — MCP surface transitions
 - `mcp_server_lifecycle: Arc<dyn McpServerLifecycleHandle>` — MCP server add/remove/reload lifecycle
 
@@ -98,16 +102,21 @@ full contract in `docs/reference/machine-authority.mdx`):
   attributability; both hold paths are machine-minted; commit verdicts emit
   `DurableTailRecoveryCommitAuthorized` with the machine-minted boundary
   sequence (one past the last committed receipt).
-- `RuntimeStore` realizes: one `atomic_apply` boundary (recovered committed
-  session body + receipt + input terminalization), fenced on the observed
-  lifecycle-row version and per-input-row digests (`expected_row_digest` MUST be enforced
-  inside the writing transaction; typed `InputRowVersionConflict` /
-  `MachineLifecycleVersionConflict`).
+- `RuntimeStore` realizes a sealed `PreparedRuntimeSessionCommit` through
+  `commit_prepared_session_boundary`: one atomic boundary for the recovered
+  profile-specific session state, receipt, and input terminalization, fenced
+  on the observed lifecycle-row version and per-input-row digests
+  (`expected_row_digest` MUST be enforced inside the writing transaction;
+  typed `InputRowVersionConflict` / `MachineLifecycleVersionConflict`).
 
-The classification verdict crosses the seam sealed:
-`DurableTailRecoveryRequest::from_classification` (meerkat-runtime/src/recovery.rs)
-is the only constructor and requires the classifier's `DurableTailClassified`
-effect. While a tail is held or evidence is quarantined, resume fails typed
+The public preparation seam is `recover_durable_tail(store, session_id)` in
+`meerkat-runtime/src/recovery.rs`. It loads opaque store-bound evidence,
+derives and proves the exact candidate, and drives/consumes the generated
+classification internally. Callers supply only the `RuntimeStore` and stable
+`SessionId`, never documents, heads, classifications, receipts, or CAS tokens.
+WholeBlob and HeadCanonical recovery have distinct preparation paths that
+produce the sealed `PreparedRuntimeSessionCommit` handed to the store.
+While a tail is held or evidence is quarantined, resume fails typed
 (`SessionError::DurableTailHeldForRecovery` / `DurableEvidenceQuarantined`)
 with content retained. Read-triggered recovery runs under an exclusive
 per-session fence and converges idempotently when a competing process wins.
@@ -202,9 +211,27 @@ Trait in `meerkat-core/src/ops_lifecycle.rs`. Concrete impl `RuntimeOpsLifecycle
 
 Completion feed: the registry owns a `FeedBuffer` that produces `CompletionEntry` events on terminal transitions. `RuntimeCompletionFeed` (read handle) implements `CompletionFeed` (meerkat-core trait). Consumer cursors are epoch-owned via `EpochCursorState` on `SessionRuntimeBindings`.
 
-Persistence channel: when wired via `set_persistence_channel()`, terminal transitions capture a `PersistedOpsSnapshot` (DSL op state + completion entries + cursor values) and queue it to a bounded mpsc channel. A dedicated persistence task drains to `RuntimeStore::persist_ops_lifecycle()`.
+Persistence channel: when wired via `set_persistence_channel()`, terminal
+persistence captures a `PersistedOpsSnapshot` (DSL op state + completion
+entries + cursor values) and sends it over an unbounded mpsc queue of
+`OpsLifecyclePersistenceRequest`. A dedicated worker calls
+`RuntimeStore::persist_ops_lifecycle()` and acknowledges the actual durable
+result through each request's separate one-slot reply channel. Terminal
+persistence waits for that acknowledgement; queue closure, worker loss, and
+store failures propagate rather than becoming successful durable writes.
+This optional persistence path is distinct from bounded completion-feed
+retention and the best-effort event projector.
 
-Recovery: `MeerkatMachine::recover_or_create_ops_state()` loads persisted snapshots via `RuntimeOpsLifecycleRegistry::from_recovered()`. Non-terminal operations are stripped. The feed buffer is pre-seeded with persisted completion entries. Consumer cursors are restored.
+Recovery: `MeerkatMachine::recover_or_create_ops_state()` loads persisted
+snapshots via `RuntimeOpsLifecycleRegistry::from_recovered()`. Generated
+recovery classification retains valid terminal records and running
+`DetachedJobWait` bindings, discarding other volatile nonterminal operations
+by default. Recovering a running wait does not mint a terminal outcome or
+completion entry; detached-job lifecycle remains feature-owned. The separate
+internal `from_recovered_preserving_operation` path handles an exact typed
+`ReloadRequired` preservation request matching persisted identity, kind, and
+source, not a blanket retain-all exception. The feed buffer is pre-seeded
+with persisted completion entries, and consumer cursors are restored.
 
 ## Durable event projection
 
@@ -297,7 +324,7 @@ entrypoints that bypass `scripts/repo-cargo`.
 - `meerkat-runtime/src/ops_lifecycle.rs` — `RuntimeOpsLifecycleRegistry`
 - `meerkat-runtime/src/policy_table.rs` — `DefaultPolicyTable`
 - `meerkat-runtime/src/runtime_loop.rs` — completion-feed wake injection and runtime loop
-- `meerkat-runtime/src/recovery.rs` — durable-tail recovery authorization/realization (`DurableTailRecoveryRequest`)
+- `meerkat-runtime/src/recovery.rs` — store-bound durable-tail preparation, classification, authorization, and realization (`recover_durable_tail(store, session_id)`)
 - `meerkat-runtime/src/store/mod.rs` — `RuntimeStore` contract (fenced records, boundary receipts)
 - `meerkat-core/src/completion_feed.rs` — monotonic completion-feed contract
 - `meerkat-runtime/src/peer_handling_mode.rs` — handling_mode validation

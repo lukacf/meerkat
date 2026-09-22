@@ -101,13 +101,25 @@ const result = await session.turn("Hello");
 console.log(result.text);
 ```
 
-For OAuth or host-owned cloud credentials, register an external auth resolver
-and bind the session to a structural auth binding. The selected realm binding
-must be configured to use the WASM external-resolver credential source.
+<Warning>
+Stock `MeerkatRuntime.init()` and `initFromMobpack()` only synthesize
+`InlineSecret` bindings in the in-memory `global` realm from provider keys
+and URLs. They do not accept realm/binding configuration or load native realm
+files. Registering an external resolver does not create a realm or convert
+those bindings. Use the key/proxy examples above for stock browser sessions;
+OAuth or cloud credential handling can stay in the server-side proxy.
+</Warning>
+
+External auth is a custom Rust/WASM composition seam. A custom bootstrap must
+install a binding with credential source
+`CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }` before that
+binding can use the callback. The following fragment only shows registration;
+it is not an external-binding bootstrap for the stock npm bundle:
 
 ```typescript
-import { registerExternalAuthResolver, withAuthBinding } from "@rkat/web";
+import { registerExternalAuthResolver } from "@rkat/web";
 
+await wasm.default(); // Load the wasm-pack web binary before invoking an export.
 registerExternalAuthResolver(wasm, async (authBinding) => {
   const token = await hostAuth.freshAccessToken(authBinding);
   return {
@@ -117,12 +129,13 @@ registerExternalAuthResolver(wasm, async (authBinding) => {
     expires_at: token.expiresAt,
   };
 });
-
-const bound = runtime.createSession(withAuthBinding(
-  { realm: "team-alpha", binding: "anthropic" },
-  { model: "claude-sonnet-4-6" },
-));
 ```
+
+Register before building the externally bound session. First runtime
+installation preserves a registration made after binary initialization;
+reinitializing an existing runtime clears it, so register again afterward.
+`withAuthBinding(authBinding, config)` only sets a structural selector for an
+already-configured binding; it cannot install one.
 
 ## Poll events
 
@@ -172,8 +185,8 @@ const leadStatus = await mob.memberStatus("lead-1");
 ```typescript
 const sub = await mob.subscribeMemberEvents("lead-1");
 
-for (const event of sub.poll()) {
-  console.log(event.type, event);
+for (const envelope of sub.poll()) {
+  console.log(envelope.payload.type, envelope);
 }
 
 sub.close();
@@ -219,7 +232,7 @@ comms tools available to agents during their turns (`send_message`,
 | **Tools** | Custom JS callbacks, task/datetime, and in-process comms tools | Shell, filesystem-mutating, and agent-internal mob-management tools |
 | **Skills** | Trust-verified mobpack skills compiled into the system prompt | Runtime skill repositories and skill tools (filesystem, HTTP, stdio, Git) |
 | **Hooks** | -- | Configured hook engines and command hooks |
-| **Compaction** | -- | Session compaction |
+| **Compaction** | Automatic session context compaction at configured/model-aware thresholds | No additional manual compaction API in `@rkat/web` |
 | **Scheduling** | -- | Durable schedule driver and stores |
 | **Other** | Helper/fork delegation inside browser mobs | MCP client and cross-process runtime recovery |
 

@@ -60,7 +60,8 @@ parent = "org"
 
 The `global` realm's config document is **home-rooted** at `~/.rkat/config.toml`
 (a single well-known location, not a per-workspace file), which is why a single
-`rkat auth login` is inherited by every workspace realm via the chain tail. See
+interactive `rkat auth login` is inherited by every workspace realm via the
+chain tail. See
 [Realm inheritance](/concepts/realm-inheritance) for the full model, including
 credential read-inherit / write-strict-owner and the add/override-but-not-remove
 rules for MCP servers and hooks.
@@ -110,15 +111,18 @@ This gives deterministic behavior when multiple clients or processes update conf
 
 Meerkat uses three update models:
 
-1. Layered config loading (`defaults -> file -> runtime`) uses **field-wise merge**:
-  - scalar/option values: last non-default wins
-  - section values (for example `store`, `comms`, `compaction`): replace whole section
-  - hook entries: append/extend
-2. Realm-chain composition folds each realm doc parent-first with **child-wins**:
+1. Layered config loading (`defaults -> file -> runtime`) uses **section-specific merge rules**:
+  - optional settings such as `max_tokens` override when present; many non-optional scalars override only when nondefault
+  - `shell`, `store`, `comms`, `compaction`, and `rest`: a nondefault incoming section replaces the whole section, including its omitted fields' defaults
+  - hook entries append; hook scalar settings override only when nondefault
+2. Realm-chain composition reuses those rules, folding each realm doc parent-first:
   - per-provider model defaults: union, child-wins per provider (a child overrides its anthropic default while inheriting the parent's openai default)
   - MCP servers: map-key union, child-wins per name (add or override, never remove)
-  - hooks and skill sources: append parent-first (child cannot remove inherited entries)
-  - limits and other config sections: per-field child-wins (a child can tighten `max_sessions` while inheriting other caps)
+  - hook entries and skill sources: append parent-first (child cannot remove inherited entries); hook scalars retain the nondefault-value rule
+  - limits: per-field optional child-wins (a child can tighten `max_sessions` while inheriting other caps)
+  - `shell`, `store`, `comms`, `compaction`, and `rest`: retain nondefault whole-section replacement, not per-field inheritance
+  - filesystem-backed docs additionally use raw TOML presence for `tools`, `retry`, and `skills` overrides, so explicitly setting a supported field to its default can override a parent; this is not a universal rule for all scalar fields or non-filesystem sources
+  - `model_fallback`: a nondefault table replaces the inherited table as a whole; an empty/default-valued table inherits, while `enabled = false` explicitly replaces and disables
   - the binding/backend/auth maps are **not** merged across realms: each realm's binding resolves its `backend_profile` / `auth_profile` only within its own section (the owning realm)
 3. Runtime patch APIs (`config/patch`, `PATCH /config`) use **RFC 7396 JSON merge-patch** semantics.
 
@@ -128,9 +132,9 @@ Use `config/set` when replacing the whole config intentionally, and `config/patc
 
 `Config.max_tokens` and `agent.max_tokens_per_turn` are optional. `None` means
 "inherit / use the template default" and is resolved at point-of-use
-(`resolved_max_tokens` / `resolved_max_tokens_per_turn`). Because merge is
+(`resolved_max_tokens` / `resolved_max_tokens_per_turn`). Merge for these fields is
 **presence-based** (an explicit value wins, regardless of whether it equals the
-default), a child realm can override a non-default parent value back **down to
+default), so a child realm can override a non-default parent value back **down to
 the default** - something a `!= default` heuristic could not express.
 
 ## CLI behavior
@@ -149,7 +153,7 @@ current directory, or from `--context-root` when supplied.
 ## What About `~/.rkat/config.toml` And `.rkat/config.toml`?
 
 `~/.rkat/config.toml` is the home-rooted config document for the reserved
-`global` realm. `rkat auth login` writes the `[realm.global]` binding
+`global` realm. Interactive `rkat auth login` writes the `[realm.global]` binding
 section here; once configured, it is the implicit chain tail for workspace
 realms.
 
@@ -272,8 +276,8 @@ an already-running service; rebuild or restart it to apply the new limit.
 
 ## HTML Presentation Defaults
 
-HTML rendering is surface-requested; config chooses the default template and
-optional custom templates:
+HTML rendering is surface-requested. The `Config` schema accepts a default
+template and optional custom templates:
 
 ```toml
 [presentation.html]
@@ -283,8 +287,21 @@ default_template = "polished"
 path = "./templates/incident.html"
 ```
 
-This does not turn ordinary runs into HTML. The CLI must still request
-`--browser` or the corresponding presentation mode.
+This is accepted configuration syntax, but the ordinary CLI realm-composition
+path currently does not propagate `presentation`. On that path, neither a
+configured default nor these named custom templates reaches the HTML resolver.
+This limitation does not describe direct Rust consumers of a parsed `Config`.
+
+HTML output itself still works. Select the builtin explicitly or read a custom
+template file directly:
+
+```bash
+rkat run --html --html-template polished "Explain this design"
+rkat run --html --html-template-file ./templates/incident.html "Summarize this incident"
+```
+
+Configuration does not turn ordinary runs into HTML; request `--html`,
+`--output html`, or `--browser`.
 
 ## Model fallback settings
 
@@ -317,8 +334,10 @@ A fallback target is identified by model, provider, self-hosted server, and
 a valid target. Cross-provider candidates are skipped before credential lookup
 unless `cross_provider = true` (default false).
 
-Use `enabled = false` to disable an inherited policy. An explicitly supplied
-fallback table replaces the inherited table as a whole; omitted tables inherit.
+Use `enabled = false` to disable an inherited policy. A nondefault child
+fallback table replaces the inherited table as a whole. Omitted tables and
+empty/default-valued tables inherit; explicit `enabled = false` is nondefault
+and therefore replaces the parent.
 A chain alone never enables fallback. `enabled = true` with an empty chain is
 invalid. Unknown fallback keys, including the removed `use_catalog_default_chain`
 and unsupported scope/expiry/revert options, are rejected.

@@ -131,6 +131,7 @@ Provide an `output_schema` and the agent will extract validated JSON after the a
     let result = service.create_session(CreateSessionRequest {
         model: "gpt-5.6-sol".into(),
         prompt: "Tell me about Tokyo".into(),
+        injected_context: Vec::new(),
         system_prompt: SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,
@@ -236,6 +237,7 @@ When validation fails, the agent retries the extraction turn with error feedback
     let result = service.create_session(CreateSessionRequest {
         model: "gpt-5.6-sol".into(),
         prompt: "Extract entities".into(),
+        injected_context: Vec::new(),
         system_prompt: SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,

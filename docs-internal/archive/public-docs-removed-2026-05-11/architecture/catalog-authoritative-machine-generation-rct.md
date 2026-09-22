@@ -163,13 +163,13 @@ Commands and outcomes:
 | Gate | Command | Outcome |
 | --- | --- | --- |
 | Inventory source scan | `rg -n "machine!\\s*\\{" meerkat-runtime/src meerkat-mob/src meerkat-schedule/src meerkat-machine-schema/src/catalog/dsl` | Found catalog bodies and five production `machine!` bodies listed in the inventory. |
-| Bridge/proxy source scan | `rg -n "DSL proxy|Bridging|OptionValueExt|struct SessionId|enum MisfirePolicy|struct OccurrenceId|struct AgentIdentity" meerkat-runtime/src/meerkat_machine/dsl.rs meerkat-mob/src/machines/mob_machine.rs meerkat-runtime/src/auth_machine/dsl.rs meerkat-schedule/src/machines/schedule_lifecycle.rs meerkat-schedule/src/machines/occurrence_lifecycle.rs` | Found the bridge/proxy declarations now listed in the file-specific bridge inventory. |
+| Bridge/proxy source scan | `rg -n "DSL proxy\|Bridging\|OptionValueExt\|struct SessionId\|enum MisfirePolicy\|struct OccurrenceId\|struct AgentIdentity" meerkat-runtime/src/meerkat_machine/dsl.rs meerkat-mob/src/machines/mob_machine.rs meerkat-runtime/src/auth_machine/dsl.rs meerkat-schedule/src/machines/schedule_lifecycle.rs meerkat-schedule/src/machines/occurrence_lifecycle.rs` | Found the bridge/proxy declarations now listed in the file-specific bridge inventory. |
 | Formatting | `cargo fmt -p meerkat-machine-codegen -- --check` | Passed. |
 | Fast-suite behavior | `./scripts/repo-cargo test -p meerkat-machine-codegen --test runtime_schema_parity` | Passed; fixture is ignored by default: `0 passed; 0 failed; 1 ignored`. |
 | Reality gate | `./scripts/repo-cargo test -p meerkat-machine-codegen --test runtime_schema_parity -- --ignored input_only_parity_misses_production_only_effect_drift` | Passed; explicit fixture run: `1 passed; 0 failed`. |
 | Existing parity regression | `./scripts/repo-cargo test -p meerkat-machine-codegen --test runtime_alphabet_parity` | Passed; `4 passed; 0 failed`. |
-| Stub scan | `rg -n "todo!\\(|unimplemented!\\(|panic!\\(\\\"not implemented\\\"|TODO|FIXME" meerkat-machine-codegen/tests/runtime_schema_parity.rs` | Passed; no matches. |
-| Public API / dead function scan | `rg -n "pub fn|pub struct|pub enum" meerkat-machine-codegen/tests/runtime_schema_parity.rs` | Passed; no public API added. |
+| Stub scan | `rg -n "todo!\\(\|unimplemented!\\(\|panic!\\(\\\"not implemented\\\"\|TODO\|FIXME" meerkat-machine-codegen/tests/runtime_schema_parity.rs` | Passed; no matches. |
+| Public API / dead function scan | `rg -n "pub fn\|pub struct\|pub enum" meerkat-machine-codegen/tests/runtime_schema_parity.rs` | Passed; no public API added. |
 
 Spec-compliance remediation:
 

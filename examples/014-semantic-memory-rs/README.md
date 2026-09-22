@@ -3,7 +3,9 @@
 Give agents searchable semantic recall outside conversation history. The
 runnable example uses `SimpleMemoryStore`, so its indexed facts live only for
 the current process. Production realms can use `HnswMemoryStore` with SQLite
-for durable cross-session memory.
+for durable session-scoped recall across turns and resumes/restarts of the same
+session. Persistence does not automatically share indexed history with unrelated
+sessions.
 
 ## Concepts
 - `MemoryStore` trait — index and search interface

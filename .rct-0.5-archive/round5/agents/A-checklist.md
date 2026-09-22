@@ -10,5 +10,5 @@
 - [x] `A-08` `DOGMA-13` Remove runtime-backed `WaitingForOps` shadow-state dependence. Done when `OpsBarrierSatisfied` and follow-up transitions use the unified authority seam only.
 - [x] `A-09` `DOGMA-13` Add or extend a defensive scan banning runtime-backed authority on `LocalTurnExecutionState`. Done when the `A1b` runtime-backed call sites are covered by the lane scan.
 - [x] `A-10` Self static review. Done: the `A1b` scan passes and the identified runtime-backed local-shadow authority sites were removed.
-- [x] `A-11` Handoff note. Done when handoff commit, changed files, and risks are recorded in [A-plan.md](/Users/luka/.codex/worktrees/ec4d/meerkat/.rct/round5/agents/A-plan.md).
+- [x] `A-11` Handoff note. Done when handoff commit, changed files, and risks are recorded in [A-plan.md](A-plan.md).
 - [x] `A-12` Generated-output request. Done when any needed machine/schema/codegen follow-up is explicitly noted in the handoff, or marked `none`.

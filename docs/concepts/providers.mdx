@@ -36,9 +36,25 @@ entitlement of a particular API organization, ChatGPT workspace, cloud
 deployment, or OAuth account. If `gpt-6-astra` is unavailable to the active
 OpenAI account, explicitly select `gpt-5.5` or set a compatible binding
 `default_model`.
-Explicit configured models and binding defaults are not migrated by a
-catalog-default change.
+Catalog-default changes alone do not migrate arbitrary configured models or
+binding defaults. The CLI has a separate, narrow built-in OAuth repair.
 </Warning>
+
+During interactive login, or read preparation when a matching stored token
+exists, the CLI can replace a built-in OAuth binding's `default_model` with
+the provider's current catalog default. This applies only to the following
+reserved `global` binding/backend/auth profile IDs and frozen legacy values:
+
+| Binding | Backend profile | Auth profile | Legacy `default_model` values repaired |
+|---------|-----------------|--------------|----------------------------------------|
+| `anthropic_oauth` | `anthropic_api` | `anthropic_oauth` | `claude-opus-4-6`, `claude-opus-4-7`, `claude-sonnet-4-6` |
+| `openai_oauth` | `openai_chatgpt` | `openai_oauth` | `gpt-5.4` |
+| `google_oauth` | `google_code_assist` | `google_oauth` | `gemini-3.1-flash-lite` |
+
+This is not a generic catalog migration: other binding IDs and other pins,
+including `gpt-5.5`, are not rewritten by this repair. A matching legacy value
+has no provenance marker distinguishing an old CLI sample from an operator
+pin. The replacement still requires account entitlement.
 
 ## Provider Setup
 
@@ -248,8 +264,8 @@ Rust applications can select only the provider adapters they use:
 
 <CodeGroup>
 
-```toml Anthropic only (smallest binary)
-meerkat = { version = "=0.8.40", features = ["anthropic", "jsonl-store"] }
+```toml Anthropic-only feature selection
+meerkat = { version = "=0.8.40", default-features = false, features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
@@ -257,6 +273,9 @@ meerkat = { version = "=0.8.40", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
+
+Cargo features are additive across the dependency graph; another dependency
+can still enable additional provider features.
 
 ## Capability-Gated Projection
 

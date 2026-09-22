@@ -5,6 +5,11 @@
 **Legacy reference**:
 `docs/architecture/assistant-image-generation-substrate.legacy-2026-04-27.md`
 
+> Historical location: the legacy path above is its original location. The
+> [retained legacy draft](assistant-image-generation-substrate.legacy-2026-04-27.md)
+> and this April draft are historical design records, not current public API
+> contracts.
+
 ## Purpose
 
 Defines assistant image generation.

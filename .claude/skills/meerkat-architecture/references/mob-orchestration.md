@@ -65,13 +65,25 @@ Profile source rule: agent-internal surfaces inherit from caller config. Non-age
 
 ## Agent-Facing Delegation Tools
 
-`AgentMobToolSurface` (`meerkat-mob-mcp/src/agent_tools.rs`) provides
-`delegate`, `conclude_objective`, `mob_create`, `mob_destroy`,
+When composed with generated operator authority, `AgentMobToolSurface`
+(`meerkat-mob-mcp/src/agent_tools.rs`) provides
+`delegate`, `conclude_objective`, `fork_off`, `council`, `mob_create`, `mob_destroy`,
 `mob_spawn_member`, `mob_retire_member`, `mob_check_member`,
 `mob_list_members`, `mob_list`, `mob_wire`, and `mob_unwire`. When a realm
 profile store is present it also exposes `mob_profile_create`,
 `mob_profile_get`, `mob_profile_list`, `mob_profile_update`,
 `mob_profile_delete`, and `mob_profile_list_sources`.
+
+- `fork_off` requires the current session to be a durable mob member. It
+  creates a real child session from an exact committed transcript prefix,
+  runs one bounded task, and retains the child in the normal roster. It is
+  not `fork_helper`, which renders history into a fresh helper's context and
+  tears that helper down afterward.
+- `council` forks existing participants at their source execution owners,
+  preserving their transcript prefixes, tools, auth, realm, and filesystem
+  boundaries. The forks run bounded rounds in a short-lived mob and are
+  cleaned up afterward. Both tools remain subject to operator authority and
+  source/scope checks; neither depends on the optional profile-store tools.
 
 `mob_wire` / `mob_unwire` create and remove comms trust relationships between mob members (local or external peers). Reuses `MobMcpState::mob_wire()` / `mob_unwire()` state API.
 
@@ -83,7 +95,16 @@ Operator capabilities are runtime-injected through `MobToolAuthorityContext`. `c
 
 ## Lifecycle Control
 
-- `retire_member(id)` — archive session, remove from roster
+- `MobHandle::retire(identity)` — terminal disposal barrier for this mob
+  incarnation's owned work, removing the roster anchor and runtime binding.
+  Mob-owned sessions are archived through their session service: persistent
+  services archive durably, while explicitly enabled ephemeral services archive
+  only in memory. Adopted host-owned sessions only
+  release/unregister their member runtime and binding, not the host's durable
+  document. The lower `MobProvisioner::retire_member` contract reports
+  `MemberSessionDisposal::Archived` or `RuntimeReleasedOnlyHostOwned`; the
+  handle returns `Result<(), MobError>`. This is not a drain guarantee for
+  separate event-log projection tasks.
 - `force_cancel_member(id)` — cancel in-flight turn (distinct from retire)
 - `respawn(id, initial_message)` — retire old bridge/runtime binding → enqueue spawn with same identity/profile/wiring/labels → new runtime incarnation/fence. Restore/respawn failure classification fans out over MobMachine-owned restore edges (`member_restore_failures: Map<AgentIdentity, String>` in the DSL); the orchestration sequencing is shell convenience, the lifecycle facts are machine-owned.
 - `member_status(id)` returns `MobMemberSnapshot`. Its current public fields

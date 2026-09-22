@@ -1,19 +1,30 @@
 # mock_realtime_ws
 
 Deterministic, in-process mock for the OpenAI Realtime session protocol,
-used by `e2e-fast` tests that need realtime lifecycle coverage without live
-OpenAI credentials. Landed in W1-C (roadmap issue #264).
+currently exercised by the native, `realtime`-feature-gated
+`mock_realtime_ws_selftest` integration test without live OpenAI credentials.
+Landed in W1-C (roadmap issue #264).
 
-## Why
+## Original motivation (W1-C)
 
-Axis-crossing bugs like the s71 turn-8 regression (peer-response-triggered
+At W1-C, axis-crossing bugs like the s71 turn-8 regression (peer-response-triggered
 turn in turn-driven realtime mode) went unnoticed because every realtime
 test path required live API credentials and ran only in `e2e-live` / `e2e-smoke`.
-The deterministic `e2e-fast` lane had no realtime coverage at all.
+At that time, the deterministic `e2e-fast` lane had no realtime coverage at all.
 
-This harness is the other half of the W1-C composite-path coverage matrix
-(`tests/integration/src/coverage_matrix.rs`): the matrix tells you which
-cells need coverage, this mock is what makes those cells testable.
+The original aim was to pair this mock with the W1-C composite-path coverage
+matrix (`tests/integration/src/coverage_matrix.rs`). It remains available for
+reuse, but its current consumer is the self-test above, not `e2e-fast`.
+Current `e2e-fast` live-plane coverage uses the separate facade-owned
+`meerkat::test_fixtures::realtime::ScriptedRealtimeSessionFactory`, composed in
+`meerkat-mob/tests/support/live_plane.rs`.
+
+## Run the self-test
+
+```bash
+# From the repository root
+./scripts/repo-cargo test -p meerkat-openai --features realtime --test mock_realtime_ws_selftest
+```
 
 ## Where it sits
 

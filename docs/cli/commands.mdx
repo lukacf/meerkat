@@ -166,9 +166,17 @@ fields when a host must address a source UUID directly.
 | `safe` | Builtins, skills, configured MCP, delegated-work-safe tools; no shell |
 | `workspace` | `safe` plus shell access |
 | `full` | All CLI-side capabilities, including memory and mob tools |
-| `none` | No tools |
+| `none` | Disables the preset's builtin, shell, and memory flags; contributes no WorkGraph or mob enablement |
 
 `--yolo` is an alias for `--tools full`.
+
+<Warning>
+`--tools none` is not a universal tool prohibition or sandbox. Configured
+external MCP tools can still be loaded, and categories such as WorkGraph, mob,
+schedule, and comms have independent configuration/composition controls.
+Provider-native capabilities and image generation also have separate controls;
+the preset does not globally deny their use.
+</Warning>
 
 ### Provider and structured output controls
 
@@ -200,7 +208,7 @@ rkat run --browser "create a visual implementation plan for this change"
 shortcut for HTML output plus `--open-in-browser`. HTML output writes the file
 under the active realm's `presentation/html` directory and prints the path.
 
-Template defaults live under `[presentation.html]`:
+The `Config` schema accepts template defaults under `[presentation.html]`:
 
 ```toml
 [presentation.html]
@@ -213,8 +221,20 @@ path = "html/review.md"
 body = "Render this as a dense technical artifact with annotated snippets."
 ```
 
-Per run, use `--html-template <NAME>` or `--html-template-file <PATH>`.
-Config template paths are resolved relative to the active config base directory.
+However, ordinary CLI realm composition currently drops the `presentation`
+section. On that path, the accepted config above does not supply a custom
+default or named template to the HTML resolver. This is a composition
+limitation, not a limitation of direct Rust consumers of a parsed `Config`.
+
+Use the builtin template or a file read directly by the run command:
+
+```bash
+rkat run --html --html-template polished "Explain this design"
+rkat run --html --html-template-file ./html/review.md "Review this change"
+```
+
+`--html-template-file` bypasses configured-template lookup. HTML output itself
+remains available.
 
 ### Streaming defaults
 
@@ -257,7 +277,7 @@ Examples:
 
 ```bash
 rkat run --resume last "keep going"
-rkat run --resume ~2 "pick this thread back up"
+rkat run --resume '~2' "pick this thread back up"
 cat notes.txt | rkat run --resume "merge these notes into the plan"
 tail -f app.log | rkat run --resume --stdin lines "watch for new incidents"
 ```
@@ -265,11 +285,18 @@ tail -f app.log | rkat run --resume --stdin lines "watch for new incidents"
 `SESSION_ID` accepts:
 
 - a full UUID
-- a short prefix
-- `last`
-- `~N`
+- a bare UUID prefix or tail handle
+- `<realm>:<uuid>`, where `<realm>` matches the active realm
+- `last`, `~`, or `~0` for the most recent session
+- `~N` for the Nth older session (`~1` is one before the most recent)
 
 Omitting the value means `last`, so `rkat run --resume "keep going"` and `rkat run --resume last "keep going"` are equivalent.
+
+The CLI displays short handles as the final eight UUID characters. Ambiguous
+prefix/tail matches fail instead of selecting a session. A qualified locator
+does not switch realms: select the matching realm and storage root first.
+Relative aliases and short-handle lookup require `session-store` support.
+Quote tilde aliases so the shell does not expand them.
 
 Resume supports the same stdin model as `run`, plus per-turn tool overlays and provider params.
 
@@ -364,7 +391,8 @@ rkat config patch --json '{"self_hosted":{"servers":{"ollama":{"transport":"open
 rkat auth realms                       # list realms defined in config
 rkat auth profiles                     # list profiles/backends/bindings
 rkat auth profile <PROFILE_ID>         # inspect one profile
-rkat auth login [<PROVIDER>] [--backend <KIND>] [--method <METHOD>] [--non-interactive --secret <SECRET>]
+rkat auth login [<PROVIDER>]           # interactive OAuth/device authorization
+rkat auth login <PROVIDER> --non-interactive [--secret <SECRET>] [--backend <KIND>] [--method <METHOD>]
 rkat auth status <PROFILE_ID>          # realm config shape + AuthMachine lease lifecycle state
 rkat auth test <BINDING_ID>            # dry-run resolve the binding
 rkat auth refresh <PROFILE_ID>         # force-refresh OAuth tokens
@@ -372,22 +400,50 @@ rkat auth logout [<REALM>:]<BINDING_ID> # clear persisted credentials; bare mean
 rkat auth profile-delete <PROFILE_ID> -y
 ```
 
-`rkat auth login` provisions the reserved **`global`** realm in the home-rooted
-doc at `~/.rkat/config.toml` — both the credential token and the
-`[realm.global]` binding section. Login therefore materializes `global` as the
-optional chain tail, after which a single sign-in is inherited by workspace
-realms without a per-realm re-login. Earlier `dev`-realm logins are
+Interactive OAuth/device `rkat auth login` writes nonsecret backend, auth
+profile, and binding declarations into the reserved **`global`** config doc
+at `~/.rkat/config.toml`. Secret tokens are stored separately through
+TokenStore. The stock CLI uses
+`<platform-config>/meerkat/credentials/global/<credential-stem>.json`,
+where the platform config directory comes from `dirs::config_dir()`; files
+are created with mode 0600 on Unix. `--user-config-root` changes the config
+document location, not this TokenStore root. Custom hosts can select a keyring
+or another store.
+
+Interactive login therefore materializes `global` as the optional chain tail,
+after which a single sign-in is inherited by workspace realms without a
+per-realm re-login. Earlier `dev`-realm logins are
 migrated to `global` on the run path (one-time, idempotent, no-clobber), so an
 existing sign-in keeps working without re-auth.
 
-Credential **reads inherit** down the realm chain (a child realm resolves a
-binding defined in a parent or in `global`), but credential **writes are
-strict-owner**: the caller must explicitly target the realm that defines the
-binding; a child-addressed inherited write is rejected. `--realm`
-on profile, status, test, and refresh commands selects the realm and composes
-its chain for resolution. Logout is different: its positional
-`[<realm>:]<binding>` selects the token owner directly, and a bare binding
-means `global`; `--realm` does not retarget logout.
+`--backend` and `--method` are accepted but ignored during interactive login;
+the provider determines its OAuth/device flow. In `--non-interactive` mode,
+`--method` selects an allowed persisted-secret mode (default `api_key`), and
+`--backend` is token metadata, not backend provisioning or full tuple
+validation. Scripted login saves a token under `global:default_<provider>` but
+does not create backend/auth/binding config or materialize `global` config.
+Using that token requires an already-configured matching `managed_store`
+binding; see the [scripted API-key example](/guides/auth#log-in). Alternatively,
+use environment-key auth. If `--secret` is omitted, scripted login reads one
+line from stdin.
+
+Runtime credential **reads inherit** down the realm chain. CLI auth
+administration differs: `--realm` on profile, status, test, and refresh
+commands selects an owner section within the scope's already-loaded effective
+config (normally the workspace/global chain). It does not by itself discover
+`<state-root>/<selected-realm>/config.toml` or inherit a missing profile/binding
+for those subcommands. The selected owner's sections must already be reachable,
+for example through a workspace parent link at the same state root or a
+multi-section workspace/global document. The default owner section is `global`.
+
+`HostAuthService` and RPC/REST credential **writes are strict-owner** and
+reject child-addressed inherited writes. **Current CLI logout exception:**
+when the loaded config resolves `child:<binding>` to an inherited owner,
+`rkat auth logout child:<binding>` can clear that owner's stored credential,
+including a shared credential account used by other routes. Explicitly address
+the true owner instead. A bare logout binding means `global`; `--realm` does
+not retarget logout. Config `get` / `set` / `patch` still operate on the raw
+head document.
 
 See [Realm inheritance](/concepts/realm-inheritance) and the
 [auth guide](/guides/auth) for the full model.

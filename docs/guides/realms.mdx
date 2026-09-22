@@ -182,7 +182,7 @@ divergent domains or discard the backup.
 |---------|-------------|-----|
 | A subdirectory does not see the parent session | Default realm identity hashes the canonicalized context path (falling back to raw path only if canonicalization fails) | Pass the parent's `--context-root` or use an explicit shared realm and root |
 | A nested run stores under the ancestor project | Local storage walks up to the nearest `.rkat` | This is expected; use `--state-root` for a different physical root |
-| CLI and RPC do not share sessions | RPC creates an isolated realm by default, and bare servers use a different root default from the CLI | Pass the same explicit realm and state root, or a matching server context root |
+| CLI and RPC do not share sessions | RPC creates an isolated realm by default, and bare servers use a different root default from the CLI | Pass the same explicit realm and state root, resolving to the same physical store/provider; matching context alone does not select the realm |
 | Equal realm IDs on two hosts do not share | Each host selected a different local store | Configure one shared storage provider/root |
 | Backend override is rejected | The manifest already pinned another backend/provider | Open with the pinned profile or migrate intentionally |
 | Startup reports both candidate roots | Two physical copies exist | Run `storage doctor`, review `storage migrate`, then adopt one root |

@@ -29,9 +29,18 @@ an on-call coordination prompt that must quote fields returned by those tools.
 ## Prerequisites
 
 ```bash
-export ANTHROPIC_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-...  # Required by the script's guard
+export OPENAI_API_KEY=sk-...     # Fresh unpinned run: needs gpt-6-astra access
 ./scripts/repo-cargo build -p rkat --bin rkat
 ```
+
+The script checks `ANTHROPIC_API_KEY`, but does not pass `--model` or
+`--provider` to select Anthropic. A fresh, unpinned run selects `gpt-6-astra`
+and therefore needs usable OpenAI credentials and access to that model.
+Explicit model/provider configuration can change the live run's credential
+requirement, but it must apply within the script's redirected `.work/` roots;
+do not rely on a model pin in your ordinary realm. Setting an API key alone
+does not select its provider, and the Anthropic-key guard still applies.
 
 If `rkat` is not on your `PATH`, the script automatically falls back to
 repo-local binaries built by `./scripts/repo-cargo`.

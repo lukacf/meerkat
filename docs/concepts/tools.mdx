@@ -97,9 +97,13 @@ enabling one of those capabilities. Explicit enables fail closed when the
 selected runtime cannot provision the requested capability.
 
 The current direct `rkat run`, REST, and JSON-RPC session builders leave image
-generation at `inherit`, which the outer factory treats as hidden; they do not
-yet expose an image-generation enable switch. `--allow-tool generate_image`
-only narrows an already composed surface and cannot enable the category.
+generation at `inherit`. In a normal composite dispatcher, that can expose
+`generate_image` when the session identity, image machine, executor, planner,
+and blob store are wired and tool visibility policy permits it. The minimal
+no-builtins/no-shell path instead needs an explicit image-generation `Enable`
+to avoid the factory's early return. These direct surfaces do not expose that
+enable switch. `--allow-tool generate_image` only narrows an already composed
+surface; it cannot provision missing dependencies or enable the category.
 
 For nontrivial Meerkat-owned tool families, companion skills provide the agent
 instruction manual. Tool descriptions stay short and schema-oriented; skills

@@ -31,9 +31,10 @@ first-party crates, each of which is one `rustc` and LLVM invocation:
 | `meerkat-machine-schema` | ~100k | Generated machine catalog (data-shaped code) |
 
 These four, plus the final `rkat` crate that pulls the whole surface into one
-binary, dominate both wall time and peak memory, which is why the release lane
-and the rest of this page talk about per-package `opt-level` pins rather than
-about the dependency count.
+binary, dominate both wall time and peak memory. The optional consumer
+profiles below therefore focus on job limits and per-package `opt-level`
+pins rather than only the dependency count; they are not the current Windows
+release recipe.
 
 Toolchain and native requirements:
 
@@ -86,8 +87,10 @@ How to translate that to your host:
   (the same `rkat` build with the low-memory profile plus `meerkat-mob` pinned
   to `opt-level = 0`) brought `meerkat-mob` down to ~6.3 GiB, after
   which the largest process is `meerkat-runtime` at ~7.4
-  GiB. Below that, the levers are the feature set (dropping `mob` removes the
-  crate), swap, and the prebuilt binaries.
+  GiB. Below that, the levers are the feature set (use `--no-default-features`
+  and omit `mob`, `rpc-surface`, and the CLI `openai-live` feature to avoid
+  their mob dependencies in a reduced production build), swap, and prebuilt
+  binaries. See [Features](#what-each-lever-does) for scope and limits.
 - **Aggregate memory scales with the job count.** Cargo runs up to one `rustc`
   per core. The aggregate peaks above happened while four or five large
   first-party crates were compiling at once; with `N` jobs, budget for the `N`
@@ -105,27 +108,29 @@ How to translate that to your host:
   deleted after the binary is installed, but it must fit while the build runs.
   A checkout that keeps its `target/` needs the full figure per profile.
 
-The project's own record of what happens on small hosts is in
-`.github/workflows/release.yml`: the Windows release lane runs on a 16 GB
-GitHub-hosted runner with no memory overcommit, and it documents `rustc`
-exceeding that runner's commit limit on the generated machine catalog. That
-lane therefore builds with `CARGO_BUILD_JOBS=2` and pins
-`meerkat-machine-schema` to `opt-level = 0` and `meerkat-runtime` and
-`meerkat-mcp` to `opt-level = 1`. The Linux and macOS release binaries keep
-full `opt-level = 3`; the pins are Windows-only. Continuous integration
-(`.github/workflows/ci.yml`) compiles its broad lane on BuildBuddy remote
-executors, with only the dense Mob topology job and the nightly lanes on
-GitHub-hosted runners; release binaries are produced only by the release
-workflow.
+The current Windows release recipe is separate from these local measurements.
+In `.github/workflows/release.yml`, `build_binaries_windows_cross` runs on
+`ubuntu-latest` and invokes `.github/actions/build-windows-cross/action.yml`.
+That action uses cargo-xwin with clang-cl, lld-link, and the Windows SDK to
+cross-compile the four surface binaries and package their ZIP archives. It
+adds an 8 GiB swap file when total swap is below 8 GiB; it does not set
+`CARGO_BUILD_JOBS=2` or inject the per-package optimization pins shown below.
+The subsequent `verify_windows_binaries` job runs on `windows-latest`,
+extracts the archives, executes each binary's `--version`, and checks
+`rkat --help`; it does not compile them natively. These workflow settings are
+not new wall-time or memory measurements. Continuous integration
+(`.github/workflows/ci.yml`) uses BuildBuddy for its broad lane and hosted
+Linux for the required dense Mob topology stress; release binaries are
+produced by the separate release workflow.
 
 Rough sizing, derived from the peaks above:
 
 | Host | Expectation |
 |------|-------------|
 | 32 GiB or more | Cargo's defaults work with all cores busy (measured aggregate peak ~24.9 GiB at 18 jobs). The low-memory profile still saves a quarter of the wall time. |
-| 16 GiB | Defaults do not fit with parallel jobs: `meerkat-mob` and `meerkat-runtime` overlapping at their default peaks already exceed 16 GiB. Use the low-memory profile below with `CARGO_BUILD_JOBS=2` (measured aggregate peak ~12.2 GiB at 18 jobs; the two largest crates sum to ~19 GiB if their peaks coincide) or `CARGO_BUILD_JOBS=1` for certainty. The release lane runs the per-package-pins variant of that profile with `CARGO_BUILD_JOBS=2` on its 16 GB runners. |
+| 16 GiB | Defaults do not fit with parallel jobs: `meerkat-mob` and `meerkat-runtime` overlapping at their default peaks already exceed 16 GiB. Consider the optional low-memory profile below with `CARGO_BUILD_JOBS=2` (measured aggregate peak ~12.2 GiB at 18 jobs; the two largest crates sum to ~19 GiB if their peaks coincide), or `CARGO_BUILD_JOBS=1` to avoid compiler overlap. Leave headroom for the rest of the host; this is consumer guidance, not the current Windows release configuration. |
 | 8 to 12 GiB (small VPS, memory-limited CI container) | Add the small-host pin below (`meerkat-mob` at `opt-level = 0`) and use `CARGO_BUILD_JOBS=1`: the largest process is then `meerkat-runtime` at ~7.4 GiB, so 12 GiB fits and 8 GiB needs swap for headroom. |
-| Under 8 GiB | Build without the `mob` feature (see [Features](#what-each-lever-does)), or install a prebuilt binary. |
+| Under 8 GiB | Prefer a prebuilt binary. To reduce the production dependency graph, use `--no-default-features` and omit `mob`, `rpc-surface`, and CLI `openai-live` (see [Features](#what-each-lever-does)); this does not guarantee the remaining build fits below 8 GiB. |
 
 ## Lowering Memory
 
@@ -165,8 +170,8 @@ lto = false          # Cargo's default; never enable "thin" or "fat" on a small 
 debug = false
 strip = "symbols"    # smaller output; no effect on compile-time memory
 
-# Generated machine catalog: data-shaped code that gains nothing from
-# optimization. The release lane pins this on its 16 GB runners.
+# Optional consumer pin for the generated machine catalog, measured above;
+# this is not a current Windows release setting.
 [profile.release.package.meerkat-machine-schema]
 opt-level = 0
 ```
@@ -181,9 +186,9 @@ workload before shipping a binary built this way:
 opt-level = 0
 ```
 
-To keep everything else at full optimization and only pin the generated
-crates (the exact shape the release lane uses on Windows), drop the global
-`opt-level` line and keep:
+As an optional per-package alternative, keep everything else at full
+optimization by dropping the global `opt-level` line and keeping these pins.
+This is a consumer profile choice, not the current Windows release recipe:
 
 ```toml
 [profile.release.package.meerkat-machine-schema]
@@ -236,16 +241,22 @@ package pin goes through `--config`; repeat the flag with
 - **Features**: `meerkat-cli/Cargo.toml` lists the subsystems behind `rkat`'s
   default features (`mob`, `rpc-surface`, `openai-realtime`, `comms`,
   `schedule`, `workgraph`, `mcp`, `skills`, storage backends, providers). A
-  narrower `--no-default-features --features ...` build compiles fewer crates;
-  dropping `mob` removes `meerkat-mob`, the crate that sets the memory floor
-  above, along with `meerkat-mob-mcp` and `meerkat-mob-pack`. The repository's
-  surface feature matrix (`scripts/run-surface-feature-matrix`, behind
-  `make test-feature-matrix-surface`) keeps three reduced `rkat` combinations compiling:
+  narrower `--no-default-features --features ...` production build can remove
+  the mob graph only if it omits `mob` and all transitive enablers, including
+  `rpc-surface` (which selects `meerkat-rpc/mob`) and the CLI `openai-live`
+  feature (which selects `mob`). Omitting just the direct `mob` feature while
+  keeping `rpc-surface` still builds `meerkat-mob` and `meerkat-mob-mcp`.
+  The repository's surface feature matrix
+  (`scripts/run-surface-feature-matrix`, behind `make test-feature-matrix-surface`)
+  keeps three reduced `rkat` combinations compiling:
   `--no-default-features --features session-store`, `session-store,mcp`, and
   `session-store,comms,mcp,workgraph`. Other subsets are not exercised, so
   check that yours builds before relying on it. Reduced builds are source
   builds only; no reduced binaries are published (see the note under
-  [Homebrew Tap](/guides/cd-and-distribution#homebrew-tap)).
+  [Homebrew Tap](/guides/cd-and-distribution#homebrew-tap)). This reduction is
+  for the selected production package: workspace/test feature unification
+  and dev-dependencies can bring mob back, and removing it is not a guarantee
+  that every host below 8 GiB can compile the remaining graph.
 
 ## Worker Stack Budget
 

@@ -146,10 +146,11 @@ domain ephemeral. The required domains are `sessions`, `runtime`, `schedule`,
 
 <Tabs>
   <Tab title="JsonlStore">
-    File-based persistence using JSONL format:
+    File-based persistence using JSONL format. Enable the facade's
+    `jsonl-store` feature:
 
     ```rust
-    use meerkat::JsonlStore;
+    use meerkat::{JsonlStore, SessionStore};
     use std::path::PathBuf;
 
     let store = JsonlStore::new(PathBuf::from("./sessions"));
@@ -161,10 +162,10 @@ domain ephemeral. The required domains are `sessions`, `runtime`, `schedule`,
     ```
   </Tab>
   <Tab title="MemoryStore">
-    In-memory storage for testing:
+    In-memory storage for testing. Enable the facade's `memory-store` feature:
 
     ```rust
-    use meerkat::MemoryStore;
+    use meerkat::{MemoryStore, SessionStore};
 
     let store = MemoryStore::new();
     store.save(&session).await?;
@@ -174,7 +175,12 @@ domain ephemeral. The required domains are `sessions`, `runtime`, `schedule`,
 </Tabs>
 
 <Accordion title="Implementing a custom store">
-Implement the `SessionStore` trait and pass it to `AgentFactory::session_store()` when you are replacing only session persistence. Then compose the persistent service with `MeerkatMachine` so the custom store participates in the canonical runtime-backed lifecycle instead of only a one-off direct agent.
+Implement `SessionStore` when replacing session-content storage.
+`AgentFactory::session_store()` installs it for direct-agent or custom-builder
+integration. It is **not** an override for persistent-service composition:
+the persistent builders take their session store from `PersistenceBundle`
+and install its adapter as the default per-agent override, taking precedence over
+the factory's custom store.
 
 ```rust
 use async_trait::async_trait;
@@ -219,16 +225,21 @@ let store: Arc<dyn SessionStore> = Arc::new(BigQueryStore { /* ... */ });
 ```
 
 <Note>
-Prefer `SessionStore` + `session_store()` over implementing `AgentSessionStore` directly.
-`SessionStore` is the richer trait (with `list`, `delete`, `exists`) and `AgentFactory`
-automatically wraps it via `StoreAdapter`. Implementing `AgentSessionStore` directly
-bypasses the factory and loses runtime-backed session orchestration.
+Prefer `SessionStore` for backend implementations: it includes `list`, `delete`,
+and `exists`, and `AgentFactory::session_store()` wraps it via `StoreAdapter`.
+That setter alone does not compose the runtime-backed lifecycle.
 
-For runtime-backed persistent services, realm persistence still flows through the
-`PersistenceBundle` opened for that realm. Treat custom `SessionStore`
-implementations as a storage seam for custom builders or direct agent/store
-integration, not as a drop-in replacement for the entire runtime persistence
-bundle.
+For a realm-backed persistent host, put the custom store in
+`RealmStoreSet.session_store` returned by your `RealmStorageProvider`, then
+use `open_realm_persistence_with_provider()` to obtain the `PersistenceBundle`.
+Supply or delegate all other required stores, keep each durability declaration
+accurate, and preserve the runtime/session-store persistence-profile pairing:
+`HeadCanonicalV1` requires an `IncrementalSessionStore`. See **Implementing a
+realm storage provider** below.
+
+Low-level `PersistenceBundle::new()` and related constructors also accept
+custom stores; callers using them own the corresponding composition. A custom
+`SessionStore` is not a drop-in replacement for the entire persistence bundle.
 </Note>
 </Accordion>
 

@@ -53,8 +53,8 @@ adapter types remain owned by `meerkat-live`.
     ```
   </Step>
   <Step title="Choose feature flags">
-    The default feature set enables all three standard LLM providers; add
-    optional gates as needed:
+    The default feature set enables the Anthropic, OpenAI, and Gemini clients
+    plus GitHub Copilot OAuth/backend support; add optional gates as needed:
     <CodeGroup>
     ```toml Default (all providers, no storage)
     [dependencies]
@@ -91,7 +91,8 @@ adapter types remain owned by `meerkat-live`.
 | `openai` | OpenAI API client | Yes |
 | `openai-realtime` | OpenAI realtime provider client; implies `openai` | No |
 | `gemini` | Google Gemini API client | Yes |
-| `all-providers` | Shorthand for the three default non-realtime providers | No |
+| `copilot` | GitHub Copilot OAuth/backend support for the Anthropic, OpenAI, and Gemini clients | Yes |
+| `all-providers` | Shorthand for the three standard provider clients plus Copilot backend support | No |
 | `native-keyring` | Native provider credential keyring | No |
 | `sqlite-store` | SQLite store implementations; pair with `session-store` for realms | No |
 | `jsonl-store` | JSONL session store; pair with `session-store` for realms | No |
@@ -119,6 +120,17 @@ Production surfaces (CLI, REST, RPC, MCP) use the **runtime-backed** path where
 `PersistentSessionService` is substrate and `MeerkatMachine` owns keep-alive,
 Queue/Steer routing, interruption, terminal publication, and archive. Start a
 native host with both halves:
+
+Use this dependency set for the persistent example. The explicit
+`meerkat-store` dependency supplies `RealmBackend` and `realm_paths_in`;
+transitive dependencies are not available as direct crate imports.
+
+```toml
+[dependencies]
+meerkat = { version = "=0.8.40", features = ["sqlite-store", "session-store"] }
+meerkat-store = "=0.8.40"
+tokio = { version = "1", features = ["full"] }
+```
 
 ```rust
 use meerkat::{
@@ -169,12 +181,24 @@ when building a native host, or use the ready-made RPC, REST, CLI, or MCP host.
 For a direct embedded or testing flow that does not need machine-owned runtime
 semantics, use the ephemeral service:
 
+Before running the model turn below, make credentials available for its
+Claude model through a compatible configured [auth binding](/guides/auth) or
+an Anthropic environment key. For a clean API-key setup:
+
+```bash
+export ANTHROPIC_API_KEY="<your-anthropic-api-key>"
+```
+
+A compatible existing binding can be used instead; another provider's key
+does not authenticate this Claude request. Merely constructing the
+persistent host above does not make a model call or require this credential
+step.
+
 ```rust
 use meerkat::{
     AgentFactory, Config, CreateSessionRequest, DeferredPromptPolicy,
-    SessionService, SystemPromptOverride, build_ephemeral_service,
+    InitialTurnPolicy, SessionService, SystemPromptOverride, build_ephemeral_service,
 };
-use meerkat_core::service::InitialTurnPolicy;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -214,10 +238,9 @@ must not call these trait methods directly.
 
 ```rust
 use meerkat::{
-    CreateSessionRequest, DeferredPromptPolicy, SessionService,
+    CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionService,
     StartTurnRequest, StartTurnRuntimeSemantics, SystemPromptOverride,
 };
-use meerkat_core::service::InitialTurnPolicy;
 
 // Turn 1: create session
 let result = service.create_session(CreateSessionRequest {
@@ -256,10 +279,9 @@ service.archive(&session_id).await?;
 
 ```rust
 use meerkat::{
-    CreateSessionRequest, DeferredPromptPolicy, SessionService,
+    CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionService,
     StartTurnRequest, StartTurnRuntimeSemantics, SystemPromptOverride,
 };
-use meerkat_core::service::InitialTurnPolicy;
 
 let created = service.create_session(CreateSessionRequest {
     model: "claude-sonnet-4-6".into(),
@@ -443,6 +465,12 @@ match event {
 
     // Retry (typed LlmRetrySchedule owns failure kind + attempt/delay plan)
     AgentEvent::Retrying { retry } => {}
+
+    // Model fallback
+    AgentEvent::ModelFallbackSkipped { retry, target } => {}
+    AgentEvent::ModelFallbackStaged { retry, previous, target } => {}
+    AgentEvent::ModelFallbackCommitted { retry, previous, target } => {}
+    AgentEvent::ModelFallbackTargetFailed { previous, target, error } => {}
 
     // Skills
     AgentEvent::SkillsResolved { skills, injection_bytes } => {}

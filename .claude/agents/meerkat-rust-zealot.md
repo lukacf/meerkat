@@ -23,7 +23,9 @@ When reviewing code changes, you MUST perform these checks in order:
 This is your highest priority. Cross-reference every new function, struct, trait, and module against existing Meerkat crates:
 
 - `meerkat-core` — Agent loop, types, budget, retry, state machine, SessionService trait, Compactor trait, MemoryStore trait
-- `meerkat-client` — LLM providers (Anthropic, OpenAI, Gemini) implementing AgentLlmClient
+- `meerkat-llm-core` — Shared LLM wire-client contracts/plumbing and `LlmClientAdapter`, which implements core's `AgentLlmClient`
+- `meerkat-anthropic` / `meerkat-openai` / `meerkat-gemini` — Provider-specific `LlmClient` implementations
+- `meerkat-client` — Compatibility shim re-exporting shared LLM-core and provider surfaces
 - `meerkat-store` — Session persistence (JsonlStore, MemoryStore, SqliteSessionStore)
 - `meerkat-session` — Session orchestration (EphemeralSessionService, DefaultCompactor, EventStore, SessionProjector)
 - `meerkat-memory` — Semantic memory (HnswMemoryStore, SimpleMemoryStore)
@@ -38,6 +40,8 @@ This is your highest priority. Cross-reference every new function, struct, trait
 - `meerkat-skills` — Skill loading and resolution
 - `meerkat-hooks` — Hook infrastructure
 - `meerkat` (facade) — AgentFactory, re-exports, SDK helpers
+
+Review provider implementations in their owning crates and agent-client adaptation in `meerkat-llm-core/src/adapter.rs`. Existing downstream `meerkat_client::*` imports remain valid; do not demand an import sweep.
 
 If new code reimplements ANY functionality that already exists in these crates, REJECT it immediately with a detailed explanation of where the existing implementation lives and how to use it instead. This is non-negotiable.
 

@@ -10,5 +10,5 @@
 - [x] `EG-08` `DOGMA-18` Update REST/RPC session skill canonicalizers to use the same registry path. Done when default-source skill refs resolve through one canonical registry path.
 - [x] `EG-09` `DOGMA-18` Add or extend a defensive scan banning helper-local UUID fabrication outside the canonical registry path. Done when the scan is checked in and wired for lane/final gating.
 - [x] `EG-10` Self static review. Done when `DOGMA-23` is clearly a full typed-outcome fix rather than a relabeled classification helper.
-- [x] `EG-11` Handoff note. Done when handoff commit, changed files, and risks are recorded in [EG-plan.md](/Users/luka/.codex/worktrees/ec4d/meerkat/.rct/round5/agents/EG-plan.md).
+- [x] `EG-11` Handoff note. Done when handoff commit, changed files, and risks are recorded in [EG-plan.md](EG-plan.md).
 - [x] `EG-12` Generated-output request. Done when any schema/regeneration need is recorded explicitly, or marked `none`.

@@ -49,5 +49,5 @@ change the public product contract above.
 ## See also
 
 - [Live Channels guide](/guides/realtime)
-- [Meerkat Runtime Dogma](/architecture/meerkat-runtime-dogma)
+- [Meerkat Runtime Dogma](meerkat-runtime-dogma.md)
 - [Architecture](/reference/architecture)

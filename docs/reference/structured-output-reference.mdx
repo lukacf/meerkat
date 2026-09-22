@@ -11,7 +11,7 @@ Use this page when you need exact structured-output terminology and types rather
 | Type | Contract |
 |------|----------|
 | `OutputSchema` | Owns `schema`, optional `name`, `strict`, `compat`, and `format`. |
-| `MeerkatSchema` | Normalized JSON Schema value. The root must be an object. Object-typed nodes gain explicit `properties` and `required` arrays. |
+| `MeerkatSchema` | Normalized JSON Schema value. The root must be an object. Object-typed nodes gain an explicit `properties` object/map and a `required` array. |
 | `SchemaCompat` | `Lossy` drops provider-unsupported schema features with warnings; `Strict` rejects them. |
 | `SchemaFormat` | Currently `MeerkatV1`. |
 | `SchemaWarning` | Provider, JSON path, and explanation for a lossy lowering decision. |
@@ -70,7 +70,9 @@ feature fails closed with typed `InvalidOutputSchema` when an output schema is
 configured. Meerkat never marks merely parsed, unvalidated JSON as structured
 output.
 
-Each extraction attempt runs with no tools and temperature `0.0`. Markdown code
+Each extraction attempt runs with no tools. Core requests temperature `0.0`;
+provider lowering may omit it when the provider/model does not support the
+parameter. This is not a deterministic-output guarantee. Markdown code
 fences are stripped before parsing. A provider may wrap a named root object in
 the schema name; Meerkat unwraps that envelope only when the inner object is a
 clearly better match and the wrapper key is not itself declared by the schema.

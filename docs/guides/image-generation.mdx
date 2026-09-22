@@ -249,7 +249,7 @@ Gemini `provider_params`:
 | Field | Values | Notes |
 |-------|--------|-------|
 | `aspect_ratio` | `1:1`, `16:9`, `9:16`, `square1x1`, `landscape16x9`, `portrait9x16` | Overrides the universal `size` to aspect-ratio mapping. |
-| `image_size` | `1K`, `2K`, `4K`, `one_k`, `two_k`, `four_k` | Ignored for `gemini-2.5-flash-image`, which does not use an explicit image-size field. |
+| `image_size` | `1K`, `2K`, `4K`, `one_k`, `two_k`, `four_k` | Omit for `gemini-2.5-flash-image`. Its default mapping omits `imageSize`, but an explicit supported-form override is still forwarded by the current adapter; provider acceptance is not guaranteed. |
 
 Gemini image generation runs through a scoped image-model turn internally. The user and model still use one `generate_image` operation; they do not need to call `switch_turn`.
 
@@ -276,7 +276,7 @@ Gemini image generation runs through a scoped image-model turn internally. The u
   "provider_text": { "disposition": "not_emitted" },
   "revised_prompt": { "disposition": "not_requested" },
   "native_metadata": {
-    "provider": "open_ai",
+    "provider": "openai",
     "target_model": "gpt-image-2",
     "response_id": "resp_..."
   },

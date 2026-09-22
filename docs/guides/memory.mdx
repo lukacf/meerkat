@@ -31,14 +31,25 @@ Compaction and semantic memory have separate build-time and runtime switches.
 | Memory session wiring | `memory-store-session` | `HnswMemoryStore`, `memory_search`, and memory integration with the agent/session path |
 
 <Note>
-The CLI's default features include the memory backend/session wiring, but **not** `session-compaction`. For no-default/custom source builds, enable the memory features explicitly when you need `memory_search`.
+The default CLI build includes memory backend/session wiring and effective
+session compaction. Its default `mob` feature pulls in `meerkat-mob`, which
+enables `session-compaction` on the shared facade and session crates through
+Cargo feature unification. The CLI's own `session-compaction` alias is not
+listed directly in its defaults. For no-default/reduced builds that omit this
+dependency path, enable that alias explicitly when you need `DefaultCompactor`,
+and enable the memory features when you need `memory_search`.
 </Note>
 
 ```bash
 ./scripts/repo-cargo build -p rkat --features session-compaction,memory-store
 ```
 
-At runtime, `AgentFactory::memory(true)` enables the semantic memory path (`HnswMemoryStore` + `memory_search`). Compaction is controlled independently by whether the binary is built with `session-compaction` and whether a compactor is wired into the session path.
+At runtime, `AgentFactory::memory(true)` enables the semantic memory path
+(`HnswMemoryStore` + `memory_search`). The effective facade
+`session-compaction` feature installs `DefaultCompactor` independently of that
+memory toggle. Low-level core embeddings can instead supply a `Compactor`;
+facade builds use the factory/config pipeline rather than direct
+`AgentBuilder::compactor` injection.
 
 ```rust
 let factory = AgentFactory::new(store_path)
@@ -121,9 +132,13 @@ When compaction triggers:
     **On ordinary failure**: a CompactionFailed event is emitted and the session is not mutated (safe failure).
 
     **If the summarization request itself exceeds provider capacity**: the
-    built-in path uses a deterministic mechanical handoff summary with zero
-    provider usage so the oversized session can still make progress. This is
-    not used for curator failures.
+    built-in path can use a deterministic mechanical handoff summary with zero
+    provider usage for recognized capacity errors, but only when current
+    history has no protected, unsummarized assistant transcript observations
+    with source `SpokenUnmeasured`. If those observations remain, the compaction
+    attempt emits `CompactionFailed` and preserves the original history rather
+    than mechanically discarding them. This fallback is not used for curator
+    failures.
 
     **On success**: `DefaultCompactor::rebuild_history` produces new messages:
     - Every unkeyed System message and the latest version of each keyed System

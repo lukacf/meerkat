@@ -2,7 +2,7 @@
 
 TypeScript client for the [Meerkat](https://github.com/lukacf/meerkat) runtime. The SDK is a thin session-first wrapper over the same runtime-backed contracts used by the CLI, REST, JSON-RPC, and MCP surfaces. It communicates with a local `rkat-rpc` subprocess over JSON-RPC 2.0 (newline-delimited JSON on stdin/stdout).
 
-Current contract version: `0.8.24`.
+Current contract version: `0.8.40`.
 
 ## Installation
 
@@ -330,7 +330,9 @@ Throws `MeerkatError` with code `"CAPABILITY_UNAVAILABLE"` if the capability is 
 async getConfig(): Promise<ConfigEnvelope>
 ```
 
-Returns a config envelope: `{ config, generation, realmId?, instanceId?, backend?, resolvedPaths? }`.
+Returns the generated `ConfigEnvelope`: `config: unknown`, `generation: number`,
+and optional nullable `realm_id`, `instance_id`, `backend`, and `resolved_paths`.
+These metadata keys retain their snake_case wire spelling.
 
 ### setConfig(config)
 
@@ -350,7 +352,11 @@ Merge-patches the runtime configuration and returns the updated envelope plus an
 
 ## Public Types
 
-The TypeScript SDK exposes camelCase domain types at the package root. The JSON-RPC snake_case wire format stays internal.
+The TypeScript SDK exposes camelCase domain types at the package root.
+Generated results such as `ConfigEnvelope` and `ConfigWriteResult` retain
+snake_case wire keys; config writes add optional nullable `live_propagation`.
+Their `config` value is `unknown`: validate it before spreading it or reading
+individual properties.
 
 - `RunResult` is available from `session.lastResult`, `await session.turn(...)`, `await deferred.startTurn(...)`, and `stream.result`.
 - `Usage`, `SessionInfo`, `Capability`, and `SchemaWarning` model the runtime responses directly.
@@ -365,21 +371,45 @@ omits them, and can preserve current `run_started`, `run_failed`, `retrying`,
 and `hook_failed` frames as `MalformedEvent` because their parser field shapes
 are stale. These are SDK/code-generation gaps.
 
+In the current **0.8.40** SDK, `model_fallback_skipped`,
+`model_fallback_staged`, `model_fallback_committed`, and
+`model_fallback_target_failed` are also absent from the generated inventory.
+If a runtime emits one during model fallback, receiving it raises
+`UNKNOWN_EVENT_TYPE` rather than yielding `UnknownEvent`. Streams that do not
+receive these events are not affected by this particular gap.
+
 Use the built-in client helpers directly for capability and skill flows:
 
 ```ts
-const client = new MeerkatClient();
-await client.connect();
+import { MeerkatClient } from "@rkat/sdk";
 
-if (client.hasCapability("skills")) {
-  const session = await client.createSession("Review this function");
-  const result = await session.invokeSkill(
-    { sourceUuid: "source-123", skillName: "code-review" },
-    "Focus on performance regressions.",
-  );
-  console.log(result.text);
+const client = new MeerkatClient();
+
+try {
+  await client.connect();
+  if (client.hasCapability("skills")) {
+    const matches = (await client.listSkills()).filter(
+      (entry) => entry.is_active && entry.key.skill_name === "code-review",
+    );
+    const [skill] = matches;
+    if (!skill || matches.length !== 1) {
+      throw new Error("Expected one active code-review skill; select a source UUID if ambiguous.");
+    }
+    const session = await client.createSession("Review this function");
+    const result = await session.invokeSkill(
+      { sourceUuid: skill.key.source_uuid, skillName: skill.key.skill_name },
+      "Focus on performance regressions.",
+    );
+    console.log(result.text);
+  }
+} finally {
+  await client.close();
 }
 ```
+
+Capability availability does not install a skill. Select an active entry from
+`listSkills()` and map its wire-shaped key to the SDK's `SkillRef`; if the
+name exists in multiple sources, choose the intended source UUID explicitly.
 
 ## Error Handling
 
@@ -464,14 +494,14 @@ try {
 
 ## Version Compatibility
 
-The SDK exports `CONTRACT_VERSION` (currently `"0.8.24"`). During `connect()`, the SDK checks that the server's contract version is compatible:
+The SDK exports `CONTRACT_VERSION` (currently `"0.8.40"`). During `connect()`, the SDK checks that the server's contract version is compatible:
 
 - While the major version is `0`, minor versions must match exactly (e.g. SDK `0.1.x` requires server `0.1.x`).
 - Once `1.0.0` is reached, major versions must match (standard semver).
 
 ```ts
 import { CONTRACT_VERSION } from "@rkat/sdk";
-console.log(CONTRACT_VERSION);  // "0.8.24"
+console.log(CONTRACT_VERSION);  // "0.8.40"
 ```
 
 If the versions are incompatible, `connect()` throws a `MeerkatError` with code `"VERSION_MISMATCH"`.
@@ -484,14 +514,14 @@ await client.connect();
 
 // Read the current config.
 const config = await client.getConfig();
-console.log(config.generation, config.config);
+console.log(config.generation, config.realm_id, config.config);
 
-// Replace the entire config.
-await client.setConfig({ ...config.config, max_tokens: 4096 });
-
-// Or merge-patch specific fields.
-const updated = await client.patchConfig({ max_tokens: 8192 });
-console.log(updated.config.max_tokens);  // 8192
+// Merge-patch a specific field without spreading the unknown config value.
+const updated = await client.patchConfig(
+  { max_tokens: 8192 },
+  { expectedGeneration: config.generation },
+);
+console.log(updated.config);
 
 await client.close();
 ```

@@ -56,7 +56,7 @@ member by stable `AgentIdentity`, not by an internal session or runtime binding.
 | Mob | Durable orchestration aggregate: definition, members, events, flows, lifecycle |
 | Profile | Role template: model, tool posture, skills, runtime mode, peer description |
 | Member | One spawned participant with a stable `AgentIdentity` |
-| Wiring | Directed peer visibility between members |
+| Wiring | Undirected peer connectivity and mutual trust between members |
 | Runtime mode | `autonomous_host` by default, `turn_driven` when explicit control is needed |
 | Flow | Declarative workflow that dispatches steps to members |
 | Work lane | Cancellable tracked work submitted to a mob or member |
@@ -100,6 +100,7 @@ A small mob definition has profiles and optional wiring:
     "lead": {
       "model": "claude-opus-4-8",
       "peer_description": "Coordinates triage and assigns work",
+      "external_addressable": true,
       "tools": {
         "builtins": true,
         "comms": true,
@@ -363,8 +364,15 @@ message text can still use the runtime context placeholders described below.
         "definition": {
           "id": "release-triage",
           "profiles": {
-            "lead": { "model": "claude-opus-4-8" },
-            "analyst": { "model": "claude-sonnet-4-6" }
+            "lead": {
+              "model": "claude-opus-4-8",
+              "tools": { "comms": true },
+              "external_addressable": true
+            },
+            "analyst": {
+              "model": "claude-sonnet-4-6",
+              "tools": { "comms": true }
+            }
           }
         }
       }
@@ -393,8 +401,15 @@ message text can still use the runtime context placeholders described below.
         definition={
             "id": "release-triage",
             "profiles": {
-                "lead": {"model": "claude-opus-4-8"},
-                "analyst": {"model": "claude-sonnet-4-6"},
+                "lead": {
+                    "model": "claude-opus-4-8",
+                    "tools": {"comms": True},
+                    "external_addressable": True,
+                },
+                "analyst": {
+                    "model": "claude-sonnet-4-6",
+                    "tools": {"comms": True},
+                },
             },
         }
     )
@@ -412,8 +427,15 @@ message text can still use the runtime context placeholders described below.
       definition: {
         id: "release-triage",
         profiles: {
-          lead: { model: "claude-opus-4-8" },
-          analyst: { model: "claude-sonnet-4-6" },
+          lead: {
+            model: "claude-opus-4-8",
+            tools: { comms: true },
+            external_addressable: true,
+          },
+          analyst: {
+            model: "claude-sonnet-4-6",
+            tools: { comms: true },
+          },
         },
       },
     });
@@ -439,8 +461,15 @@ message text can still use the runtime context placeholders described below.
     const mob = await runtime.createMob({
       id: "release-triage",
       profiles: {
-        lead: { model: "gpt-5.5" },
-        analyst: { model: "gpt-5.4-mini" },
+        lead: {
+          model: "gpt-5.5",
+          tools: { comms: true },
+          external_addressable: true,
+        },
+        analyst: {
+          model: "gpt-5.4-mini",
+          tools: { comms: true },
+        },
       },
     });
 
@@ -593,6 +622,13 @@ strict topology when roles must not communicate outside an approved graph.
 Use member send for direct content delivery. Use the work lane when the caller
 needs a tracked, cancellable work reference.
 
+`mob/member_send`, SDK `Member.send`, and `mob/submit_work` with
+`origin: "external"` require the target's profile to set
+`external_addressable: true` (the default is `false`). The definitions above
+opt in only the lead as the application's entry point. For tracked work,
+choose a `member_ref` belonging to an opted-in member. This opt-in is not
+required for internal flow dispatch or ordinary peer messaging.
+
 <Tabs>
   <Tab title="Member send">
     ```json
@@ -700,6 +736,49 @@ are also rendered inside text blocks of multimodal messages, while non-text
 blocks are preserved. Invalid syntax, an unknown root, a missing field under a
 present value, or indexing into a scalar fails the step closed. A step or loop
 root that genuinely has not produced output renders as `null`.
+
+Nested output lookups also depend on the producer step's `output_format`:
+
+| Step setting | Per-target output |
+|--------------|---------------|
+| `"output_format": "text"` | A JSON string containing the raw text, even if that text looks like JSON |
+| `"output_format": "json"` | Parsed JSON, allowing field/index lookup when the value has the corresponding object/array shape |
+| Format omitted, `expected_schema_ref` present | `json` |
+| Both omitted | `text` |
+
+An explicit format always wins over the schema-aware default. A profile's
+`output_schema` constrains the member's structured response; it does not
+override a flow step's `text` mode. Asking a text-mode producer to return JSON
+is therefore not enough to make `steps.<step-id>.output.<field>` work.
+
+Dispatch and collection still determine the enclosing step-result shape. This
+example uses `one_to_one` with `collection_policy: { "type": "any" }` so
+`scan` exposes the selected member's output directly instead of a member-keyed
+aggregate. Add this flow to a definition containing the lead and analyst
+profiles above:
+
+```json
+{
+  "flows": {
+    "structured_triage": {
+      "steps": {
+        "scan": {
+          "role": "lead",
+          "message": "Pick the highest-priority issue. Return only JSON with shape {\"issue\":{\"title\":\"the selected issue title\"} }.",
+          "output_format": "json",
+          "dispatch_mode": "one_to_one",
+          "collection_policy": { "type": "any" }
+        },
+        "investigate": {
+          "role": "analyst",
+          "message": "Investigate {{ steps.scan.output.issue.title }} and return evidence.",
+          "depends_on": ["scan"]
+        }
+      }
+    }
+  }
+}
+```
 
 ### Advisory nodes (`failure_policy`)
 

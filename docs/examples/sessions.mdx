@@ -227,7 +227,7 @@ rkat run --resume 019c8b99 "Keep going"
 rkat run --resume last "Keep going"
 
 # 2nd most recent
-rkat run --resume ~2 "Go back to this one"
+rkat run --resume ~1 "Go back to this one"
 
 # Omitting the session value resumes `last`
 rkat --resume "Keep going"
@@ -446,7 +446,9 @@ preserved.
 
 ## Interrupt a turn
 
-Cancel an in-flight turn. No-op if the session is idle.
+Cancel an in-flight turn. Runtime-backed public interrupt handling returns a
+successful no-op for an existing idle session. This does not make missing or
+archived targets successful no-ops, and direct substrate calls differ.
 
 <Tabs>
   <Tab title="CLI">
@@ -484,6 +486,10 @@ Cancel an in-flight turn. No-op if the session is idle.
     ```
   </Tab>
   <Tab title="Rust">
+    A directly constructed `EphemeralSessionService` returns
+    `SessionError::NotRunning` when idle. This example propagates that result
+    with `?`; it does not normalize it to a successful no-op.
+
     ```rust
     service.interrupt(&session_id).await?;
     ```
@@ -508,14 +514,27 @@ Cancel an in-flight turn. No-op if the session is idle.
       "jsonrpc": "2.0",
       "method": "session/event",
       "params": {
-        "session_id": "01936f8a-...",
+        "session_id": "01936f8a-7b2c-7000-8000-000000000001",
         "event": {
-          "type": "text_delta",
-          "delta": "The capital"
+          "event_id": "01936f8a-7b2c-7000-8000-000000000002",
+          "source": {
+            "type": "session",
+            "session_id": "01936f8a-7b2c-7000-8000-000000000001"
+          },
+          "seq": 1,
+          "timestamp_ms": 1732746900268,
+          "payload": {
+            "type": "text_delta",
+            "delta": "The capital"
+          }
         }
       }
     }
     ```
+
+    The wire `event` is an `EventEnvelope<AgentEvent>`; the agent event lives
+    at `params.event.payload`. The SDK stream helpers below expose decoded
+    agent events instead.
   </Tab>
   <Tab title="REST">
     ```bash
@@ -536,7 +555,12 @@ Cancel an in-flight turn. No-op if the session is idle.
     }
     ```
 
-    When `stream: true`, the MCP server sends progress notifications with `AgentEvent` payloads during execution.
+    When `stream: true`, this agent-event path sends MCP logging notifications
+    (`notifications/message`), not `notifications/progress`. Each notification
+    has `params.level: "info"` and a `params.data` object containing
+    `source: "meerkat"`, `session_id`, and `event` as an
+    `EventEnvelope<AgentEvent>`. The actual agent event is at
+    `params.data.event.payload`.
 
     For long-running or autonomous sessions, use the managed event stream tools instead:
 
@@ -799,8 +823,11 @@ model unless the surface explicitly supplies another binding.
     rkat config set --json '{"agent": {"model": "gpt-5.5"}}'
 
     # Merge-patch with optimistic concurrency
-    rkat config patch --json '{"budget": {"max_tokens": 50000}}' --expected-generation 3
+    rkat config patch --json '{"limits": {"budget": 50000}}' --expected-generation 3
     ```
+
+    `limits.budget` sets the runtime total-token budget used at construction,
+    distinct from the per-call output-token limit.
   </Tab>
   <Tab title="JSON-RPC">
     ```json
@@ -868,8 +895,11 @@ model unless the surface explicitly supplies another binding.
     ```typescript
     const config = await client.getConfig();
     await client.setConfig({ agent: { model: "gpt-5.5" } }, { expectedGeneration: 3 });
-    await client.patchConfig({ agent: { maxTokensPerTurn: 8192 } }, { expectedGeneration: 4 });
+    await client.patchConfig({ agent: { max_tokens_per_turn: 8192 } }, { expectedGeneration: 4 });
     ```
+
+    Config-document keys use the schema's snake_case. SDK wrapper options
+    such as `expectedGeneration` remain camelCase.
   </Tab>
   <Tab title="Rust">
     ```rust

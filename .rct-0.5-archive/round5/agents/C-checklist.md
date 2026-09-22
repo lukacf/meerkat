@@ -9,5 +9,5 @@
 - [x] `C-07` `DOGMA-19` Add explicit rollback or deferred-publication logic for every trust-mutating failure path. Done when handler-level tests cover reject-after-prepare cases.
 - [x] `C-08` `DOGMA-12` `DOGMA-19` Add or update the trust/ack defensive scan. Done when the scan is checked in and wired for lane/final gating.
 - [x] `C-09` Self static review. Done when the trust publication order is clearly commit-first and not just renamed comments.
-- [x] `C-10` Handoff note. Done when handoff commit, changed files, and risks are recorded in [C-plan.md](/Users/luka/.codex/worktrees/ec4d/meerkat/.rct/round5/agents/C-plan.md).
+- [x] `C-10` Handoff note. Done when handoff commit, changed files, and risks are recorded in [C-plan.md](C-plan.md).
 - [x] `C-11` Generated-output request. Done when any regen need is recorded explicitly, or marked `none`.

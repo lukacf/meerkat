@@ -269,7 +269,8 @@ production deployments.
 
 The runtime uses `tokio_with_wasm` as a drop-in tokio replacement (backed by the JS event loop), `reqwest` with browser `fetch` for HTTP, and `web-time` for browser-safe timestamps. The `#[async_trait(?Send)]` pattern handles wasm32's single-threaded model.
 
-API:
+For local development, the direct SDK bootstrap below explicitly opts into
+permissive trust:
 
 ```typescript
 import { MeerkatRuntime } from "@rkat/web";
@@ -278,12 +279,22 @@ import * as wasm from "@rkat/web/wasm/meerkat_web_runtime.js";
 const runtime = await MeerkatRuntime.initFromMobpack(wasm, mobpackBytes, {
   anthropicApiKey: "sk-ant-...",
   model: "claude-sonnet-4-6",
+  mobpackTrust: { policy: "permissive" },
 });
 
 const session = runtime.createSession({ model: "claude-sonnet-4-6" });
 const result = await session.turn("Your prompt here");
 const events = session.pollEvents();
 ```
+
+For production, set `mobpackTrust.policy` to `"strict"` and supply
+`mobpackTrust.trustedSigners`, mapping each verified signer id to its
+Ed25519 public key as 64 hex characters. Verify that mapping through a trusted
+channel rather than trusting a key merely because it is embedded in the pack.
+Omitting `mobpackTrust` means strict verification with an empty signer store,
+so unsigned packs and packs from unenrolled signers fail closed. Native CLI
+`--trust-policy` flags and user/project trust stores are not imported by this
+direct SDK path; configure browser-local trust explicitly.
 
 ### Browser capabilities and limitations
 

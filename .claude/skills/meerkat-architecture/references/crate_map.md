@@ -27,9 +27,9 @@ meerkat-core              (types, foundational traits, agent loop, domain-only S
   ├── meerkat-store-conformance (published storage conformance harness: per-trait capability
                                 profiles, capability-discovery, append-only media, blob/artifact
                                 chapters — depends only on meerkat-core)
-  ├── meerkat-anthropic       (Anthropic streaming client, implements AgentLlmClient through llm-core)
-  ├── meerkat-openai          (OpenAI client, including realtime transport — implements AgentLlmClient)
-  ├── meerkat-gemini          (Gemini client, including inline video — implements AgentLlmClient)
+  ├── meerkat-anthropic       (Anthropic streaming client — native client implements LlmClient)
+  ├── meerkat-openai          (OpenAI client, including realtime transport — native client implements LlmClient)
+  ├── meerkat-gemini          (Gemini client, including inline video — native client implements LlmClient)
   ├── meerkat-providers       (compatibility shim: ProviderRuntimeRegistry surface + cloud authorizer wiring)
   ├── meerkat-client          (compatibility shim: re-exports provider crates — do NOT add new code here)
   ├── meerkat-store           (session persistence: SQLite, Jsonl, Memory; realm manifest v2 pinning,
@@ -41,6 +41,8 @@ meerkat-core              (types, foundational traits, agent loop, domain-only S
   ├── meerkat-jobs            (generated DetachedJobMachine authority, fenced attempts,
                                 typed terminal results, atomic outbox, memory/disk stores)
   ├── meerkat-workgraph       (realm-scoped durable WorkGraph service, stores, tools, read surface)
+  ├── meerkat-schedule        (scheduler: once/interval/calendar triggers, occurrence lifecycle,
+                                delivery, schedule tools — consumed by the facade)
   ├── meerkat-live            (LiveAdapterHost, live projection sink, WebSocket transport,
                                 optional WebRTC media/signaling transport)
   ├── meerkat-comms           (inter-agent: inproc, TCP, UDS, Ed25519)
@@ -53,7 +55,7 @@ meerkat-machine-dsl-core      (DSL primitives: machine/composition modeling base
 meerkat-machine-derive        (proc macros for machine DSL)
 meerkat-machine-dsl           (DSL frontend — used by catalog sources)
 meerkat-machine-schema        (formal machine/composition catalog + seam/handoff protocol metadata)
-meerkat-machine-kernels       (generated kernel interpreter — centralized, no owner-crate re-exports)
+meerkat-machine-kernels       (typed generated kernel modules; optional generic test-oracle)
 meerkat-machine-codegen       (TLA+ generation, TLC verification, drift detection)
 
 meerkat (facade)              (AgentFactory, FactoryAgentBuilder, persistence helpers, re-exports,
@@ -64,8 +66,6 @@ meerkat (facade)              (AgentFactory, FactoryAgentBuilder, persistence he
   ├── meerkat-mob-adaptive     (transitional re-export of the mob-owned adaptive module)
   ├── meerkat-mob-pack         (mobpack archive: signing, trust, validation)
   ├── meerkat-mob-mcp          (mob tools as MCP dispatcher + agent delegation surface, profile tools)
-  ├── meerkat-schedule         (scheduler: once/interval/calendar triggers, occurrence lifecycle,
-                                delivery, schedule tools)
   └── meerkat-web-runtime      (WASM embedded runtime — wasm_bindgen exports)
 
 Surface binaries:
@@ -76,6 +76,17 @@ Surface binaries:
 ```
 
 There are no separate public reduced-surface binaries. Reduced-surface distributions are source builds of the same surface crates with a narrower Cargo feature set.
+
+The provider-native clients implement `LlmClient`. The facade adapts them to
+the agent loop through `meerkat_llm_core::LlmClientAdapter`, which implements
+`AgentLlmClient`; the `meerkat-client` crate remains a compatibility re-export
+shim.
+
+`meerkat-machine-kernels/src/generated/` is the ordinary typed kernel surface.
+The generic interpreter in `src/runtime.rs` is available as
+`test_oracle::GeneratedMachineKernel` only with the `test-oracle` feature.
+Production authority work belongs in the catalog-owned DSL and the production
+bridge modules that invoke its bodies, not in that optional oracle.
 
 ## Storage Flow (0.8.4 unification arc)
 
@@ -129,8 +140,13 @@ profiles; the in-repo stores run the same suite in
 | `MemoryStore` | Semantic memory: index/search + lifecycle (`drop_scope`, paged `enumerate_scoped`; defaults are typed `Unsupported`) | `HnswMemoryStore` (lazy per-scope loading), `SimpleMemoryStore` (meerkat-memory) |
 | `OpsLifecycleRegistry` | Async operation tracking (wait_all, collect_completed, bounded retention, timestamps, concurrency, detached wake) | `RuntimeOpsLifecycleRegistry` (meerkat-runtime) |
 | `MobToolsFactory` | Late-binding session-scoped mob tool construction | `AgentMobToolSurfaceFactory` (meerkat-mob-mcp) |
-| `WorkGraphStore` | Durable realm-scoped work item, edge, claim, event, and snapshot storage | `MemoryWorkGraphStore`, `SqliteWorkGraphStore` (meerkat-workgraph) |
 | `StorageMigrator` | Shape-stable storage diagnose seam (`diagnose(&DiagnoseScope) → StorageDiagnosis`; mutation verbs arrive as defaulted methods) | `DiskStorageMigrator` (meerkat-store/src/doctor.rs) |
+
+### WorkGraph traits (defined in meerkat-workgraph)
+
+| Trait | Purpose | Implementors |
+|-------|---------|-------------|
+| `WorkGraphStore` | Feature-owned durable realm-scoped work item, edge, claim, event, and snapshot storage | `MemoryWorkGraphStore`, `SqliteWorkGraphStore` (meerkat-workgraph) |
 
 ### Runtime traits (defined in meerkat-runtime)
 
@@ -230,6 +246,9 @@ profiles; the in-repo stores run the same suite in
 
 ### 0.8.9 additions (PR #917, durable-tail recovery)
 
+The first two entries record their original 0.8.9 API shapes; they are
+superseded by the current-design note below the table.
+
 | Type | Purpose |
 |------|---------|
 | `BoundSessionCommit` | Sealed snapshot+typed-session pair on `CoreApplyOutput` (one private `committed` field; `with_session` is the only typed mint) — meerkat-core/src/lifecycle/core_executor.rs |
@@ -238,6 +257,19 @@ profiles; the in-repo stores run the same suite in
 | `ResumeSessionLoad` / `SessionResumeUnavailableReason` / `MobFailureClass::TargetArchived` | Typed mob resume seam (`MobSessionService::load_session_for_resume` is required, no default) — meerkat-mob |
 | `RuntimeStore::{load_committed_boundary_receipts, load_input_states_with_versions}` + `InputRowVersionConflict` / `MachineLifecycleVersionConflict` | Recovery reads + fenced-record conflicts; `expected_row_digest` is enforced inside the writing transaction — meerkat-runtime/src/store/mod.rs |
 | `meerkat_runtime::stack_relief` | Fresh-task child-agent construction (never nested in a parent's poll stack) |
+
+**Current recovery/commit design:** `recover_durable_tail(store, session_id)`
+derives, proves, and classifies store-bound evidence internally, then prepares a
+profile-specific `PreparedRuntimeSessionCommit` and realizes it through
+`RuntimeStore::commit_prepared_session_boundary`. This supersedes the old
+caller-assembled `DurableTailRecoveryRequest`/`from_classification` and direct
+`atomic_apply` recovery handoff. `BoundSessionCommit` is a disjoint carrier for
+typed/untyped WholeBlob, a prepared HeadCanonical boundary, or receipt-only
+provisional promotion, not a universal snapshot/session pair. `with_session`
+seals without eager serialization; `whole_blob_bytes()` is lazy and fallible.
+Use `with_bound_session` to preserve an already prepared carrier and its exact
+predecessor/suffix proof. Typed authority and unrelated bytes must never be
+re-paired.
 
 ### 0.8.11 additions (checkpoint-free session persistence)
 
@@ -318,7 +350,7 @@ MobBuilder::create() → MobHandle
   ├── create provisioner
   └── spawn MobActor task
 
-MobHandle::spawn(spec)
+MobHandle::spawn_spec(spec)
   ├── resolve launch mode (Fresh/Resume/Fork)
   ├── build AgentBuildConfig from profile
   ├── provisioner.provision_member() → session_service.create_session()
@@ -326,7 +358,8 @@ MobHandle::spawn(spec)
   └── do_wire() for each target pair
 
 MobHandle::respawn(identity: AgentIdentity)
-  ├── retire existing member (archive session, remove from roster)
+  ├── retire existing member and remove its roster/runtime binding
+  │     (archive mob-owned session; release/unregister adopted host-owned runtime only)
   ├── enqueue spawn with same identity/profile/labels/mode
   └── new FenceToken issued, peer wiring needs re-establishment
 
@@ -339,6 +372,11 @@ MobHandle::run_flow(flow_id, params)
 
 - `mob/create` is definition-only; prefabs are gone.
 - `delegate` / implicit mobs are tracked by canonical `owner_bridge_session_id` + `is_implicit` fields and cleaned up by `destroy_session_mobs()`.
+- Successful retirement is the disposal barrier for this mob incarnation's
+  owned work. The provisioner's `MemberSessionDisposal` distinguishes
+  `Archived` from `RuntimeReleasedOnlyHostOwned`; the latter does not archive
+  the host's durable document. Neither promises a drain of separate event-log
+  projection tasks.
 
 ## Post-0.5.0 Deltas
 

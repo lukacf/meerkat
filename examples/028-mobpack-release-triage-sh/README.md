@@ -30,12 +30,15 @@ real release-triage coordination pattern.
 ## What The Script Builds
 
 `examples.sh` generates a temporary mob source tree under `.work/release-triage/`
-with:
+(relative to this example directory) with:
 - `manifest.toml` - artifact identity, runtime requirements, and model aliases
 - `definition.json` - a 4-role mob with orchestrator and specialists
 - `skills/*.md` - role playbooks packed into the artifact
 - `config/defaults.toml` - typed deploy defaults for per-turn output, provider model, and total budget
-- `release.key` - demo signing key for local verification
+
+It also writes sibling outputs outside that source tree:
+- `.work/release.key` - demo signing key for local verification
+- `.work/release-triage.mobpack` - the signed artifact
 
 ## Concepts
 
@@ -92,8 +95,13 @@ That forces the mob to do work an operator actually cares about:
 
 ## Notes
 
-- The signing key in `.work/release.key` is for local demonstration only.
+- The fixed signing key in `.work/release.key` is publicly known, for local
+  demonstration only, and unsuitable for production.
 - The script uses `--trust-policy permissive` so you can run the example
   without pre-configuring a trust store.
-- For a stricter production-like flow, switch the deploy step to
-  `--trust-policy strict` and manage keys outside the example directory.
+- Signing a pack does not enroll its signer in a trust store.
+- For a stricter production-like flow, use a privately managed signing key
+  outside the example directory and choose its signer ID. Enroll that ID's
+  matching Ed25519 public key in the `[signers]` mapping of the effective
+  user/project `.rkat/trusted-signers.toml` trust store before validating or
+  deploying with `--trust-policy strict`.

@@ -6,8 +6,10 @@ from "Hello World" to production-shaped multi-agent systems.
 ## Quick Start
 
 ```bash
-# Set your API key
+# Set API keys: 010 checks ANTHROPIC_API_KEY, but its fresh unpinned run
+# uses OpenAI's gpt-6-astra and needs access to that model.
 export ANTHROPIC_API_KEY=sk-...
+export OPENAI_API_KEY=sk-...
 
 # Build the repo-local CLI/RPC binaries used by shell and SDK examples
 ./scripts/repo-cargo build -p rkat --bin rkat
@@ -37,8 +39,18 @@ npm --prefix sdks/typescript run build
 (cd examples/010-mcp-tool-server-sh && ./setup.sh)
 ```
 
-Rust examples in this folder are wired into `meerkat/Cargo.toml` and can be run
-directly from the workspace root. For example:
+Setting an API key does not select its provider. Fresh, unpinned CLI runs in
+004 and 010 select `gpt-6-astra`. Explicit model/provider configuration can
+change the credentials needed, but must apply to the roots used by the script:
+010 redirects its roots into `.work/`, and 004 includes an `--isolated` run.
+An ordinary-realm-only model pin is not sufficient for every run.
+
+Most numbered Rust examples are registered in `meerkat/Cargo.toml`; 017-019
+are registered in `meerkat-mob/Cargo.toml` and use `-p meerkat-mob`. Examples
+034 and 035 are standalone packages: select their `Cargo.toml` with
+`--manifest-path` and the desired binary with `--bin`. See each example's own
+run instructions for target names and required features. For example, run
+the facade's 001 target from the workspace root:
 
 ```bash
 ./scripts/repo-cargo run -p meerkat --example 001-hello-meerkat --features jsonl-store
@@ -207,7 +219,7 @@ export MEERKAT_BIN_PATH="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_T
 ### API Keys
 ```bash
 export ANTHROPIC_API_KEY=sk-...     # Required for most examples
-export OPENAI_API_KEY=sk-...        # Optional (examples 021, 034, 035 live suite, 036)
+export OPENAI_API_KEY=sk-...        # 004/010 fresh defaults; also 021, 034, 035 live suite, 036
 export GEMINI_API_KEY=...           # Optional (examples 021, 034, 035 live suite)
 ```
 

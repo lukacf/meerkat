@@ -406,6 +406,13 @@ field shapes than the handwritten parser and can arrive as malformed events.
 Treat all of these as SDK/code-generation gaps, not stable alternate wire
 contracts.
 
+In the current **0.8.40** SDK, `model_fallback_skipped`,
+`model_fallback_staged`, `model_fallback_committed`, and
+`model_fallback_target_failed` are also absent from the generated inventory.
+If a runtime emits one during model fallback, receiving it raises
+`UNKNOWN_EVENT_TYPE` rather than yielding `UnknownEvent`. Streams that do not
+receive these events are not affected by this particular gap.
+
 ## Capability and error model
 
 Capabilities:

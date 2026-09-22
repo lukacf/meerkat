@@ -626,13 +626,13 @@ Outcome:
    raw `19,459 -> 459`, phase `19,459 -> 464`, full `19,459 -> 19,070`,
    TLC `1,814,665 generated / 19,459 distinct / depth 9`.
 4. Read that baseline together with the largest-block field projection from
-   [`docs/architecture/machine-simplification-proposal.md`](/architecture/machine-simplification-proposal):
+   [`docs/architecture/machine-simplification-proposal.md`](machine-simplification-proposal.md):
    the dominant Meerkat mixed block is now measured as `8,897` states over
    `4,560` extended-state tuples, with `3,096` tuples reused across multiple
    phases.
 5. Read that baseline together with the now-green Mob lifecycle-triangle
    ledger in
-   [`docs/architecture/mob-runtime-schema-parity-ledger.md`](/architecture/mob-runtime-schema-parity-ledger).
+   [`docs/architecture/mob-runtime-schema-parity-ledger.md`](mob-runtime-schema-parity-ledger.md).
 6. The remaining Meerkat edge is now narrower and mostly terminal/batch
    mechanics. `RuntimeIngressAuthority` no longer treats contributor staging,
    boundary application, run completion, replay rollback, or admission

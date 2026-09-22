@@ -5,7 +5,7 @@ architecture.
 
 ## Primary code anchors
 
-- `meerkat-runtime/src/meerkat_machine.rs` — Meerkat-side runtime/session
+- `meerkat-runtime/src/meerkat_machine/mod.rs` — Meerkat-side runtime/session
   authority
 - `meerkat-mob/src/runtime/handle.rs` — Mob-side command submission and
   projection surface

@@ -18,7 +18,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 
 ## Transaction Plans
 - `transactional_claim` via `claim_due_occurrences` / `ScheduleStore::claim_due_occurrences` — store-backed claim uses authoritative store time plus durable lease state
-- `revision_supersede_and_replan` via `update_schedule_revision` / `ScheduleStore::commit_schedule_mutation` — revision-affecting schedule updates supersede pending future occurrences before replanning
+- `revision_supersede_and_replan` via `update_schedule_revision` / `ScheduleStore::commit_schedule_mutation` — revision-affecting schedule updates (including deletion) supersede all outstanding nonterminal occurrences of the schedule from older revisions at commit time, including overdue Pending and in-flight Claimed/Dispatching/AwaitingCompletion, through typed occurrence Supersede and reciprocal OccurrencesSuperseded -> ConfirmOccurrencesSuperseded acknowledgement; supersession does not promise cancellation of already-dispatched external work
 
 ## Scheduler Rules
 - `(none)`
@@ -28,7 +28,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `occurrence_supersede_ack_route_present` — the occurrence authority's supersede-consumption ack returns to the schedule authority through the reciprocal route so the schedule observes completion
 
 ## Behavioral Invariants
-- `superseded_occurrence_originates_from_schedule_revision` — pending future occurrences are superseded only by the schedule revision route rather than by ad hoc shell mutation
+- `superseded_occurrence_originates_from_schedule_revision` — observed occurrence.Supersede inputs delivered on revision_supersede_enters_occurrence_authority originate from schedule.SupersedePendingOccurrences; this route-scoped provenance invariant neither proves sweep completeness nor excludes other typed Supersede ingress
 
 ## Coverage
 ### Code Anchors
@@ -37,6 +37,6 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `schedule_bundle_schema` (route `revision_supersede_enters_occurrence_authority`): `meerkat-machine-schema/src/catalog/compositions.rs` — formal schedule bundle composition
 
 ### Scenarios
-- `revision-supersede-route` — revision-affecting schedule updates supersede pending future occurrences through the explicit route
+- `revision-supersede-route` — revision-affecting schedule updates (including deletion) supersede all outstanding nonterminal occurrences of the schedule from older revisions at commit time, including overdue Pending and in-flight Claimed/Dispatching/AwaitingCompletion, through typed occurrence Supersede and reciprocal OccurrencesSuperseded -> ConfirmOccurrencesSuperseded acknowledgement; supersession does not promise cancellation of already-dispatched external work
 - `pause-resume-without-revision` — pause and resume leave schedule revision unchanged while preserving typed ownership
 - `rolling-planning-occurrence-materialization` — rolling planning records a planning window and materializes or supersedes pending occurrences through revision-aware schedule routes

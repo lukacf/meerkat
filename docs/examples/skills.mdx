@@ -55,8 +55,8 @@ Discover all skills from every source (project, user, filesystem, git, HTTP, std
     ```python
     skills = await client.list_skills()
     for s in skills:
-        key = s["key"]
-        print(f"{key['source_uuid']}/{key['skill_name']}: {s['name']}")
+        key = s.key
+        print(f"{key.source_uuid}/{key.skill_name}: {s.name}")
     ```
   </Tab>
   <Tab title="TypeScript">
@@ -118,8 +118,9 @@ View the full body and metadata of a specific skill by canonical key.
         SourceUuid::parse("00000000-0000-4b11-8111-000000000001")?,
         SkillName::parse("task-workflow")?,
     );
-    // The SkillKey already pins the source UUID; the optional second
-    // argument filters by repository *name*.
+    // The SkillKey pins the source UUID. In the factory-built runtime, the
+    // optional `source_name` selector is a UUID string resolved through
+    // source lineage, not a repository display name.
     let doc = skill_runtime.load_from_source(&key, None).await?;
     println!("{}", doc.body);
     ```
@@ -140,6 +141,7 @@ filesystem repository and use its typed key instead.
   <Tab title="CLI">
     ```bash
     rkat run "Track the implementation and use the shell safely" \
+      --tools workspace \
       --skill task-workflow \
       --skill shell-patterns
     ```
@@ -372,6 +374,7 @@ Use `skill_refs` when the skill should be injected for the first turn rather tha
     let created = service.create_session(CreateSessionRequest {
         model: "gpt-5.6-sol".into(),
         prompt: "".into(),
+        injected_context: Vec::new(),
         system_prompt: SystemPromptOverride::Inherit,
         max_tokens: None,
         event_tx: None,
@@ -383,6 +386,7 @@ Use `skill_refs` when the skill should be injected for the first turn rather tha
 
     let result = service.start_turn(&created.session_id, StartTurnRequest {
         prompt: "Extract emails".into(),
+        injected_context: Vec::new(),
         system_prompt: None,
         event_tx: None,
         runtime: StartTurnRuntimeSemantics::runtime_metadata(RuntimeTurnMetadata {
@@ -405,10 +409,13 @@ Use `skill_refs` when the skill should be injected for the first turn rather tha
 
 ## Per-turn skill injection
 
-Inject skills into a specific turn on an existing session. The skill content is
-added to the context for that turn only. On the CLI, `--skill` remains the
-embedded-builtin slug preload convenience; the typed per-turn surface is
-`skill_refs`.
+Request skill activation for a specific input on an existing session using
+`skill_refs`. The materialized `SkillContext` blocks become transcript/history
+content and can remain available on later turns, subject to ordinary
+compaction or other history changes; they do not automatically expire at the
+end of the turn. This differs from preloading skills into the initial system
+prompt. On the CLI, `--skill` remains the embedded-builtin slug preload
+convenience.
 
 <Tabs>
   <Tab title="CLI">
@@ -438,9 +445,10 @@ embedded-builtin slug preload convenience; the typed per-turn surface is
   </Tab>
   <Tab title="REST">
     ```bash
-    curl -X POST http://localhost:8080/sessions/019467d9-7e3a.../messages \
+    curl -X POST http://localhost:8080/sessions/019467d9-7e3a-7000-8000-000000000000/messages \
       -H "Content-Type: application/json" \
       -d '{
+        "session_id": "019467d9-7e3a-7000-8000-000000000000",
         "prompt": "Now format the output",
         "skill_refs": [
           {
@@ -501,6 +509,7 @@ embedded-builtin slug preload convenience; the typed per-turn surface is
     ```rust
     let result = service.start_turn(&session_id, StartTurnRequest {
         prompt: "Now format the output".into(),
+        injected_context: Vec::new(),
         system_prompt: None,
         event_tx: None,
         runtime: StartTurnRuntimeSemantics::runtime_metadata(RuntimeTurnMetadata {

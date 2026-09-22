@@ -374,10 +374,14 @@ escape hatch, not the public facade construction path.
 
 ## Development
 
-The repository uses Make as its command surface:
+Complete the [onboarding prerequisites](ONBOARDING.md#prerequisites), including
+Node.js and `cargo-nextest`, before running contributor validation.
+`make install-build-deps` installs the pinned Rust toolchain and components,
+not every validation tool. The repository uses Make as its command surface:
 
 ```bash
 make install-build-deps
+./scripts/repo-cargo install cargo-nextest --locked
 make build
 make check
 make lint
@@ -425,8 +429,9 @@ Embedded consumers can disable defaults and select provider, store, MCP,
 comms, skills, live, memory, ATIF, and session capabilities individually.
 Schedule, WorkGraph, and durable-job substrates are always linked; hosts still
 choose whether to compose and expose their runtime services and tools. The
-empty `schedule` and `workgraph` features remain compatibility aliases, not
-compile-time selectors.
+`schedule` feature gates facade-local predicate-scheduling helpers, including
+`ScheduledPredicateRunnable`; it does not select the already-linked scheduling
+substrate. The empty `workgraph` feature remains a compatibility alias.
 
 Meerkat is pre-1.0 and patch releases can contain declared public API breaks.
 Exactly pin the Meerkat crate family and bump deliberately:

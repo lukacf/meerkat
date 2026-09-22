@@ -5,6 +5,12 @@ MobKit authors its public documentation in the meerkat-mobkit repository. The
 Mintlify project for docs.rkat.ai deploys from this repository, so this script
 creates the namespaced snapshot consumed by the MobKit product navigation.
 
+The mirror tracks MobKit main. Documentation carries no version tag: every
+push to MobKit main that touches docs regenerates this snapshot (see
+.github/workflows/publish-mobkit-docs.yml), and releases do not publish docs.
+The generated manifest records the exact source commit and the MobKit
+workspace version at that commit as information, not as an identity.
+
 Usage:
     python3 scripts/sync-mobkit-docs.py /path/to/meerkat-mobkit
     python3 scripts/sync-mobkit-docs.py /path/to/meerkat-mobkit --check
@@ -74,7 +80,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source-ref",
-        help="immutable source tag or ref to record in the generated manifest",
+        help="source branch to record in the generated manifest (default: the "
+        "checked-out branch, or main when detached)",
     )
     return parser.parse_args()
 
@@ -281,22 +288,24 @@ def ensure_page_icon(text: str, page_id: str) -> str:
 
 def version_stamp(
     source_version: str,
-    source_ref: str | None,
+    source_ref: str,
     source_commit: str,
+    source_date: str,
     source_repository: str = SOURCE_REPOSITORY,
 ) -> str:
-    """Return the one-line freshness stamp every mirrored page carries.
+    """Return the one-line provenance stamp every mirrored page carries.
 
-    docs.rkat.ai serves this snapshot until the next publication succeeds, and
-    publication has silently lagged MobKit releases before. The stamp names the
-    documented MobKit version on every page so a reader can tell that the page
-    they are on describes a release older than the one they run.
+    docs.rkat.ai serves this snapshot until the next publication succeeds. The
+    stamp names the exact MobKit commit the page was rendered from and the
+    MobKit workspace version at that commit, so a reader can tell how current
+    the page is and which version it was written against. The commit is the
+    identity; the version is information.
     """
-    if source_ref is not None:
-        origin = f"[{source_ref}]({source_repository}/tree/{source_ref})"
-    else:
-        origin = f"commit [{source_commit[:12]}]({source_repository}/commit/{source_commit})"
-    return f"*This page documents MobKit v{source_version} (mirrored from {origin}).*"
+    commit = f"[{source_commit[:12]}]({source_repository}/commit/{source_commit})"
+    return (
+        f"*Mirrored from MobKit {source_ref} at {commit} on {source_date}; "
+        f"MobKit workspace version {source_version} at that commit.*"
+    )
 
 
 def stamp_page(text: str, stamp: str, page_id: str) -> str:
@@ -355,12 +364,8 @@ def build_snapshot(
 
     source_version = workspace_version(source / "Cargo.toml")
     if source_ref is None:
-        exact_tag = subprocess.run(
-            ["git", "-C", str(source), "describe", "--tags", "--exact-match", "HEAD"],
-            capture_output=True,
-            text=True,
-        )
-        source_ref = exact_tag.stdout.strip() if exact_tag.returncode == 0 else None
+        branch = git_output(source, "rev-parse", "--abbrev-ref", "HEAD")
+        source_ref = "main" if branch == "HEAD" else branch
 
     config = json.loads(config_path.read_text(encoding="utf-8"))
     page_ids = flatten_pages(config.get("navigation", {}))
@@ -370,7 +375,8 @@ def build_snapshot(
         raise SystemExit("MobKit docs navigation contains duplicate pages")
 
     source_commit = git_output(source, "rev-parse", "HEAD")
-    stamp = version_stamp(source_version, source_ref, source_commit)
+    source_date = git_output(source, "show", "-s", "--format=%cs", "HEAD")
+    stamp = version_stamp(source_version, source_ref, source_commit, source_date)
     corrections = released_anchor_corrections(source_docs)
 
     destination.mkdir(parents=True, exist_ok=True)
@@ -400,8 +406,10 @@ def build_snapshot(
     manifest = {
         "generated": True,
         "source_repository": SOURCE_REPOSITORY,
+        "source_branch": source_ref,
         "source_ref": source_ref,
         "source_commit": source_commit,
+        "source_commit_date": source_date,
         "source_version": source_version,
         "source_docs_dirty": source_dirty,
         "public_pages": len(page_ids),

@@ -186,21 +186,18 @@ class SyncMobKitDocsTests(unittest.TestCase):
                 {"navigation": {"products": []}},
             )
 
-    def test_version_stamp_names_the_documented_version_and_its_release_ref(self) -> None:
-        stamp = sync.version_stamp("1.2.3", "v1.2.3", "a" * 40)
-        self.assertIn("This page documents MobKit v1.2.3", stamp)
-        self.assertIn("[v1.2.3](https://github.com/lukacf/meerkat-mobkit/tree/v1.2.3)", stamp)
+    def test_version_stamp_names_the_source_commit_date_and_workspace_version(self) -> None:
+        commit = "a" * 40
+        stamp = sync.version_stamp("1.2.3", "main", commit, "2026-09-22")
+        self.assertIn("Mirrored from MobKit main at", stamp)
+        self.assertIn(
+            f"[{commit[:12]}](https://github.com/lukacf/meerkat-mobkit/commit/{commit})", stamp
+        )
+        self.assertIn("on 2026-09-22", stamp)
+        self.assertIn("MobKit workspace version 1.2.3 at that commit", stamp)
+        self.assertNotIn("This page documents MobKit v", stamp)
         self.assertTrue(stamp.startswith("*") and stamp.endswith("*"))
         self.assertNotIn("\n", stamp)
-
-    def test_version_stamp_falls_back_to_the_commit_without_a_release_ref(self) -> None:
-        commit = "44f1c4ef3c6ae45079c54fac760bc703604d3f0b"
-        stamp = sync.version_stamp("1.2.3", None, commit)
-        self.assertIn("This page documents MobKit v1.2.3", stamp)
-        self.assertIn(
-            f"commit [44f1c4ef3c6a](https://github.com/lukacf/meerkat-mobkit/commit/{commit})",
-            stamp,
-        )
 
     def test_stamp_page_inserts_the_stamp_as_the_first_body_line(self) -> None:
         source = '---\ntitle: "Quickstart"\ndescription: "Boot"\nicon: "rocket"\n---\n\n## Install\n\nText.\n'
@@ -288,18 +285,28 @@ class SyncMobKitDocsTests(unittest.TestCase):
                 ],
                 check=True,
             )
+            # A release tag on the source commit must not leak into the mirror:
+            # documentation tracks the branch, not releases.
             subprocess.run([*git, "tag", "v1.2.3"], check=True)
+            subprocess.run([*git, "branch", "-M", "main"], check=True)
 
             destination = Path(temp) / "mobkit"
             sync.build_snapshot(source, destination, source_ref=None, require_clean=True)
 
             manifest = json.loads((destination / "_source.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["source_version"], "1.2.3")
-            self.assertEqual(manifest["source_ref"], "v1.2.3")
+            self.assertEqual(manifest["source_branch"], "main")
+            self.assertEqual(manifest["source_ref"], "main")
             self.assertEqual(manifest["source_commit"], sync.git_output(source, "rev-parse", "HEAD"))
+            self.assertEqual(
+                manifest["source_commit_date"],
+                sync.git_output(source, "show", "-s", "--format=%cs", "HEAD"),
+            )
             self.assertIs(manifest["source_docs_dirty"], False)
             self.assertEqual(manifest["content_sha256"], sync.validate.tree_digest(destination))
-            expected_stamp = sync.version_stamp("1.2.3", "v1.2.3", manifest["source_commit"])
+            expected_stamp = sync.version_stamp(
+                "1.2.3", "main", manifest["source_commit"], manifest["source_commit_date"]
+            )
             pages = sorted(destination.rglob("*.mdx"))
             self.assertEqual(len(pages), 5)
             for page in pages:
@@ -312,7 +319,9 @@ class SyncMobKitDocsTests(unittest.TestCase):
                 )
             introduction = (destination / "introduction.mdx").read_text(encoding="utf-8")
             self.assertIn("[deploy](/mobkit/guides/deploy)", introduction)
-            self.assertIn("This page documents MobKit v1.2.3", introduction)
+            self.assertIn("Mirrored from MobKit main at", introduction)
+            self.assertIn("MobKit workspace version 1.2.3 at that commit", introduction)
+            self.assertNotIn("v1.2.3", introduction)
             self.assertIn('icon: "boxes-stacked"', introduction)
             for page_id in ("quickstart", "api/rpc"):
                 rendered = (destination / f"{page_id}.mdx").read_text(encoding="utf-8")
@@ -333,7 +342,7 @@ class SyncMobKitDocsTests(unittest.TestCase):
             (docs / "quickstart.mdx").write_text("dirty", encoding="utf-8")
             with self.assertRaisesRegex(SystemExit, "uncommitted changes"):
                 sync.build_snapshot(
-                    source, Path(temp) / "dirty", source_ref="v1.2.3", require_clean=True
+                    source, Path(temp) / "dirty", source_ref="main", require_clean=True
                 )
 
 

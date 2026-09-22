@@ -525,11 +525,11 @@ docs-check:
 	@$(PYTHON) scripts/test_usage_accounting_docs.py
 
 MOBKIT_REPO ?= ../meerkat-mobkit
-MOBKIT_REF ?= $(shell git -C "$(MOBKIT_REPO)" describe --tags --exact-match HEAD 2>/dev/null)
+MOBKIT_REF ?= main
 
+# The MobKit docs mirror tracks MobKit main; no release tag is involved.
 docs-sync-mobkit:
-	@test -n "$(MOBKIT_REF)" || (echo "$(RED)MOBKIT_REPO must point to an exact release tag$(NC)" && exit 1)
-	@echo "$(GREEN)Syncing released MobKit docs from $(MOBKIT_REF)...$(NC)"
+	@echo "$(GREEN)Syncing MobKit docs from $(MOBKIT_REPO) ($(MOBKIT_REF))...$(NC)"
 	@$(PYTHON) scripts/sync-mobkit-docs.py "$(MOBKIT_REPO)" --source-ref "$(MOBKIT_REF)" --require-clean
 
 # Open documentation in browser
@@ -939,7 +939,7 @@ help:
 	@echo "  $(GREEN)check$(NC)         - Quick compilation check"
 	@echo "  $(GREEN)doc$(NC)           - Generate documentation"
 	@echo "  $(GREEN)docs-check$(NC)    - Validate Mintlify docs navigation and links"
-	@echo "  $(GREEN)docs-sync-mobkit$(NC) - Refresh docs.rkat.ai from a clean MobKit release tag"
+	@echo "  $(GREEN)docs-sync-mobkit$(NC) - Refresh docs.rkat.ai from a clean MobKit main checkout"
 	@echo "  $(GREEN)coverage$(NC)      - Generate test coverage report"
 	@echo "  $(GREEN)clean$(NC)         - Remove build artifacts"
 	@echo "  $(GREEN)install-hooks$(NC) - Install git hooks"

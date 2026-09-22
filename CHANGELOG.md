@@ -37,6 +37,17 @@ them.
 
 ### Changed
 
+- The MobKit documentation mirror on docs.rkat.ai tracks MobKit main instead
+  of releases. `Publish MobKit docs` now runs on the `mobkit-docs-updated`
+  dispatch that MobKit sends for every push to main touching `docs/`, on a
+  nightly catch-up, and on manual dispatch; it refuses commits that are not
+  on MobKit main and drops the release identity, latestness, and registry
+  checks. The regenerated snapshot lands through a pull request whose CI run
+  the workflow approves at once, or directly to main when an admin-held
+  `MOBKIT_DOCS_PR_TOKEN` secret exists. Mirrored pages carry the exact
+  MobKit commit and date instead of a release version, the manifest records
+  `source_branch`, and the nightly lag check compares the mirrored commit
+  with MobKit main by docs-touching commits rather than by release count.
 - Windows release binaries are cross-compiled from Linux with cargo-xwin
   (clang-cl, lld-link, the Windows SDK) and then verified on a Windows runner.
   The native windows-latest build ran 190 to 275 minutes on every release from

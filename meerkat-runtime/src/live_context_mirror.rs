@@ -699,6 +699,60 @@ mod tests {
     }
 
     #[test]
+    fn same_channel_assistant_speech_without_an_observation_is_present_not_reasserted() {
+        // An assistant row committed from the live channel itself (realtime
+        // materialization, no context observation) now carries a channel
+        // origin. Its disposition: already present in the channel, so it is
+        // never mirrored back, and with no observation claim it is not
+        // reasserted after a bootstrap summary either; the summary path is
+        // what carries it forward.
+        let session_id = SessionId::new();
+        let channel_id = meerkat_core::LiveChannelId::new("voice-origin-test");
+        let mut session = meerkat_core::Session::with_id(session_id.clone());
+        let mut assistant = meerkat_core::types::BlockAssistantMessage::new(
+            vec![AssistantBlock::Transcript {
+                text: "spoken on this call".to_string(),
+                source: meerkat_core::types::TranscriptSource::Spoken,
+                meta: None,
+            }],
+            meerkat_core::StopReason::EndTurn,
+        );
+        assistant.identity.realtime_origin = Some(
+            serde_json::from_value(serde_json::json!({
+                "session_id": session_id,
+                "channel_id": channel_id,
+                "canonical_row_sequence": 1,
+                "provider_item_ids": ["item_spoken"],
+            }))
+            .expect("realtime origin"),
+        );
+        session.push(Message::BlockAssistant(assistant));
+        let committed = meerkat_core::lifecycle::core_executor::BoundSessionCommit::sealed(
+            std::sync::Arc::new(session),
+        )
+        .expect("seal exact committed messages");
+        let rows = classify_committed_boundary_rows_after(
+            &session_id,
+            &committed,
+            0,
+            &channel_id,
+            "store-receipt",
+            &std::collections::BTreeSet::new(),
+        )
+        .expect("classify same-channel assistant speech");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].disposition(),
+            LiveContextCommittedRowDisposition::AlreadyPresentInLiveChannel
+        );
+        assert!(rows[0].provider_context().is_none());
+        assert!(
+            rows[0].observation_id().is_none(),
+            "no observation claim: the row is not reasserted after a bootstrap summary"
+        );
+    }
+
+    #[test]
     fn existing_voice_assistant_is_excluded_but_later_ordinary_assistant_is_mirrored() {
         let session_id = SessionId::new();
         let voice_interaction = meerkat_core::InteractionId::new();

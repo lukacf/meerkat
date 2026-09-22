@@ -35,8 +35,70 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- Public GPT Live open authority accepts `session_instructions_preface`
+  (`PublicGptLiveOpenAuthorityConfig`), a per-session
+  `PublicGptLiveInstructionsPreface` provider resolved at open for the canonical
+  session being opened, so one authority per mob can describe each backing
+  member (identity, role, peers, tools, skills). The preface is prepended to
+  the effective session instructions without replacing the default
+  executor-split and continuing-conversation guidance;
+  `compose_public_session_instructions` documents the precedence. The host call
+  is bounded by `PUBLIC_INSTRUCTIONS_PREFACE_BOUND` (2 s): on timeout the open
+  proceeds without a preface and warns.
+- `RealtimeMessageOrigin` records `provider_item_ids` (read through
+  `RealtimeMessageOrigin::provider_item_ids`, first id through
+  `provider_item_id`), every provider item a canonical live transcript row
+  materialized from: one for a user row, one per item of the committed
+  response group for an assistant row (a barge-in that re-keys speech into a
+  second item yields two). A console that showed the live deltas for any of
+  them can retire that rendering by id and replace it with the committed row.
+  Assistant rows streamed on a live channel now carry a channel
+  `realtime_origin` at all; before, only user rows and context-observed
+  assistant rows did, so plain assistant speech had no origin to match.
+- `DurableForkAtTurnBoundary`, `PersistentSessionService::
+  fork_durable_session_at_turn_boundary`, `MobSessionService::
+  fork_persisted_session_at_turn_boundary`, `MobHandle::
+  fork_member_at_turn_boundary` and `ForkMemberAtTurnBoundary`: a durable
+  fork that waits, bounded, for the source's turn-finalization boundary and
+  cuts the branch while still holding it, so a runtime lap queued behind the
+  wait cannot take the gate first.
+- `DelegationExecutionError::SourceBusy` names a delegation whose source
+  member was still mid-turn after the bounded wait
+  (`DelegationExecutionService::SOURCE_TURN_BOUNDARY_WAIT`).
+
 ### Fixed
 
+- Public GPT Live no longer opens a call with a fresh greeting. The startup
+  factual summary and the pending-context notice were seeded as a user-role
+  input item, which the provider answered like a first utterance; they now ride
+  the session instructions after the caller's own, and the default
+  instructions plus the concurrent-bootstrap framing state that the call
+  continues an existing conversation and that the model should wait for the
+  user to speak. The instructions also allow the model to keep conversing while
+  a delegated request runs.
+- A live delegation arriving while the backing member is mid-turn no longer
+  fails with `ForkSourceUnavailable { cause: Running }`. The persistent fork
+  owner waits, bounded, for the member's turn-finalization boundary and forks
+  from the committed transcript while still holding that boundary (releasing
+  and re-locking would let a queued follow-up lap win the FIFO gate and refuse
+  the fork as `Busy`); a member still running after the bound is reported as
+  `SourceBusy`. `MobSessionService::fork_persisted_session_at_turn_boundary`
+  is a required trait method forwarded by every wrapper (RPC gateway, CLI,
+  test doubles); its earlier default body acquired the owner's non-reentrant
+  boundary and then called the owner's fork, which re-acquires it, so a live
+  delegation against an idle member behind the RPC gateway hung forever with
+  no bound applied. The bound now also covers the recovery-gate wait after
+  the boundary is won (floor `TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND`);
+  a source still not forkable after that is `SourceBusy`, never a silent wait.
+- Live delegation start failures reach the voice channel typed:
+  `LiveDelegationStartFailure::SourceBusy` names the mid-turn source and the
+  wait, `Failed` carries everything else; both sites log the kind and the
+  agent tool reports a busy source distinctly.
+- The public Live instructions preface host runs on its own task: a host
+  that panics loses its preface for that open like a slow host does, and the
+  open proceeds.
 - Closing a live channel whose remote side is already gone now converges
   instead of failing on every retry. `ExperimentalGptLiveWebrtcTransport`
   retired an unconfirmed closure only when the provider had accepted
@@ -57,8 +119,43 @@ them.
   large members) no longer exceeds the actor's inline step budget or queues
   every later mob command behind one voice status poll.
 
+
+### Breaking
+
+- `PublicGptLiveOpenAuthorityConfig` gains the public field
+  `session_instructions_preface: Option<Arc<dyn PublicGptLiveInstructionsPreface>>`
+  (struct literals must add it); new public trait
+  `PublicGptLiveInstructionsPreface` and constant
+  `PUBLIC_INSTRUCTIONS_PREFACE_BOUND` in `experimental_gpt_live`.
+- `RealtimeMessageOrigin` gains the private field `provider_item_ids` and the
+  public methods `provider_item_ids` and `provider_item_id`;
+  `RealtimeMaterializedRow` gains the public field `provider_item_ids`.
+- New public items: `meerkat_core::DurableForkAtTurnBoundary`,
+  `PersistentSessionService::fork_durable_session_at_turn_boundary` and
+  `TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND`,
+  `MobSessionService::fork_persisted_session_at_turn_boundary` (REQUIRED
+  trait method, no default: every implementation must add it),
+  `MobHandle::fork_member_at_turn_boundary`,
+  `meerkat_mob::ForkMemberAtTurnBoundary`,
+  `meerkat_mob_mcp::live_delegation::LiveDelegationStartFailure`.
+- `DelegationExecutionError` gains the variant `SourceBusy`
+  (`DelegationExecutionError::*` discriminants move).
+- `DelegationExecutionService` gains the associated constant
+  `SOURCE_TURN_BOUNDARY_WAIT`.
+- `LIVE_CONTEXT_BOOTSTRAP_FRAMING` is reworded (consumers matching the old
+  text must update).
+
 ### Changed
 
+- Live context mirror: an assistant row committed from the live channel
+  itself (realtime materialization, no context observation) now carries a
+  channel `realtime_origin`, so the mirror classifies it as
+  `LiveRealtimeTranscript`: already present in the channel, never echoed
+  back, and, with no observation claim, not reasserted after a bootstrap
+  summary. Before, such rows were re-mirrored as `ParentSessionServiceTurn`.
+  This is the intended disposition: the speech already exists in the
+  channel, and the concurrent bootstrap summary carries earlier speech
+  forward.
 - The MobKit documentation mirror on docs.rkat.ai tracks MobKit main instead
   of releases. `Publish MobKit docs` now runs on the `mobkit-docs-updated`
   dispatch that MobKit sends for every push to main touching `docs/`, on a

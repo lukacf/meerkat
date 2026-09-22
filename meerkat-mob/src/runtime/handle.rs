@@ -4196,6 +4196,17 @@ pub struct ForkMemberResult {
     pub(crate) fence_token: FenceToken,
 }
 
+/// Outcome of [`MobHandle::fork_member_at_turn_boundary`].
+#[derive(Debug, Clone)]
+pub enum ForkMemberAtTurnBoundary {
+    /// The source reached its turn boundary within the bound and the child
+    /// was forked and seated.
+    Forked(ForkMemberResult),
+    /// The source was still mid-turn when the bound elapsed; nothing was
+    /// forked or seated.
+    SourceBusy { waited: Duration },
+}
+
 /// Result from a helper convenience operation.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
@@ -12566,17 +12577,78 @@ impl MobHandle {
         .await
     }
 
-    async fn fork_member_with_source_admission(
+    /// [`Self::fork_member`] for a caller that can wait for a running source.
+    ///
+    /// The source is not refused while mid-turn: the persistent fork owner
+    /// waits up to `bound` for the source's turn-finalization boundary and
+    /// cuts the branch while still holding it, so a runtime lap queued behind
+    /// the wait cannot take the gate first. A source still running after
+    /// `bound` is [`ForkMemberAtTurnBoundary::SourceBusy`]. This is the
+    /// live-delegation contract: the caller does not own the member's turn,
+    /// so `CallerTurn` admission would not be honest.
+    ///
+    /// `bound` covers the waits only (the turn boundary, then the recovery
+    /// gate); the fork's store IO is not cut short. `message_count` keeps its
+    /// [`Self::fork_member`] meaning. Live delegation passes the count
+    /// committed before the caller's own spoken turn, so the child branches
+    /// at that pre-turn boundary even when the source finalized another turn
+    /// during the wait; `None` takes the source's committed end at fork time.
+    pub async fn fork_member_at_turn_boundary(
         &self,
         source_identity: &AgentIdentity,
-        mut member: SpawnMemberSpec,
+        member: SpawnMemberSpec,
         message_count: Option<usize>,
+        bound: Duration,
+    ) -> Result<ForkMemberAtTurnBoundary, MobError> {
+        let (source_session_id, fork_target) = self
+            .admit_fork_member(
+                source_identity,
+                &member,
+                meerkat_core::DurableForkSourceAdmission::Quiescent,
+            )
+            .await?;
+        let fork = self
+            .session_service
+            .fork_persisted_session_at_turn_boundary(
+                &source_session_id,
+                message_count,
+                member.tool_access_policy.clone(),
+                fork_target,
+                bound,
+            )
+            .await
+            // The owner reports a source it could not fork after winning the
+            // boundary as `SourceBusy`, never as `Busy`.
+            .map_err(MobError::from)?;
+        let fork = match fork {
+            meerkat_core::DurableForkAtTurnBoundary::Forked(fork) => fork,
+            meerkat_core::DurableForkAtTurnBoundary::SourceBusy { waited } => {
+                return Ok(ForkMemberAtTurnBoundary::SourceBusy { waited });
+            }
+        };
+        self.seat_forked_member(member, fork)
+            .await
+            .map(ForkMemberAtTurnBoundary::Forked)
+    }
+
+    /// Admission shared by every durable member fork: control scope, source
+    /// and child identities, placement, and the source's bridge session.
+    async fn admit_fork_member(
+        &self,
+        source_identity: &AgentIdentity,
+        member: &SpawnMemberSpec,
         source_admission: meerkat_core::DurableForkSourceAdmission,
-    ) -> Result<ForkMemberResult, MobError> {
+    ) -> Result<
+        (
+            meerkat_core::SessionId,
+            meerkat_core::DurableSessionForkTarget,
+        ),
+        MobError,
+    > {
         self.admit_control_scope(mob_dsl::ControlScope::SendCommand)
             .await?;
         if &member.identity == source_identity {
-            return Err(MobError::MemberAlreadyExists(member.identity));
+            return Err(MobError::MemberAlreadyExists(member.identity.clone()));
         }
         if member.placement.is_some() {
             return Err(MobError::WiringError(
@@ -12591,12 +12663,11 @@ impl MobHandle {
                 source_member_id: source_identity.to_string(),
                 cause: crate::error::ForkSourceUnavailableCause::NoSession,
             })?;
-        let child_identity = member.identity.clone();
         let fork_target = meerkat_core::DurableSessionForkTarget {
             member_binding: meerkat_core::MobMemberBinding {
                 mob_id: self.definition.id.as_str().to_string(),
                 role: member.role_name.as_str().to_string(),
-                member: child_identity.as_str().to_string(),
+                member: member.identity.as_str().to_string(),
             },
             // Profile resolution and resume override masks are actor-owned and
             // occur after this handle admits the spawn, so the exact child
@@ -12609,22 +12680,17 @@ impl MobHandle {
             cache_identity: None,
             source_admission,
         };
-        let fork = self
-            .session_service
-            .fork_persisted_session(
-                &source_session_id,
-                message_count,
-                member.tool_access_policy.clone(),
-                fork_target,
-            )
-            .await
-            .map_err(|error| match error {
-                meerkat_core::SessionError::Busy { .. } => MobError::ForkSourceUnavailable {
-                    source_member_id: source_identity.to_string(),
-                    cause: crate::error::ForkSourceUnavailableCause::Running,
-                },
-                error => MobError::from(error),
-            })?;
+        Ok((source_session_id, fork_target))
+    }
+
+    /// Seat an already committed durable fork as a new mob member through the
+    /// ordinary resume pipeline.
+    async fn seat_forked_member(
+        &self,
+        mut member: SpawnMemberSpec,
+        fork: meerkat_core::SessionForkResult,
+    ) -> Result<ForkMemberResult, MobError> {
+        let child_identity = member.identity.clone();
         let fork_session_id = fork.session_id.clone();
         member.launch_mode = crate::launch::MemberLaunchMode::Resume {
             bridge_session_id: fork_session_id.clone(),
@@ -12666,6 +12732,35 @@ impl MobHandle {
             fence_token: entry.fence_token,
             cache_inheritance: fork.cache_inheritance,
         })
+    }
+
+    async fn fork_member_with_source_admission(
+        &self,
+        source_identity: &AgentIdentity,
+        member: SpawnMemberSpec,
+        message_count: Option<usize>,
+        source_admission: meerkat_core::DurableForkSourceAdmission,
+    ) -> Result<ForkMemberResult, MobError> {
+        let (source_session_id, fork_target) = self
+            .admit_fork_member(source_identity, &member, source_admission)
+            .await?;
+        let fork = self
+            .session_service
+            .fork_persisted_session(
+                &source_session_id,
+                message_count,
+                member.tool_access_policy.clone(),
+                fork_target,
+            )
+            .await
+            .map_err(|error| match error {
+                meerkat_core::SessionError::Busy { .. } => MobError::ForkSourceUnavailable {
+                    source_member_id: source_identity.to_string(),
+                    cause: crate::error::ForkSourceUnavailableCause::Running,
+                },
+                error => MobError::from(error),
+            })?;
+        self.seat_forked_member(member, fork).await
     }
 
     /// Persist a real transcript fork, provision its child member, and run the

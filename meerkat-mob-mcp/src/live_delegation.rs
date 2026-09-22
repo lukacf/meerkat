@@ -25,11 +25,11 @@ use meerkat_live::{
     LiveSidebandTurnRef, ProviderWebrtcBinding,
 };
 use meerkat_mob::{
-    AgentIdentity, BoundedResultSpec, DelegationCancellationHandle, DelegationExecutionHandle,
-    DelegationExecutionRequest, DelegationExecutionService, DelegationTerminalizedExecution,
-    DelegationTurnTerminal, DurableBoundedMemberState, DurableBoundedWorkState,
-    LiveBridgeExecutionSnapshot, LiveBridgeOperationTerminal, MobDeliveryIdentity,
-    render_bounded_delegation_task,
+    AgentIdentity, BoundedResultSpec, DelegationCancellationHandle, DelegationExecutionError,
+    DelegationExecutionHandle, DelegationExecutionRequest, DelegationExecutionService,
+    DelegationTerminalizedExecution, DelegationTurnTerminal, DurableBoundedMemberState,
+    DurableBoundedWorkState, LiveBridgeExecutionSnapshot, LiveBridgeOperationTerminal,
+    MobDeliveryIdentity, render_bounded_delegation_task,
 };
 use meerkat_runtime::live_execution::{
     LiveBridgeExecutionTerminalReceipt, LiveBridgeOperationAdmission,
@@ -77,6 +77,65 @@ fn live_worker_failure_terminal(
             LiveDelegationWorkerTerminalKind::Cancelled
         }
         _ => LiveDelegationWorkerTerminalKind::Failed,
+    }
+}
+
+/// Why a live delegation's executor did not start, as the voice channel
+/// needs to know it.
+///
+/// `SourceBusy` is the one start failure a caller can act on truthfully (the
+/// backing member was still mid-turn after the bounded wait; nothing was
+/// forked); everything else is a failure. Narration keys off this type, not
+/// off the rendered string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveDelegationStartFailure {
+    /// The source member stayed mid-turn past the fork bound.
+    SourceBusy {
+        source_identity: AgentIdentity,
+        waited_ms: u64,
+    },
+    /// Any other executor start failure, rendered.
+    Failed(String),
+}
+
+impl LiveDelegationStartFailure {
+    /// Stable kind label for logs and metrics.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::SourceBusy { .. } => "source_busy",
+            Self::Failed(_) => "failed",
+        }
+    }
+}
+
+impl From<&DelegationExecutionError> for LiveDelegationStartFailure {
+    fn from(error: &DelegationExecutionError) -> Self {
+        match error {
+            DelegationExecutionError::SourceBusy {
+                source_identity,
+                waited_ms,
+            } => Self::SourceBusy {
+                source_identity: source_identity.clone(),
+                waited_ms: *waited_ms,
+            },
+            other => Self::Failed(other.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for LiveDelegationStartFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceBusy {
+                source_identity,
+                waited_ms,
+            } => write!(
+                f,
+                "source member {source_identity} was still mid-turn after {waited_ms} ms; the request was not started"
+            ),
+            Self::Failed(message) => f.write_str(message),
+        }
     }
 }
 
@@ -1967,7 +2026,13 @@ impl ExperimentalLiveDelegationCoordinator {
                     )),
                 };
                 let _ = execution.completion.send(waiter_outcome);
-                return Err(format!("durable live executor fork failed: {error}"));
+                let failure = LiveDelegationStartFailure::from(&error);
+                tracing::warn!(
+                    kind = failure.kind(),
+                    %failure,
+                    "durable live executor fork did not start"
+                );
+                return Err(format!("durable live executor fork failed: {failure}"));
             }
         };
 
@@ -3144,7 +3209,14 @@ impl ExperimentalLiveDelegationCoordinator {
         let execution = match service.start(request).await {
             Ok(execution) => execution,
             Err(error) => {
-                let start_error = error.to_string();
+                let failure = LiveDelegationStartFailure::from(&error);
+                tracing::warn!(
+                    operation_id = %operation.operation_id(),
+                    kind = failure.kind(),
+                    %failure,
+                    "client-context delegation executor did not start"
+                );
+                let start_error = failure.to_string();
                 let operation_id = operation.operation_id().clone();
                 let runtime = Arc::clone(&self.runtime);
                 let cleanup_binding = runtime_binding.clone();
@@ -6232,5 +6304,32 @@ mod tests {
             ),
             ExperimentalResponsesRestartDisposition::NoExecutorBeforeFinalInput
         ));
+    }
+}
+
+#[cfg(test)]
+mod start_failure_tests {
+    use super::*;
+
+    #[test]
+    fn source_busy_start_failure_is_typed_not_stringified() {
+        let error = DelegationExecutionError::SourceBusy {
+            source_identity: AgentIdentity::from("voice-executor"),
+            waited_ms: 20_000,
+        };
+        let failure = LiveDelegationStartFailure::from(&error);
+        assert_eq!(
+            failure,
+            LiveDelegationStartFailure::SourceBusy {
+                source_identity: AgentIdentity::from("voice-executor"),
+                waited_ms: 20_000,
+            }
+        );
+        assert_eq!(failure.kind(), "source_busy");
+        assert!(
+            failure
+                .to_string()
+                .contains("still mid-turn after 20000 ms")
+        );
     }
 }

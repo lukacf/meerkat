@@ -2408,6 +2408,19 @@ pub struct DurableSessionForkTarget {
     pub source_admission: DurableForkSourceAdmission,
 }
 
+/// Outcome of a durable fork that first waited, bounded, for the source
+/// session's turn-finalization boundary.
+///
+/// `Forked` means the boundary was won and the branch was cut while it was
+/// still held, so no queued runtime lap could slip in between the wait and
+/// the fork. `SourceBusy` means the source was still mid-turn when the bound
+/// elapsed; nothing was forked.
+#[derive(Debug, Clone)]
+pub enum DurableForkAtTurnBoundary {
+    Forked(SessionForkResult),
+    SourceBusy { waited: std::time::Duration },
+}
+
 /// Runtime-state admission the durable fork owner applies to the source
 /// session before it observes the transcript to branch.
 ///

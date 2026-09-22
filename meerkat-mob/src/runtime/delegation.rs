@@ -21,8 +21,8 @@ use crate::{
 };
 
 use super::{
-    BoundedResultSpec, BoundedTurnWaitError, MobHandle, SpawnMemberSpec, SpawnResult,
-    WorkBoundedTurnResult, WorkDeliveryReceipt, WorkTurnHandle,
+    BoundedResultSpec, BoundedTurnWaitError, ForkMemberAtTurnBoundary, MobHandle, SpawnMemberSpec,
+    SpawnResult, WorkBoundedTurnResult, WorkDeliveryReceipt, WorkTurnHandle,
 };
 
 /// Visible best-effort reporting convention for bounded delegated work.
@@ -540,6 +540,14 @@ pub enum DelegationExecutionError {
     ExistingMemberAdmissionRequired,
     #[error("delegated helper spawn failed: {0}")]
     Spawn(#[source] MobError),
+    #[error(
+        "delegation source member {source_identity} was still running a turn after {waited_ms} ms; \
+         the durable fork needs its committed turn boundary"
+    )]
+    SourceBusy {
+        source_identity: AgentIdentity,
+        waited_ms: u64,
+    },
     #[error("delegated helper work admission failed: {error}")]
     WorkAdmission {
         #[source]
@@ -558,12 +566,48 @@ pub enum DelegationExecutionError {
 #[derive(Clone)]
 pub struct DelegationExecutionService {
     handle: MobHandle,
+    #[cfg(test)]
+    source_turn_boundary_wait_override: Arc<std::sync::Mutex<Option<std::time::Duration>>>,
 }
 
 impl DelegationExecutionService {
+    /// How long a delegation waits for a busy source member's turn boundary
+    /// (and, once won, the recovery gate) before reporting `SourceBusy`. Long
+    /// enough for a tool round to finish, short enough that a voice caller
+    /// hears a truthful busy answer. The fork's store IO is outside the
+    /// bound.
+    pub const SOURCE_TURN_BOUNDARY_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+    fn source_turn_boundary_wait(&self) -> std::time::Duration {
+        #[cfg(test)]
+        if let Some(wait) = *self
+            .source_turn_boundary_wait_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            return wait;
+        }
+        Self::SOURCE_TURN_BOUNDARY_WAIT
+    }
+
+    /// Test-only: shorten the busy-source wait so a never-released source
+    /// reports `SourceBusy` quickly.
+    #[cfg(test)]
+    pub(crate) fn with_source_turn_boundary_wait(self, wait: std::time::Duration) -> Self {
+        *self
+            .source_turn_boundary_wait_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(wait);
+        self
+    }
+
     #[must_use]
     pub fn new(handle: MobHandle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            #[cfg(test)]
+            source_turn_boundary_wait_override: Arc::new(std::sync::Mutex::new(None)),
+        }
     }
 
     /// Start one delegation through existing MobMachine and exact-turn
@@ -808,11 +852,39 @@ impl DelegationExecutionService {
                     source_identity = %source_identity,
                     "delegation service starting durable fork"
                 );
-                let fork = self
+                // A live delegation arrives while the source member may be
+                // mid-turn (the backing agent is busy). The durable fork
+                // requires a committed turn boundary, and the live channel
+                // does not own the member's turn, so `CallerTurn` admission
+                // would not be honest here. Instead the fork owner waits,
+                // bounded, for the running turn to reach its finalization
+                // boundary and cuts the branch while still holding it, so a
+                // runtime lap queued behind the wait cannot take the gate
+                // first. The bound covers the waits, not the fork's store
+                // IO. A still-running source after the bound is a typed busy
+                // result, not an immediate refusal. Live callers pass
+                // `message_count` as the count committed before their own
+                // spoken turn, so the child branches at that pre-turn
+                // boundary whatever the source committed meanwhile.
+                let fork = match self
                     .handle
-                    .fork_member(&source_identity, spec, message_count)
+                    .fork_member_at_turn_boundary(
+                        &source_identity,
+                        spec,
+                        message_count,
+                        self.source_turn_boundary_wait(),
+                    )
                     .await
-                    .map_err(DelegationExecutionError::Spawn)?;
+                    .map_err(DelegationExecutionError::Spawn)?
+                {
+                    ForkMemberAtTurnBoundary::Forked(fork) => fork,
+                    ForkMemberAtTurnBoundary::SourceBusy { waited } => {
+                        return Err(DelegationExecutionError::SourceBusy {
+                            source_identity,
+                            waited_ms: waited.as_millis() as u64,
+                        });
+                    }
+                };
                 tracing::debug!(
                     delegated_identity = %identity,
                     "delegation service completed durable fork"

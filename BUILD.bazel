@@ -553,6 +553,7 @@ test_suite(
         "//meerkat-mob:remote_spawn_materialization_test",
         "//meerkat-mob:scope_matrix_test",
         "//meerkat-mob:shadow_state_absent_test",
+        "//meerkat-mob:turn_boundary_fork_forwarding_test",
         "//meerkat-models:catalog_data_test",
         "//meerkat-models:meerkat_models_unit_test",
         "//meerkat-openai:meerkat_openai_unit_test",

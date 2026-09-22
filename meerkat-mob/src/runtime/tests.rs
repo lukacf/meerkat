@@ -4034,6 +4034,33 @@ impl SessionServiceControlExt for MockSessionService {
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &meerkat_core::SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        // The mock's fork takes no boundary of its own, so holding the guard
+        // across it is safe here and mirrors the persistent owner's handover.
+        let started = std::time::Instant::now();
+        let Ok(guard) = tokio::time::timeout(
+            bound,
+            self.acquire_runtime_turn_finalization_guard(source_session_id),
+        )
+        .await
+        else {
+            return Ok(meerkat_core::DurableForkAtTurnBoundary::SourceBusy {
+                waited: started.elapsed(),
+            });
+        };
+        let _held = guard?;
+        self.fork_persisted_session(source_session_id, message_count, tool_access_policy, target)
+            .await
+            .map(meerkat_core::DurableForkAtTurnBoundary::Forked)
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         _machine: &meerkat_runtime::MeerkatMachine,
@@ -11029,6 +11056,25 @@ impl SessionServiceControlExt for PersistedListingSessionService {
 
 #[async_trait]
 impl MobSessionService for PersistedListingSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &meerkat_core::SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        self.inner
+            .fork_persisted_session_at_turn_boundary(
+                source_session_id,
+                message_count,
+                tool_access_policy,
+                target,
+                bound,
+            )
+            .await
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         machine: &meerkat_runtime::MeerkatMachine,
@@ -11400,6 +11446,25 @@ impl SessionServiceControlExt for InactiveReadSessionService {
 
 #[async_trait]
 impl MobSessionService for InactiveReadSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &meerkat_core::SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        self.inner
+            .fork_persisted_session_at_turn_boundary(
+                source_session_id,
+                message_count,
+                tool_access_policy,
+                target,
+                bound,
+            )
+            .await
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         machine: &meerkat_runtime::MeerkatMachine,
@@ -21393,6 +21458,122 @@ async fn delegation_execution_service_runs_on_a_real_durable_fork_and_retires_on
             .and_then(|member| member.member_ref.bridge_session_id().cloned()),
         Some(source_session_id),
         "durable delegation must not perturb the canonical source binding"
+    );
+}
+
+#[tokio::test]
+async fn durable_fork_delegation_waits_for_a_busy_source_turn_boundary_then_forks() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let source_identity = AgentIdentity::from("delegation-busy-source");
+    let source = handle
+        .spawn(ProfileName::from("worker"), source_identity.clone(), None)
+        .await
+        .expect("spawn busy delegation source");
+    assert!(
+        source.bridge_session_id().is_some(),
+        "source bridge session"
+    );
+    // Hold the turn-finalization boundary the way a running turn does: a
+    // real mutex the fork must wait on (an entry gate would be consumed by
+    // whichever acquirer came first, which under load is not the fork).
+    let gate = service.install_non_reentrant_turn_finalization_gate();
+    let held_turn = Arc::clone(&gate).lock_owned().await;
+    let child_identity = AgentIdentity::from("delegation-busy-child");
+    let request = DelegationExecutionRequest::new(
+        child_identity.clone(),
+        "bounded child task after the boundary",
+        BoundedResultSpec::new("delegation-busy-result", 256).expect("valid result spec"),
+    )
+    .with_durable_fork(source_identity.clone(), None);
+    let delegation_service = DelegationExecutionService::new(handle.clone());
+    let start = tokio::spawn({
+        let delegation_service = delegation_service.clone();
+        async move { delegation_service.start(request).await }
+    });
+    // While the boundary is held the delegation must not have forked.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !start.is_finished(),
+        "delegation must wait for the source turn boundary"
+    );
+    assert!(
+        handle
+            .get_member(&child_identity)
+            .await
+            .expect("child roster lookup")
+            .is_none(),
+        "no fork may exist before the source boundary is released"
+    );
+    drop(held_turn);
+    let execution = tokio::time::timeout(Duration::from_secs(10), start)
+        .await
+        .expect("delegation resumes once the boundary is released")
+        .expect("join")
+        .expect("durable-fork delegation starts after the boundary");
+    let terminalized = execution.await_terminal().await;
+    match terminalized.terminal() {
+        DelegationTurnTerminal::Completed(turn) => {
+            assert_eq!(
+                turn.result().result().text(),
+                "bounded child task after the boundary"
+            );
+        }
+        terminal => panic!("child must complete: {terminal:?}"),
+    }
+    delegation_service
+        .retire_terminalized(&terminalized)
+        .await
+        .expect("retire busy-source child");
+}
+
+#[tokio::test]
+async fn durable_fork_delegation_reports_source_busy_after_the_bounded_wait() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let source_identity = AgentIdentity::from("delegation-stuck-source");
+    let source = handle
+        .spawn(ProfileName::from("worker"), source_identity.clone(), None)
+        .await
+        .expect("spawn stuck delegation source");
+    assert!(
+        source.bridge_session_id().is_some(),
+        "source bridge session"
+    );
+    // A turn that never finalizes within the bound: hold the real boundary
+    // mutex for the whole test.
+    let gate = service.install_non_reentrant_turn_finalization_gate();
+    let _held_turn = Arc::clone(&gate).lock_owned().await;
+    let request = DelegationExecutionRequest::new(
+        AgentIdentity::from("delegation-stuck-child"),
+        "never starts",
+        BoundedResultSpec::new("delegation-stuck-result", 256).expect("valid result spec"),
+    )
+    .with_durable_fork(source_identity.clone(), None);
+    let delegation_service = DelegationExecutionService::new(handle.clone())
+        .with_source_turn_boundary_wait(Duration::from_millis(300));
+    let error = delegation_service
+        .start(request)
+        .await
+        .err()
+        .expect("a source still running after the bound is a typed busy result");
+    match error {
+        DelegationExecutionError::SourceBusy {
+            source_identity: busy,
+            waited_ms,
+        } => {
+            assert_eq!(busy, source_identity);
+            assert!(waited_ms >= 300, "waited {waited_ms} ms");
+        }
+        other => panic!("expected SourceBusy, got {other:?}"),
+    }
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("delegation-stuck-child"))
+            .await
+            .expect("child roster lookup")
+            .is_none(),
+        "a busy source must not leave a half-forked child"
     );
 }
 
@@ -47871,6 +48052,19 @@ impl SessionServiceControlExt for RealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RealCommsSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        _source_session_id: &meerkat_core::SessionId,
+        _message_count: Option<usize>,
+        _tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        _target: meerkat_core::DurableSessionForkTarget,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        Err(meerkat_core::service::SessionError::Unsupported(
+            "real-comms test service has no durable fork authority".to_string(),
+        ))
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         _machine: &meerkat_runtime::MeerkatMachine,
@@ -49178,6 +49372,19 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RuntimeBackedRealCommsSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        _source_session_id: &meerkat_core::SessionId,
+        _message_count: Option<usize>,
+        _tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        _target: meerkat_core::DurableSessionForkTarget,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        Err(meerkat_core::service::SessionError::Unsupported(
+            "runtime-backed real-comms test service has no durable fork authority".to_string(),
+        ))
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         _machine: &meerkat_runtime::MeerkatMachine,

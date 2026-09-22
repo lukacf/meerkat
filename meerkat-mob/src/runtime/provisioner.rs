@@ -8356,6 +8356,20 @@ mod tests {
 
             #[async_trait::async_trait]
             impl crate::runtime::session_service::MobSessionService for StubService {
+                async fn fork_persisted_session_at_turn_boundary(
+                    &self,
+                    _source_session_id: &meerkat_core::SessionId,
+                    _message_count: Option<usize>,
+                    _tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+                    _target: meerkat_core::DurableSessionForkTarget,
+                    _bound: std::time::Duration,
+                ) -> Result<
+                    meerkat_core::DurableForkAtTurnBoundary,
+                    meerkat_core::service::SessionError,
+                > {
+                    Err(unused())
+                }
+
                 async fn commit_live_delegation_final_transcript(
                     &self,
                     _machine: &meerkat_runtime::MeerkatMachine,

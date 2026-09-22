@@ -989,6 +989,15 @@ impl AgentMobToolSurface {
                     call.name
                 )));
             }
+            Err(DelegationExecutionError::SourceBusy {
+                source_identity,
+                waited_ms,
+            }) => {
+                return Err(ToolError::execution_failed(format!(
+                    "tool '{}' source member {source_identity} was still mid-turn after {waited_ms} ms; nothing was delegated",
+                    call.name
+                )));
+            }
             Err(error) => {
                 return Err(ToolError::execution_failed(format!(
                     "tool '{}' delegated helper failed: {error}",
@@ -4016,6 +4025,20 @@ mod tests {
 
     #[async_trait]
     impl meerkat_mob::MobSessionService for RealCommsSessionSvc {
+        async fn fork_persisted_session_at_turn_boundary(
+            &self,
+            _source_session_id: &meerkat_core::SessionId,
+            _message_count: Option<usize>,
+            _tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+            _target: meerkat_core::DurableSessionForkTarget,
+            _bound: std::time::Duration,
+        ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError>
+        {
+            Err(meerkat_core::service::SessionError::Unsupported(
+                "real-comms test service has no durable fork authority".to_string(),
+            ))
+        }
+
         async fn commit_live_delegation_final_transcript(
             &self,
             _machine: &meerkat_runtime::MeerkatMachine,

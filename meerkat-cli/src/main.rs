@@ -10300,6 +10300,25 @@ impl meerkat_core::service::SessionServiceHistoryExt for RunMobSessionService {
 #[async_trait::async_trait]
 #[cfg(feature = "mob")]
 impl meerkat_mob::MobSessionService for RunMobSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &meerkat_core::SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::fork_persisted_session_at_turn_boundary(
+            &self.inner,
+            source_session_id,
+            message_count,
+            tool_access_policy,
+            target,
+            bound,
+        )
+        .await
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         machine: &meerkat_runtime::MeerkatMachine,
@@ -13361,6 +13380,25 @@ impl meerkat_core::service::SessionServiceHistoryExt for MobCliSessionService {
 #[async_trait::async_trait]
 #[cfg(all(feature = "mob", feature = "session-store"))]
 impl meerkat_mob::MobSessionService for MobCliSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &meerkat_core::SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::fork_persisted_session_at_turn_boundary(
+            &self.inner,
+            source_session_id,
+            message_count,
+            tool_access_policy,
+            target,
+            bound,
+        )
+        .await
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         machine: &meerkat_runtime::MeerkatMachine,
@@ -21251,6 +21289,20 @@ default_model = "gemma"
     #[cfg(feature = "mob")]
     #[async_trait]
     impl meerkat_mob::MobSessionService for TestMobSessionService {
+        async fn fork_persisted_session_at_turn_boundary(
+            &self,
+            _source_session_id: &meerkat_core::SessionId,
+            _message_count: Option<usize>,
+            _tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+            _target: meerkat_core::DurableSessionForkTarget,
+            _bound: std::time::Duration,
+        ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError>
+        {
+            Err(meerkat_core::service::SessionError::Unsupported(
+                "CLI test service has no durable fork authority".to_string(),
+            ))
+        }
+
         async fn commit_live_delegation_final_transcript(
             &self,
             _machine: &meerkat_runtime::MeerkatMachine,

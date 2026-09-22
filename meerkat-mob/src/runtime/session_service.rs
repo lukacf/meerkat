@@ -1291,6 +1291,31 @@ pub trait MobSessionService:
         ))
     }
 
+    /// Wait, bounded, for the source's turn-finalization boundary and cut a
+    /// durable fork while still holding it.
+    ///
+    /// REQUIRED, deliberately without a default: the persistent owner
+    /// (`PersistentSessionService::fork_durable_session_at_turn_boundary`)
+    /// hands the boundary it waited for straight into its fork, which is what
+    /// closes the race with a runtime lap queued behind the wait. Every
+    /// wrapper (the RPC gateway, the CLI, test doubles) must forward this
+    /// method to its inner service as one contract. A default body that
+    /// acquires the boundary through
+    /// [`Self::acquire_runtime_turn_finalization_guard`] and then calls
+    /// [`Self::fork_persisted_session`] self-deadlocks on every wrapper over
+    /// the persistent owner, because the owner's fork re-acquires that same
+    /// non-reentrant boundary, and it does so outside any bound (S97,
+    /// 2026-09-22). `bound` covers the boundary wait and the recovery-gate
+    /// admission that follows it, not the fork's store IO.
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, SessionError>;
+
     /// Load an archived session only for an explicit resume/revival operation.
     /// Ordinary reads remain archive-filtered.
     ///
@@ -1710,6 +1735,20 @@ impl<B> MobSessionService for meerkat_session::EphemeralSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        _source_session_id: &meerkat_core::SessionId,
+        _message_count: Option<usize>,
+        _tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        _target: meerkat_core::DurableSessionForkTarget,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        Err(meerkat_core::service::SessionError::Unsupported(
+            "ephemeral session service does not expose durable transcript fork authority"
+                .to_string(),
+        ))
+    }
+
     async fn start_turn_with_admission_notification(
         &self,
         session_id: &SessionId,
@@ -2627,6 +2666,25 @@ where
             message_count,
             tool_access_policy,
             Some(target),
+        )
+        .await
+    }
+
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::fork_durable_session_at_turn_boundary(
+            self,
+            source_session_id,
+            message_count,
+            tool_access_policy,
+            target,
+            bound,
         )
         .await
     }

@@ -90,6 +90,14 @@ pub struct RealtimeMessageOrigin {
     canonical_row_sequence: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     context_observation_id: Option<LiveContextObservationId>,
+    /// Every provider item id this row materialized from, in transcript
+    /// order. A user row has one; an assistant row carries one per item of
+    /// the response group it committed (a barge-in that re-keys speech into
+    /// a second item yields two), so a console that rendered the live deltas
+    /// for any of them can retire that rendering by id and replace it with
+    /// this canonical row. Empty on rows committed before the field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    provider_item_ids: Vec<String>,
 }
 
 impl RealtimeMessageOrigin {
@@ -103,12 +111,31 @@ impl RealtimeMessageOrigin {
             channel_id,
             canonical_row_sequence,
             context_observation_id: None,
+            provider_item_ids: Vec::new(),
         }
     }
 
     pub(crate) fn with_context_observation(mut self, id: LiveContextObservationId) -> Self {
         self.context_observation_id = Some(id);
         self
+    }
+
+    pub(crate) fn with_provider_item_ids(mut self, item_ids: Vec<String>) -> Self {
+        self.provider_item_ids = item_ids;
+        self
+    }
+
+    /// The first provider item this row materialized from, when recorded.
+    /// See [`Self::provider_item_ids`] for the whole group.
+    #[must_use]
+    pub fn provider_item_id(&self) -> Option<&str> {
+        self.provider_item_ids.first().map(String::as_str)
+    }
+
+    /// Every provider item this row materialized from, in transcript order.
+    #[must_use]
+    pub fn provider_item_ids(&self) -> &[String] {
+        &self.provider_item_ids
     }
 
     #[must_use]

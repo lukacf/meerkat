@@ -2304,6 +2304,20 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     event_projection_drains: EventProjectionDrainRegistry,
 }
 
+/// How a durable fork holds the source's turn-finalization boundary.
+enum ForkSourceBoundary {
+    /// Acquire (or, for `CallerTurn`, skip) the boundary here.
+    Admission(meerkat_core::DurableForkSourceAdmission),
+    /// The caller already won the boundary while waiting for the source's
+    /// running turn and hands it over so the fork runs under it. The
+    /// recovery-gate wait that follows is bounded by the caller's remaining
+    /// deadline.
+    HeldTurnBoundary {
+        turn_finalization_guard: tokio::sync::OwnedMutexGuard<()>,
+        recovery_gate_bound: std::time::Duration,
+    },
+}
+
 struct SessionMutationGuard {
     /// Both are `None` only for a fork requested from the source's own running
     /// turn: the runtime loop holds the turn-finalization boundary and the
@@ -4783,6 +4797,54 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         })
     }
 
+    /// [`Self::transcript_edit_mutation_guard`] for a caller that already
+    /// holds the session's turn-finalization boundary.
+    ///
+    /// The boundary is a FIFO mutex shared with the runtime loop: a caller
+    /// that acquired it to wait for a running turn to finish must not release
+    /// it and re-lock here, or a queued follow-up lap wins the gate first and
+    /// the fork is refused with `Busy`. The held guard is taken over and the
+    /// remaining boundaries (recovery gate, active admission check, stale live
+    /// session discard) are applied exactly as for a fresh acquisition.
+    ///
+    /// `recovery_gate_bound` caps the wait for the recovery gate, the only
+    /// other lock this path takes after winning the boundary. A gate still
+    /// held when it elapses is reported as `Busy`, never awaited silently:
+    /// a caller that has already waited for the turn boundary must not hang
+    /// unbounded past its own deadline.
+    async fn transcript_edit_mutation_guard_with_turn_boundary(
+        &self,
+        id: &SessionId,
+        turn_finalization_guard: tokio::sync::OwnedMutexGuard<()>,
+        recovery_gate_bound: std::time::Duration,
+    ) -> Result<SessionMutationGuard, SessionError> {
+        let recovery_gate = self.recovery_gate_for_session(id).await;
+        let Ok(recovery_guard) =
+            tokio::time::timeout(recovery_gate_bound, recovery_gate.lock_owned()).await
+        else {
+            tracing::warn!(
+                session_id = %id,
+                bound_ms = recovery_gate_bound.as_millis() as u64,
+                "turn-boundary fork won the turn boundary but the recovery gate stayed held past the bound"
+            );
+            return Err(SessionError::Busy { id: id.clone() });
+        };
+        match self.inner.join_active_runtime_context_admission(id).await {
+            Ok(Some(active_admission)) => {
+                drop(active_admission);
+                return Err(SessionError::Busy { id: id.clone() });
+            }
+            Ok(None) | Err(SessionError::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+
+        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        Ok(SessionMutationGuard {
+            _turn_finalization_guard: Some(turn_finalization_guard),
+            _recovery_guard: Some(recovery_guard),
+        })
+    }
+
     /// Serialize a durable fork requested from the source session's own
     /// running turn (`DurableForkSourceAdmission::CallerTurn`).
     ///
@@ -5028,6 +5090,88 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         .await
     }
 
+    /// Wait, bounded, for the source's turn-finalization boundary, then cut a
+    /// durable fork while still holding it.
+    ///
+    /// The external `Quiescent` contract refuses a running source outright.
+    /// A caller that can afford to wait (a live delegation whose backing
+    /// member is mid-turn) uses this instead: acquiring the boundary returns
+    /// at once when no turn is running and otherwise blocks until the current
+    /// turn finalizes. The fork then observes the committed transcript under
+    /// that same guard, so a runtime lap queued behind the caller cannot take
+    /// the gate between the wait and the branch. A source still running when
+    /// `bound` elapses yields [`DurableForkAtTurnBoundary::SourceBusy`] and
+    /// nothing is forked. `target.source_admission` must be `Quiescent`: the
+    /// caller does not own the running turn.
+    ///
+    /// `bound` covers the two waits this path can block on, the turn boundary
+    /// and then the recovery gate (the remainder of the bound, at least
+    /// [`Self::TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND`]); a gate or an
+    /// admission that still refuses the fork after that is `SourceBusy` too.
+    /// The fork's own store IO is not bounded: it holds no lock another
+    /// writer could be waiting on, and cutting it short mid-commit would leave
+    /// a half-written child.
+    pub async fn fork_durable_session_at_turn_boundary(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, SessionError> {
+        if target.source_admission != meerkat_core::DurableForkSourceAdmission::Quiescent {
+            return Err(SessionError::Unsupported(
+                "a turn-boundary fork waits for the source turn and cannot claim the caller's turn"
+                    .into(),
+            ));
+        }
+        let started = std::time::Instant::now();
+        let Ok(turn_finalization_guard) = tokio::time::timeout(
+            bound,
+            self.acquire_runtime_turn_finalization_guard(source_session_id),
+        )
+        .await
+        else {
+            return Ok(meerkat_core::DurableForkAtTurnBoundary::SourceBusy {
+                waited: started.elapsed(),
+            });
+        };
+        let recovery_gate_bound = bound
+            .saturating_sub(started.elapsed())
+            .max(Self::TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND);
+        match self
+            .fork_durable_session_with_optional_planned_identity_under(
+                source_session_id,
+                message_count,
+                None,
+                tool_access_policy,
+                Some(target),
+                ForkSourceBoundary::HeldTurnBoundary {
+                    turn_finalization_guard,
+                    recovery_gate_bound,
+                },
+            )
+            .await
+        {
+            Ok(forked) => Ok(meerkat_core::DurableForkAtTurnBoundary::Forked(forked.fork)),
+            // The boundary was won, but the source is still not forkable
+            // (recovery gate held past the bound, or a runtime admission
+            // active despite the boundary): a busy source, not a failure.
+            Err(SessionError::Busy { .. }) => {
+                Ok(meerkat_core::DurableForkAtTurnBoundary::SourceBusy {
+                    waited: started.elapsed(),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Floor for the recovery-gate wait after the turn boundary is won, so a
+    /// boundary wait that consumed the whole bound still gives the gate a
+    /// moment instead of reporting busy on a gate that is about to free.
+    pub const TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND: std::time::Duration =
+        std::time::Duration::from_secs(1);
+
     /// Stamp one DETACHED fork session with the exact mob member binding it is
     /// being seated as.
     ///
@@ -5164,24 +5308,56 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .as_ref()
             .map(|target| target.source_admission)
             .unwrap_or_default();
-        let _mutation_guard = match source_admission {
-            meerkat_core::DurableForkSourceAdmission::Quiescent => {
+        self.fork_durable_session_with_optional_planned_identity_under(
+            source_session_id,
+            message_count,
+            planned_child_session_id,
+            tool_access_policy,
+            target,
+            ForkSourceBoundary::Admission(source_admission),
+        )
+        .await
+    }
+
+    async fn fork_durable_session_with_optional_planned_identity_under(
+        &self,
+        source_session_id: &SessionId,
+        message_count: Option<usize>,
+        planned_child_session_id: Option<SessionId>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: Option<meerkat_core::DurableSessionForkTarget>,
+        boundary: ForkSourceBoundary,
+    ) -> Result<DurableSessionForkWithProvenance, SessionError> {
+        let caller_turn = matches!(
+            boundary,
+            ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::CallerTurn)
+        );
+        let _mutation_guard = match boundary {
+            ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::Quiescent) => {
                 self.transcript_edit_mutation_guard(source_session_id)
                     .await?
             }
-            meerkat_core::DurableForkSourceAdmission::CallerTurn => {
+            ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::CallerTurn) => {
                 Self::caller_turn_fork_mutation_guard()
             }
+            ForkSourceBoundary::HeldTurnBoundary {
+                turn_finalization_guard,
+                recovery_gate_bound,
+            } => {
+                self.transcript_edit_mutation_guard_with_turn_boundary(
+                    source_session_id,
+                    turn_finalization_guard,
+                    recovery_gate_bound,
+                )
+                .await?
+            }
         };
-        let source = match source_admission {
-            meerkat_core::DurableForkSourceAdmission::Quiescent => {
-                self.source_session_for_transcript_edit_locked(source_session_id)
-                    .await?
-            }
-            meerkat_core::DurableForkSourceAdmission::CallerTurn => {
-                self.source_session_for_caller_turn_fork_locked(source_session_id)
-                    .await?
-            }
+        let source = if caller_turn {
+            self.source_session_for_caller_turn_fork_locked(source_session_id)
+                .await?
+        } else {
+            self.source_session_for_transcript_edit_locked(source_session_id)
+                .await?
         };
         let source_metadata = source.try_session_metadata().map_err(|error| {
             SessionError::Agent(AgentError::InternalError(format!(
@@ -23641,6 +23817,200 @@ mod tests {
             parent_history.message_count >= committed_len,
             "the caller-turn fork must not shrink or disturb the parent transcript"
         );
+    }
+
+    #[tokio::test]
+    async fn turn_boundary_fork_waits_for_the_running_turn_and_wins_the_gate_before_a_queued_lap() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let builder = BlockingRunBuilder::new();
+        let service = Arc::new(PersistentSessionService::new(
+            builder.clone(),
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        ));
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let parent_id = created.session_id;
+        // A targeted durable fork copies canonical parent metadata onto the
+        // child, so seed it the way the runtime does at its first boundary.
+        let parent = service
+            .load_authoritative_session_base(&parent_id)
+            .await
+            .expect("load runtime-authoritative parent")
+            .expect("parent exists");
+        let parent = mutate_test_session(parent, "run boundary", |parent| {
+            parent
+                .set_session_metadata(meerkat_core::SessionMetadata {
+                    model_fallback: None,
+                    schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    structured_output_retries: 2,
+                    provider: meerkat_core::Provider::Anthropic,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    tooling: meerkat_core::SessionTooling::default(),
+                    keep_alive: false,
+                    comms_name: None,
+                    peer_meta: None,
+                    realm_id: None,
+                    instance_id: None,
+                    backend: None,
+                    config_generation: None,
+                    auth_binding: None,
+                    mob_member_binding: None,
+                })
+                .expect("seed canonical parent metadata");
+        });
+        runtime_store
+            .commit_session_snapshot(
+                &PersistentSessionService::<BlockingRunBuilder>::runtime_id_for_session(&parent_id),
+                meerkat_runtime::store::SerializedSessionSnapshot {
+                    session_snapshot: (serde_json::to_vec(&parent)
+                        .expect("serialize parent metadata snapshot"))
+                    .into(),
+                },
+            )
+            .await
+            .expect("commit parent metadata snapshot");
+        let target = meerkat_core::DurableSessionForkTarget {
+            member_binding: meerkat_core::MobMemberBinding {
+                mob_id: "mob".to_string(),
+                role: "role".to_string(),
+                member: "child".to_string(),
+            },
+            cache_identity: None,
+            source_admission: meerkat_core::DurableForkSourceAdmission::Quiescent,
+        };
+
+        // Turn 1 runs exactly as the runtime loop runs it: the lap holds the
+        // turn-finalization boundary for its whole duration and the turn
+        // holds the runtime admission.
+        let turn_boundary = service
+            .acquire_runtime_turn_finalization_guard(&parent_id)
+            .await;
+        let admission = service
+            .reserve_runtime_turn_admission(&parent_id)
+            .await
+            .expect("runtime turn admission should be reserved");
+        let active_turn = tokio::spawn({
+            let service = Arc::clone(&service);
+            let parent_id = parent_id.clone();
+            async move {
+                service
+                    .apply_runtime_turn_with_reserved_admission(
+                        &parent_id,
+                        RunId::new(),
+                        runtime_content_turn_request("slow first turn"),
+                        RunApplyBoundary::RunStart,
+                        vec![InputId::new()],
+                        admission,
+                    )
+                    .await
+            }
+        });
+        builder.wait_for_entered_runs(1).await;
+
+        // A live delegation arrives mid-turn and parks on the boundary.
+        let order = Arc::new(AtomicUsize::new(0));
+        let fork_task = tokio::spawn({
+            let service = Arc::clone(&service);
+            let parent_id = parent_id.clone();
+            let order = Arc::clone(&order);
+            async move {
+                let outcome = service
+                    .fork_durable_session_at_turn_boundary(
+                        &parent_id,
+                        None,
+                        None,
+                        target,
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await;
+                let position = order.fetch_add(1, Ordering::AcqRel);
+                (outcome, position)
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // A follow-up runtime lap queues behind the delegation on the same
+        // FIFO boundary and, once it holds it, reserves the runtime turn
+        // admission exactly as `process_queue` does before applying a turn.
+        // Before the fix the delegation released the gate after its wait and
+        // re-locked inside the fork, so this lap won the gate first and the
+        // fork was refused as `Busy`. (The lap stops at the admission: with
+        // the source's stale live session discarded by the fork, applying a
+        // raw runtime turn here would need the runtime loop's live
+        // rematerialization, which is not what this test is about.)
+        let queued_lap = tokio::spawn({
+            let service = Arc::clone(&service);
+            let parent_id = parent_id.clone();
+            let order = Arc::clone(&order);
+            async move {
+                let _turn_boundary = service
+                    .acquire_runtime_turn_finalization_guard(&parent_id)
+                    .await;
+                let position = order.fetch_add(1, Ordering::AcqRel);
+                let admission = service.reserve_runtime_turn_admission(&parent_id).await;
+                (admission.map(drop), position)
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !fork_task.is_finished(),
+            "the delegation must wait for the running turn's boundary"
+        );
+
+        // Turn 1 finalizes and its lap releases the boundary.
+        builder.release_notify.add_permits(1);
+        active_turn
+            .await
+            .expect("active turn task should join")
+            .expect("the running turn must complete");
+        drop(turn_boundary);
+
+        let (outcome, fork_position) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), fork_task)
+                .await
+                .expect("the delegation fork settles once the boundary is released")
+                .expect("fork task should join");
+        let forked = match outcome.expect("the fork must not be refused after the wait") {
+            meerkat_core::DurableForkAtTurnBoundary::Forked(forked) => forked,
+            meerkat_core::DurableForkAtTurnBoundary::SourceBusy { waited } => {
+                panic!(
+                    "the source finalized within the bound, yet the fork reported busy after {waited:?}"
+                )
+            }
+        };
+        let (admitted, lap_position) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), queued_lap)
+                .await
+                .expect("the queued lap settles after the fork releases the boundary")
+                .expect("queued lap should join");
+        admitted.expect("the queued lap must be admitted to run its turn after the fork");
+        assert!(
+            fork_position < lap_position,
+            "the fork must win the boundary ahead of the lap queued behind it (fork={fork_position}, lap={lap_position})"
+        );
+
+        // The branch was cut at the source's committed end after turn 1
+        // finalized and nothing else wrote in between: it matches the parent
+        // exactly.
+        let parent_history = service
+            .read_history(&parent_id, SessionHistoryQuery::default())
+            .await
+            .expect("parent history after the turn");
+        assert_eq!(forked.message_count, parent_history.message_count);
+        let fork_history = service
+            .read_history(&forked.session_id, SessionHistoryQuery::default())
+            .await
+            .expect("fork history should be persisted");
+        assert_eq!(fork_history.message_count, forked.message_count);
     }
 
     #[tokio::test]

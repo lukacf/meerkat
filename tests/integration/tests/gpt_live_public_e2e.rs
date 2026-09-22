@@ -790,6 +790,7 @@ async fn open_public_live_with_summary(
             // "Voice session access denied", not a validation error.
             voice: "marin".to_string(),
             session_instructions: None,
+            session_instructions_preface: None,
         })?;
     let open_authority = Arc::new(if concurrent {
         open_authority

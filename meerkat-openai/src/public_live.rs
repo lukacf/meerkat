@@ -273,27 +273,31 @@ enum PublicLiveContextSeed {
 }
 
 impl PublicLiveContextSeed {
+    /// Real prior dialogue turns are the only seed that belongs in the
+    /// session's `input`. A factual summary or a pending notice is startup
+    /// knowledge, not a user utterance; seeding it as a user-role item made
+    /// the provider answer it with a fresh greeting.
     fn initial_input(&self) -> Option<Vec<InitialItem>> {
-        let text = match self {
-            Self::Absent => return None,
-            Self::History(items) => return (!items.is_empty()).then(|| items.clone()),
-            Self::FactualSummary(summary) => format!(
+        match self {
+            Self::History(items) => (!items.is_empty()).then(|| items.clone()),
+            Self::Absent | Self::FactualSummary(_) | Self::HistoricalContextPending => None,
+        }
+    }
+
+    /// Startup knowledge for the instructions lane, appended after the
+    /// caller's own instructions. The text and its framing are unchanged
+    /// from the former user-role seed; only the lane differs.
+    fn instructions_context(&self) -> Option<String> {
+        match self {
+            Self::Absent | Self::History(_) => None,
+            Self::FactualSummary(summary) => Some(format!(
                 "Factual summary of the background agent's context at voice-channel open (context data, not a new user request):\n{summary}"
-            ),
-            Self::HistoricalContextPending =>
+            )),
+            Self::HistoricalContextPending => Some(
                 "Voice-channel context availability (factual state, not a new user request):\nHistorical session context is being prepared and is not yet available."
                     .to_string(),
-        };
-        Some(vec![InitialItem {
-            role: InitialRole::User,
-            content: vec![InitialText {
-                text,
-                text_type: Some(InitialTextType::InputText),
-            }],
-            id: Field::Absent,
-            status: Field::Absent,
-            item_type: Some(MessageType::Message),
-        }])
+            ),
+        }
     }
 }
 
@@ -622,11 +626,22 @@ impl PublicLiveBrokerFactory {
             client: None,
             delegation: Field::Value(DelegationConfig::Client),
             input: config.context_seed.initial_input(),
-            instructions: config
-                .instructions
-                .clone()
-                .map_or(Field::Absent, Field::Value),
+            instructions: Self::session_instructions(config).map_or(Field::Absent, Field::Value),
             store: None,
+        }
+    }
+
+    /// Caller instructions first, then any startup context, separated by a
+    /// blank line. Absent when neither exists.
+    fn session_instructions(config: &PublicLiveOpenConfig) -> Option<String> {
+        match (
+            config.instructions.as_deref(),
+            config.context_seed.instructions_context(),
+        ) {
+            (None, None) => None,
+            (Some(instructions), None) => Some(instructions.to_string()),
+            (None, Some(context)) => Some(context),
+            (Some(instructions), Some(context)) => Some(format!("{instructions}\n\n{context}")),
         }
     }
 }
@@ -1939,7 +1954,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_summary_is_factual_input_not_behavior_or_a_canonical_replay() {
+    fn startup_summary_is_instructions_context_not_a_user_item_or_a_canonical_replay() {
         let config = PublicLiveOpenConfig::new("v=0", "marin")
             .unwrap()
             .with_instructions("Speak briefly.")
@@ -1950,17 +1965,22 @@ mod tests {
         ))
         .unwrap();
         let encoded = serde_json::to_value(factory.session_config(&config)).unwrap();
-        assert_eq!(encoded["instructions"], "Speak briefly.");
-        assert_eq!(encoded["input"].as_array().unwrap().len(), 1);
-        assert_eq!(encoded["input"][0]["role"], "user");
-        let text = encoded["input"][0]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("context data, not a new user request"));
-        assert!(text.ends_with("The agent is comparing two tables."));
+        // The summary rides the instructions lane after the caller's own
+        // instructions. It is never a user-role input item: a user item at
+        // session start made the provider open the call with a greeting.
+        assert!(
+            encoded.get("input").is_none(),
+            "no startup input items: {encoded}"
+        );
+        let instructions = encoded["instructions"].as_str().unwrap();
+        assert!(instructions.starts_with("Speak briefly.\n\n"));
+        assert!(instructions.contains("context data, not a new user request"));
+        assert!(instructions.ends_with("The agent is comparing two tables."));
         assert!(!format!("{config:?}").contains("two tables"));
     }
 
     #[test]
-    fn pending_context_is_distinct_native_startup_data_not_summary_or_instructions() {
+    fn pending_context_is_instructions_context_distinct_from_the_summary() {
         let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
             "gpt-live-1",
             OpenAiBackendKind::OpenAiApi,
@@ -1978,19 +1998,15 @@ mod tests {
         let session = factory.session_config(&config);
         session
             .validate()
-            .expect("pinned SDK accepts native initial factual input");
+            .expect("pinned SDK accepts instructions-only startup context");
         let encoded = serde_json::to_value(session).unwrap();
-        assert_eq!(encoded["instructions"], "Catalog behavior.");
+        assert!(
+            encoded.get("input").is_none(),
+            "pending notice is not a user item: {encoded}"
+        );
         assert_eq!(
-            encoded["input"],
-            json!([{
-                "type": "message",
-                "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": "Voice-channel context availability (factual state, not a new user request):\nHistorical session context is being prepared and is not yet available."
-                }]
-            }])
+            encoded["instructions"],
+            "Catalog behavior.\n\nVoice-channel context availability (factual state, not a new user request):\nHistorical session context is being prepared and is not yet available."
         );
         assert!(!encoded.to_string().contains("PRIVATE_PRIOR_SUMMARY"));
         assert!(format!("{config:?}").contains("HistoricalContextPending"));
@@ -2001,10 +2017,11 @@ mod tests {
             PublicLiveContextSeed::FactualSummary(_)
         ));
         let summary = serde_json::to_value(factory.session_config(&summarized)).unwrap();
-        let text = summary["input"][0]["content"][0]["text"].as_str().unwrap();
-        assert!(text.starts_with("Factual summary"));
+        assert!(summary.get("input").is_none());
+        let text = summary["instructions"].as_str().unwrap();
+        assert!(text.starts_with("Catalog behavior.\n\nFactual summary"));
         assert!(!text.contains("not yet available"));
-        assert_eq!(summary["instructions"], "Catalog behavior.");
+        assert!(text.ends_with("Prepared facts."));
     }
 
     #[test]
@@ -3102,13 +3119,11 @@ mod tests {
             {
                 let captured = capture.lock().unwrap();
                 let body = captured.create_body.as_ref().unwrap();
-                let startup = body["session"]["input"][0]["content"][0]["text"]
-                    .as_str()
-                    .unwrap();
+                assert!(body["session"].get("input").is_none(), "{body}");
+                let startup = body["session"]["instructions"].as_str().unwrap();
                 assert!(startup.ends_with(
                     "Historical session context is being prepared and is not yet available."
                 ));
-                assert!(body["session"].get("instructions").is_none());
                 assert!(
                     captured.client_events.is_empty(),
                     "pending startup never sends commentary"

@@ -35,9 +35,11 @@ pub enum Stage {
     ReplacementRecall,
     Finished,
     // S100 morning standup.
+    StandupSilence,
     StandupOpen,
     StandupDelegation,
     StandupBargeIn,
+    StandupReadback,
     StandupFarewell,
 }
 
@@ -306,6 +308,61 @@ pub enum Record {
         converged_before_host_close: bool,
         ms: u64,
     },
+    /// Time-to-talk breakdown for one channel, every mark on the journal
+    /// clock (ms since the journal was created; `None` when not observed):
+    /// live/open request -> open returned (pending handle) -> provider
+    /// session attached (thinking capture `SessionAttached`) -> host answer
+    /// delivered -> browser WebRTC connected / data channel open -> first
+    /// outbound user audio packet -> first user speech -> first user input
+    /// transcript delta. The public path carries media browser <-> provider
+    /// directly, so the host never accepts an audio packet; the browser's
+    /// first outbound RTP packet is the media-path-up mark.
+    TimeToTalk {
+        channel: u32,
+        open_request_ms: u64,
+        open_returned_ms: u64,
+        session_attached_ms: Option<u64>,
+        answer_delivered_ms: u64,
+        webrtc_connected_ms: Option<u64>,
+        data_channel_open_ms: Option<u64>,
+        first_audio_packet_ms: Option<u64>,
+        first_user_speech_ms: Option<u64>,
+        first_input_delta_ms: Option<u64>,
+    },
+    /// Barge-in breakdown on the browser clock, relative to the user's
+    /// speech onset (fixture start): first provider input transcript delta
+    /// of the interruption, the assistant's last energetic window, the
+    /// overlap the fixture accumulated, and every provider event type seen
+    /// in the window. Media is browser <-> provider on the public path, so
+    /// the peer plays a live track with no queued playback to flush.
+    BargeIn {
+        channel: u32,
+        onset_ms: u64,
+        first_input_delta_after_onset_ms: Option<i64>,
+        assistant_quiet_after_onset_ms: Option<i64>,
+        overlap_ms: u64,
+        overlap_bound_ms: u64,
+        provider_events: Vec<String>,
+    },
+    /// Browser uplink health at close: outbound audio RTP packets sent
+    /// against the ~50 packets/s a continuous 20 ms Opus track produces
+    /// since `connected`. A ratio well under 1.0 means the headless
+    /// browser's audio rendering stalled (host CPU starvation), which loses
+    /// user speech before it ever reaches the provider.
+    Uplink {
+        channel: u32,
+        packets_sent: u64,
+        expected_packets: u64,
+        ratio: f32,
+    },
+    /// A tolerant (model-dependent) check: recorded with its outcome, never
+    /// a gate on its own. The deterministic checks assert.
+    Tolerant {
+        channel: u32,
+        check: String,
+        passed: bool,
+        detail: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -326,6 +383,10 @@ struct State {
     job: u32,
     exchange: u32,
     attached_channels: Vec<u32>,
+    /// Journal-clock time of each channel's provider `SessionAttached`.
+    session_attached_ms: Vec<(u32, u64)>,
+    /// Texts of owned instructions-lane append attempts, in wire order.
+    instructions_append_texts: Vec<String>,
     /// Running count of owned thinking-append attempts seen on the wire.
     thinking_append_attempts: usize,
     /// Bounded copy of the attempted thinking-append texts, for echo checks.
@@ -449,6 +510,8 @@ impl Journal {
                 job: 0,
                 exchange: 0,
                 attached_channels: Vec::new(),
+                session_attached_ms: Vec::new(),
+                instructions_append_texts: Vec::new(),
                 thinking_append_attempts: 0,
                 thinking_append_texts: Vec::new(),
                 instructions_append_attempts: 0,
@@ -596,12 +659,11 @@ impl Journal {
         let events = self.0.wire.drain().map_err(|_| Fault::ProviderContention)?;
         for event in events {
             if matches!(event.event, thinking_capture::EventKind::SessionAttached) {
-                self.0
-                    .state
-                    .lock()
-                    .map_err(|_| Fault::Poisoned)?
-                    .attached_channels
-                    .push(event.channel_ordinal);
+                let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+                state.attached_channels.push(event.channel_ordinal);
+                state
+                    .session_attached_ms
+                    .push((event.channel_ordinal, event.elapsed_ms));
             }
             if let thinking_capture::EventKind::ThinkingAppendAttempt { text, .. } = &event.event {
                 let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
@@ -635,6 +697,9 @@ impl Journal {
                     append.counted_as_framed = true;
                     state.framed_summary_attempts += 1;
                 }
+                if state.instructions_append_texts.len() < thinking_capture::Capture::MAX_EVENTS {
+                    state.instructions_append_texts.push(text.clone());
+                }
             }
             self.record(Record::Thinking { event })?;
         }
@@ -660,6 +725,35 @@ impl Journal {
             .lock()
             .map_err(|_| Fault::Poisoned)?
             .thinking_append_attempts)
+    }
+
+    /// Milliseconds on the journal clock at `at` (the thinking capture and
+    /// the journal start together, so its `elapsed_ms` is the same clock).
+    pub fn elapsed_ms_at(&self, at: Instant) -> u64 {
+        u64::try_from(at.saturating_duration_since(self.0.started).as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Journal-clock time the provider session of `channel` attached.
+    pub fn session_attached_ms(&self, channel: u32) -> Result<Option<u64>, Fault> {
+        self.flush_wire()?;
+        let state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+        Ok(state
+            .session_attached_ms
+            .iter()
+            .find(|(ordinal, _)| *ordinal == channel)
+            .map(|(_, ms)| *ms))
+    }
+
+    /// Texts of every owned instructions-lane append attempt so far.
+    pub fn instructions_append_attempt_texts(&self) -> Result<Vec<String>, Fault> {
+        self.flush_wire()?;
+        Ok(self
+            .0
+            .state
+            .lock()
+            .map_err(|_| Fault::Poisoned)?
+            .instructions_append_texts
+            .clone())
     }
 
     /// Owner appends observed so far, by lane.

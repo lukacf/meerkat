@@ -94,6 +94,11 @@ async function prepare(command) {
     await audioContext.resume();
     const peer = new RTCPeerConnection();
     peer.addTrack(destination.stream.getAudioTracks()[0], destination.stream);
+    peer.addEventListener('connectionstatechange', () => {
+      if (peer.connectionState === 'connected') {
+        globalThis.__gptLivePeer?.pushTimeline('connected', { ice: peer.iceConnectionState });
+      }
+    });
     const remoteAudio = {
       decodedFrames: 0,
       decodedNonSilentFrames: 0,
@@ -169,6 +174,9 @@ async function prepare(command) {
       }
     };
     const channel = peer.createDataChannel('oai-events', { ordered: true });
+    channel.addEventListener('open', () => {
+      globalThis.__gptLivePeer?.pushTimeline('data_channel_open', {});
+    });
     globalThis.__gptLivePeer = {
       audioContext,
       channel,
@@ -199,7 +207,8 @@ async function prepare(command) {
         first_assistant_audio_ms: [],
         timer: null,
       },
-      inputTranscript: { pending: false, last_delta_ms: null, text: '', finals: [] },
+      inputTranscript: { pending: false, last_delta_ms: null, text: '', finals: [], first_delta_ms: null },
+      firstAudioPacketMs: null,
       lastFixtureStartMs: -1,
       response: { text: '', started_ms: null, index: 0 },
       playing: new Map(),
@@ -462,6 +471,21 @@ async function prepare(command) {
       }
       state.checkScheduled(t);
     }, energyConfig.window_ms);
+    // ---- media path up: first outbound user audio packet -----------------
+    const outboundPoll = setInterval(async () => {
+      if (state.firstAudioPacketMs !== null || state.disconnected) { clearInterval(outboundPoll); return; }
+      let stats;
+      try { stats = await peer.getStats(); } catch { return; }
+      for (const report of stats.values()) {
+        if (report.type === 'outbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio')
+          && Number(report.packetsSent || 0) > 0) {
+          state.firstAudioPacketMs = nowMs();
+          state.pushTimeline('first_audio_packet_sent', { packets_sent: Number(report.packetsSent) });
+          clearInterval(outboundPoll);
+          return;
+        }
+      }
+    }, 50);
     // ---- provider events ------------------------------------------------
     channel.onmessage = async (event) => {
       const state = globalThis.__gptLivePeer;
@@ -506,6 +530,10 @@ async function prepare(command) {
         }
       }
       if (isInputDelta) {
+        if (state.inputTranscript.first_delta_ms === null) {
+          state.inputTranscript.first_delta_ms = t;
+          state.pushTimeline('first_input_delta', { event_index: state.events.length - 1 });
+        }
         const delta = typeof parsed.delta === 'string' ? parsed.delta : typeof parsed.text === 'string' ? parsed.text : '';
         const finals = state.inputTranscript.finals;
         const lastFinal = finals[finals.length - 1];
@@ -537,6 +565,13 @@ async function prepare(command) {
       }
       if (parsed?.type === 'session.delegation.created') {
         state.pushTimeline('delegation_created', { target: parsed?.delegation?.target ?? null, event_index: state.events.length - 1 });
+      }
+      // Every provider event that is not a transcript/audio delta lands on
+      // the timeline by type, so barge-in and close breakdowns can be read
+      // against the same clock as fixture starts and energy windows.
+      if (typeof parsed?.type === 'string' && !isInputDelta && !isOutputDelta
+        && parsed.type !== 'session.output_audio.delta') {
+        state.pushTimeline('provider_event', { type: parsed.type, event_index: state.events.length - 1 });
       }
       if (parsed?.type === 'session.commentary.appended') {
         state.pushTimeline('commentary_appended', { event_index: state.events.length - 1 });
@@ -580,7 +615,10 @@ async function answer(sdp) {
   await page.waitForFunction(() => globalThis.__gptLivePeer.channel.readyState === 'open', null, {
     timeout: 60_000,
   });
-  return { ready: true };
+  // The browser clock reading at return lets the host align timeline
+  // entries with its own journal clock.
+  const now_ms = await page.evaluate(() => globalThis.__gptLivePeer.nowMs());
+  return { ready: true, now_ms };
 }
 
 async function play(name) {
@@ -792,6 +830,7 @@ async function snapshot() {
         state: item.state, armed_ms: item.armed_ms, fired_ms: item.fired_ms,
       })),
       disconnected: state.disconnected,
+      now_ms: state.nowMs(),
     };
   }).then((snapshot) => ({ ...snapshot, protocol }));
 }

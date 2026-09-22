@@ -540,6 +540,16 @@ impl BrowserPeer {
         Ok(snapshot["events"].as_array().cloned().unwrap_or_default())
     }
 
+    /// Outbound audio RTP packets sent so far and the browser clock now,
+    /// for the uplink health record.
+    pub async fn uplink(&mut self) -> Result<(u64, u64), Box<dyn std::error::Error>> {
+        let snapshot = self.snapshot().await?;
+        Ok((
+            snapshot["connection"]["packets_sent"].as_u64().unwrap_or(0),
+            snapshot["now_ms"].as_u64().unwrap_or(0),
+        ))
+    }
+
     pub async fn audio_evidence(&mut self) -> Result<AudioEvidence, Box<dyn std::error::Error>> {
         let snapshot = self.snapshot().await?;
         Ok(serde_json::from_value(snapshot["audio"].clone())?)
@@ -756,6 +766,16 @@ pub enum TimelineKind {
     Disconnect,
     DelegationCreated,
     CommentaryAppended,
+    /// Any other provider event, by `type` in the detail.
+    ProviderEvent,
+    /// RTCPeerConnection reached `connected`.
+    Connected,
+    /// The `oai-events` data channel opened.
+    DataChannelOpen,
+    /// First outbound user audio RTP packet reported by the browser.
+    FirstAudioPacketSent,
+    /// First `session.input_transcript.delta` of the channel.
+    FirstInputDelta,
     #[serde(other)]
     Other,
 }

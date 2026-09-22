@@ -91,37 +91,48 @@
       "notes": "Historical fixture (macOS say, Samantha, 155 wpm; PCM16 mono 24 kHz, Apple FLLR filler chunk). Not re-mintable; voice inferred from the FLLR chunk and the documented `history` fixture."
     },
     {
-      "name": "standup_open",
-      "file": "standup-open.wav",
+      "name": "standup_notes",
+      "file": "standup-notes.wav",
       "voice": "coral",
-      "text": "Morning. Quick standup. What did we agree on yesterday about the project and the deadline? Keep it short.",
-      "sha256": "5d4d27e1e1addcdb2de169b7b27f47c8864a56aa8d6bb4cd68e3360091dbc411",
-      "duration_ms": 7517,
-      "sample_rate_hz": 24000,
-      "trailing_silence_ms": 1642,
-      "notes": "S100 turn 1, played immediately after connect: the answer must come from the seeded typed context, not a fresh greeting. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, coral), VAD-normalised, 1500 ms trailing-silence floor."
-    },
-    {
-      "name": "standup_delegate",
-      "file": "standup-delegate.wav",
-      "voice": "coral",
-      "text": "Ask the team to write a two-line release note for that project and read it back to me when it's done.",
-      "sha256": "9f8eb4664d968453454720b77b042d82073baaf51543efd1772e546387df3081",
-      "duration_ms": 7683,
+      "text": "Okay, so, create a notes folder, put today's plan in it as a markdown file, then tell me what you named it.",
+      "sha256": "98ab643b0bc9577ac77ca06e4e8d2c3721092f9fc4d06a79c5f67a027cfea785",
+      "duration_ms": 7520,
       "sample_rate_hz": 24000,
       "trailing_silence_ms": 1580,
-      "notes": "S100 turn 2 at assistant_quiet+400 ms: requires the backing mob member (client delegation, executor turn, spoken commentary). Minted with `voice_fixtures mint` (gpt-4o-mini-tts, coral), VAD-normalised, 1500 ms trailing-silence floor."
+      "notes": "S100 request 1 after a 4 s silence hold: pronoun-heavy three-step request that the executor fulfils with real file writes in the scratch workspace. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, coral), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "standup_testing",
+      "file": "standup-testing.wav",
+      "voice": "coral",
+      "text": "Now open that file and add a second section about testing. Call the heading Quokka Testing.",
+      "sha256": "60aa7d3d98f26188e0f9e1a45368c992e7706a9caf3970e048cd2e7f992cbddc",
+      "duration_ms": 8125,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S100 request 2 at assistant_quiet+300 ms: 'that file' resolves through the previous exchange; the heading token is planted by the test and checked in the third answer window. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, coral), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "standup_headings",
+      "file": "standup-headings.wav",
+      "voice": "coral",
+      "text": "Read me the headings of the second one.",
+      "sha256": "55083d0f3a489e2211a08cb37a940909e1a98a37dfe2350693e8925206834ab0",
+      "duration_ms": 4503,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S100 request 3 at assistant_quiet+300 ms: the answer window must carry the planted second heading token. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, coral), VAD-normalised, 1500 ms trailing-silence floor."
     },
     {
       "name": "standup_barge_in",
       "file": "standup-barge-in.wav",
       "voice": "coral",
-      "text": "Hold on, just give me the first line.",
-      "sha256": "f4b373b5dd38fab2aec8a10dff39168d01657050f3624e9b4c0ec48660a3bba3",
-      "duration_ms": 3978,
+      "text": "Hold on, skip the details, just say done.",
+      "sha256": "d6ec0ca4a5a81e7f629f2e914b5b4a65c9fb0d61ea2fcd5ea23c344d965fbcdb",
+      "duration_ms": 4865,
       "sample_rate_hz": 24000,
       "trailing_silence_ms": 1580,
-      "notes": "S100 turn 3 at first_assistant_audio+600 ms of the commentary readout: a barge-in; overlap beyond the bound is a fault. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, coral), VAD-normalised, 1500 ms trailing-silence floor."
+      "notes": "S100 barge-in at first_assistant_audio+600 ms of the second request's commentary readout; overlap beyond the bound is a fault. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, coral), VAD-normalised, 1500 ms trailing-silence floor."
     },
     {
       "name": "standup_close",

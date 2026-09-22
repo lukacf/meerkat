@@ -4410,8 +4410,8 @@ impl Session {
                     if let Some(observation_id) = row.context_observation_id {
                         origin = origin.with_context_observation(observation_id);
                     }
-                    if let Some(item_id) = row.provider_item_id {
-                        origin = origin.with_provider_item_id(item_id);
+                    if !row.provider_item_ids.is_empty() {
+                        origin = origin.with_provider_item_ids(row.provider_item_ids);
                     }
                     match &mut message {
                         Message::User(user) => user.identity.realtime_origin = Some(origin),
@@ -9932,6 +9932,86 @@ mod tests {
             "without a committed witness the stale notice is stripped"
         );
         assert_eq!(&plain.messages()[2], &fresh);
+    }
+
+    #[test]
+    fn realtime_origin_records_every_provider_item_of_the_committed_assistant_group() {
+        let mut session = Session::new();
+        let channel = crate::LiveChannelId::new("voice-channel");
+        let user = session.append_realtime_transcript_event_for_channel(
+            RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "item_user".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "tell me a story".to_string(),
+            },
+            channel.clone(),
+        );
+        assert_eq!(user.materialized_messages.len(), 1);
+        // One response, two provider items: the speech was re-keyed into a
+        // second item mid-response (the barge-in shape).
+        for (item_id, previous, delta) in [
+            ("item_a", "item_user", "Once upon"),
+            ("item_a", "item_user", " a time"),
+            ("item_b", "item_a", ", the end."),
+        ] {
+            session.append_realtime_transcript_event_for_channel(
+                RealtimeTranscriptEvent::AssistantTextDelta {
+                    response_id: "resp_story".to_string(),
+                    delta_id: format!("evt_{item_id}_{}", delta.len()),
+                    item_id: item_id.to_string(),
+                    previous_item_id: Some(previous.to_string()),
+                    content_index: 0,
+                    delta: delta.to_string(),
+                },
+                channel.clone(),
+            );
+        }
+        let committed = session.append_realtime_transcript_event_for_channel(
+            RealtimeTranscriptEvent::AssistantTurnCompleted {
+                response_id: "resp_story".to_string(),
+                stop_reason: StopReason::EndTurn,
+                usage: test_turn_usage(Usage::default()),
+            },
+            channel,
+        );
+        assert!(!committed.is_inert());
+        assert_eq!(session.messages().len(), 2);
+
+        let Message::User(user) = &session.messages()[0] else {
+            panic!("user row")
+        };
+        let user_origin = user.identity.realtime_origin.as_ref().expect("user origin");
+        assert_eq!(user_origin.provider_item_id(), Some("item_user"));
+        assert_eq!(user_origin.provider_item_ids(), ["item_user".to_string()]);
+
+        let Message::BlockAssistant(assistant) = &session.messages()[1] else {
+            panic!("assistant row")
+        };
+        let origin = assistant
+            .identity
+            .realtime_origin
+            .as_ref()
+            .expect("assistant origin");
+        assert_eq!(
+            origin.provider_item_ids(),
+            ["item_a".to_string(), "item_b".to_string()],
+            "both items of the group are attributable to this row"
+        );
+        assert_eq!(origin.provider_item_id(), Some("item_a"));
+        let json = serde_json::to_value(origin).expect("origin json");
+        assert_eq!(
+            json["provider_item_ids"],
+            serde_json::json!(["item_a", "item_b"])
+        );
+        let restored: crate::types::RealtimeMessageOrigin =
+            serde_json::from_value(serde_json::json!({
+                "session_id": json["session_id"],
+                "channel_id": json["channel_id"],
+                "canonical_row_sequence": json["canonical_row_sequence"],
+            }))
+            .expect("origins committed before the field existed still load");
+        assert!(restored.provider_item_ids().is_empty());
     }
 
     #[test]

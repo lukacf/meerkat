@@ -24408,21 +24408,43 @@ impl MobActor {
                         }) {
                             return Err(super::LiveBridgeOperationStartError::Rejected);
                         }
-                        let source = self
-                            .session_service
-                            .load_persisted_session(&session_id)
-                            .await
-                            .map_err(|_| super::LiveBridgeOperationStartError::Rejected)?;
-                        if source
-                            .as_ref()
-                            .is_none_or(|session| session.id() != &session_id)
-                        {
-                            return Err(super::LiveBridgeOperationStartError::Rejected);
-                        }
-                        Ok(())
+                        Ok(session_id)
                     }
                     .await;
-                    let _ = reply_tx.send(result);
+                    // The roster and binding checks above are the actor's
+                    // authority and stay inline. Loading the durable source
+                    // body is store I/O that took seconds on large members
+                    // and, run inline, queued every later mob command behind
+                    // one voice status poll. Reply from a detached task so
+                    // the actor keeps serving; the reply contract is
+                    // unchanged.
+                    match result {
+                        Err(error) => {
+                            let _ = reply_tx.send(Err(error));
+                        }
+                        Ok(session_id) => {
+                            let session_service = Arc::clone(&self.session_service);
+                            tokio::spawn(async move {
+                                let result = async {
+                                    let source = session_service
+                                        .load_persisted_session(&session_id)
+                                        .await
+                                        .map_err(|_| {
+                                            super::LiveBridgeOperationStartError::Rejected
+                                        })?;
+                                    if source
+                                        .as_ref()
+                                        .is_none_or(|session| session.id() != &session_id)
+                                    {
+                                        return Err(super::LiveBridgeOperationStartError::Rejected);
+                                    }
+                                    Ok(())
+                                }
+                                .await;
+                                let _ = reply_tx.send(result);
+                            });
+                        }
+                    }
                 }
                 #[cfg(feature = "openai-live")]
                 MobCommand::StartLiveBridgeOperation {

@@ -71,6 +71,27 @@ if [[ " ${tlc_java_tool_options} " != *" -XX:+UseParallelGC "* ]]; then
 fi
 export JAVA_TOOL_OPTIONS="${tlc_java_tool_options}"
 
+# JAVA_TOOL_OPTIONS reaches the JVM, not the launcher. The `java` binary sizes
+# the main thread, where TLC parses the module and computes the initial
+# states, only from its command line or JDK_JAVA_OPTIONS; `tlc` is a
+# `java -jar` wrapper, so the stack flag has to travel through
+# JDK_JAVA_OPTIONS as well. Without it the generated initial predicate
+# overflows the launcher's default stack and TLC reports a StackOverflowError
+# regardless of the -Xss above (observed on the 09-16 Governance lane and
+# reproduced locally). An explicit caller stack policy governs both layers.
+tlc_stack_flag="-Xss256m"
+for flag in ${tlc_java_tool_options}; do
+  if [[ "${flag}" == -Xss* ]]; then
+    tlc_stack_flag="${flag}"
+    break
+  fi
+done
+tlc_jdk_java_options="${JDK_JAVA_OPTIONS:-}"
+if [[ " ${tlc_jdk_java_options} " != *" -Xss"* ]]; then
+  tlc_jdk_java_options="${tlc_stack_flag}${tlc_jdk_java_options:+ ${tlc_jdk_java_options}}"
+fi
+export JDK_JAVA_OPTIONS="${tlc_jdk_java_options}"
+
 # The full adaptive composition includes two complete MobMachine instances and
 # is too large for the CI TLC budget. Before applying that broad skip, prove the
 # generated route that matters for the adaptive bundle: terminal layer-mob

@@ -853,3 +853,32 @@ fn mob_catalog_gate_rejects_missing_scope() {
     );
     assert!(!gated, "a missing scope must fail closed");
 }
+
+#[test]
+fn jdk_java_options_mirror_the_tlc_stack_flag_for_the_launcher_main_thread() {
+    // The launcher sizes TLC's main thread from JDK_JAVA_OPTIONS, not from
+    // JAVA_TOOL_OPTIONS, so the merged stack flag must appear there too.
+    assert_eq!(
+        super::merge_jdk_java_options("", "-Xss256m -XX:+UseParallelGC"),
+        "-Xss256m"
+    );
+    // An explicit caller stack policy governs both layers.
+    assert_eq!(
+        super::merge_jdk_java_options("", "-Dmeerkat.sentinel=true -Xss8m"),
+        "-Xss8m"
+    );
+    // Existing launcher options are preserved and never duplicated.
+    assert_eq!(
+        super::merge_jdk_java_options("-Dlauncher.flag=1", "-Xss256m"),
+        "-Xss256m -Dlauncher.flag=1"
+    );
+    assert_eq!(
+        super::merge_jdk_java_options("-Xss1g", "-Xss256m"),
+        "-Xss1g"
+    );
+    // No stack flag anywhere still yields the canonical default.
+    assert_eq!(
+        super::merge_jdk_java_options("", "-XX:+UseParallelGC"),
+        "-Xss256m"
+    );
+}

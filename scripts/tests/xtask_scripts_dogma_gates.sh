@@ -291,13 +291,16 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
+  'printf "%s\n" "$JDK_JAVA_OPTIONS" > "$TLC_JDK_JAVA_OPTIONS_CAPTURE"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
 
 capture="$tlc_env_tmp/captured"
+jdk_capture="$tlc_env_tmp/captured-jdk"
 true_bin="$(type -P true)"
 if PATH="$tlc_env_tmp:$PATH" \
     TLC_JAVA_OPTIONS_CAPTURE="$capture" \
+    TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
     JAVA_TOOL_OPTIONS='-Dmeerkat.sentinel=true' \
     bash xtask/tests/machine_verify_all_tlc_test.sh "$true_bin" >/dev/null 2>&1 \
   && grep -Fqw -- '-Dmeerkat.sentinel=true' "$capture" \
@@ -308,16 +311,28 @@ else
   bad "direct TLC witness did not merge caller JVM options with canonical stack/GC defaults"
 fi
 
+# The launcher sizes TLC's main thread (module parse, initial states) from
+# JDK_JAVA_OPTIONS only; -Xss in JAVA_TOOL_OPTIONS reaches JVM-created threads.
+# The witness must hand the same stack flag to the launcher layer.
+if [ "$(tr ' ' '\n' < "$jdk_capture" | grep -Fxc -- '-Xss256m')" -eq 1 ]; then
+  ok "direct TLC witness gives the launcher main thread the canonical stack through JDK_JAVA_OPTIONS"
+else
+  bad "direct TLC witness leaves the launcher main thread on the default stack (JDK_JAVA_OPTIONS lacks -Xss256m)"
+fi
+
 if PATH="$tlc_env_tmp:$PATH" \
     TLC_JAVA_OPTIONS_CAPTURE="$capture" \
+    TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
     JAVA_TOOL_OPTIONS='-Dmeerkat.sentinel=true -Xss8m -XX:+UseParallelGC' \
     bash xtask/tests/machine_verify_all_tlc_test.sh "$true_bin" >/dev/null 2>&1 \
   && [ "$(tr ' ' '\n' < "$capture" | grep -Fxc -- '-Xss8m')" -eq 1 ] \
   && ! grep -Fqw -- '-Xss256m' "$capture" \
-  && [ "$(tr ' ' '\n' < "$capture" | grep -Fxc -- '-XX:+UseParallelGC')" -eq 1 ]; then
-  ok "direct TLC witness preserves explicit stack policy without duplicating JVM defaults"
+  && [ "$(tr ' ' '\n' < "$capture" | grep -Fxc -- '-XX:+UseParallelGC')" -eq 1 ] \
+  && [ "$(tr ' ' '\n' < "$jdk_capture" | grep -Fxc -- '-Xss8m')" -eq 1 ] \
+  && ! grep -Fqw -- '-Xss256m' "$jdk_capture"; then
+  ok "direct TLC witness preserves explicit stack policy on both JVM layers without duplicating defaults"
 else
-  bad "direct TLC witness replaced explicit stack policy or duplicated JVM defaults"
+  bad "direct TLC witness replaced explicit stack policy, duplicated JVM defaults, or left the launcher layer inconsistent"
 fi
 
 echo ""

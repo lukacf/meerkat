@@ -52,6 +52,11 @@ pub enum Stage {
     StuckCloseJob,
     StuckCloseCut,
     StuckCloseJobCommit,
+    // S104 handoff voice -> typed -> voice.
+    HandoffJob,
+    HandoffClose,
+    HandoffTyped,
+    HandoffBack,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

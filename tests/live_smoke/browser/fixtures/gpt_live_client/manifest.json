@@ -243,6 +243,28 @@
       "sample_rate_hz": 24000,
       "trailing_silence_ms": 1580,
       "notes": "S107 first utterance on the reopened channel: a native answer proves the session came back. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, ballad), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "handoff_job",
+      "file": "handoff-job.wav",
+      "voice": "alloy",
+      "text": "Start a job for me. Write a short ode to coffee into a file called coffee.md, at least six lines, and make sure the last line mentions a nightjar. Read it back to me when it's done.",
+      "sha256": "25b9f9e2b4755f74ddf9d3a8e1e63cc1a0062b56379ce0964f02396eaebcf82d",
+      "duration_ms": 11697,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1575,
+      "notes": "S104 job started by voice; the live channel closes while it runs. The result token nightjar is planted by the test. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "handoff_back",
+      "file": "handoff-back.wav",
+      "voice": "alloy",
+      "text": "Okay, I'm back on voice. What happened while I was gone?",
+      "sha256": "6287659f22c160e4f8d428ec58e8b4393d7b2a7dbde2101ea39e2ea41bbf94b0",
+      "duration_ms": 4855,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S104 first utterance after the reopen: the answer window should carry the job's planted result token and the typed turn's fact. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor."
     }
   ]
 }

@@ -2895,17 +2895,24 @@ async fn wait_executor_turn(
             snapshot.terminal().is_some() && !seen.contains(&snapshot.operation_id().to_string())
         });
         if let Some(snapshot) = fresh {
-            assert_eq!(snapshot.worker_identity(), "voice-executor");
-            assert_eq!(
-                snapshot.worker_ownership(),
-                LiveDelegationWorkerOwnership::ExistingMember
-            );
-            assert_eq!(
-                snapshot.terminal(),
-                Some(LiveDelegationWorkerTerminalKind::Completed),
-                "the delegated executor turn did not complete"
-            );
             seen.insert(snapshot.operation_id().to_string());
+            if snapshot.worker_identity() != "voice-executor"
+                || snapshot.worker_ownership() != LiveDelegationWorkerOwnership::ExistingMember
+            {
+                return Err(format!(
+                    "delegated turn ran on {} ({:?}), not the existing voice-executor",
+                    snapshot.worker_identity(),
+                    snapshot.worker_ownership()
+                )
+                .into());
+            }
+            if snapshot.terminal() != Some(LiveDelegationWorkerTerminalKind::Completed) {
+                return Err(format!(
+                    "the delegated executor turn did not complete: terminal={:?}",
+                    snapshot.terminal()
+                )
+                .into());
+            }
             return Ok(started.elapsed().as_millis());
         }
         if Instant::now() >= deadline {
@@ -3121,12 +3128,16 @@ async fn e2e_scenario_100_gpt_live_public_morning_standup() -> Result<(), Box<dy
         run_s100_morning_standup(evidence.clone()),
     )
     .await;
-    evidence.finish(match &result {
+    // The scenario's own error comes first; a journal fault that followed it
+    // (a dropped peer after a failed reopen) must not shadow it.
+    let finished = evidence.finish(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
-    })?;
-    result.map_err(|_| "S100 overall deadline expired")?
+    });
+    result.map_err(|_| "S100 overall deadline expired")??;
+    finished?;
+    Ok(())
 }
 
 async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
@@ -3705,12 +3716,16 @@ async fn e2e_scenario_102_gpt_live_public_who_are_you() -> Result<(), Box<dyn st
         run_s102_who_are_you(evidence.clone()),
     )
     .await;
-    evidence.finish(match &result {
+    // The scenario's own error comes first; a journal fault that followed it
+    // (a dropped peer after a failed reopen) must not shadow it.
+    let finished = evidence.finish(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
-    })?;
-    result.map_err(|_| "S102 overall deadline expired")?
+    });
+    result.map_err(|_| "S102 overall deadline expired")??;
+    finished?;
+    Ok(())
 }
 
 async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
@@ -4035,12 +4050,16 @@ async fn e2e_scenario_103_gpt_live_public_interrupt_and_recover()
         run_s103_interrupt_and_recover(evidence.clone()),
     )
     .await;
-    evidence.finish(match &result {
+    // The scenario's own error comes first; a journal fault that followed it
+    // (a dropped peer after a failed reopen) must not shadow it.
+    let finished = evidence.finish(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
-    })?;
-    result.map_err(|_| "S103 overall deadline expired")?
+    });
+    result.map_err(|_| "S103 overall deadline expired")??;
+    finished?;
+    Ok(())
 }
 
 async fn run_s103_interrupt_and_recover(
@@ -4419,12 +4438,16 @@ async fn e2e_scenario_107_gpt_live_public_stuck_close_convergence()
         run_s107_stuck_close_convergence(evidence.clone()),
     )
     .await;
-    evidence.finish(match &result {
+    // The scenario's own error comes first; a journal fault that followed it
+    // (a dropped peer after a failed reopen) must not shadow it.
+    let finished = evidence.finish(match &result {
         Ok(Ok(())) => evidence::Outcome::Passed,
         Ok(Err(_)) => evidence::Outcome::Failed,
         Err(_) => evidence::Outcome::TimedOut,
-    })?;
-    result.map_err(|_| "S107 overall deadline expired")?
+    });
+    result.map_err(|_| "S107 overall deadline expired")??;
+    finished?;
+    Ok(())
 }
 
 async fn run_s107_stuck_close_convergence(
@@ -4683,6 +4706,314 @@ async fn run_s107_stuck_close_convergence(
         if !deterministic_failures.is_empty() {
             return Err(format!(
                 "S107 deterministic checks failed:\n  - {}",
+                deterministic_failures.join("\n  - ")
+            )
+            .into());
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+    let browser_flush = live.peer.stop_evidence().await;
+    let outcome = if result.is_ok() && browser_flush.is_ok() {
+        evidence.stage(EvidenceStage::Finished)?;
+        evidence::Outcome::Passed
+    } else {
+        evidence::Outcome::Failed
+    };
+    let retained = evidence.finish(outcome);
+    live.peer.close().await;
+    live.server_task.abort();
+    // The scenario's own error is the one to report; journal faults that
+    // followed it (a dropped peer after a failed reopen) come second.
+    result?;
+    retained?;
+    browser_flush?;
+    Ok(())
+}
+
+// ===========================================================================
+// Scenario 104: handoff voice -> typed -> voice (close mid-job, type, reopen)
+// ===========================================================================
+
+/// Result token the spoken request plants in the job's output.
+const S104_RESULT_TOKEN: &str = "nightjar";
+/// Typed follow-up during the closure; its fact is a second oracle.
+const S104_TYPED_PROMPT: &str = "Typed while the voice call is down: remember that the meeting room is called Osprey. Reply with one short sentence.";
+const S104_TYPED_TOKEN: &str = "osprey";
+/// The reopen must connect within this.
+const S104_REOPEN_BOUND: Duration = Duration::from_secs(30);
+
+/// Scenario 104: the user starts a 20 s job by voice, the live channel is
+/// closed while it runs, a typed turn lands during the closure, then the
+/// channel reopens on the same session and the user asks what happened.
+///
+/// Deterministic: the close converges within the 20 s bound (recorded, one
+/// attempt); the job reaches realized terminality during the closure and its
+/// executor input plus answer are committed; the typed turn commits its user
+/// and assistant rows; the reopen connects within 30 s and the first spoken
+/// question is answered natively (no delegation); the second channel closes
+/// gracefully. Tolerant: the post-reopen answer window carries the job's
+/// planted result token and the typed fact; open -> connected < 5 s per
+/// channel.
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice()
+-> Result<(), Box<dyn std::error::Error>> {
+    let evidence = Journal::create_for("S104", S104_RESULT_TOKEN.to_owned())?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = timeout(
+        Duration::from_secs(720),
+        run_s104_handoff_voice_typed_voice(evidence.clone()),
+    )
+    .await;
+    // The scenario's own error comes first; a journal fault that followed it
+    // (a dropped peer after a failed reopen) must not shadow it.
+    let finished = evidence.finish(match &result {
+        Ok(Ok(())) => evidence::Outcome::Passed,
+        Ok(Err(_)) => evidence::Outcome::Failed,
+        Err(_) => evidence::Outcome::TimedOut,
+    });
+    result.map_err(|_| "S104 overall deadline expired")??;
+    finished?;
+    Ok(())
+}
+
+async fn run_s104_handoff_voice_typed_voice(
+    evidence: Journal,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+        )
+        .with_test_writer()
+        .try_init();
+    require_api_key()?;
+    let started = Instant::now();
+    evidence.stage(EvidenceStage::Opening)?;
+    let mut live = open_public_live_with(PublicLiveOpen {
+        temp_prefix: "gpt-live-public-handoff-e2e-",
+        operator_principal: "scenario-104-operator",
+        execution_policy: LiveDelegationExecutionPolicy::ExistingMember,
+        bootstrap: None,
+        seed_prompt: None,
+        evidence: Some(evidence.clone()),
+        unmeasured_playback: true,
+        executor_instructions: Some(vec![
+            "You are the executor behind a voice assistant. Your current working directory is the \
+             scratch workspace; do every file operation there with the shell tool. When asked for an \
+             ode in a file, write exactly the requested file with the requested content, then in your \
+             spoken answer read it back line by line. Answer typed questions in one short sentence."
+                .to_owned(),
+        ]),
+        extra_members: Vec::new(),
+        instructions_preface: None,
+    })
+    .await?;
+    let connected_ms = started.elapsed().as_millis();
+    let workspace = live._temp.path().join("project");
+    let _server_guard = AbortScenarioServer(live.server_task.clone());
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let channel = evidence.current_channel()?;
+    let mut tolerant_failures = Vec::new();
+    let mut deterministic_failures: Vec<String> = Vec::new();
+    let mut seen_executor_turns = std::collections::BTreeSet::new();
+    let result = async {
+        evidence.stage(EvidenceStage::Connected)?;
+        live.assert_existing_text_identity().await?;
+
+        // The job by voice.
+        evidence.stage(EvidenceStage::HandoffJob)?;
+        let request = live
+            .peer
+            .play_at(&PlayAt::new("handoff_job", Anchor::Now, 0))
+            .await?;
+        let request_start_ms = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(30), "job fixture_start", |t| {
+                fixture_start_entry(t, request).map(|e| e.t_ms)
+            })
+            .await?;
+        let delegation_created_ms = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(60), "job delegation_created", |t| {
+                timeline_find(t, TimelineKind::DelegationCreated, request_start_ms).map(|e| e.t_ms)
+            })
+            .await?;
+        live.record_time_to_talk("S104", &mut tolerant_failures).await?;
+        live.record_uplink("S104").await?;
+        let timeline1 = live.peer.timeline().await?;
+        println!(
+            "GPT_LIVE_S104_JOB fixture_start_ms={request_start_ms} delegation_created_ms={delegation_created_ms} heard={:?}",
+            SpokenTurn::from_timeline(&timeline1, request).map(|t| t.input_text)
+        );
+
+        // Close while the job runs (graceful client disconnect, host close).
+        evidence.stage(EvidenceStage::HandoffClose)?;
+        let close1 = close_or_record(&mut live, &evidence, channel, "S104", &mut deterministic_failures).await?;
+        evidence.record(EvidenceRecord::Timeline {
+            channel,
+            entries: timeline1.clone(),
+        })?;
+
+        // Typed follow-up during the closure.
+        evidence.stage(EvidenceStage::HandoffTyped)?;
+        let typed_started = Instant::now();
+        let typed = live
+            .rpc
+            .call_raw(
+                "turn/start",
+                json!({"session_id":live.session_id,"prompt":S104_TYPED_PROMPT}),
+                180,
+            )
+            .await?;
+        let typed_ms = typed_started.elapsed().as_millis();
+        let typed_ok = typed["error"].is_null();
+        println!(
+            "GPT_LIVE_S104_TYPED ok={typed_ok} ms={typed_ms} error={}",
+            typed["error"]
+        );
+        if !typed_ok {
+            deterministic_failures.push(format!(
+                "the typed turn during the closure failed: {}",
+                typed["error"]
+            ));
+        }
+
+        // The job completes during the closure and commits.
+        let job = wait_executor_turn(&mut live, &mut seen_executor_turns, started).await;
+        let executor_done_at_ms = match job {
+            Ok(ms) => Some(ms),
+            Err(error) => {
+                deterministic_failures.push(format!("the job did not reach terminality during the closure: {error}"));
+                None
+            }
+        };
+        let history = live
+            .rpc
+            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+            .await?;
+        let rows = s100_user_rows(&history);
+        let all_text = history_text(&history).to_lowercase();
+        let messages = history["messages"].as_array().cloned().unwrap_or_default();
+        let roles: Vec<&str> = messages.iter().filter_map(|m| m["role"].as_str()).collect();
+        let files = s100_markdown_files(&workspace);
+        println!(
+            "GPT_LIVE_S104_CLOSURE_HISTORY executor_done_at_ms={executor_done_at_ms:?} executor_inputs={:?} spoken_rows={:?} roles={roles:?} files={:?} result_token_committed={} typed_committed={}",
+            rows.executor_inputs,
+            rows.spoken,
+            files.iter().filter_map(|p| p.strip_prefix(&workspace).ok()).collect::<Vec<_>>(),
+            all_text.contains(S104_RESULT_TOKEN),
+            rows.spoken.iter().any(|row| row.contains(S104_TYPED_TOKEN))
+        );
+        if rows.executor_inputs.is_empty() {
+            deterministic_failures.push("the job's executor input was not committed".to_owned());
+        }
+        if !all_text.contains(S104_RESULT_TOKEN) {
+            deterministic_failures.push(format!(
+                "the job's final transcript (carrying {S104_RESULT_TOKEN:?}) was not committed to the session"
+            ));
+        }
+        if typed_ok && !rows.spoken.iter().any(|row| row.contains(S104_TYPED_TOKEN)) {
+            deterministic_failures.push("the typed turn's user row was not committed".to_owned());
+        }
+
+        // Reopen on the same session and ask what happened.
+        let reopen_requested = Instant::now();
+        match timeout(S104_REOPEN_BOUND, live.reopen()).await {
+            Ok(Ok(())) => println!("GPT_LIVE_S104_REOPEN ms={}", reopen_requested.elapsed().as_millis()),
+            Ok(Err(error)) => {
+                println!("GPT_LIVE_S104_REOPEN_FAILED error={error}");
+                deterministic_failures.push(format!("reopen failed: {error}"));
+                return Err(format!(
+                    "S104 deterministic checks failed:\n  - {}",
+                    deterministic_failures.join("\n  - ")
+                )
+                .into());
+            }
+            Err(_) => {
+                println!("GPT_LIVE_S104_REOPEN_FAILED error=timeout");
+                deterministic_failures.push(format!(
+                    "reopen did not connect within {} s",
+                    S104_REOPEN_BOUND.as_secs()
+                ));
+                return Err(format!(
+                    "S104 deterministic checks failed:\n  - {}",
+                    deterministic_failures.join("\n  - ")
+                )
+                .into());
+            }
+        }
+        let channel2 = evidence.current_channel()?;
+        let owner = evidence.owner_appends()?;
+        println!(
+            "GPT_LIVE_S104_REOPEN_APPENDS instructions_attempts={} thinking_attempts={} framed_summaries={}",
+            owner.instructions_attempts, owner.thinking_attempts, owner.framed_summaries
+        );
+        evidence.stage(EvidenceStage::HandoffBack)?;
+        let events_before_back = live.peer.events().await?.len();
+        let (back, answer_back, _, back_start) = native_question(
+            &mut live,
+            "S104",
+            "reopened channel (handoff_back)",
+            PlayAt::new("handoff_back", Anchor::Now, 0).overlap_bound_ms(60_000),
+        )
+        .await?;
+        live.record_time_to_talk("S104", &mut tolerant_failures).await?;
+        evidence.record(EvidenceRecord::Latency {
+            channel: channel2,
+            turn: 1,
+            input_final_to_audio_ms: back.input_final_to_audio_ms(),
+            speech_end_to_audio_ms: back.speech_end_to_audio_ms(),
+        })?;
+        let lower = answer_back.to_lowercase();
+        record_tolerant(
+            &evidence,
+            channel2,
+            "S104",
+            "post_reopen_answer_carries_job_result_token",
+            lower.contains(S104_RESULT_TOKEN),
+            format!("token={S104_RESULT_TOKEN:?} answer={:?}", answer_back.trim()),
+            &mut tolerant_failures,
+        )?;
+        record_tolerant(
+            &evidence,
+            channel2,
+            "S104",
+            "post_reopen_answer_carries_typed_fact",
+            lower.contains(S104_TYPED_TOKEN),
+            format!("token={S104_TYPED_TOKEN:?} answer={:?}", answer_back.trim()),
+            &mut tolerant_failures,
+        )?;
+        let events = live.peer.events().await?;
+        if events[events_before_back..].iter().any(is_client_delegation) {
+            deterministic_failures.push("the post-reopen question must be answered natively, not delegated".to_owned());
+        }
+
+        evidence.stage(EvidenceStage::Closing)?;
+        live.record_uplink("S104").await?;
+        let close2 = close_or_record(&mut live, &evidence, channel2, "S104", &mut deterministic_failures).await?;
+        let timeline2 = live.peer.timeline().await?;
+        evidence.record(EvidenceRecord::Timeline {
+            channel: channel2,
+            entries: timeline2.clone(),
+        })?;
+        let mut faults = evidence.faults()?;
+        faults.extend(live.peer.faults().await?);
+        if !faults.is_empty() {
+            deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
+        }
+        println!(
+            "GPT_LIVE_S104_OK total_ms={} connected_ms={connected_ms} close1_ms={:?} typed_ms={typed_ms} executor_done_at_ms={executor_done_at_ms:?} back_start_ms={back_start} back_ms={:?} close2_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            started.elapsed().as_millis(),
+            close1.map(|c| c.ms),
+            back.input_final_to_audio_ms(),
+            close2.map(|c| c.ms)
+        );
+        println!("GPT_LIVE_S104_TIMELINE_1\n{}", format_timeline(&timeline1));
+        println!("GPT_LIVE_S104_TIMELINE_2\n{}", format_timeline(&timeline2));
+        if !deterministic_failures.is_empty() {
+            return Err(format!(
+                "S104 deterministic checks failed:\n  - {}",
                 deterministic_failures.join("\n  - ")
             )
             .into());

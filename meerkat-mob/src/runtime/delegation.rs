@@ -572,8 +572,10 @@ pub struct DelegationExecutionService {
 
 impl DelegationExecutionService {
     /// How long a delegation waits for a busy source member's turn boundary
-    /// before reporting `SourceBusy`. Long enough for a tool round to finish,
-    /// short enough that a voice caller hears a truthful busy answer.
+    /// (and, once won, the recovery gate) before reporting `SourceBusy`. Long
+    /// enough for a tool round to finish, short enough that a voice caller
+    /// hears a truthful busy answer. The fork's store IO is outside the
+    /// bound.
     pub const SOURCE_TURN_BOUNDARY_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
     fn source_turn_boundary_wait(&self) -> std::time::Duration {
@@ -858,8 +860,12 @@ impl DelegationExecutionService {
                 // bounded, for the running turn to reach its finalization
                 // boundary and cuts the branch while still holding it, so a
                 // runtime lap queued behind the wait cannot take the gate
-                // first. A still-running source after the bound is a typed
-                // busy result, not an immediate refusal.
+                // first. The bound covers the waits, not the fork's store
+                // IO. A still-running source after the bound is a typed busy
+                // result, not an immediate refusal. Live callers pass
+                // `message_count` as the count committed before their own
+                // spoken turn, so the child branches at that pre-turn
+                // boundary whatever the source committed meanwhile.
                 let fork = match self
                     .handle
                     .fork_member_at_turn_boundary(

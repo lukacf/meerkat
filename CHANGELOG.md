@@ -84,12 +84,21 @@ them.
   from the committed transcript while still holding that boundary (releasing
   and re-locking would let a queued follow-up lap win the FIFO gate and refuse
   the fork as `Busy`); a member still running after the bound is reported as
-  `SourceBusy`. The RPC server's session service forwards the turn-boundary
-  fork to the persistent owner explicitly. The `MobSessionService` trait
-  default releases the boundary before it forks: it cannot hold the owner's
-  non-reentrant boundary across the owner's own fork, which self-deadlocked a
-  live delegation against an idle member behind a forwarding host with no
-  bound applied.
+  `SourceBusy`. `MobSessionService::fork_persisted_session_at_turn_boundary`
+  is a required trait method forwarded by every wrapper (RPC gateway, CLI,
+  test doubles); its earlier default body acquired the owner's non-reentrant
+  boundary and then called the owner's fork, which re-acquires it, so a live
+  delegation against an idle member behind the RPC gateway hung forever with
+  no bound applied. The bound now also covers the recovery-gate wait after
+  the boundary is won (floor `TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND`);
+  a source still not forkable after that is `SourceBusy`, never a silent wait.
+- Live delegation start failures reach the voice channel typed:
+  `LiveDelegationStartFailure::SourceBusy` names the mid-turn source and the
+  wait, `Failed` carries everything else; both sites log the kind and the
+  agent tool reports a busy source distinctly.
+- The public Live instructions preface host runs on its own task: a host
+  that panics loses its preface for that open like a slow host does, and the
+  open proceeds.
 
 ### Breaking
 
@@ -102,10 +111,13 @@ them.
   public methods `provider_item_ids` and `provider_item_id`;
   `RealtimeMaterializedRow` gains the public field `provider_item_ids`.
 - New public items: `meerkat_core::DurableForkAtTurnBoundary`,
-  `PersistentSessionService::fork_durable_session_at_turn_boundary`,
-  `MobSessionService::fork_persisted_session_at_turn_boundary` (trait method
-  with a default body), `MobHandle::fork_member_at_turn_boundary`,
-  `meerkat_mob::ForkMemberAtTurnBoundary`.
+  `PersistentSessionService::fork_durable_session_at_turn_boundary` and
+  `TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND`,
+  `MobSessionService::fork_persisted_session_at_turn_boundary` (REQUIRED
+  trait method, no default: every implementation must add it),
+  `MobHandle::fork_member_at_turn_boundary`,
+  `meerkat_mob::ForkMemberAtTurnBoundary`,
+  `meerkat_mob_mcp::live_delegation::LiveDelegationStartFailure`.
 - `DelegationExecutionError` gains the variant `SourceBusy`
   (`DelegationExecutionError::*` discriminants move).
 - `DelegationExecutionService` gains the associated constant
@@ -115,6 +127,15 @@ them.
 
 ### Changed
 
+- Live context mirror: an assistant row committed from the live channel
+  itself (realtime materialization, no context observation) now carries a
+  channel `realtime_origin`, so the mirror classifies it as
+  `LiveRealtimeTranscript`: already present in the channel, never echoed
+  back, and, with no observation claim, not reasserted after a bootstrap
+  summary. Before, such rows were re-mirrored as `ParentSessionServiceTurn`.
+  This is the intended disposition: the speech already exists in the
+  channel, and the concurrent bootstrap summary carries earlier speech
+  forward.
 - The MobKit documentation mirror on docs.rkat.ai tracks MobKit main instead
   of releases. `Publish MobKit docs` now runs on the `mobkit-docs-updated`
   dispatch that MobKit sends for every push to main touching `docs/`, on a

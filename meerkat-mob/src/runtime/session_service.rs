@@ -1291,22 +1291,22 @@ pub trait MobSessionService:
         ))
     }
 
-    /// Wait, bounded, for the source's turn-finalization boundary, then fork.
+    /// Wait, bounded, for the source's turn-finalization boundary and cut a
+    /// durable fork while still holding it.
     ///
-    /// The persistent store owner overrides this to cut the branch while it
-    /// still holds the boundary it waited for, which closes the race with a
-    /// runtime lap queued behind the wait. Decorators that forward
-    /// [`Self::fork_persisted_session`] to such a service must forward this
-    /// method too, or they fall back to this default.
-    ///
-    /// The default cannot hold the boundary across
-    /// [`Self::fork_persisted_session`]: for a service whose fork authority
-    /// takes that same non-reentrant boundary itself (the persistent owner
-    /// behind a forwarding decorator) that would self-deadlock with no bound
-    /// applied. It therefore waits under the bound, releases the boundary,
-    /// and forks with the ordinary `Quiescent` admission, which refuses a
-    /// source that started another turn in between with `Busy` instead of
-    /// hanging.
+    /// REQUIRED, deliberately without a default: the persistent owner
+    /// (`PersistentSessionService::fork_durable_session_at_turn_boundary`)
+    /// hands the boundary it waited for straight into its fork, which is what
+    /// closes the race with a runtime lap queued behind the wait. Every
+    /// wrapper (the RPC gateway, the CLI, test doubles) must forward this
+    /// method to its inner service as one contract. A default body that
+    /// acquires the boundary through
+    /// [`Self::acquire_runtime_turn_finalization_guard`] and then calls
+    /// [`Self::fork_persisted_session`] self-deadlocks on every wrapper over
+    /// the persistent owner, because the owner's fork re-acquires that same
+    /// non-reentrant boundary, and it does so outside any bound (S97,
+    /// 2026-09-22). `bound` covers the boundary wait and the recovery-gate
+    /// admission that follows it, not the fork's store IO.
     async fn fork_persisted_session_at_turn_boundary(
         &self,
         source_session_id: &SessionId,
@@ -1314,28 +1314,7 @@ pub trait MobSessionService:
         tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
         target: meerkat_core::DurableSessionForkTarget,
         bound: std::time::Duration,
-    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, SessionError> {
-        let started = std::time::Instant::now();
-        let Ok(guard) = tokio::time::timeout(
-            bound,
-            self.acquire_runtime_turn_finalization_guard(source_session_id),
-        )
-        .await
-        else {
-            return Ok(meerkat_core::DurableForkAtTurnBoundary::SourceBusy {
-                waited: started.elapsed(),
-            });
-        };
-        drop(guard?);
-        tracing::debug!(
-            session_id = %source_session_id,
-            "turn-boundary fork on a session service without held-boundary fork authority; \
-             forking after the wait with quiescent admission"
-        );
-        self.fork_persisted_session(source_session_id, message_count, tool_access_policy, target)
-            .await
-            .map(meerkat_core::DurableForkAtTurnBoundary::Forked)
-    }
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, SessionError>;
 
     /// Load an archived session only for an explicit resume/revival operation.
     /// Ordinary reads remain archive-filtered.
@@ -1756,6 +1735,20 @@ impl<B> MobSessionService for meerkat_session::EphemeralSessionService<B>
 where
     B: meerkat_session::SessionAgentBuilder + 'static,
 {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        _source_session_id: &meerkat_core::SessionId,
+        _message_count: Option<usize>,
+        _tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        _target: meerkat_core::DurableSessionForkTarget,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        Err(meerkat_core::service::SessionError::Unsupported(
+            "ephemeral session service does not expose durable transcript fork authority"
+                .to_string(),
+        ))
+    }
+
     async fn start_turn_with_admission_notification(
         &self,
         session_id: &SessionId,

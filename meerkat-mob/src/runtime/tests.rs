@@ -4034,6 +4034,33 @@ impl SessionServiceControlExt for MockSessionService {
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &meerkat_core::SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        // The mock's fork takes no boundary of its own, so holding the guard
+        // across it is safe here and mirrors the persistent owner's handover.
+        let started = std::time::Instant::now();
+        let Ok(guard) = tokio::time::timeout(
+            bound,
+            self.acquire_runtime_turn_finalization_guard(source_session_id),
+        )
+        .await
+        else {
+            return Ok(meerkat_core::DurableForkAtTurnBoundary::SourceBusy {
+                waited: started.elapsed(),
+            });
+        };
+        let _held = guard?;
+        self.fork_persisted_session(source_session_id, message_count, tool_access_policy, target)
+            .await
+            .map(meerkat_core::DurableForkAtTurnBoundary::Forked)
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         _machine: &meerkat_runtime::MeerkatMachine,
@@ -10989,6 +11016,25 @@ impl SessionServiceControlExt for PersistedListingSessionService {
 
 #[async_trait]
 impl MobSessionService for PersistedListingSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &meerkat_core::SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        self.inner
+            .fork_persisted_session_at_turn_boundary(
+                source_session_id,
+                message_count,
+                tool_access_policy,
+                target,
+                bound,
+            )
+            .await
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         machine: &meerkat_runtime::MeerkatMachine,
@@ -11360,6 +11406,25 @@ impl SessionServiceControlExt for InactiveReadSessionService {
 
 #[async_trait]
 impl MobSessionService for InactiveReadSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &meerkat_core::SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        self.inner
+            .fork_persisted_session_at_turn_boundary(
+                source_session_id,
+                message_count,
+                tool_access_policy,
+                target,
+                bound,
+            )
+            .await
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         machine: &meerkat_runtime::MeerkatMachine,
@@ -47959,6 +48024,19 @@ impl SessionServiceControlExt for RealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RealCommsSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        _source_session_id: &meerkat_core::SessionId,
+        _message_count: Option<usize>,
+        _tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        _target: meerkat_core::DurableSessionForkTarget,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        Err(meerkat_core::service::SessionError::Unsupported(
+            "real-comms test service has no durable fork authority".to_string(),
+        ))
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         _machine: &meerkat_runtime::MeerkatMachine,
@@ -49266,6 +49344,19 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
 
 #[async_trait]
 impl MobSessionService for RuntimeBackedRealCommsSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        _source_session_id: &meerkat_core::SessionId,
+        _message_count: Option<usize>,
+        _tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        _target: meerkat_core::DurableSessionForkTarget,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        Err(meerkat_core::service::SessionError::Unsupported(
+            "runtime-backed real-comms test service has no durable fork authority".to_string(),
+        ))
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         _machine: &meerkat_runtime::MeerkatMachine,

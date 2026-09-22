@@ -4531,6 +4531,19 @@ impl SessionServiceHistoryExt for LocalSessionService {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobSessionService for LocalSessionService {
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        _source_session_id: &meerkat_core::SessionId,
+        _message_count: Option<usize>,
+        _tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        _target: meerkat_core::DurableSessionForkTarget,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        Err(meerkat_core::service::SessionError::Unsupported(
+            "in-memory local session service has no durable fork authority".to_string(),
+        ))
+    }
+
     async fn commit_live_delegation_final_transcript(
         &self,
         _machine: &meerkat_runtime::MeerkatMachine,
@@ -7706,6 +7719,20 @@ mod tests {
 
     #[async_trait]
     impl MobSessionService for MockSessionSvc {
+        async fn fork_persisted_session_at_turn_boundary(
+            &self,
+            _source_session_id: &meerkat_core::SessionId,
+            _message_count: Option<usize>,
+            _tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+            _target: meerkat_core::DurableSessionForkTarget,
+            _bound: std::time::Duration,
+        ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError>
+        {
+            Err(meerkat_core::service::SessionError::Unsupported(
+                "mock session service has no durable fork authority".to_string(),
+            ))
+        }
+
         async fn commit_live_delegation_final_transcript(
             &self,
             _machine: &meerkat_runtime::MeerkatMachine,

@@ -2309,8 +2309,13 @@ enum ForkSourceBoundary {
     /// Acquire (or, for `CallerTurn`, skip) the boundary here.
     Admission(meerkat_core::DurableForkSourceAdmission),
     /// The caller already won the boundary while waiting for the source's
-    /// running turn and hands it over so the fork runs under it.
-    HeldTurnBoundary(tokio::sync::OwnedMutexGuard<()>),
+    /// running turn and hands it over so the fork runs under it. The
+    /// recovery-gate wait that follows is bounded by the caller's remaining
+    /// deadline.
+    HeldTurnBoundary {
+        turn_finalization_guard: tokio::sync::OwnedMutexGuard<()>,
+        recovery_gate_bound: std::time::Duration,
+    },
 }
 
 struct SessionMutationGuard {
@@ -4801,13 +4806,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// the fork is refused with `Busy`. The held guard is taken over and the
     /// remaining boundaries (recovery gate, active admission check, stale live
     /// session discard) are applied exactly as for a fresh acquisition.
+    ///
+    /// `recovery_gate_bound` caps the wait for the recovery gate, the only
+    /// other lock this path takes after winning the boundary. A gate still
+    /// held when it elapses is reported as `Busy`, never awaited silently:
+    /// a caller that has already waited for the turn boundary must not hang
+    /// unbounded past its own deadline.
     async fn transcript_edit_mutation_guard_with_turn_boundary(
         &self,
         id: &SessionId,
         turn_finalization_guard: tokio::sync::OwnedMutexGuard<()>,
+        recovery_gate_bound: std::time::Duration,
     ) -> Result<SessionMutationGuard, SessionError> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
-        let recovery_guard = recovery_gate.lock_owned().await;
+        let Ok(recovery_guard) =
+            tokio::time::timeout(recovery_gate_bound, recovery_gate.lock_owned()).await
+        else {
+            tracing::warn!(
+                session_id = %id,
+                bound_ms = recovery_gate_bound.as_millis() as u64,
+                "turn-boundary fork won the turn boundary but the recovery gate stayed held past the bound"
+            );
+            return Err(SessionError::Busy { id: id.clone() });
+        };
         match self.inner.join_active_runtime_context_admission(id).await {
             Ok(Some(active_admission)) => {
                 drop(active_admission);
@@ -5082,6 +5103,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// `bound` elapses yields [`DurableForkAtTurnBoundary::SourceBusy`] and
     /// nothing is forked. `target.source_admission` must be `Quiescent`: the
     /// caller does not own the running turn.
+    ///
+    /// `bound` covers the two waits this path can block on, the turn boundary
+    /// and then the recovery gate (the remainder of the bound, at least
+    /// [`Self::TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND`]); a gate or an
+    /// admission that still refuses the fork after that is `SourceBusy` too.
+    /// The fork's own store IO is not bounded: it holds no lock another
+    /// writer could be waiting on, and cutting it short mid-commit would leave
+    /// a half-written child.
     pub async fn fork_durable_session_at_turn_boundary(
         &self,
         source_session_id: &SessionId,
@@ -5107,18 +5136,41 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 waited: started.elapsed(),
             });
         };
-        let forked = self
+        let recovery_gate_bound = bound
+            .saturating_sub(started.elapsed())
+            .max(Self::TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND);
+        match self
             .fork_durable_session_with_optional_planned_identity_under(
                 source_session_id,
                 message_count,
                 None,
                 tool_access_policy,
                 Some(target),
-                ForkSourceBoundary::HeldTurnBoundary(turn_finalization_guard),
+                ForkSourceBoundary::HeldTurnBoundary {
+                    turn_finalization_guard,
+                    recovery_gate_bound,
+                },
             )
-            .await?;
-        Ok(meerkat_core::DurableForkAtTurnBoundary::Forked(forked.fork))
+            .await
+        {
+            Ok(forked) => Ok(meerkat_core::DurableForkAtTurnBoundary::Forked(forked.fork)),
+            // The boundary was won, but the source is still not forkable
+            // (recovery gate held past the bound, or a runtime admission
+            // active despite the boundary): a busy source, not a failure.
+            Err(SessionError::Busy { .. }) => {
+                Ok(meerkat_core::DurableForkAtTurnBoundary::SourceBusy {
+                    waited: started.elapsed(),
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
+
+    /// Floor for the recovery-gate wait after the turn boundary is won, so a
+    /// boundary wait that consumed the whole bound still gives the gate a
+    /// moment instead of reporting busy on a gate that is about to free.
+    pub const TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND: std::time::Duration =
+        std::time::Duration::from_secs(1);
 
     /// Stamp one DETACHED fork session with the exact mob member binding it is
     /// being seated as.
@@ -5288,10 +5340,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::CallerTurn) => {
                 Self::caller_turn_fork_mutation_guard()
             }
-            ForkSourceBoundary::HeldTurnBoundary(turn_finalization_guard) => {
+            ForkSourceBoundary::HeldTurnBoundary {
+                turn_finalization_guard,
+                recovery_gate_bound,
+            } => {
                 self.transcript_edit_mutation_guard_with_turn_boundary(
                     source_session_id,
                     turn_finalization_guard,
+                    recovery_gate_bound,
                 )
                 .await?
             }

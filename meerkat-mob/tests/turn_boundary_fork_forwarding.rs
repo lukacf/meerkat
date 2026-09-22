@@ -1,12 +1,13 @@
 //! A live delegation forks its source member at the source's turn boundary
 //! through `MobSessionService::fork_persisted_session_at_turn_boundary`.
 //! Hosts (the RPC server, the CLI) reach the persistent session owner
-//! through a decorator that forwards trait methods one by one. A decorator
-//! that forwards `fork_persisted_session` and the turn-finalization guard but
-//! not the turn-boundary fork falls back to the trait default; that default
-//! must not hold the persistent owner's non-reentrant boundary across the
-//! owner's own fork, or a delegation against an idle source hangs forever
-//! with no bound applied (S97, 2026-09-22).
+//! through a decorator that forwards trait methods one by one. The method is
+//! required so a decorator cannot compile without forwarding it: a default
+//! body that held the persistent owner's non-reentrant boundary across the
+//! owner's own fork made a delegation against an idle source hang forever
+//! with no bound applied (S97, 2026-09-22). This test keeps the wrapper shape
+//! honest end to end: a real persistent service behind a forwarding
+//! decorator, an idle member, the exact call a live delegation makes.
 
 #![cfg(all(not(target_arch = "wasm32"), feature = "test-support"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -82,6 +83,18 @@ fn persistent_service(paths: &Paths) -> Arc<PersistentSessionService<FactoryAgen
     ))
 }
 
+fn fork_target(member: &str) -> meerkat_core::DurableSessionForkTarget {
+    meerkat_core::DurableSessionForkTarget {
+        member_binding: meerkat_core::MobMemberBinding {
+            mob_id: "voice".to_string(),
+            role: "executor".to_string(),
+            member: member.to_string(),
+        },
+        cache_identity: None,
+        source_admission: meerkat_core::DurableForkSourceAdmission::Quiescent,
+    }
+}
+
 fn definition() -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
@@ -125,8 +138,8 @@ async fn turn_boundary_fork_through_a_forwarding_host_returns_within_the_bound()
     let root = tempfile::tempdir().expect("tempdir");
     let paths = Paths::new(root.path());
     let inner = persistent_service(&paths);
-    // The host decorator shape (see `FailingOnceSessionService`): fork and
-    // turn boundary forwarded, turn-boundary fork left to the trait default.
+    // The host decorator shape (see `FailingOnceSessionService`): fork, turn
+    // boundary, and turn-boundary fork forwarded to the persistent owner.
     let host = support::FailingOnceSessionService::new(
         Arc::clone(&inner) as Arc<dyn MobSessionService>,
         None,
@@ -136,7 +149,7 @@ async fn turn_boundary_fork_through_a_forwarding_host_returns_within_the_bound()
     );
     let storage = MobStorage::persistent(&paths.mob_db_path).expect("persistent mob storage");
     let handle = MobBuilder::new(definition(), storage)
-        .with_session_service(host)
+        .with_session_service(Arc::clone(&host) as Arc<dyn MobSessionService>)
         .with_default_llm_client(Arc::new(meerkat_client::TestClient::for_provider(
             meerkat_core::Provider::OpenAI,
         )))
@@ -151,17 +164,16 @@ async fn turn_boundary_fork_through_a_forwarding_host_returns_within_the_bound()
         .await
         .expect("spawn the executor");
 
-    // The exact call a live delegation makes. The bound is the production
-    // value; the outer timeout is the regression detector: before the fix
-    // this future never completed (the decorator default held the owner's
-    // boundary across the owner's own fork).
+    // The exact call a live delegation makes, with a 1 s bound under a 5 s
+    // detector: a self-deadlock on the owner's boundary never completes, a
+    // healthy handover returns in milliseconds.
     let outcome = tokio::time::timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(5),
         handle.fork_member_at_turn_boundary(
             &source,
             SpawnMemberSpec::new("executor", AgentIdentity::from("live-delegation-1")),
             None,
-            Duration::from_secs(20),
+            Duration::from_secs(1),
         ),
     )
     .await
@@ -175,21 +187,27 @@ async fn turn_boundary_fork_through_a_forwarding_host_returns_within_the_bound()
         AgentIdentity::from("live-delegation-1")
     );
 
-    // A second delegation against the still idle source behaves the same.
-    let again = tokio::time::timeout(
-        Duration::from_secs(10),
-        handle.fork_member_at_turn_boundary(
-            &source,
-            SpawnMemberSpec::new("executor", AgentIdentity::from("live-delegation-2")),
+    // The same through the decorator's trait method directly, the way
+    // `MobHandle` reaches it as `Arc<dyn MobSessionService>`.
+    let source_session_id = handle
+        .resolve_bridge_session_id(&source)
+        .await
+        .expect("source bridge session");
+    let direct = tokio::time::timeout(
+        Duration::from_secs(5),
+        host.fork_persisted_session_at_turn_boundary(
+            &source_session_id,
             None,
-            Duration::from_secs(20),
+            None,
+            fork_target("live-delegation-2"),
+            Duration::from_secs(1),
         ),
     )
     .await
-    .expect("the second turn-boundary fork must return as well")
-    .expect("the second fork must succeed");
+    .expect("the decorator's turn-boundary fork must return for an idle source")
+    .expect("the decorator's fork must succeed for an idle source");
     assert!(
-        matches!(again, ForkMemberAtTurnBoundary::Forked(_)),
-        "{again:?}"
+        matches!(direct, meerkat_core::DurableForkAtTurnBoundary::Forked(_)),
+        "{direct:?}"
     );
 }

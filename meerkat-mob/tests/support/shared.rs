@@ -1104,10 +1104,10 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
         self.inner.load_revivable_retired_session(session_id).await
     }
 
-    // The host decorator shape (RPC server, CLI): the persistent owner's fork
-    // and turn boundary are forwarded one method at a time, and the
-    // turn-boundary fork is deliberately NOT forwarded so tests can exercise
-    // the trait default behind such a decorator.
+    // The host decorator shape (RPC server, CLI): the persistent owner's fork,
+    // turn boundary, and turn-boundary fork are forwarded one method at a
+    // time. The last is a required trait method precisely so a decorator
+    // cannot compile without it.
     async fn fork_persisted_session(
         &self,
         source_session_id: &meerkat_core::SessionId,
@@ -1129,6 +1129,25 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
     > {
         self.inner
             .acquire_runtime_turn_finalization_guard(session_id)
+            .await
+    }
+
+    async fn fork_persisted_session_at_turn_boundary(
+        &self,
+        source_session_id: &meerkat_core::SessionId,
+        message_count: Option<usize>,
+        tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+        target: meerkat_core::DurableSessionForkTarget,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::DurableForkAtTurnBoundary, meerkat_core::service::SessionError> {
+        self.inner
+            .fork_persisted_session_at_turn_boundary(
+                source_session_id,
+                message_count,
+                tool_access_policy,
+                target,
+                bound,
+            )
             .await
     }
 

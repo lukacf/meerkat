@@ -21430,18 +21430,15 @@ async fn durable_fork_delegation_waits_for_a_busy_source_turn_boundary_then_fork
         .spawn(ProfileName::from("worker"), source_identity.clone(), None)
         .await
         .expect("spawn busy delegation source");
-    let source_session_id = source
-        .bridge_session_id()
-        .expect("source bridge session")
-        .clone();
-    // Hold the source's turn-finalization boundary: this is what a running
-    // turn does, and what made a live delegation fail with `Running`.
-    let gate = Arc::new(TestRuntimeControlBarrier::new());
-    service
-        .turn_finalization_entry_gates
-        .write()
-        .await
-        .insert(source_session_id.clone(), Arc::clone(&gate));
+    assert!(
+        source.bridge_session_id().is_some(),
+        "source bridge session"
+    );
+    // Hold the turn-finalization boundary the way a running turn does: a
+    // real mutex the fork must wait on (an entry gate would be consumed by
+    // whichever acquirer came first, which under load is not the fork).
+    let gate = service.install_non_reentrant_turn_finalization_gate();
+    let held_turn = Arc::clone(&gate).lock_owned().await;
     let child_identity = AgentIdentity::from("delegation-busy-child");
     let request = DelegationExecutionRequest::new(
         child_identity.clone(),
@@ -21468,7 +21465,7 @@ async fn durable_fork_delegation_waits_for_a_busy_source_turn_boundary_then_fork
             .is_none(),
         "no fork may exist before the source boundary is released"
     );
-    gate.release_all();
+    drop(held_turn);
     let execution = tokio::time::timeout(Duration::from_secs(10), start)
         .await
         .expect("delegation resumes once the boundary is released")
@@ -21499,23 +21496,14 @@ async fn durable_fork_delegation_reports_source_busy_after_the_bounded_wait() {
         .spawn(ProfileName::from("worker"), source_identity.clone(), None)
         .await
         .expect("spawn stuck delegation source");
-    let source_session_id = source
-        .bridge_session_id()
-        .expect("source bridge session")
-        .clone();
-    let gate = Arc::new(TestRuntimeControlBarrier::new());
-    struct ReleaseOnDrop(Arc<TestRuntimeControlBarrier>);
-    impl Drop for ReleaseOnDrop {
-        fn drop(&mut self) {
-            self.0.release_all();
-        }
-    }
-    let _release = ReleaseOnDrop(Arc::clone(&gate));
-    service
-        .turn_finalization_entry_gates
-        .write()
-        .await
-        .insert(source_session_id.clone(), Arc::clone(&gate));
+    assert!(
+        source.bridge_session_id().is_some(),
+        "source bridge session"
+    );
+    // A turn that never finalizes within the bound: hold the real boundary
+    // mutex for the whole test.
+    let gate = service.install_non_reentrant_turn_finalization_gate();
+    let _held_turn = Arc::clone(&gate).lock_owned().await;
     let request = DelegationExecutionRequest::new(
         AgentIdentity::from("delegation-stuck-child"),
         "never starts",

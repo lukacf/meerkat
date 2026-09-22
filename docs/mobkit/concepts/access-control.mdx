@@ -4,7 +4,7 @@ description: "Optional ABAC for the console: control which users can see which a
 icon: "lock"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 MobKit ships an optional attribute-based access control (ABAC) layer for everything that flows through the console and observation surfaces. When it is off — the default — nothing changes. When it is on, every console caller only sees and operates exactly what their attributes grant: the agent sidebar, roster, topology, timeline, event streams, sends, and lifecycle actions are all filtered or gated per principal, invisibly. A restricted user doesn't see denied agents or disabled buttons explained; they just get a console shaped to what they're allowed.
 
@@ -12,7 +12,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 
 ## The model
 
-- **Principal** — the authenticated console caller: the `subject` (email or token `sub`) plus the groups it belongs to. On an open console (`require_app_auth = false`) the principal is anonymous and only matches rules without subject constraints.
+- **Principal** — the authenticated console caller: the `subject` (email or token `sub`) plus the groups it belongs to. On an auth-optional console (`require_app_auth = false`), callers without a valid voluntarily supplied token are anonymous and only match rules without subject constraints. With access control and trusted-token validation configured, a valid optional token can still identify a named principal for HTTP and SSE access checks.
 - **Resource** — usually an agent: its identity, role, and labels (the same labels you already use for console grouping).
 - **Action** — a verb from a fixed vocabulary:
 
@@ -34,6 +34,8 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `agent.retire` | Retire / force-cancel / delete the agent |
 | `agent.reset` | Reset durable agent state |
 | `gating.view` / `gating.decide` | Read and decide approval gates |
+| `workgraph.view` | Read WorkGraph snapshots, items, attention, events, and facts; observe the wake stream |
+| `workgraph.manage` | Mutate WorkGraph items, goals, links, and attention bindings |
 | `mob.observe` | Subscribe to whole-mob raw event streams |
 | `runtime.admin` | Routing tables, labels, wiring, reconcile |
 | `topology.view` | Inspect topology state for an agent; also requires `agent.view` |
@@ -48,6 +50,10 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 - **Rule** — matches principals (`subjects`, `groups`), actions (exact, `agent.*`, or `*`), and resources (`agents`, `roles`, `match_labels`). Resource selectors AND together; values within a list OR together. Empty selectors leave a dimension unconstrained.
 
 Evaluation is **deny-by-default with deny-overrides**: a matching `deny` rule always wins, then a matching `allow` rule allows, otherwise the check denies. Subjects listed in `admins` bypass rules entirely. A disabled config allows everything.
+
+WorkGraph actions are resource-less grants over the whole WorkGraph, not
+per-agent permissions. Console mutations also require the independent
+read-only policy gate to allow mutation.
 
 ### Spawn-lineage inheritance
 
@@ -72,6 +78,10 @@ admins = ["root@example.com"]
 [groups.ops]
 description = "Operations"
 members = ["alice@example.com", "bob@example.com"]
+
+[groups.contractors]
+description = "Payments contractors"
+members = ["contractor@example.com"]
 
 # Ops can see every agent...
 [[rules]]
@@ -124,8 +134,8 @@ const mobkit = await MobKit.builder()
   .build();
 ```
 
-Use the downloaded or locally built gateway binary as described in the
-[quickstart](/mobkit/quickstart#install).
+Use the `rpc_gateway` executable installed by the
+[quickstart](/mobkit/quickstart#install) for the explicit gateway path.
 
 ```python
 mobkit = await (
@@ -175,7 +185,7 @@ All write methods require `access.admin` (or admin standing) and return the new 
 Label- and role-based rules resolve against an attribute cache the runtime refreshes from every roster projection, so selectors keep working on surfaces that only carry an identity string.
 
 <Note>
-**Migration — memory read actions.** Recall used to ride bare `agent.view`. Configs written before `agent.memory.read` existed (no `*.memory.*` action mentioned in any rule) keep working: on load, every rule matching `agent.view` is extended to also cover `agent.memory.read` — allow *and* deny rules alike — and a warning is logged recommending explicit rules. The rewrite is materialized into the persisted config, so it happens once. A config that mentions any memory action anywhere is taken literally.
+**Migration — memory read actions.** Recall used to ride bare `agent.view`. Configs written before `agent.memory.read` existed (no `*.memory.*` action mentioned in any rule) keep working: on load, every rule matching `agent.view` is extended to also cover `agent.memory.read` — allow *and* deny rules alike — and a warning is logged recommending explicit rules. Normalization is in memory on load and reaches the TOML file on the next successful persisted admin mutation/save. Until then, an unchanged old file is normalized again on restart; after the normalized config is saved, the rewrite is self-limiting. A config that mentions any memory action anywhere is taken literally.
 </Note>
 
 ### `mob.observe` and per-agent filtering
@@ -188,13 +198,13 @@ Label- and role-based rules resolve against an attribute cache the runtime refre
 
 ## Relationship to authentication
 
-Access control layers on top of console authentication (`require_app_auth` + the email allowlist): authentication decides who may reach the console at all, ABAC decides what each of them sees and does once inside. Identity comes from the validated bearer token (`email` or `sub` claim). Running with access control enabled but authentication off is possible (anonymous callers match only unconstrained rules), but for per-user policy you want auth on.
+Access control layers on top of console authentication (`require_app_auth` + the email allowlist): authentication decides who may reach the console at all, ABAC decides what each of them sees and does once inside. Identity comes from the validated bearer token (`email` or `sub` claim). With authentication optional, a valid voluntarily supplied token can still establish a named principal when trusted-token validation and access control are configured. Callers without one are anonymous and match only rules without subject constraints. For per-user deployments, require authentication rather than relying on optional identification.
 
 ## Cross-mob control grants
 
 Everything above governs the **console plane**: human callers reaching agents through the console, REST, and RPC surfaces. The **cross-mob control channel** is a separate plane with a separate policy, and the two never see each other's rules.
 
-That channel is the TCP/UDS listener a gateway binds with `control_listen` / `--control-listen`. Peer gateways drive four verbs across it:
+That channel is the TCP/UDS listener a gateway binds with `control_listen` / `--control-listen`. Peer gateways drive four member-plane verbs across it:
 
 | Verb | Reaches |
 |------|---------|
@@ -202,7 +212,17 @@ That channel is the TCP/UDS listener a gateway binds with `control_listen` / `--
 | `inject` | Deliver an external-turn message into one of your members' sessions |
 | `lookup_member` | Read a member's comms facts (peer id, comms name, transport pubkey, advertised address) |
 
-A **control grant** binds one calling gateway - identified by its Ed25519 pubkey, the same one `mobkit/peer_pubkey` reports - to the verbs and the members it may reach. Anything outside the grant is refused before the request reaches your mob, so an ungranted caller never learns whether the member it named exists.
+Two separately granted host-plane verbs address the runtime host, not a member:
+
+| Verb | Reaches |
+|------|---------|
+| `host_describe` | Host identity, capabilities, and placement labels |
+| `host_health` | Host health projection |
+
+Host verbs must be explicitly named in the grant and require an installed
+host-facts provider to return data; member selectors do not scope them.
+
+A **control grant** binds one calling gateway - identified by its Ed25519 pubkey, the same one `mobkit/peer_pubkey` reports - to the verbs it may use and, for member-plane operations, the members it may reach. Anything outside the grant is refused before the request reaches your mob, so an ungranted caller never learns whether the member it named exists.
 
 ### How a caller is identified
 
@@ -225,7 +245,11 @@ verbs = ["inject"]
 # `members` omitted (or ["*"]) grants every member, present and future.
 ```
 
-`verbs = ["*"]` grants all four. An unknown verb, a missing or empty `verbs` list, an undecodable pubkey, or two labels sharing one pubkey are all config errors - the table refuses to load rather than granting something the operator did not write.
+`verbs = ["*"]` grants only the four member-plane verbs, never
+`host_describe` or `host_health`; include those names explicitly when intended.
+An unknown verb, a missing or empty `verbs` list, an undecodable pubkey, or two
+labels sharing one pubkey are all config errors - the table refuses to load
+rather than granting something the operator did not write.
 
 A caller entry accepts only `pubkey`, `verbs`, and `members`; any other key is a config error too. That is deliberate rather than pedantic: `member = ["bob"]` (singular) would otherwise leave `members` absent, and an absent `members` means *every* member - the typo would quietly widen a one-member grant to the whole mob. Put notes in `#` comments.
 

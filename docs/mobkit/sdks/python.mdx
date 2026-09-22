@@ -4,7 +4,7 @@ description: "MobKit Python SDK — typed builder API, async runtime, and stream
 icon: "python"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 The MobKit Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -29,12 +29,11 @@ pip install meerkat-mobkit
 
 ## Quick start
 
-Create `config/mob.toml` with a `worker` profile and configure credentials for
-its model's provider:
+In a fresh project directory, create `config/mob.toml`:
 
-```toml config/mob.toml
+```toml
 [mob]
-id = "quickstart"
+id = "python-quickstart"
 
 [profiles.worker]
 model = "gpt-5.5"
@@ -44,24 +43,42 @@ runtime_mode = "turn_driven"
 comms = true
 ```
 
-Profiles are templates, so the example explicitly ensures `agent-1` exists
-before sending to it.
+Set `OPENAI_API_KEY` in your environment for the model above, or choose a
+supported model and its matching provider credentials. Run the following
+script from that project directory, replacing `/path/to/rpc_gateway` with
+the binary you installed. Profiles are templates, not pre-created members,
+so the example explicitly creates an ephemeral worker before sending.
+
+<Warning>
+  This example disables console and SSE authentication for a local demo on
+  the gateway's default loopback-only listener. Do not expose it to a shared
+  network. See [Authentication](/mobkit/guides/authentication) and
+  [Deployment](/mobkit/guides/deployment) for authenticated hosting. The Python
+  subscription helpers below do not forward bearer tokens; configuring
+  `.auth(...)` alone does not authenticate those SSE requests.
+</Warning>
 
 ```python
 import asyncio
 from meerkat_mobkit import MobKit
 
 async def main():
-    async with await MobKit.builder().mob("config/mob.toml").gateway("/path/to/rpc_gateway").build() as rt:
+    async with await (
+        MobKit.builder()
+        .mob("config/mob.toml")
+        .gateway("/path/to/rpc_gateway")
+        .console_auth_required(False)
+        .build()
+    ) as rt:
         handle = rt.mob_handle()
-        await handle.ensure_member("agent-1", "worker")
 
         # Send a message (comms)
+        await handle.ensure_member("agent-1", "worker")
         await handle.send("agent-1", "Hello")
 
         # Watch what happens (observation)
         async for event in handle.subscribe_agent("agent-1"):
-            print(event.event_type, event.data)
+            print(event.event_type, event.event)
 
 asyncio.run(main())
 ```
@@ -149,9 +166,9 @@ luka = rt.agent("identity:luka")
 await luka.send("Hello")                                          # Addressable only
 await triage.dispatch_text("School closed", origin="connector")   # Any identity
 
-# Delivery + wait for THAT turn's answer. These wait on the completion
-# cursor the gateway captured before delivery, so they stay correct when an
-# agent answers two turns identically.
+# Wait for an identity completion after the pre-delivery cursor baseline,
+# even if consecutive answers have identical text. This is not request
+# correlation: concurrent/in-flight work can satisfy the same barrier.
 answer = await luka.send_and_wait("Hello", timeout=90)
 
 # Observation (no mob_handle, no member IDs needed)
@@ -168,11 +185,19 @@ await rt.agent("domain:calendar").respawn()  # Non-destructive recovery
 await rt.reconcile()                  # In-process roster reconciliation
 ```
 
+`send_and_wait` returns the `output_preview` observed after that identity's
+completion cursor advances; the preview is not request-correlated. Interpret
+it as this send's answer only if you exclude all other completion-producing
+work for the identity throughout the wait, including already-running kickoff
+turns and peer or background work.
+
 ### DurableAgentSpec fields
 
-The roster provider returns one `DurableAgentSpec` per identity. The Rust side
-deserializes the same shape, so every field below reaches the gateway
-verbatim; fields left at their default are omitted from the wire.
+The roster provider returns one `DurableAgentSpec` per identity. The SDK
+serializes the shared wire shape that Rust deserializes: `identity`, `profile`,
+`addressability`, `labels`, and `additional_instructions` are always included,
+even at their defaults. Optional fields whose value is `None` are omitted,
+including unset `runtime_mode_override` and `initial_message`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -205,7 +230,7 @@ the Rust struct:
 | Field | Type | Meaning |
 |-------|------|---------|
 | `mob_definition` | `dict \| None` | The booted mob's compiled definition as JSON (`id`, `profiles`, ...). Always present behind the bundled `rpc_gateway`; `None` only for in-process Rust embedders and test harnesses that resolve a roster without a mob definition. |
-| `previous_identities` | `list[str]` | Identities the identity runtime has registered at the time of the call. Empty on the bootstrap resolves (nothing is registered yet), populated on later re-derivations such as `mobkit/topology/query` or an edge reconcile. |
+| `previous_identities` | `list[str]` | Call-site-dependent prior-identity context, not an authoritative membership snapshot on every callback. Topology queries and edge reconciliation supply currently registered identities. Bootstrap, full roster refresh/reconcile, and reset-time spec adoption currently pass an empty list; an empty list does not imply that no identities are registered. |
 
 ```python
 class MyRoster:
@@ -244,11 +269,11 @@ The message enters the agent's inbox and is processed by the host loop.
 ```python
 # Stream one agent's events
 async for event in handle.subscribe_agent("agent-1"):
-    print(event.event_type, event.data)
+    print(event.event_type, event.event)
 
 # Stream mob-wide events (all agents)
 async for event in handle.subscribe_mob():
-    print(event.source, event.data)
+    print(event.member_id, event.event)
 ```
 
 Observation is independent of delivery. Subscribe before or after sending — the stream is continuous.
@@ -256,7 +281,7 @@ Observation is independent of delivery. Subscribe before or after sending — th
 ### Structural mob events — durable observability
 
 `MobHandle.query_mob_events()` and `subscribe_mob_events()` project
-every meerkat `MobEventKind` into a typed envelope
+every current Meerkat `MobEventKind` into a typed envelope
 preserving `mob_id`, `run_id`, `step_id`, `agent_identity`, and the
 full payload.
 
@@ -428,7 +453,7 @@ rt = await (
 | `.roster(provider)` | Identity-first roster provider |
 | `.topology_provider(provider)` | Identity-first topology provider |
 | `.agent_customizer(customizer)` | Identity-first agent customizer (`customize_build(context, spec, draft)`; see [Per-profile tools](#session-agent-builder-and-per-profile-tools)) |
-| `.on_error(callback)` | Error hook. Receives every runtime `ErrorEvent` (`category`, `message`, `context`) the gateway forwards as the `mobkit/on_error` notification; sync or async, fire-and-forget. Without it the events reach only the gateway's stderr ERROR line (see [Error hook and logging](/mobkit/guides/unified-runtime#error-hook-and-logging)) |
+| `.on_error(callback)` | Error hook. Receives every runtime `ErrorEvent` (`category`, `message`, `context`) the gateway forwards as the `mobkit/on_error` notification; sync or async, fire-and-forget. Without it the events reach only the gateway's normal log sink: ERROR for failures, INFO for `actor_loop_recovered`, subject to configured tracing filters and stderr handling (see [Error hook and logging](/mobkit/guides/unified-runtime#error-hook-and-logging)) |
 | `.identity_bootstrap_mode(mode)` | Eager, lazy, or bounded background-warm identity materialization; requires `.roster(...)` |
 | `.role_migrations(declarations)` | Authorize durable member role migrations for THIS boot. Takes an iterable of `RoleMigrationDeclaration` dataclasses or equivalent `identity` / `from_role` dicts, validating either form; a conflicting pair for one identity raises `ValueError`, an identical repeat is accepted, and leaving the setter unused emits no `role_migrations` init-params key at all |
 | `.session_service(builder, store)` | Session agent builder and optional store |
@@ -504,6 +529,7 @@ silent in-memory fallback. The `config.runtime_store` and
 `config.event_log` modules produce the explicit declarations:
 
 ```python
+from meerkat_mobkit import MobKit
 from meerkat_mobkit.config import event_log, runtime_store
 
 runtime = await (
@@ -514,6 +540,7 @@ runtime = await (
     .runtime_store(runtime_store.memory())
     # Declare a bounded queryable in-process event log — or event_log.null().
     .event_log(event_log.memory(batch_size=64))
+    .gateway("/path/to/rpc_gateway")
     .build()
 )
 ```
@@ -651,9 +678,13 @@ session builder exists, so there is no post-connect registration.
 ### Identity-first equivalent: `customize_build`
 
 On the identity plane the same hook is `AgentCustomizer.customize_build`,
-registered with the public `.agent_customizer(customizer)`. It runs on fresh
-create and on every restore/reconcile, receives the durable spec (so
-`spec.profile` is the profile name), and registers tools on the draft:
+registered with the public `.agent_customizer(customizer)`. It runs when an
+identity is actually built or re-materialized, including fresh creation and
+cold restore/resume. An already-active converged identity is reused without
+customization; lazy registration defers the hook until materialization.
+Do not use reconciliation to refresh an already-active identity's tool
+handlers. The hook receives the durable spec (so `spec.profile` is the profile
+name), and registers tools on the draft:
 
 ```python
 from meerkat_mobkit import (
@@ -686,8 +717,11 @@ identities keep it.
 `AgentBuildDraft.provider_params` mirrors meerkat's `ProviderParamsOverride`:
 the shared sampling knobs at the top level and the provider-specific knobs
 nested under `provider_tag`, which is tagged by `provider`. Anthropic prompt
-caching is such a knob; Meerkat defaults it to
-`disabled` on every backend, so a long-lived identity opts in here:
+caching is one such knob. With no profile or request override, the pinned Meerkat
+dependency defaults to `automatic` on Anthropic API, Vertex, and Foundry, and to
+`disabled` on Bedrock and Copilot. Bedrock and Copilot do not support request-wide
+automatic caching and reject an explicit `automatic` policy. On a supported
+backend, this example explicitly selects automatic caching with a one-hour TTL:
 
 ```python
 draft.provider_params = {
@@ -698,6 +732,9 @@ draft.provider_params = {
     },
 }
 ```
+
+To opt out per agent, set `provider_tag.cache_control` to `"disabled"` and omit
+`cache_ttl`.
 
 The flat form `{"cache_control": "automatic"}` is refused: both
 `ProviderParamsOverride` and the provider tags deny unknown fields, so the

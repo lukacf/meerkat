@@ -4,7 +4,7 @@ description: "Understand MobKit's lightweight roster projection, deep member sta
 icon: "users"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 The mob roster is the operational view of the members known to a mob. Roster
 reads return lightweight `MobMemberListEntry` projections. Deep execution
@@ -41,26 +41,19 @@ spawn anywhere is `mobkit_gateway`'s no-config fallback, which ensures a single
 `definition.json` exists; a workspace definition with an empty
 `identity_roster` boots with no members at all.
 
-The roster callback receives a typed `RosterContext`. On `rpc_gateway`, the
-gateway sends `callback/roster_provider/roster` with the serialized context
-nested under `params.context`, and both SDK dispatchers pass the parsed
-context to the provider:
+On `rpc_gateway`, `callback/roster_provider/roster` supplies the serialized
+`RosterContext` under `params.context`. Both SDKs pass a typed context to
+`roster(context)`: read `context.mob_definition` in Python or
+`context.mobDefinition` in TypeScript for the booted mob's compiled definition.
+Its `id`, `orchestrator`, and `profiles` are top-level fields, unlike the
+`[mob]` nesting in the source TOML. Prior-identity context is call-site-dependent;
+an empty list does not establish that no identities are registered. See
+[Roster provider context](#roster-provider-context) for the field contract.
 
-- Python: `context.mob_definition` and `context.previous_identities`.
-- TypeScript: `context.mobDefinition` and `context.previousIdentities`.
-
-The bundled gateway supplies its booted, compiled definition as a JSON object,
-including `profiles`. The definition is optional for custom hosts and test
-harnesses (`None` in Python, `null` in TypeScript). The `previous_identities`
-list depends on the callback path: topology-query/edge-reconciliation
-snapshots supply registered identities, while bootstrap, full roster
-refresh/reconcile, and reset-time roster adoption currently pass an empty
-list. An empty list is not proof that no identities are registered, and the
-context does not instruct the host to spawn one member per profile.
-
-A host can derive its roster from that context. If it already owns the source
-`mob.toml`, it can instead use its own parsed configuration, as in this
-optional profile-shaped roster strategy:
+A host may instead derive a profile-shaped crew from its own parsed `mob.toml`
+as an explicit policy choice, not as a workaround for a missing callback
+definition. This example uses the same text passed to `.mob_inline(MOB_TOML)`
+and intentionally ignores `context`:
 
 ```python
 import tomllib
@@ -465,11 +458,14 @@ under `context` (the same envelope the topology and customizer callbacks use):
 | Field | Meaning |
 |-------|---------|
 | `mob_definition` | The booted mob's compiled definition. Always present behind the bundled `rpc_gateway`; `null` only when an in-process Rust embedder or test harness resolves a roster without a mob definition. |
-| `previous_identities` | Call-site-dependent context, not a complete membership snapshot. Topology-query/edge-reconciliation snapshots supply registered identities; bootstrap, full roster refresh/reconcile, and reset-time roster adoption currently pass an empty list, even if identities are already registered. |
+| `previous_identities` | Call-site-dependent prior-identity context, not an authoritative membership snapshot on every callback. Topology-query and edge-reconciliation snapshots supply currently registered identities. Bootstrap, full roster refresh/reconcile, and reset-time spec adoption currently pass an empty list; an empty list does not establish that no identities are registered. |
 
 The Python SDK delivers this as `RosterContext` from
 `meerkat_mobkit.identity_first_models`; the TypeScript SDK as the exported
-`RosterContext` interface (`mobDefinition`, `previousIdentities`).
+`RosterContext` interface (`mobDefinition`, `previousIdentities`). Use
+`context.mob_definition` / `context.previous_identities` in Python and
+`context.mobDefinition` / `context.previousIdentities` in TypeScript; the
+prior-identity field has the same call-site qualification in both SDKs.
 
 ## See also
 

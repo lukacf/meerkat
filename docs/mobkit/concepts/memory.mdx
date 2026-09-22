@@ -4,7 +4,7 @@ description: "Operational memory assertions plus optional identity-first agent m
 icon: "brain"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 MobKit has two memory-adjacent surfaces, and they serve different latency
 classes:
@@ -72,9 +72,11 @@ The assertion ledger is a runtime-owned snapshot, not a shared append log.
 `MobkitRuntimeHandle` reads `state_path` exactly once, at runtime bootstrap,
 and from then on the in-memory assertions and conflict signals are the
 authority. Every `mobkit/memory/index` serializes that entire in-memory state
-and atomically replaces the file (`<state_path>.tmp`, then rename over
-`state_path`); nothing re-reads the file, takes a lock, or checks its
-modification time first. If the persist fails, the in-memory write is rolled
+and atomically replaces the file (write to `state_path.with_extension("tmp")`,
+then rename over `state_path`). The scratch path replaces the extension:
+`memory-ledger-state.json` uses `memory-ledger-state.tmp`. Nothing re-reads
+the file, takes a lock, or checks its modification time first. If the persist
+fails, the in-memory write is rolled
 back and the index call returns the backend error.
 
 Persists are not only host-originated. When `agent_memory` enables the
@@ -86,10 +88,12 @@ What this means for anything else that touches the file:
 
 - An external edit is never observed by the running runtime and is overwritten
   by the next persist, whether a host call or a Steward signal triggers it.
-- A well-formed hand-added entry is picked up only at the next restart, and
-  only if its `entity`, `topic`, and `store` are canonical (the five supported
-  store names) and its `fact` is non-empty; rows that fail that are dropped at
-  load without a diagnostic.
+- A well-formed hand-added entry is picked up only at the next restart.
+  Loading trims and ASCII-lowercases `entity`, `topic`, and `store`;
+  `entity` and `topic` must remain non-empty, and `store` must normalize to
+  one of the five supported store names. The `fact` is trimmed and must
+  remain non-empty. Rows that fail these checks are dropped at load without
+  a diagnostic; mixed case or surrounding whitespace alone is not a failure.
 - A structurally malformed file (an assertion missing a required field, or
   invalid JSON) refuses the next boot with `MobkitRuntimeError::MemoryBackend`.
 - Retention is capped: the runtime keeps at most 4,096 assertions
@@ -125,7 +129,7 @@ MemoryIndexRequest {
 }
 ```
 
-The current MobKit runtime stores a canonical assertion in memory and, when the memory backend is configured, rewrites the whole ledger file from that in-memory state (see [the ownership model](#the-runtime-owns-the-assertion-ledger)). Set `conflict: Some(true)` with `conflict_reason` to record a conflict signal instead of a normal assertion.
+The current MobKit runtime stores a canonical assertion in memory and, when the memory backend is configured, rewrites the whole ledger file from that in-memory state (see [the ownership model](#the-runtime-owns-the-assertion-ledger)). Set `conflict: Some(true)`, optionally with `conflict_reason`, to record or update a conflict signal. For a conflict-only write, set `fact: None`; a non-empty `fact` together with `conflict: Some(true)` records both an assertion and a conflict signal.
 
 ## Querying
 
@@ -140,7 +144,7 @@ MemoryQueryRequest {
 }
 ```
 
-The current MobKit runtime filters stored assertions and conflict signals by `entity`, `topic`, and `store` (exact matches). The optional `query` parameter is applied afterwards as a case-insensitive substring filter across entity, topic, and fact (reason for conflict signals). Semantic/vector search should be supplied by a provider or upstream Meerkat memory surface rather than assumed from this RPC.
+The current MobKit runtime filters stored assertions and conflict signals by `entity`, `topic`, and `store` (exact matches on trimmed, ASCII-lowercased tokens). Empty normalized filters and unsupported `store` filters are treated as absent, not as validation errors. The optional `query` parameter is applied afterwards as a case-insensitive substring filter across entity, topic, and fact (reason for conflict signals). Semantic/vector search should be supplied by a provider or upstream Meerkat memory surface rather than assumed from this RPC.
 
 ## Agent memory injection
 
@@ -183,29 +187,24 @@ With the SQLite store (the default), identity-first members get a capability-gat
 
 A memory tool that can be poisoned by prompt injection is worse than no memory tool, so the recorder ships with a deterministic firewall:
 
-- **Content-trust classification** (`agent_memory.content_trust`): built-in web/fetch tools and provider-native search are always untrusted. Tool classification checks those built-in names first, then `untrusted_tools`, then `trusted_tools`, then MCP server attribution against `trusted_mcp_servers`. Explicit tool rules therefore take precedence over server rules, but cannot make the built-in web/fetch tools trusted.
+- **Content-trust classification** (`agent_memory.content_trust`): dispatch-time classification joins recognized tool results to the request tool catalog's `ToolDef.provenance`. Typed MCP provenance uses `source_id` as the server name even when the tool name is unqualified. The asynchronous observe-stream fallback remains name-based. Classification precedence is: always-untrusted builtin names (`web_search`, `web_fetch`, `fetch`, `http_request`), `untrusted_tools`, `trusted_tools`, typed MCP server attribution against `trusted_mcp_servers`, qualified `mcp__<server>__<tool>` fallback when provenance is absent or non-MCP, then trusted. MCP servers not in the allowlist are untrusted. Explicit tool rules precede server rules but cannot override the always-untrusted builtin names. Provider-native `ServerToolContent` is always untrusted. Use explicit overrides for intentional policy or tools without usable attribution, not merely because an MCP tool name is unqualified.
 - **Session-sticky taint**: once a session ingests untrusted tool content, every LLM-authored memory write from that session lands `quarantined` — stored, auditable, but never injected or recalled until review. Taint clears only at a fresh-context boundary (reset, respawn, fresh spawn); compaction does not clear it.
-- **Write posture** (`agent_memory.llm_writes`): `"observed"` (default) quarantines only tainted-session writes; `"quarantined"` is the stricter policy that quarantines *every* LLM-authored write pending review.
+- **Write posture** (`agent_memory.llm_writes`): `"observed"` (default) quarantines only tainted-session writes; `"quarantined"` is the stricter policy and quarantines *every* LLM-authored write pending review.
 
-Dispatch-time classification joins tool results with the request's
-`ToolDef.provenance` catalog. Typed MCP provenance attributes a tool to its
-`source_id` even when the tool name is unqualified; servers are untrusted
-unless allowlisted. When MCP provenance is unavailable, classification falls
-back to the `mcp__<server>__<tool>` name shape and the explicit tool lists.
-Otherwise-unclassified tools default to trusted. The asynchronous
-observe-stream tool-event path remains name-based; it does not universally
-carry typed provenance.
+The bundled `rpc_gateway` with its SQLite agent-memory stack and
+`UnifiedRuntime`'s full-stack `persistent_agent_memory_stack` composition fill
+the `DispatchTaintSlot` and decorate member LLM clients. Recognized untrusted
+tool results are marked before the LLM request that consumes them; typed
+provider-native server-tool blocks are marked before the model response returns
+for tool dispatch. These paths do not wait for the asynchronous observer before
+a derived LLM memory write reaches the shared tracker-backed store gate. The
+observer remains a fallback.
 
-The bundled SDK gateway and `UnifiedRuntime` full-stack memory composition
-fill a shared `DispatchTaintSlot` and attach the member LLM-client decorator.
-It marks tool-result ingestions before the next LLM call, and marks typed
-provider-native server-tool content before returning the response to the
-agent loop. LLM-authored memory writes derived from that classified content
-therefore reach the store gate after taint is marked, rather than racing the
-asynchronous observer's first-ingestion signal. A custom composition with an
-unfilled slot is a pass-through and does not gain this ordering protection.
-This is a scoped ingestion/write ordering guarantee, not universal
-prompt-injection safety.
+This is a composed-path ordering guarantee, not general prompt-injection
+immunity or a guarantee for unclassified content. An unfilled slot is
+pass-through; custom or classic-provider compositions need equivalent tracker,
+decorator, and write-gate wiring. The stricter `"quarantined"` posture is not a
+workaround for an unshipped stock dispatch-order fix.
 
 Application/operator writes (the `mobkit/agent_memory/*` RPCs) are non-LLM principals and are never quarantined by this machinery. `llm_writes` and `content_trust` require `store: "sqlite"`. Selecting `store: "markdown"` is refused before a runtime can start; combining it with these SQLite-only knobs is rejected earlier during config validation.
 
@@ -260,7 +259,7 @@ MemoryStoreInfo {
 
 ## Console Memory panel
 
-When the bundled SQLite agent-memory store is wired, the console gains a **Memory** panel — trust through inspectability. It is strictly read-only and served by four `mobkit/memory/panel/*` RPC methods:
+When the bundled SQLite agent-memory store is wired, the console gains a **Memory** panel — trust through inspectability. It is strictly read-only and served by ten `mobkit/memory/panel/*` RPC methods, subject to provider capability and the caller's access grants:
 
 | Method | Returns |
 |--------|---------|
@@ -268,6 +267,16 @@ When the bundled SQLite agent-memory store is wired, the console gains a **Memor
 | `mobkit/memory/panel/record` | One record with body, its supersede chain (ancestors, committed successors, trailing uncommitted claimants), and its injection-ledger usage |
 | `mobkit/memory/panel/quarantine` | The quarantine queue plus pending gated promotions. The queue is read-only — verdicts belong to the memory steward's dream and the gating flow |
 | `mobkit/memory/panel/dreams` | Steward dream-run summaries reconstructed from the audit rows (op counts and kinds, quarantined ops, sampled record ids and rationales) |
+| `mobkit/memory/panel/dream_runs` | Durable dream-run detail, including partition, timestamps, committed-op count, and saved detail |
+| `mobkit/memory/panel/audit_verdicts` | Open usage-audit verdicts awaiting operator action, with record/run ids and rationales |
+| `mobkit/memory/panel/overview` | Per-scope status counts and body bytes, with store floors and pressure indicators |
+| `mobkit/memory/panel/proposals` | Pending mob/operator proposal metadata and a propose-time taint flag; bodies are withheld |
+| `mobkit/memory/panel/injections` | Recent injection-ledger rows, newest first, with record, identity, session key, surface, and timestamp |
+| `mobkit/memory/panel/harvests` | Pending exit-interview harvests, with identity, session key, cause, and retirement timestamp |
+
+These six additional methods accept optional `realm` selection; all except
+`overview` also accept `limit`. The current `injections` handler does not parse
+identity, session-key, or surface filters proposed in the design notes.
 
 Memory lifecycle events (`memory.dream.*`, `memory.record.promoted`, `memory.quarantine.verdict`, `memory.write.quarantined`, `memory.taint.transition`, `memory.hygiene.*`, ...) flow onto the console timeline as standard envelopes and render in the timeline and Signals surfaces.
 

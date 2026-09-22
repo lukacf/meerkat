@@ -4,7 +4,7 @@ description: "TypeScript SDK for MobKit with type-safe contracts, parity tests, 
 icon: "js"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 The TypeScript SDK (`@rkat/mobkit-sdk`) provides type-safe access to the MobKit JSON-RPC gateway from Node.js.
 
@@ -146,9 +146,11 @@ export interface RosterContext {
    */
   readonly mobDefinition: Record<string, unknown> | null;
   /**
-   * Identities the identity runtime has registered at the time of the call.
-   * Empty on the bootstrap resolves, populated on later re-derivations such as
-   * `mobkit/topology/query` or an edge reconcile.
+   * Call-site-dependent prior-identity context, not an authoritative membership
+   * snapshot on every callback. Topology queries and edge reconciliation supply
+   * currently registered identities. Bootstrap, full roster refresh/reconcile,
+   * and reset-time spec adoption currently pass an empty list; an empty list
+   * does not imply that no identities are registered.
    */
   readonly previousIdentities: readonly string[];
 }
@@ -247,7 +249,7 @@ The TypeScript SDK targets the JSON-RPC gateway. Rust also exposes lower-level n
 External identity providers are all-or-nothing: configure `continuityStore()`, `leaseProvider()`, and `scratchDir()` together. The SDK sends the corresponding init flags to Rust, and provider callbacks use Rust's wire shape (`result` tags and `ttl`). `LeaseProvider.renewLeases(...)` is atomic from the caller's perspective: a rejected promise means no input grant was changed, while every returned `renewed` or `lost` result is already committed for that identity. Providers must not commit a replacement grant and then reject.
 Continuity stores should treat `checkpoint_version` as monotonic per identity and continuity generation. A live session rebind changes `session_id` without resetting the version; only destructive reset advances `generation` and starts the version stream over.
 
-Gateway memory config accepts `{ backend: "local_json" }` with an optional `healthCheckEndpoint` (`memory.localJson(...)`); the legacy Elephant `{ backend, endpoint }` shape still works but is deprecated. Store, collection, and space selectors are retained on the helper object for app code but are not sent to the Rust gateway. Gateway auth config supports JWT validation; Google/OIDC helpers are model objects, not accepted by `mobkit/init` today.
+Raw gateway memory config accepts `{ backend: "local_json", health_check_endpoint: url }`, with `health_check_endpoint` optional. The TypeScript helper is `memory.localJson({ healthCheckEndpoint: url })`; it translates that option to the snake_case wire key. The legacy Elephant `{ backend, endpoint }` shape still works but is deprecated. Store, collection, and space selectors are retained on the helper object for app code but are not sent to the Rust gateway. Gateway auth config supports JWT validation; Google/OIDC helpers are model objects, not accepted by `mobkit/init` today.
 
 The builder exposes no `roleMigrations(...)` setter and sends no `role_migrations` init param, so a TypeScript host cannot authorize a role-migrating resume: a durable member whose role changed keeps refusing to resume with `MobError::MemberRoleMigrationRequired`. Declaring the migration currently requires the Python builder's `.role_migrations([...])` or a hand-built `mobkit/init` payload; see the [configuration reference](/mobkit/reference/configuration#member-role-migrations).
 
@@ -275,6 +277,7 @@ const runtime = await MobKit.builder()
   .runtimeStore(runtimeStore.memory())
   // Declare a bounded queryable in-process event log — or eventLog.nullStore().
   .eventLog(eventLog.memory({ batchSize: 64 }))
+  .gateway("/path/to/rpc_gateway")
   .build();
 ```
 
@@ -317,12 +320,14 @@ from a hang.
 `category` is one of the `ErrorCategory` constants (`spawn_failure`,
 `reconcile_incomplete`, `checkpoint_failure`,
 `compaction_persistence_rejected`, `actor_loop_stalled`,
-`actor_loop_recovered`, `host_loop_crash`, `rediscover_failure`,
+`actor_loop_recovered`, `actor_loop_terminated`, `host_loop_crash`, `rediscover_failure`,
 `event_log_flush_failure`, `identity_materialization_failure`,
-`mob_stop_proceeded_without_interrupt`), kept in lockstep with the Rust enum
-by `tests/sdk_error_category_parity.rs`; `context` carries the variant's
-fields (`member_id`, `error`, and so on). The hook is fire-and-forget: a
-rejected promise is swallowed, and with no callback registered the
+`mob_stop_proceeded_without_interrupt`). The SDK source constants are kept
+in lockstep with the Rust enum by `tests/sdk_error_category_parity.rs`;
+`context` carries the variant's fields (`member_id`, `error`, and so on).
+`actor_loop_terminated` is a terminal actor failure requiring a process restart,
+not a recovery notification like `actor_loop_recovered`. The hook is
+fire-and-forget: a rejected promise is swallowed, and with no callback registered the
 notification is dropped. The gateway's own stderr line for the same event
 (ERROR, or INFO for `actor_loop_recovered`) is written either way, so the
 hook adds alerting, not logging. Use

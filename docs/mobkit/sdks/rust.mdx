@@ -4,7 +4,7 @@ description: "Use MobKit as a Rust library: bootstrap runtimes, route module cal
 icon: "code"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 The Rust crate `meerkat-mobkit` is the primary interface for MobKit. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -283,10 +283,11 @@ fn validate_governance_state(file_name: &str, content: &str) -> Result<(), Gover
 fn validate_traceability_statuses(markdown: &str) -> Result<(), GovernanceValidationError>
 ```
 
-The state validator reads a `governance_state:` declaration from document
-content. The traceability validator accepts a Markdown table or YAML document,
-including evidence fields, rather than a list of statuses; see
-[Governance](/mobkit/reference/governance#validation).
+The first function receives a diagnostic file label and document contents, not
+a state value or a file to read. The second accepts a Markdown table or YAML
+traceability document, including evidence for statuses that require it; it does
+not accept an array of status names. See [Governance](/mobkit/reference/governance)
+for complete examples and the validators' limits.
 
 ## HTTP routers
 
@@ -314,14 +315,18 @@ let json_api_with_runtime: Router =
 Binding is separate from routing. `GatewayHttpBinding::bind_loopback()` is
 the default posture (loopback, ephemeral port) and
 `GatewayHttpBinding::bind(addr)` takes any `SocketAddr`; `http_base_url()`
-always returns the same-host form (`127.0.0.1` for `0.0.0.0` and `::`
-binds) and `with_advertised_base_url(..)` carries a proxy-facing base for
-your init reply. Before binding, check the host's `addr`, `allow_remote`, and
-decision state with:
+returns the same-host form, mapping wildcard binds to loopback of the same
+family: `0.0.0.0:PORT` becomes `http://127.0.0.1:PORT`, and `[::]:PORT`
+becomes `http://[::1]:PORT`. Concrete bound addresses and the bound port are
+preserved. `with_advertised_base_url(..)` carries a proxy-facing base for
+your init reply.
+
+Before binding, validate the requested `addr: SocketAddr` against your launch's
+`allow_remote` acknowledgement and decision state:
 
 ```rust
 use meerkat_mobkit::gateway_composition::{
-    GatewaySurface, HttpBindPolicy, validate_http_bind_policy,
+    validate_http_bind_policy, GatewaySurface, HttpBindPolicy,
 };
 
 validate_http_bind_policy(
@@ -331,13 +336,13 @@ validate_http_bind_policy(
 )?;
 ```
 
-`GatewaySurface` identifies a bundled gateway for diagnostics, not an
-arbitrary host label: this example uses the SDK-facing `RpcGateway` variant;
-`MobkitGateway` names the standalone console/admin surface. The fail-closed
-rule is unchanged: non-loopback needs enforced console auth or the
-`allow_remote` acknowledgement. Use `warn_on_non_loopback_bind` for the
-non-loopback WARN line. These helpers live in
-`meerkat_mobkit::gateway_composition`; see [Deployment](/mobkit/guides/deployment).
+`GatewaySurface` is the closed gateway diagnostic enum, not an arbitrary
+host name; use `GatewaySurface::MobkitGateway` instead when representing that surface.
+The check applies the gateways' fail-closed rule: non-loopback needs enforced
+console auth or the `allow_remote` acknowledgement. After binding, call
+`warn_on_non_loopback_bind(surface, bound, &decisions)` for the gateways'
+WARN line. These helpers and `GatewayHttpBinding` live in
+`meerkat_mobkit::gateway_composition`. See [Deployment](/mobkit/guides/deployment).
 
 ## See also
 

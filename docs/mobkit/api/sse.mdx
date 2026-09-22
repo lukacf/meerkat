@@ -4,7 +4,7 @@ description: "Server-Sent Events for real-time MobKit interaction and event subs
 icon: "bolt"
 ---
 
-*Mirrored from MobKit main at [484d55339669](https://github.com/lukacf/meerkat-mobkit/commit/484d553396699a771a57d04ad50b710a5fdd4e48) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 MobKit uses Server-Sent Events (SSE) for several live HTTP streams:
 
@@ -54,13 +54,75 @@ event: run_completed
 data: {"type": "run_completed", "session_id": "session-1", "result": "Done."}
 ```
 
+## Mob-merged event stream
+
+```
+GET /mob/events
+```
+
+This is a live merger of agent events, not `EventEnvelope<UnifiedEvent>` and
+not the structural mob ledger. Each event uses the agent event name and wraps
+its projected payload with `member_id` and `source`:
+
+```
+id: mob:0
+event: text_delta
+data: {"member_id":"worker-1:0","source":"worker-1:0","payload":{"type":"text_delta","delta":"Analyzing the metrics now..."}}
+```
+
+Both source fields use the projected runtime alias including its generation
+suffix (`worker-1:0` here). The `mob:<sequence>` ID is connection-local and
+starts again on a new connection; it is not a durable cursor. This route
+does not replay from `Last-Event-ID`. Use
+[structural mob SSE](#structural-mob-events-stream) for ledger-cursor replay,
+or `mobkit/events/subscribe` for a bounded merged-event RPC snapshot with its
+own envelope and checkpoint contract.
+
 ## Console timeline stream
 
 ```
 GET /console/timeline/stream
 ```
 
-Streams a bounded replay snapshot followed by live console timeline frames. The route accepts the same `identity`, `conversation_id`, `after`, `before`, `mode`, and `limit` parameters as [`GET /console/timeline`](/mobkit/api/rest).
+Streams a replay snapshot followed by live console timeline frames. The route
+accepts the same `identity`, `conversation_id`, `after`, `before`, `mode`, and
+`limit` parameters as [`GET /console/timeline`](/mobkit/api/rest), with distinct seed
+semantics: without `after`, `since` switches to `recent`. `recent` returns a
+bounded seed page; anchored `since` drains all retained matching backlog in
+pages, so `limit` controls each page, not total replay size. A non-empty
+`Last-Event-ID` header overrides the URL's `after`.
+
+### Timeline frame format
+
+SSE `data` is a type-tagged `ConsoleTimelineEvent`, not a bare
+`ConsoleFrame` or agent event. For example (the frame is abbreviated):
+
+```
+event: snapshot_started
+data: {"type":"snapshot_started","after":"console:239"}
+
+id: console:240
+event: console_frame
+data: {"type":"console_frame","frame":{"id":"frame-240","cursor":"console:240","identity":"worker-1","kind":"interaction_complete","payload":{"text":"Done."}}}
+
+id: console:240
+event: snapshot_complete
+data: {"type":"snapshot_complete","cursor":"console:240"}
+```
+
+| SSE event | `data` shape and handling | SSE `id` |
+|-----------|---------------------------|----------|
+| `snapshot_started` | `{type: "snapshot_started", after?}` begins replay | none |
+| `console_frame` | `{type: "console_frame", frame: ConsoleFrame}` | `frame.cursor` |
+| `frame_updated` | `{type: "frame_updated", frame}` **or** `{type: "console_frame", frame}` with `frame.kind = "frame_updated"`; handle as an update, not a new completed interaction | `frame.cursor` |
+| `snapshot_complete` | `{type: "snapshot_complete", cursor?}` ends replay; live continuation follows | `cursor` when present |
+| `replay_unavailable` | `{type: "replay_unavailable", requested_cursor, latest_cursor}`; `latest_cursor` may be `null`; refetch a recent page | none |
+
+`after` and `cursor` are omitted on markers when absent. The SSE event name
+and `data.type` need not coincide for updates. Persist cursor-bearing IDs for
+`Last-Event-ID` continuation; frame content remains in `frame.payload`.
+Initial replay refusal is an HTTP error before the stream opens, rather than
+a promise that every failure arrives as a `replay_unavailable` event.
 
 If replay cannot satisfy the requested cursor, the server returns HTTP **409** with:
 
@@ -72,7 +134,8 @@ If replay cannot satisfy the requested cursor, the server returns HTTP **409** w
 }
 ```
 
-Clients should resume from `latest_cursor` rather than retrying the stale cursor.
+Clients should refetch a recent page and resume from its `latest_cursor`
+rather than retrying the stale cursor.
 
 ## Identity timeline stream
 
@@ -80,7 +143,7 @@ Clients should resume from `latest_cursor` rather than retrying the stale cursor
 GET /console/identity/{identity}/stream
 ```
 
-Convenience route for an identity-filtered console timeline stream. It sets the timeline query `identity` from the path and otherwise behaves like `GET /console/timeline/stream`.
+Convenience route for an identity-filtered console timeline stream. It sets the timeline query `identity` from the path and otherwise uses the same replay rules, event envelopes, markers, and cursor headers as `GET /console/timeline/stream`.
 
 ## Event subscription
 
@@ -242,7 +305,9 @@ HTTP **410 Gone** as described above.
 
 ## Keep-alive
 
-The server sends keep-alive frames at a configurable interval (default: 15 seconds) to prevent connection timeouts:
+The stock HTTP streams send a keep-alive comment after 15 seconds of idle
+time to prevent connection timeouts. This interval is fixed, not an exposed
+configuration option:
 
 ```
 : keep-alive

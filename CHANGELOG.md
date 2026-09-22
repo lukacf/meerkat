@@ -35,6 +35,49 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- Public GPT Live open authority accepts `session_instructions_preface`
+  (`PublicGptLiveOpenAuthorityConfig`), host knowledge prepended to the
+  effective session instructions without replacing the default executor-split
+  and continuing-conversation guidance; `compose_public_session_instructions`
+  documents the precedence.
+- `RealtimeMessageOrigin` records `provider_item_id` (read through
+  `RealtimeMessageOrigin::provider_item_id`), the provider item a canonical
+  live transcript row materialized from, so a console that showed the live
+  deltas for that item can replace them with the committed row exactly.
+- `DelegationExecutionError::SourceBusy` names a delegation whose source
+  member was still mid-turn after the bounded wait
+  (`DelegationExecutionService::SOURCE_TURN_BOUNDARY_WAIT`).
+
+### Fixed
+
+- Public GPT Live no longer opens a call with a fresh greeting. The startup
+  factual summary and the pending-context notice were seeded as a user-role
+  input item, which the provider answered like a first utterance; they now ride
+  the session instructions after the caller's own, and the default
+  instructions plus the concurrent-bootstrap framing state that the call
+  continues an existing conversation and that the model should wait for the
+  user to speak. The instructions also allow the model to keep conversing while
+  a delegated request runs.
+- A live delegation arriving while the backing member is mid-turn no longer
+  fails with `ForkSourceUnavailable { cause: Running }`. The durable fork waits,
+  bounded, for the member's turn boundary and forks from the committed
+  transcript; a member still running after the bound is reported as
+  `SourceBusy`.
+
+### Breaking
+
+- `PublicGptLiveOpenAuthorityConfig` gains the public field
+  `session_instructions_preface` (struct literals must add it).
+- `RealtimeMessageOrigin` gains the private field `provider_item_id` and the
+  public method `provider_item_id`; `RealtimeMaterializedRow` gains the public
+  field `provider_item_id`.
+- `DelegationExecutionError` gains the variant `SourceBusy`
+  (`DelegationExecutionError::*` discriminants move).
+- `DelegationExecutionService` gains the associated constant
+  `SOURCE_TURN_BOUNDARY_WAIT`.
+
 ### Changed
 
 - The MobKit documentation mirror on docs.rkat.ai tracks MobKit main instead

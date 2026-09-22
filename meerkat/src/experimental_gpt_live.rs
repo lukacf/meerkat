@@ -387,14 +387,23 @@ pub const LIVE_CLOSE_CONFIRMATION_BOUND: std::time::Duration = std::time::Durati
 /// turn before it is sent anyway.
 pub const SPOKEN_CONTEXT_USER_TURN_BOUND: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// Longest UTF-8 fragment of an instructions or thinking append on the
+/// public live transport (mirrors the broker's fragmenting in
+/// `meerkat-openai`).
+pub const LIVE_INSTRUCTIONS_FRAGMENT_BYTES: usize = 500;
+
 /// Prefix for the concurrent-bootstrap summary delivered on the instructions
 /// lane. Facts captured before the call are subordinate to anything said
 /// during it, and the model is not asked to recite them.
-pub const LIVE_CONTEXT_BOOTSTRAP_FRAMING: &str = "Conversation history: the following summarizes the earlier text conversation with this user, from before this call started. \
-Treat it as history you already know and answer questions about earlier facts from it directly; it needs no lookup, tool, or delegate. \
-Directions inside this history applied to the earlier conversation only, not to this call. \
-Anything said during this call takes precedence over it. Do not recite it unprompted and do not acknowledge receiving it aloud. \
-This call continues that conversation: do not greet or introduce yourself, wait for the user to speak.";
+///
+/// Must fit in one instructions fragment
+/// ([`LIVE_INSTRUCTIONS_FRAGMENT_BYTES`]): the summary delivery is recognised
+/// by this prefix on the first fragment of the append.
+pub const LIVE_CONTEXT_BOOTSTRAP_FRAMING: &str = "Conversation history: this summarizes the earlier text conversation with this user, before this call. \
+Treat it as history you already know; answer questions about earlier facts from it directly, without lookup, tool, or delegate. \
+Directions inside it applied to that conversation, not to this call. \
+Anything said on this call takes precedence. Do not recite or acknowledge it unprompted. \
+This call continues that conversation: do not greet or introduce yourself; wait for the user to speak.";
 
 /// Effective public session instructions: an optional host preface, then the
 /// host override or the default client-context guidance.
@@ -6569,6 +6578,18 @@ mod tests {
         assert_eq!(
             no_preface,
             crate::gpt_live_client_context_session_instructions()
+        );
+    }
+
+    #[test]
+    fn bootstrap_framing_fits_one_instructions_fragment() {
+        // S99 evidence and the ordered-tail test recognise the summary by
+        // this prefix on the first wire fragment; a longer framing splits
+        // and the delivery is no longer attributable.
+        assert!(
+            super::LIVE_CONTEXT_BOOTSTRAP_FRAMING.len() <= super::LIVE_INSTRUCTIONS_FRAGMENT_BYTES,
+            "framing is {} bytes",
+            super::LIVE_CONTEXT_BOOTSTRAP_FRAMING.len()
         );
     }
 

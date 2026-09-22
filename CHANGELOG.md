@@ -77,6 +77,10 @@ them.
   (`DelegationExecutionError::*` discriminants move).
 - `DelegationExecutionService` gains the associated constant
   `SOURCE_TURN_BOUNDARY_WAIT`.
+- `experimental_gpt_live` gains the public constant
+  `LIVE_INSTRUCTIONS_FRAGMENT_BYTES`; `LIVE_CONTEXT_BOOTSTRAP_FRAMING` is
+  reworded and shortened so the framing plus its no-greeting sentence fits one
+  wire fragment (consumers matching the old text must update).
 
 ### Changed
 

@@ -4,7 +4,7 @@ description: "Configuration reference for MobKit: module definitions, runtime op
 icon: "gear"
 ---
 
-*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
+*This page documents MobKit v0.8.40 (mirrored from [v0.8.40](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.40)).*
 
 MobKit is configured through Rust types passed at startup. This page documents every configuration surface.
 
@@ -100,7 +100,7 @@ The stock SDK gateway (`rpc_gateway`) consumes the `runtime_options` object of `
 | `identity_bootstrap_mode` | Object | Controls roster materialization for identity-first gateways. Omitted preserves the classic gateway when no roster is configured; with a roster, omission selects synchronous eager startup. Any explicit value declares identity-first intent and requires a roster provider, including `{ "mode": "eager_materialize" }`. `{ "mode": "lazy_materialize" }` registers metadata and materializes on use. `{ "mode": "lazy_with_background_warm", "concurrency": 2 }` returns after metadata registration and warms in a tracked background task; concurrency must be `1..=16`. |
 | `agent_memory` | Boolean or object | Enables identity-first agent memory injection for roster-backed agents. `true` uses contextual recall defaults with the bundled per-realm SQLite store under `<persistent_state>/agent-memory`. The object form controls recall, injection, trust, Distiller, Steward, and provisional operator scope. `store: "markdown"` is import-only and refused with -32014. `selector` is retired: only absence or `"off"` is accepted; every activation-shaped value is refused with -32602, and recall is always deterministic lexical recall. `hygienist` is parked: only absence, `false`, or `{enabled:false}` is accepted for migration compatibility; every activation-shaped value is refused with -32602. The internal Hygienist engine remains in the Rust crate, but the public gateway has no activation seam and this release makes no provider-proof claim. `operator_scope: "provisional"` is preserved: the SDK gateway installs the console-auth-principal resolver and composes operator scope only for authenticated principals it has observed addressing an identity. Library embedders may install a different `OperatorResolver`. `TrustTier::Operator`, operator-scope schema, and re-derivation metadata remain policy-bearing contracts. |
 | `routing_config_path` | String | Loads JSON or TOML route config (`routes = [...]` / `[[routes]]`) and installs the routes into the unified runtime before serving RPCs. |
-| `gating_config_path` | String | Loads JSON or TOML action policies from an `actions` object and supplies a configured `risk_tier` for `mobkit/gating/evaluate` requests that omit `risk_tier`. |
+| `gating_config_path` | String | Loads JSON or TOML action policies from an `actions` object. For a matching `action` in `mobkit/gating/evaluate`, the configured `risk_tier` overrides a caller-supplied tier and supplies an omitted tier. Actions without a matching policy still require a caller-supplied tier. |
 | `auth_config` | Object | Supports JWT shared-secret auth (`provider = "jwt"` / `shared_secret`) and wires the reference HTTP console/SSE routes to the configured trusted issuer, audience, and email allowlist. |
 | `console_config_path` | String | Loads a TOML `ConsoleUiConfig` and projects it through `/console/experience` as `console_config`. Python `.console_config(path)`, TypeScript `.consoleConfig(path)`. |
 | `console_require_app_auth` | Boolean | Overrides `ConsolePolicy.require_app_auth`. The default is fail-closed: without `auth_config` the gateway's decision state trusts no signing key, so a console that still requires app auth refuses every request with 401, and the gateway logs a startup warning naming this. `false` is the explicit opt-out for a local or host-protected console. Python `.console_auth_required(False)`, TypeScript `.consoleAuthRequired(false)`; the Rust library twin is `RuntimeDecisionState::local_console`. |
@@ -830,6 +830,7 @@ ConsolePolicy {
     require_app_auth: bool,
     read_only: bool,
     fetch_timeout_ms: Option<u64>,
+    ui: ConsoleUiConfig,
 }
 ```
 
@@ -838,6 +839,7 @@ ConsolePolicy {
 | `require_app_auth` | `bool` | `true` | Whether console routes require JWT authentication |
 | `read_only` | `bool` | `false` | Whether the console is view-only; when enabled, send/upload/lifecycle/gating-write RPCs return a read-only error |
 | `fetch_timeout_ms` | `Option<u64>` | `None` | Optional bundled-console JSON fetch timeout override, projected through `/console/experience` |
+| `ui` | `ConsoleUiConfig` | `ConsoleUiConfig::default()` | Stock-console presentation configuration, projected through `/console/experience` as `console_config`; does not control runtime authorization |
 
 For standalone `mobkit_gateway` launches, pass `console_read_only: true` in the
 `mobkit/init` params or set `MOBKIT_CONSOLE_READ_ONLY=true`. This setting is
@@ -939,7 +941,7 @@ from the `agent_memory` injection and turn-surface ledgers below.
 
 ## Agent memory injection
 
-`agent_memory` is separate from `mobkit/memory/*`. It is hot identity-scoped memory plus prompt injection: during create/resume/materialize and ordinary identity-first turns, MobKit asks an `AgentMemoryProvider` for memories keyed by `AgentIdentity` and injects a bounded, quoted observation summary. With the current Meerkat 0.8.32 pairing, ambient per-turn memory requires `runtime_mode = "turn_driven"`; remove this restriction after the Meerkat 0.8.33 carrier change lands. The bundled gateway provider is one SQLite database per realm under `<persistent_state>/agent-memory` (`store: "sqlite"`, the only live gateway store). The earlier per-identity markdown files are import-only: `store: "markdown"` is refused at init with a migration verdict, and pointing SQLite at the same directory imports a realm's un-imported markdown files when that realm is first accessed and its SQLite connection is opened, preserving ids, tag content and timestamps and renaming each original `<file>.imported` rather than deleting it (tags are collated on insert, so tag ORDER is not preserved - assert on the set, not the sequence). The path is server-owned and cannot be overridden from SDK init input. Elephant remains an optional deeper knowledge backend for graph/document/truth/provenance use cases and is not required for this hot path.
+`agent_memory` is separate from `mobkit/memory/*`. It is hot identity-scoped memory plus prompt injection: during create/resume/materialize and ordinary identity-first turns, MobKit asks an `AgentMemoryProvider` for memories keyed by `AgentIdentity` and injects a bounded, quoted observation summary. Ambient per-turn memory requires `runtime_mode = "turn_driven"`: MobKit still explicitly skips recall for `autonomous_host` delivery with the typed reason `runtime_mode_autonomous_host`. A dependency version change alone does not remove that runtime restriction. The bundled gateway provider is one SQLite database per realm under `<persistent_state>/agent-memory` (`store: "sqlite"`, the only live gateway store). The earlier per-identity markdown files are import-only: `store: "markdown"` is refused at init with a migration verdict, and pointing SQLite at the same directory imports a realm's un-imported markdown files when that realm is first accessed and its SQLite connection is opened, preserving ids, tag content and timestamps and renaming each original `<file>.imported` rather than deleting it (tags are collated on insert, so tag ORDER is not preserved - assert on the set, not the sequence). The path is server-owned and cannot be overridden from SDK init input. Elephant remains an optional deeper knowledge backend for graph/document/truth/provenance use cases and is not required for this hot path.
 
 With the SQLite store, build-time injection also composes a metadata index (record ids, kinds, titles, descriptions, human-phrased age) over the identity's readable scopes, budgeted at ~8 KiB, ahead of the selected record bodies. Every injected record is logged to an injection ledger inside the realm database and counted in per-record usage statistics; explicit `mobkit/agent_memory/recall` reads are counted separately from ambient injection.
 

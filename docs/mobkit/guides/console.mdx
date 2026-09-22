@@ -4,7 +4,7 @@ description: "Embedded MobKit console with configurable branding, grouped roster
 icon: "desktop"
 ---
 
-*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
+*This page documents MobKit v0.8.40 (mirrored from [v0.8.40](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.40)).*
 
 MobKit ships a web-based operator console through its HTTP composition. The
 console/admin `mobkit_gateway` serves it directly. A persistent, SDK-driven
@@ -45,7 +45,7 @@ The bundled console uses a small set of stable protocol surfaces:
 | Surface | Purpose |
 |---------|---------|
 | `GET /console/experience` | Initial runtime snapshot, affordances, topology, health, and `console_config`. |
-| `GET /console/modules` | Loaded module summary. |
+| `GET /console/modules` | Configured module IDs from `RuntimeDecisionState`, not startup or health confirmation. |
 | `GET /console/identities` | Identity-first list and inspection summary. |
 | `GET /console/timeline` | Replayable console frames for initial load and older-history paging. |
 | `GET /console/timeline/stream` | Bounded replay followed by live timeline frames. |
@@ -521,7 +521,7 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
 | `/console/assets/console-app.js` | GET | React bundle (JavaScript) |
 | `/console/assets/console-app.css` | GET | Stylesheet (CSS) |
 | `/console/experience` | GET | Experience metadata (JSON) |
-| `/console/modules` | GET | Loaded modules list (JSON) |
+| `/console/modules` | GET | Configured module IDs (JSON), not a loaded-runtime inventory |
 | `/console/identities` | GET | Identity-first records |
 | `/console/timeline` | GET | Replayable console timeline page |
 | `/console/timeline/stream` | GET | Timeline SSE replay and live continuation |
@@ -611,6 +611,7 @@ Coarse console access is governed by `ConsolePolicy`:
 ConsolePolicy {
     require_app_auth: true,   // the default; set false only for local development
     read_only: false,         // set true for view-only deployments
+    ..ConsolePolicy::default()
 }
 ```
 

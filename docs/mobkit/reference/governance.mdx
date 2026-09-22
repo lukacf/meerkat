@@ -4,22 +4,25 @@ description: "Release candidate tracking, traceability matrix, validation, and g
 icon: "clipboard-check"
 ---
 
-*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
+*This page documents MobKit v0.8.40 (mirrored from [v0.8.40](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.40)).*
 
-MobKit includes a governance system for tracking release candidates through implementation. The governance layer validates that all contracts are traced, documented, and verified before a release.
+MobKit includes a governance system for tracking release candidates through implementation. The governance layer validates governance-state declarations, traceability statuses, and required evidence fields.
 
 ## Governance state
 
-The runtime declares its governance state as a string. The primary state for in-progress work:
+Governance documents declare the required state for in-progress work:
 
-```
-"realignment_in_progress"
+```yaml
+governance_state: realignment_in_progress
 ```
 
-`validate_governance_state` verifies the state is recognized:
+`validate_governance_state` takes a file label for diagnostics and the document
+content. It requires a `governance_state:` line with the value shown above:
 
 ```rust
-validate_governance_state("realignment_in_progress")?;
+use meerkat_mobkit::validate_governance_state;
+
+validate_governance_state("spec.yaml", "governance_state: realignment_in_progress\n")?;
 ```
 
 ## Traceability statuses
@@ -39,51 +42,81 @@ Every contract or feature in MobKit carries a traceability status. The strict st
 ### Validation
 
 ```rust
-validate_traceability_statuses(&["TYPED", "WIRED", "VALIDATED"])?;
+use meerkat_mobkit::validate_traceability_statuses;
+
+let traceability = r#"
+rows:
+  - status: TYPED
+    evidence: ["meerkat-mobkit/src/governance.rs"]
+  - status: WIRED
+    evidence: ["meerkat-mobkit/src/bin/governance_check.rs"]
+  - status: VALIDATED
+    evidence: ["meerkat-mobkit/tests/governance_contracts.rs"]
+"#;
+validate_traceability_statuses(traceability)?;
 ```
 
-All provided statuses must be in the `STRICT_TRACEABILITY_STATUSES` set. Unknown statuses produce a `GovernanceValidationError`.
+The input is a YAML document with `rows`, or a Markdown table with `Status`
+and evidence/link columns, not a slice of status strings. Every status must be
+in `STRICT_TRACEABILITY_STATUSES`. `TYPED`, `WIRED`, `VALIDATED`, and
+`PROVISIONAL` rows require non-placeholder evidence; `MISSING`, `DEFERRED`,
+and `STUBBED` do not. Empty documents, invalid rows, unknown statuses, and
+missing required evidence produce a `GovernanceValidationError`. This checks
+the evidence fields, not whether the referenced tests actually passed.
 
 ## Baseline verification
 
-The optional source-baseline check can verify that the required Meerkat API
-symbols are available in a local Meerkat checkout. Supply the checkout
+The optional source-baseline check heuristically scans a local Meerkat
+checkout's text for selected prerequisite symbols. Supply the checkout
 explicitly, or set `MEERKAT_REPO`; there is no machine-specific default:
 
 ```rust
 use std::path::Path;
+use meerkat_mobkit::{BaselineVerificationReport, verify_meerkat_baseline_symbols};
 
 let report: BaselineVerificationReport =
     verify_meerkat_baseline_symbols(Some(Path::new("/path/to/meerkat")))?;
 ```
 
-The baseline check ensures that:
-- Required Meerkat crates are present
-- Expected API symbols are exported
-- Version compatibility is maintained
+The scanner matches substrings and selected token combinations in eligible
+text files. Comments or Markdown can satisfy a match: success does not prove
+that a required crate exists, an API is publicly exported, or dependency
+versions are compatible. Use dependency resolution and compilation to check
+those properties.
 
 ### Required symbols
 
-The `REQUIRED_MEERKAT_SYMBOLS` constant lists every Meerkat API entry point that MobKit depends on. Missing symbols produce a `BaselineVerificationError`.
+`REQUIRED_MEERKAT_SYMBOLS` is the scanner's selected prerequisite list, not an
+exhaustive inventory of every Meerkat API MobKit uses. Missing textual matches
+produce `BaselineVerificationError::MissingSymbols`; repository configuration
+and read failures also use this separate error type.
 
 ## Governance contracts
 
-`validate_governance_contracts` runs the full governance validation suite:
+`validate_governance_contracts` validates the supplied document contents:
 
-1. Governance state validation
-2. Traceability status validation
-3. Baseline symbol verification
+1. Governance state in the spec, plan, and checklist documents
+2. Traceability row statuses and required evidence
 
 This is available as a standalone binary (`governance_check`) for CI integration.
+Neither the aggregate function nor that binary runs baseline symbol
+verification. Invoke `baseline_check` or `verify_meerkat_baseline_symbols`
+separately when that optional text scan is useful.
 
 ## Governance validation errors
 
 | Error | Cause |
 |-------|-------|
-| `InvalidState` | Governance state not recognized |
-| `InvalidTraceabilityStatus` | Status not in strict set |
-| `BaselineVerificationFailed` | Required Meerkat symbols missing |
-| `ContractNotTraced` | Contract lacks traceability annotation |
+| `MissingGovernanceState { file }` | No `governance_state:` line; `file` is the supplied diagnostic label |
+| `InvalidGovernanceState { file, found }` | State differs from `realignment_in_progress`; includes the file label and found value |
+| `NoTraceabilityRows` | No traceability data rows were found |
+| `InvalidTraceabilityStatus { line, status }` | Status is outside the strict set; includes the reported position and value |
+| `MissingTraceabilityEvidence { line }` | A status requiring evidence has only empty or placeholder evidence |
+| `InvalidTraceabilityRow { line }` | Malformed document, table header, or row |
+
+For Markdown, `line` is a one-based source line; for parsed YAML rows it is
+the one-based row index (a YAML parse failure reports `1`). Baseline scan
+failures belong to `BaselineVerificationError`, not this enum.
 
 ## CLI tools
 
@@ -91,7 +124,7 @@ MobKit provides standalone binaries for governance checks:
 
 | Binary | Purpose |
 |--------|---------|
-| `baseline_check` | Verify Meerkat prerequisites |
+| `baseline_check` | Heuristically scan for selected Meerkat prerequisite symbols |
 | `governance_check` | Validate governance state and traceability |
 | `mobkit_gateway` | JSON-RPC gateway |
 | `mcp_fixture` | MCP test fixture |

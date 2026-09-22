@@ -4,7 +4,7 @@ description: "MobKit Python SDK — typed builder API, async runtime, and stream
 icon: "python"
 ---
 
-*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
+*This page documents MobKit v0.8.40 (mirrored from [v0.8.40](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.40)).*
 
 The MobKit Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -29,6 +29,24 @@ pip install meerkat-mobkit
 
 ## Quick start
 
+Create `config/mob.toml` with a `worker` profile and configure credentials for
+its model's provider:
+
+```toml config/mob.toml
+[mob]
+id = "quickstart"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+```
+
+Profiles are templates, so the example explicitly ensures `agent-1` exists
+before sending to it.
+
 ```python
 import asyncio
 from meerkat_mobkit import MobKit
@@ -36,6 +54,7 @@ from meerkat_mobkit import MobKit
 async def main():
     async with await MobKit.builder().mob("config/mob.toml").gateway("/path/to/rpc_gateway").build() as rt:
         handle = rt.mob_handle()
+        await handle.ensure_member("agent-1", "worker")
 
         # Send a message (comms)
         await handle.send("agent-1", "Hello")
@@ -237,7 +256,7 @@ Observation is independent of delivery. Subscribe before or after sending — th
 ### Structural mob events — durable observability
 
 `MobHandle.query_mob_events()` and `subscribe_mob_events()` project
-every meerkat `MobEventKind` (25 variants) into a typed envelope
+every meerkat `MobEventKind` into a typed envelope
 preserving `mob_id`, `run_id`, `step_id`, `agent_identity`, and the
 full payload.
 
@@ -667,7 +686,7 @@ identities keep it.
 `AgentBuildDraft.provider_params` mirrors meerkat's `ProviderParamsOverride`:
 the shared sampling knobs at the top level and the provider-specific knobs
 nested under `provider_tag`, which is tagged by `provider`. Anthropic prompt
-caching is such a knob; meerkat 0.8.32 (the pinned release) defaults it to
+caching is such a knob; Meerkat defaults it to
 `disabled` on every backend, so a long-lived identity opts in here:
 
 ```python

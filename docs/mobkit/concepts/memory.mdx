@@ -4,7 +4,7 @@ description: "Operational memory assertions plus optional identity-first agent m
 icon: "brain"
 ---
 
-*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
+*This page documents MobKit v0.8.40 (mirrored from [v0.8.40](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.40)).*
 
 MobKit has two memory-adjacent surfaces, and they serve different latency
 classes:
@@ -50,8 +50,8 @@ and before every persist. Configuration is provided through
 
 ```rust
 LocalJsonMemoryBackendConfig {
-    state_path: "/var/mobkit/state/memory-ledger-state.json",
-    health_check_endpoint: Some("http://localhost:3000"),
+    state_path: "/var/mobkit/state/memory-ledger-state.json".into(),
+    health_check_endpoint: Some("http://localhost:3000".into()),
 }
 ```
 
@@ -183,9 +183,29 @@ With the SQLite store (the default), identity-first members get a capability-gat
 
 A memory tool that can be poisoned by prompt injection is worse than no memory tool, so the recorder ships with a deterministic firewall:
 
-- **Content-trust classification** (`agent_memory.content_trust`): web/fetch tools and provider-native search are always untrusted; MCP servers are untrusted by default with a `trusted_mcp_servers` allowlist; `untrusted_tools` / `trusted_tools` give explicit per-tool overrides. In this release classification is by tool *name* (tool events do not carry provenance yet), so MCP tools are attributable to a server only when their names are qualified as `mcp__<server>__<tool>`; list unqualified MCP tool names in `untrusted_tools`.
+- **Content-trust classification** (`agent_memory.content_trust`): built-in web/fetch tools and provider-native search are always untrusted. Tool classification checks those built-in names first, then `untrusted_tools`, then `trusted_tools`, then MCP server attribution against `trusted_mcp_servers`. Explicit tool rules therefore take precedence over server rules, but cannot make the built-in web/fetch tools trusted.
 - **Session-sticky taint**: once a session ingests untrusted tool content, every LLM-authored memory write from that session lands `quarantined` — stored, auditable, but never injected or recalled until review. Taint clears only at a fresh-context boundary (reset, respawn, fresh spawn); compaction does not clear it.
-- **Write posture** (`agent_memory.llm_writes`): `"observed"` (default) quarantines only tainted-session writes; `"quarantined"` quarantines *every* LLM-authored write pending review. Choose `"quarantined"` if you cannot accept the known race: a write issued in the same turn as the session's *first* untrusted ingestion can beat the observe-stream taint signal (closed in a later phase by dispatch-time taint visibility).
+- **Write posture** (`agent_memory.llm_writes`): `"observed"` (default) quarantines only tainted-session writes; `"quarantined"` is the stricter policy that quarantines *every* LLM-authored write pending review.
+
+Dispatch-time classification joins tool results with the request's
+`ToolDef.provenance` catalog. Typed MCP provenance attributes a tool to its
+`source_id` even when the tool name is unqualified; servers are untrusted
+unless allowlisted. When MCP provenance is unavailable, classification falls
+back to the `mcp__<server>__<tool>` name shape and the explicit tool lists.
+Otherwise-unclassified tools default to trusted. The asynchronous
+observe-stream tool-event path remains name-based; it does not universally
+carry typed provenance.
+
+The bundled SDK gateway and `UnifiedRuntime` full-stack memory composition
+fill a shared `DispatchTaintSlot` and attach the member LLM-client decorator.
+It marks tool-result ingestions before the next LLM call, and marks typed
+provider-native server-tool content before returning the response to the
+agent loop. LLM-authored memory writes derived from that classified content
+therefore reach the store gate after taint is marked, rather than racing the
+asynchronous observer's first-ingestion signal. A custom composition with an
+unfilled slot is a pass-through and does not gain this ordering protection.
+This is a scoped ingestion/write ordering guarantee, not universal
+prompt-injection safety.
 
 Application/operator writes (the `mobkit/agent_memory/*` RPCs) are non-LLM principals and are never quarantined by this machinery. `llm_writes` and `content_trust` require `store: "sqlite"`. Selecting `store: "markdown"` is refused before a runtime can start; combining it with these SQLite-only knobs is rejected earlier during config validation.
 
@@ -231,7 +251,7 @@ Failed health checks produce `LocalJsonMemoryStoreError::ExternalCallFailed` wit
 
 ```rust
 MemoryStoreInfo {
-    store: "knowledge_graph",
+    store: "knowledge_graph".into(),
     record_count: 42,
 }
 ```

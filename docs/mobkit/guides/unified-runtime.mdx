@@ -4,7 +4,7 @@ description: "Combine a Meerkat mob with MobKit modules into a single managed ru
 icon: "layer-group"
 ---
 
-*This page documents MobKit v0.8.39 (mirrored from [v0.8.39](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.39)).*
+*This page documents MobKit v0.8.40 (mirrored from [v0.8.40](https://github.com/lukacf/meerkat-mobkit/tree/v0.8.40)).*
 
 The unified runtime is the production entry point for MobKit. It bootstraps a Meerkat mob and MobKit's module subsystems together, merges their event streams, and manages the combined lifecycle through a single handle.
 
@@ -171,7 +171,7 @@ Key routes in the reference app include:
 | `/console/assets/console-app.js` | GET | React bundle |
 | `/console/assets/console-app.css` | GET | Stylesheet |
 | `/console/experience` | GET | Experience metadata JSON |
-| `/console/modules` | GET | Loaded modules JSON |
+| `/console/modules` | GET | Configured module IDs from `RuntimeDecisionState` (JSON), not startup or health confirmation |
 | `/console/identities` | GET | Identity records |
 | `/console/timeline` | GET | Replayable timeline page |
 | `/console/timeline/stream` | GET | Timeline replay/live SSE |

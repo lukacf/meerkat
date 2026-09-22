@@ -25136,6 +25136,50 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // The shell's mechanical cancellation races the worker's own terminal:
+        // the bounded turn can reach realized terminality (recorded through
+        // `RecordLiveDelegationWorkerTerminal` from `CancelAuthorized`) before
+        // the cancellation outcome is reported. That late report is exact
+        // evidence about an already-settled worker, so it is accepted and
+        // changes nothing; refusing it must never fail the channel closed.
+        transition ResolveLiveDelegationCancellationAfterTerminal {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveDelegationCancellation {
+                channel_id, runtime_id, fence_token, generation, interaction_id,
+                operation_id, worker_identity, outcome
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_settled_cancel_authority" {
+                self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
+                && self.live_delegation_worker_identity_by_operation.get_cloned(operation_id) == Some(worker_identity)
+                && self.live_delegation_cancellation_reason_by_operation.contains_key(operation_id)
+                && (self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationWorkerPhase::Terminal)
+                    || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationWorkerPhase::RetirementAuthorized)
+                    || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationWorkerPhase::Retired)
+                    || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationWorkerPhase::Failed))
+            }
+            to Idle
+            emit LiveDelegationCancellationResolved {
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                operation_id: operation_id,
+                worker_identity: worker_identity,
+                outcome: outcome
+            }
+        }
+
         transition RecordLiveDelegationWorkerTerminal {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RecordLiveDelegationWorkerTerminal {

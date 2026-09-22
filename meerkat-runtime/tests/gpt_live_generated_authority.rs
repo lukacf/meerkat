@@ -5493,6 +5493,16 @@ fn channel_worker(index: usize) -> String {
 /// Admit the `index`th delegation on the shared channel: provider user turn,
 /// delegation join, turn completion, and canonical transcript confirmation.
 fn admit_parallel_delegation(authority: &mut mm::MeerkatMachineAuthority, index: usize) {
+    admit_parallel_delegation_with_turn(authority, index, true);
+}
+
+/// Like [`admit_parallel_delegation`] but optionally leaves the provider
+/// user turn open (the interaction stays active) for abandonment tests.
+fn admit_parallel_delegation_with_turn(
+    authority: &mut mm::MeerkatMachineAuthority,
+    index: usize,
+    complete_turn: bool,
+) {
     apply(
         authority,
         mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
@@ -5521,17 +5531,19 @@ fn admit_parallel_delegation(authority: &mut mm::MeerkatMachineAuthority, index:
         },
     )
     .expect("a further delegation is admitted on a channel with pending work");
-    apply(
-        authority,
-        mm::MeerkatMachineInput::CompleteLiveInteraction {
-            channel_id: CHANNEL.to_string(),
-            runtime_id: runtime_id(),
-            fence_token: fence(),
-            generation: generation(),
-            provider_turn_ref: channel_provider_turn(index),
-        },
-    )
-    .expect("provider user turn completes");
+    if complete_turn {
+        apply(
+            authority,
+            mm::MeerkatMachineInput::CompleteLiveInteraction {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                provider_turn_ref: channel_provider_turn(index),
+            },
+        )
+        .expect("provider user turn completes");
+    }
     apply(
         authority,
         mm::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
@@ -6121,4 +6133,117 @@ fn busy_source_start_failure_requeues_without_abandoning_the_interaction() {
             ..
         }
     )));
+}
+
+#[test]
+fn cancellation_resolution_is_accepted_after_the_worker_terminal_races_it() {
+    for (index, physical_retire) in [(1usize, false), (2usize, true)] {
+        let mut authority = opened_authority();
+        bind_only(&mut authority);
+        admit_parallel_delegation_with_turn(&mut authority, index, false);
+        start_parallel_worker(&mut authority, index);
+        let abandoned = apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AbandonLiveInteraction {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: channel_interaction(index),
+            },
+        )
+        .expect("abandoning the interaction authorizes the running worker's cancellation");
+        assert!(abandoned.effects().iter().any(|effect| matches!(
+            effect,
+            mm::MeerkatMachineEffect::LiveDelegationCancellationAuthorized {
+                reason: mm::LiveDelegationCancellationReason::Abandoned,
+                ..
+            }
+        )));
+        // The bounded turn terminalizes before the shell reports the
+        // cancellation outcome: the terminal lands first.
+        record_parallel_terminal(
+            &mut authority,
+            index,
+            &channel_worker(index),
+            mm::LiveDelegationWorkerTerminalKind::Cancelled,
+        );
+        if physical_retire {
+            retire_parallel_worker(&mut authority, index, &channel_worker(index));
+        }
+        let resolved = apply(
+            &mut authority,
+            mm::MeerkatMachineInput::ResolveLiveDelegationCancellation {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: channel_interaction(index),
+                operation_id: channel_operation(index),
+                worker_identity: channel_worker(index),
+                outcome: mm::LiveDelegationCancellationOutcome::Cancelled,
+            },
+        )
+        .expect("a late cancellation outcome is accepted after the recorded terminal");
+        assert!(resolved.effects().iter().any(|effect| matches!(
+            effect,
+            mm::MeerkatMachineEffect::LiveDelegationCancellationResolved {
+                operation_id,
+                outcome: mm::LiveDelegationCancellationOutcome::Cancelled,
+                ..
+            } if operation_id == &channel_operation(index)
+        )));
+        let expected_phase = if physical_retire {
+            mm::LiveDelegationWorkerPhase::Retired
+        } else {
+            mm::LiveDelegationWorkerPhase::Terminal
+        };
+        assert_eq!(
+            authority
+                .state()
+                .live_delegation_worker_phase_by_operation
+                .get(&channel_operation(index))
+                .copied(),
+            Some(expected_phase),
+            "a late resolution never rewinds the settled worker"
+        );
+        // The abandoned user turn still completes on the provider side.
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::CompleteLiveInteraction {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                provider_turn_ref: channel_provider_turn(index),
+            },
+        )
+        .expect("abandoned provider turn completes");
+        // A resolution for a worker that was never cancelled is still refused.
+        admit_parallel_delegation(&mut authority, index + 10);
+        start_parallel_worker(&mut authority, index + 10);
+        record_parallel_terminal(
+            &mut authority,
+            index + 10,
+            &channel_worker(index + 10),
+            mm::LiveDelegationWorkerTerminalKind::Completed,
+        );
+        assert!(
+            apply(
+                &mut authority,
+                mm::MeerkatMachineInput::ResolveLiveDelegationCancellation {
+                    channel_id: CHANNEL.to_string(),
+                    runtime_id: runtime_id(),
+                    fence_token: fence(),
+                    generation: generation(),
+                    interaction_id: channel_interaction(index + 10),
+                    operation_id: channel_operation(index + 10),
+                    worker_identity: channel_worker(index + 10),
+                    outcome: mm::LiveDelegationCancellationOutcome::Cancelled,
+                },
+            )
+            .is_err(),
+            "no cancellation authority means no cancellation resolution"
+        );
+    }
 }

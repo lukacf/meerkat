@@ -5578,6 +5578,10 @@ fn spawn_sideband_actors(
                     } else {
                         None
                     };
+                    // One refused lifecycle fact fails that fact closed, not
+                    // the channel: transcript projection and delivery
+                    // receipts for the same observation still flow, and the
+                    // provider stream keeps running for the user.
                     if lifecycle_observation
                         && let Err(error) = activation
                             .activator
@@ -5586,9 +5590,8 @@ fn spawn_sideband_actors(
                     {
                         tracing::warn!(
                             error,
-                            "experimental live lifecycle observation failed closed"
+                            "experimental live lifecycle observation was refused; the channel continues"
                         );
-                        break;
                     }
                     if adapter_observation
                         && observation_adapter
@@ -10110,6 +10113,144 @@ mod tests {
             LiveSidebandObservationKind::UnsupportedProviderEvent
         ));
         assert_eq!(session.provider_reads.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    /// One refused lifecycle fact must not end the provider stream: the
+    /// observation actor keeps consuming and every later lifecycle fact still
+    /// reaches the activator.
+    struct RefusingFirstLifecycleActivator {
+        lifecycle_calls: AtomicUsize,
+        all_seen: Notify,
+        expected: usize,
+    }
+
+    #[async_trait]
+    impl ExperimentalLiveBoundChannelActivator for RefusingFirstLifecycleActivator {
+        async fn prepare_bound_channel(
+            &self,
+            _binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+            _control: Arc<dyn ExperimentalGptLiveControlPlane>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn run_bound_channel(
+            &self,
+            _binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+            _control: Arc<dyn ExperimentalGptLiveControlPlane>,
+        ) {
+        }
+
+        async fn observe_provider_lifecycle(
+            &self,
+            _observation: &LiveSidebandObservation,
+        ) -> Result<(), String> {
+            let call = self.lifecycle_calls.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            if call >= self.expected {
+                self.all_seen.notify_waiters();
+            }
+            if call == 1 {
+                Err("guard rejected transition (fixture refusal)".to_string())
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn deactivate_bound_channel(
+            &self,
+            _binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_lifecycle_observation_does_not_end_the_provider_stream() {
+        let session_id = meerkat_core::SessionId::new();
+        let channel_id = meerkat_live::LiveChannelId::new("refused-lifecycle-continues");
+        let binding = ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let mut observations = VecDeque::new();
+        for index in 0..3 {
+            let turn = LiveSidebandTurnRef::__from_provider_observation(
+                &channel_id,
+                format!("turn-{index}"),
+                format!("provider-turn-{index}"),
+            )
+            .expect("turn ref");
+            observations.push_back(LiveSidebandObservation::new(
+                binding.clone(),
+                LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ));
+            observations.push_back(LiveSidebandObservation::new(
+                binding.clone(),
+                LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: format!("utterance {index}"),
+                },
+            ));
+        }
+        let expected = observations.len();
+        let sideband: Arc<dyn ProviderWebrtcSidebandSession> = Arc::new(FloodingSideband {
+            observations: std::sync::Mutex::new(observations),
+            fail_close: false,
+        });
+        let activator = Arc::new(RefusingFirstLifecycleActivator {
+            lifecycle_calls: AtomicUsize::new(0),
+            all_seen: Notify::new(),
+            expected,
+        });
+        let transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());
+        let (retirement_tx, _retirement_rx) = mpsc::channel(1);
+        let active = spawn_sideband_actors(
+            binding.clone(),
+            sideband,
+            test_deferred_adapter(),
+            1,
+            retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
+        );
+        let all_seen = activator.all_seen.notified();
+        *active.activation_gate.prepared.lock().await =
+            Some(Arc::new(PreparedExperimentalGptLiveActivation {
+                runtime: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+                runtime_binding:
+                    meerkat_runtime::live_execution::LiveDelegationRuntimeBinding::__test_new(
+                        session_id.clone(),
+                        channel_id.clone(),
+                        meerkat_runtime::identifiers::LogicalRuntimeId::new("fixture-runtime"),
+                        1,
+                        1,
+                    ),
+                activator: Arc::clone(&activator) as Arc<dyn ExperimentalLiveBoundChannelActivator>,
+                control: Arc::clone(&transport) as Arc<dyn ExperimentalGptLiveControlPlane>,
+                live_adapter_host: Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+                    meerkat_live::NoOpProjectionSink,
+                ))),
+                public_observation_publisher: Arc::new(NoopPublicObservationPublisher),
+            }));
+        active
+            .activation_gate
+            .committed
+            .store(true, Ordering::Release);
+        active.activation_gate.changed.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(5), all_seen)
+            .await
+            .expect("every lifecycle fact after the refused one still reaches the activator");
+        assert_eq!(
+            activator.lifecycle_calls.load(AtomicOrdering::SeqCst),
+            expected,
+            "the refused lifecycle observation must not end the observation actor"
+        );
+        retire_sideband_actors(active).await;
     }
 
     #[tokio::test]

@@ -15246,6 +15246,61 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `LiveDelegationCancellationResolved`
 - To: `Stopped`
 
+### `ResolveLiveDelegationCancellationAfterTerminalIdle`
+- From: `Idle`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_settled_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Idle`
+
+### `ResolveLiveDelegationCancellationAfterTerminalAttached`
+- From: `Attached`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_settled_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Attached`
+
+### `ResolveLiveDelegationCancellationAfterTerminalRunning`
+- From: `Running`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_settled_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Running`
+
+### `ResolveLiveDelegationCancellationAfterTerminalRetired`
+- From: `Retired`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_settled_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Retired`
+
+### `ResolveLiveDelegationCancellationAfterTerminalStopped`
+- From: `Stopped`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_settled_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Stopped`
+
 ### `RecordLiveDelegationWorkerTerminalIdle`
 - From: `Idle`
 - On: `RecordLiveDelegationWorkerTerminal`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, terminal)

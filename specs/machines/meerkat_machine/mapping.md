@@ -4292,6 +4292,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveLiveDelegationCancellationStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveLiveDelegationCancellationAfterTerminalIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationCancellationAfterTerminalAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationCancellationAfterTerminalRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationCancellationAfterTerminalRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveDelegationCancellationAfterTerminalStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveDelegationWorkerTerminalIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

@@ -2695,6 +2695,55 @@ pub enum LiveDelegationWorkerTerminalKind {
     Completed,
     Cancelled,
     Failed,
+    Blocked,
+}
+
+/// Bridging copy of the generated per-item schedule state.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveDelegationScheduleState {
+    #[default]
+    Created,
+    Claimed,
+    Running,
+    Completed,
+    Blocked,
+    Cancelled,
+    Failed,
+}
+
+/// Bridging copy of the generated executor-state narration kind.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LiveDelegationNarrationKind {
+    #[default]
+    Queued,
+    Claimed,
+    Blocked,
+    Completed,
+    SourceBusy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

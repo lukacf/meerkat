@@ -1732,12 +1732,44 @@ pub enum LiveDelegationCancellationOutcome {
 }
 
 /// Exact worker terminal observed from Mob bounded-turn authority.
+/// `Blocked` is a worker that ended its bounded turn after handing its
+/// WorkGraph item back with unresolved dependencies: it is never result
+/// eligible, and its operation may bind a fresh worker once the item is
+/// ready again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum LiveDelegationWorkerTerminalKind {
     #[default]
     Completed,
     Cancelled,
     Failed,
+    Blocked,
+}
+
+/// Generated scheduling state of one live delegation work item. Several
+/// items coexist per channel; at most `live_delegation_channel_worker_cap`
+/// of them hold a worker slot at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveDelegationScheduleState {
+    #[default]
+    Created,
+    Claimed,
+    Running,
+    Completed,
+    Blocked,
+    Cancelled,
+    Failed,
+}
+
+/// Templated executor state narration the machine releases for one exact
+/// delegation. A kind is released at most once per schedule pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveDelegationNarrationKind {
+    #[default]
+    Queued,
+    Claimed,
+    Blocked,
+    Completed,
+    SourceBusy,
 }
 
 /// Generated phase of one channel's provider-affecting authority.
@@ -3747,12 +3779,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_assistant_playback_segment_by_turn: Map<String, u64>,
             live_abandoned_interactions: Set<String>,
 
-            // Exactly one serialized delegation may be pending per channel.
-            // Provider turn correlation is deliberately opaque and is used
-            // only for exact equality joins.
-            live_delegation_interaction_by_channel: Map<String, String>,
-            live_delegation_operation_by_channel: Map<String, OperationId>,
-            live_delegation_provider_turn_by_channel: Map<String, String>,
+            // Several delegations coexist per channel. Each provider user
+            // turn (interaction) carries at most one delegation and every
+            // operation is bound to exactly one channel. Provider turn
+            // correlation is deliberately opaque and is used only for exact
+            // equality joins.
+            live_delegation_operation_by_interaction: Map<String, OperationId>,
+            live_delegation_channel_by_operation: Map<OperationId, String>,
+            live_delegation_schedule_state_by_operation: Map<OperationId, Enum<LiveDelegationScheduleState>>,
+            live_delegation_active_worker_count_by_channel: Map<String, u64>,
+            live_delegation_channel_worker_cap: u64,
+            live_delegation_last_narration_by_operation: Map<OperationId, Enum<LiveDelegationNarrationKind>>,
             live_delegation_interaction_by_operation: Map<OperationId, String>,
             live_delegation_provider_turn_by_operation: Map<OperationId, String>,
             live_delegation_reconciliation_by_operation: Map<OperationId, Enum<LiveDelegationReconciliation>>,
@@ -4344,9 +4381,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_assistant_playback_segment_by_turn = EmptyMap,
             live_assistant_turn_channel_by_ref = EmptyMap,
             live_abandoned_interactions = EmptySet,
-            live_delegation_interaction_by_channel = EmptyMap,
-            live_delegation_operation_by_channel = EmptyMap,
-            live_delegation_provider_turn_by_channel = EmptyMap,
+            live_delegation_operation_by_interaction = EmptyMap,
+            live_delegation_channel_by_operation = EmptyMap,
+            live_delegation_schedule_state_by_operation = EmptyMap,
+            live_delegation_active_worker_count_by_channel = EmptyMap,
+            live_delegation_channel_worker_cap = 4,
+            live_delegation_last_narration_by_operation = EmptyMap,
             live_delegation_interaction_by_operation = EmptyMap,
             live_delegation_provider_turn_by_operation = EmptyMap,
             live_delegation_reconciliation_by_operation = EmptyMap,
@@ -5654,6 +5694,32 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 worker_identity: String,
                 retired: bool,
+            },
+            RequeueLiveDelegation {
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                interaction_id: String,
+                operation_id: OperationId,
+            },
+            CancelQueuedLiveDelegation {
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                interaction_id: String,
+                operation_id: OperationId,
+            },
+            AuthorizeLiveDelegationNarration {
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+                interaction_id: String,
+                operation_id: OperationId,
+                provider_turn_correlation: String,
+                kind: Enum<LiveDelegationNarrationKind>,
             },
             AbandonLiveInteraction {
                 channel_id: String,
@@ -7081,6 +7147,23 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 authority_id: String,
             },
+            LiveDelegationRequeued {
+                channel_id: String,
+                interaction_id: String,
+                operation_id: OperationId,
+            },
+            LiveDelegationQueuedCancelled {
+                channel_id: String,
+                interaction_id: String,
+                operation_id: OperationId,
+            },
+            LiveDelegationNarrationAuthorized {
+                channel_id: String,
+                interaction_id: String,
+                operation_id: OperationId,
+                provider_turn_correlation: String,
+                kind: Enum<LiveDelegationNarrationKind>,
+            },
             LiveDelegationResultReleaseAuthorized {
                 channel_id: String,
                 interaction_id: String,
@@ -7786,6 +7869,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveInteractionAbandoned => external seam OwnerRealizationOnly,
         disposition LiveInteractionCompleted => local seam OwnerRealizationOnly,
         disposition LiveConsequentialEffectAuthorized => external seam OwnerRealizationOnly,
+        disposition LiveDelegationRequeued => local seam OwnerRealizationOnly,
+        disposition LiveDelegationQueuedCancelled => local seam OwnerRealizationOnly,
+        disposition LiveDelegationNarrationAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultReleaseAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultDeliveryAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultDeliveryResolved => external seam OwnerRealizationOnly,
@@ -8587,29 +8673,22 @@ macro_rules! meerkat_catalog_machine_dsl {
                     == self.live_assistant_turn_channel_by_ref.get_cloned(assistant_turn_ref))
         }
 
-        invariant live_pending_delegation_is_serialized_and_complete {
-            self.live_delegation_interaction_by_channel.keys()
-                == self.live_delegation_operation_by_channel.keys()
-            && self.live_delegation_interaction_by_channel.keys()
-                == self.live_delegation_provider_turn_by_channel.keys()
-            && for_all(channel_id in self.live_delegation_operation_by_channel.keys(),
+        invariant live_delegation_items_are_channel_bound_and_capped {
+            self.live_delegation_channel_by_operation.keys()
+                == self.live_delegation_schedule_state_by_operation.keys()
+            && self.live_delegation_channel_by_operation.keys()
+                == self.live_delegation_interaction_by_operation.keys()
+            && for_all(interaction_id in self.live_delegation_operation_by_interaction.keys(),
+                self.live_delegation_interaction_by_operation.get_cloned(
+                    self.live_delegation_operation_by_interaction.get_cloned(interaction_id).get("value"))
+                    == Some(interaction_id))
+            && for_all(operation_id in self.live_delegation_channel_by_operation.keys(),
                 self.live_interaction_channel_by_id.get_cloned(
-                    self.live_delegation_interaction_by_channel.get_cloned(channel_id).get("value"))
-                    == Some(channel_id)
-                && (!self.live_abandoned_interactions.contains(
-                    self.live_delegation_interaction_by_channel.get_cloned(channel_id).get("value"))
-                    || self.live_delegation_reconciliation_by_operation.get_copied(
-                        self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value"))
-                        == Some(LiveDelegationReconciliation::MaterialConflict)
-                    || self.live_delegation_reconciliation_by_operation.get_copied(
-                        self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value"))
-                        == Some(LiveDelegationReconciliation::Missing)
-                    || self.live_delegation_worker_terminal_by_operation.contains_key(
-                        self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value"))
-                    || self.live_delegation_cancellation_reason_by_operation.contains_key(
-                        self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value")))
-                && self.live_delegation_reconciliation_by_operation.contains_key(
-                    self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value")))
+                    self.live_delegation_interaction_by_operation.get_cloned(operation_id).get("value"))
+                    == self.live_delegation_channel_by_operation.get_cloned(operation_id))
+            && for_all(channel_id in self.live_delegation_active_worker_count_by_channel.keys(),
+                self.live_delegation_active_worker_count_by_channel.get_copied(channel_id).get("value")
+                    <= self.live_delegation_channel_worker_cap)
         }
 
         invariant live_delegation_operation_has_exact_join_identity {
@@ -23505,9 +23584,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_active_interaction_by_channel.remove(channel_id);
                 self.live_awaiting_assistant_interaction_by_channel.remove(channel_id);
                 self.live_provider_turn_by_channel.remove(channel_id);
-                self.live_delegation_interaction_by_channel.remove(channel_id);
-                self.live_delegation_operation_by_channel.remove(channel_id);
-                self.live_delegation_provider_turn_by_channel.remove(channel_id);
+                self.live_delegation_active_worker_count_by_channel.remove(channel_id);
                 if self.live_bridge_operation_by_channel.contains_key(channel_id) {
                     if !self.live_bridge_execution_terminal_by_operation.contains_key(
                         self.live_bridge_operation_by_channel.get_cloned(channel_id).get("value")
@@ -24104,12 +24181,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && !self.live_active_interaction_by_channel.contains_key(channel_id)
             }
             update {
-                if self.live_delegation_operation_by_channel.contains_key(channel_id) {
-                    self.live_result_speech_suppressed_operations.insert(
-                        self.live_delegation_operation_by_channel
-                            .get_cloned(channel_id).get("value")
-                    );
-                }
                 if self.live_result_delivery_operation_by_channel.contains_key(channel_id) {
                     self.live_result_speech_suppressed_operations.insert(
                         self.live_result_delivery_operation_by_channel
@@ -24303,8 +24374,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_active_interaction_by_channel.get_cloned(channel_id) == Some(interaction_id)
             }
             guard "interaction_not_abandoned" { !self.live_abandoned_interactions.contains(interaction_id) }
-            guard "one_pending_delegation" {
-                !self.live_delegation_operation_by_channel.contains_key(channel_id)
+            guard "one_delegation_per_interaction" {
+                !self.live_delegation_operation_by_interaction.contains_key(interaction_id)
             }
             guard "exact_actionable_join" {
                 delegation_identity_present == true
@@ -24315,9 +24386,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 !self.live_delegation_reconciliation_by_operation.contains_key(operation_id)
             }
             update {
-                self.live_delegation_interaction_by_channel.insert(channel_id, interaction_id);
-                self.live_delegation_operation_by_channel.insert(channel_id, operation_id);
-                self.live_delegation_provider_turn_by_channel.insert(channel_id, provider_turn_correlation);
+                self.live_delegation_operation_by_interaction.insert(interaction_id, operation_id);
+                self.live_delegation_channel_by_operation.insert(operation_id, channel_id);
+                self.live_delegation_schedule_state_by_operation.insert(
+                    operation_id,
+                    LiveDelegationScheduleState::Created
+                );
                 self.live_delegation_interaction_by_operation.insert(operation_id, interaction_id);
                 self.live_delegation_provider_turn_by_operation.insert(operation_id, provider_turn_correlation);
                 self.live_delegation_reconciliation_by_operation.insert(
@@ -24359,9 +24433,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
             }
-            guard "channel_has_no_active_interaction_or_delegation" {
+            guard "channel_has_no_active_interaction" {
                 !self.live_active_interaction_by_channel.contains_key(channel_id)
-                && !self.live_delegation_operation_by_channel.contains_key(channel_id)
                 && !self.live_provider_turn_by_channel.contains_key(channel_id)
             }
             guard "exact_actionable_join" {
@@ -24376,9 +24449,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.live_interaction_channel_by_id.insert(interaction_id, channel_id);
                 self.live_active_interaction_by_channel.insert(channel_id, interaction_id);
-                self.live_delegation_interaction_by_channel.insert(channel_id, interaction_id);
-                self.live_delegation_operation_by_channel.insert(channel_id, operation_id);
-                self.live_delegation_provider_turn_by_channel.insert(channel_id, provider_turn_correlation);
+                self.live_delegation_operation_by_interaction.insert(interaction_id, operation_id);
+                self.live_delegation_channel_by_operation.insert(operation_id, channel_id);
+                self.live_delegation_schedule_state_by_operation.insert(
+                    operation_id,
+                    LiveDelegationScheduleState::Created
+                );
                 self.live_delegation_interaction_by_operation.insert(operation_id, interaction_id);
                 self.live_delegation_provider_turn_by_operation.insert(operation_id, provider_turn_correlation);
                 self.live_delegation_reconciliation_by_operation.insert(
@@ -24425,7 +24501,25 @@ macro_rules! meerkat_catalog_machine_dsl {
                 !self.live_delegation_worker_identity_by_operation.contains_key(operation_id)
                 && !self.live_delegation_worker_phase_by_operation.contains_key(operation_id)
             }
+            guard "schedule_state_is_created" {
+                self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationScheduleState::Created)
+            }
+            guard "channel_worker_slot_available" {
+                !self.live_delegation_active_worker_count_by_channel.contains_key(channel_id)
+                || self.live_delegation_active_worker_count_by_channel.get_copied(channel_id).get("value")
+                    < self.live_delegation_channel_worker_cap
+            }
             update {
+                self.live_delegation_schedule_state_by_operation.insert(
+                    operation_id,
+                    LiveDelegationScheduleState::Claimed
+                );
+                if self.live_delegation_active_worker_count_by_channel.contains_key(channel_id) {
+                    self.live_delegation_active_worker_count_by_channel.increment(channel_id, 1);
+                } else {
+                    self.live_delegation_active_worker_count_by_channel.insert(channel_id, 1);
+                }
                 self.live_delegation_worker_identity_by_operation.insert(operation_id, worker_identity);
                 if worker_ownership == LiveDelegationWorkerOwnership::ExistingMember {
                     self.live_delegation_existing_member_operations.insert(operation_id);
@@ -24475,6 +24569,24 @@ macro_rules! meerkat_catalog_machine_dsl {
                         LiveDelegationWorkerPhase::Failed
                     }
                 );
+                if started == true {
+                    self.live_delegation_schedule_state_by_operation.insert(
+                        operation_id,
+                        LiveDelegationScheduleState::Running
+                    );
+                } else {
+                    self.live_delegation_schedule_state_by_operation.insert(
+                        operation_id,
+                        LiveDelegationScheduleState::Failed
+                    );
+                    if self.live_delegation_active_worker_count_by_channel.contains_key(channel_id)
+                        && self.live_delegation_active_worker_count_by_channel.get_copied(channel_id).get("value") > 0 {
+                        self.live_delegation_active_worker_count_by_channel.insert(
+                            channel_id,
+                            self.live_delegation_active_worker_count_by_channel.get_copied(channel_id).get("value") - 1
+                        );
+                    }
+                }
             }
             to Idle
             emit LiveDelegationWorkerStartResolved {
@@ -24717,25 +24829,25 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_active_interaction_by_channel.get_cloned(channel_id) == Some(interaction_id)
             }
             guard "exact_running_worker_exists" {
-                self.live_delegation_interaction_by_channel.get_cloned(channel_id) == Some(interaction_id)
+                self.live_delegation_operation_by_interaction.contains_key(interaction_id)
                 && self.live_delegation_worker_identity_by_operation.contains_key(
-                    self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value"))
+                    self.live_delegation_operation_by_interaction.get_cloned(interaction_id).get("value"))
                 && (self.live_delegation_worker_phase_by_operation.get_copied(
-                        self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value"))
+                        self.live_delegation_operation_by_interaction.get_cloned(interaction_id).get("value"))
                         == Some(LiveDelegationWorkerPhase::Running)
                     || self.live_delegation_worker_phase_by_operation.get_copied(
-                        self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value"))
+                        self.live_delegation_operation_by_interaction.get_cloned(interaction_id).get("value"))
                         == Some(LiveDelegationWorkerPhase::StartAuthorized))
             }
             update {
                 self.live_abandoned_interactions.insert(interaction_id);
                 self.live_active_interaction_by_channel.remove(channel_id);
                 self.live_delegation_worker_phase_by_operation.insert(
-                    self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value"),
+                    self.live_delegation_operation_by_interaction.get_cloned(interaction_id).get("value"),
                     LiveDelegationWorkerPhase::CancelAuthorized
                 );
                 self.live_delegation_cancellation_reason_by_operation.insert(
-                    self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value"),
+                    self.live_delegation_operation_by_interaction.get_cloned(interaction_id).get("value"),
                     LiveDelegationCancellationReason::Abandoned
                 );
             }
@@ -24743,9 +24855,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit LiveDelegationCancellationAuthorized {
                 channel_id: channel_id,
                 interaction_id: interaction_id,
-                operation_id: self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value"),
+                operation_id: self.live_delegation_operation_by_interaction.get_cloned(interaction_id).get("value"),
                 worker_identity: self.live_delegation_worker_identity_by_operation.get_cloned(
-                    self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value")).get("value"),
+                    self.live_delegation_operation_by_interaction.get_cloned(interaction_id).get("value")).get("value"),
                 reason: LiveDelegationCancellationReason::Abandoned,
                 superseding_interaction_id: None
             }
@@ -24774,7 +24886,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "exact_active_worker" {
                 self.live_active_interaction_by_channel.get_cloned(channel_id) == Some(interaction_id)
-                && self.live_delegation_operation_by_channel.get_cloned(channel_id) == Some(operation_id)
+                && self.live_delegation_operation_by_interaction.get_cloned(interaction_id) == Some(operation_id)
                 && self.live_delegation_worker_identity_by_operation.get_cloned(operation_id) == Some(worker_identity)
                 && (self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
                         == Some(LiveDelegationWorkerPhase::Running)
@@ -24834,8 +24946,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && !self.live_abandoned_interactions.contains(superseding_interaction_id)
             }
             guard "exact_completed_turn_worker_is_pending" {
-                self.live_delegation_interaction_by_channel.get_cloned(channel_id) == Some(interaction_id)
-                && self.live_delegation_operation_by_channel.get_cloned(channel_id) == Some(operation_id)
+                self.live_delegation_operation_by_interaction.get_cloned(interaction_id) == Some(operation_id)
                 && self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
                 && self.live_delegation_worker_identity_by_operation.get_cloned(operation_id) == Some(worker_identity)
                 && (self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
@@ -24925,53 +25036,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "interaction_is_active" {
                 self.live_active_interaction_by_channel.get_cloned(channel_id) == Some(interaction_id)
             }
-            guard "pending_delegation_absent_or_owned" {
-                !self.live_delegation_interaction_by_channel.contains_key(channel_id)
-                || self.live_delegation_interaction_by_channel.get_cloned(channel_id) == Some(interaction_id)
-            }
             guard "no_cancellable_worker" {
-                !self.live_delegation_operation_by_channel.contains_key(channel_id)
+                !self.live_delegation_operation_by_interaction.contains_key(interaction_id)
                 || (self.live_delegation_worker_phase_by_operation.get_copied(
-                        self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value"))
+                        self.live_delegation_operation_by_interaction.get_cloned(interaction_id).get("value"))
                         != Some(LiveDelegationWorkerPhase::Running)
                     && self.live_delegation_worker_phase_by_operation.get_copied(
-                        self.live_delegation_operation_by_channel.get_cloned(channel_id).get("value"))
+                        self.live_delegation_operation_by_interaction.get_cloned(interaction_id).get("value"))
                         != Some(LiveDelegationWorkerPhase::StartAuthorized))
-            }
-            update {
-                self.live_abandoned_interactions.insert(interaction_id);
-                self.live_active_interaction_by_channel.remove(channel_id);
-                self.live_delegation_interaction_by_channel.remove(channel_id);
-                self.live_delegation_operation_by_channel.remove(channel_id);
-                self.live_delegation_provider_turn_by_channel.remove(channel_id);
-            }
-            to Idle
-            emit LiveInteractionAbandoned {
-                channel_id: channel_id,
-                interaction_id: interaction_id
-            }
-        }
-
-        transition AbandonLiveInteractionPreservingEarlierDelegation {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input AbandonLiveInteraction {
-                channel_id, runtime_id, fence_token, generation, interaction_id
-            }
-            guard "runtime_binding_matches" {
-                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
-            }
-            guard "fence_binding_matches" {
-                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
-            }
-            guard "generation_binding_matches" {
-                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
-            }
-            guard "interaction_is_active" {
-                self.live_active_interaction_by_channel.get_cloned(channel_id) == Some(interaction_id)
-            }
-            guard "earlier_delegation_is_pending" {
-                self.live_delegation_interaction_by_channel.contains_key(channel_id)
-                && self.live_delegation_interaction_by_channel.get_cloned(channel_id) != Some(interaction_id)
             }
             update {
                 self.live_abandoned_interactions.insert(interaction_id);
@@ -25099,6 +25171,29 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_delegation_worker_phase_by_operation.insert(
                     operation_id,
                     LiveDelegationWorkerPhase::Terminal
+                );
+                if (self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationScheduleState::Claimed)
+                    || self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationScheduleState::Running))
+                    && self.live_delegation_active_worker_count_by_channel.contains_key(channel_id)
+                    && self.live_delegation_active_worker_count_by_channel.get_copied(channel_id).get("value") > 0 {
+                    self.live_delegation_active_worker_count_by_channel.insert(
+                        channel_id,
+                        self.live_delegation_active_worker_count_by_channel.get_copied(channel_id).get("value") - 1
+                    );
+                }
+                self.live_delegation_schedule_state_by_operation.insert(
+                    operation_id,
+                    if terminal == LiveDelegationWorkerTerminalKind::Completed {
+                        LiveDelegationScheduleState::Completed
+                    } else { if terminal == LiveDelegationWorkerTerminalKind::Blocked {
+                        LiveDelegationScheduleState::Blocked
+                    } else { if terminal == LiveDelegationWorkerTerminalKind::Cancelled {
+                        LiveDelegationScheduleState::Cancelled
+                    } else {
+                        LiveDelegationScheduleState::Failed
+                    }}}
                 );
                 if self.live_abandoned_interactions.contains(interaction_id)
                     || self.live_delegation_cancellation_reason_by_operation.contains_key(operation_id) {
@@ -25351,11 +25446,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                             self.live_active_interaction_by_channel.remove(channel_id);
                         }
                     }
-                    if self.live_delegation_operation_by_channel.get_cloned(channel_id) == Some(operation_id) {
-                        self.live_delegation_interaction_by_channel.remove(channel_id);
-                        self.live_delegation_operation_by_channel.remove(channel_id);
-                        self.live_delegation_provider_turn_by_channel.remove(channel_id);
-                    }
                 }
             }
             to Idle
@@ -25365,6 +25455,218 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: operation_id,
                 worker_identity: worker_identity,
                 retired: retired
+            }
+        }
+
+        // A worker that handed its WorkGraph item back with unresolved
+        // dependencies was retired without merging a result. Once the item is
+        // ready again the same exact operation may bind a fresh worker.
+        transition RequeueBlockedLiveDelegation {
+            per_phase [Idle, Attached, Running]
+            on input RequeueLiveDelegation {
+                channel_id, runtime_id, fence_token, generation, interaction_id, operation_id
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_operation_join" {
+                self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
+                && self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
+                && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id)
+            }
+            guard "interaction_not_abandoned" { !self.live_abandoned_interactions.contains(interaction_id) }
+            guard "schedule_state_is_blocked" {
+                self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationScheduleState::Blocked)
+            }
+            guard "blocked_worker_is_retired" {
+                self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationWorkerPhase::Retired)
+                && self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationWorkerTerminalKind::Blocked)
+            }
+            update {
+                self.live_delegation_worker_identity_by_operation.remove(operation_id);
+                self.live_delegation_worker_phase_by_operation.remove(operation_id);
+                self.live_delegation_worker_terminal_by_operation.remove(operation_id);
+                self.live_delegation_cancellation_reason_by_operation.remove(operation_id);
+                self.live_delegation_existing_member_operations.remove(operation_id);
+                self.live_delegation_late_terminal_operations.remove(operation_id);
+                self.live_delegation_result_eligible_operations.remove(operation_id);
+                self.live_delegation_schedule_state_by_operation.insert(
+                    operation_id,
+                    LiveDelegationScheduleState::Created
+                );
+            }
+            to Idle
+            emit LiveDelegationRequeued {
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                operation_id: operation_id
+            }
+        }
+
+        // A worker start that failed before anything physical existed (the
+        // source member was still mid-turn after the bounded wait) leaves the
+        // item queued: the same exact operation may bind a worker again.
+        transition RequeueUnstartedLiveDelegation {
+            per_phase [Idle, Attached, Running]
+            on input RequeueLiveDelegation {
+                channel_id, runtime_id, fence_token, generation, interaction_id, operation_id
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_operation_join" {
+                self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
+                && self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
+                && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id)
+            }
+            guard "interaction_not_abandoned" { !self.live_abandoned_interactions.contains(interaction_id) }
+            guard "schedule_state_is_failed" {
+                self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationScheduleState::Failed)
+            }
+            guard "worker_never_started" {
+                self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationWorkerPhase::Failed)
+                && !self.live_delegation_worker_terminal_by_operation.contains_key(operation_id)
+                && !self.live_delegation_cancellation_reason_by_operation.contains_key(operation_id)
+            }
+            update {
+                self.live_delegation_worker_identity_by_operation.remove(operation_id);
+                self.live_delegation_worker_phase_by_operation.remove(operation_id);
+                self.live_delegation_existing_member_operations.remove(operation_id);
+                self.live_delegation_late_terminal_operations.remove(operation_id);
+                self.live_delegation_result_eligible_operations.remove(operation_id);
+                self.live_delegation_schedule_state_by_operation.insert(
+                    operation_id,
+                    LiveDelegationScheduleState::Created
+                );
+            }
+            to Idle
+            emit LiveDelegationRequeued {
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                operation_id: operation_id
+            }
+        }
+
+        // Queued or blocked work with no live worker is cancelled directly.
+        // A channel that has already unbound needs no binding fence: nothing
+        // could ever serve that item again.
+        transition CancelQueuedLiveDelegation {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CancelQueuedLiveDelegation {
+                channel_id, runtime_id, fence_token, generation, interaction_id, operation_id
+            }
+            guard "binding_matches_or_channel_unbound" {
+                (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id))
+                || (self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                    && self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                    && self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation))
+            }
+            guard "exact_operation_join" {
+                self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
+                && self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
+                && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id)
+            }
+            guard "schedule_state_is_queued" {
+                self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationScheduleState::Created)
+                || self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationScheduleState::Blocked)
+            }
+            guard "no_live_worker" {
+                !self.live_delegation_worker_identity_by_operation.contains_key(operation_id)
+                || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationWorkerPhase::Retired)
+            }
+            update {
+                self.live_delegation_schedule_state_by_operation.insert(
+                    operation_id,
+                    LiveDelegationScheduleState::Cancelled
+                );
+            }
+            to Idle
+            emit LiveDelegationQueuedCancelled {
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                operation_id: operation_id
+            }
+        }
+
+        // Executor state narration is templated by the shell and reaches the
+        // provider only through this authority. Each kind is released at most
+        // once per schedule pass and must match the generated schedule state.
+        transition AuthorizeLiveDelegationNarration {
+            per_phase [Idle, Attached, Running]
+            on input AuthorizeLiveDelegationNarration {
+                channel_id, runtime_id, fence_token, generation, interaction_id,
+                operation_id, provider_turn_correlation, kind
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            guard "exact_operation_join" {
+                self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
+                && self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
+                && self.live_delegation_provider_turn_by_operation.get_cloned(operation_id) == Some(provider_turn_correlation)
+                && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id)
+            }
+            guard "interaction_not_abandoned" { !self.live_abandoned_interactions.contains(interaction_id) }
+            guard "narration_matches_schedule_state" {
+                (kind == LiveDelegationNarrationKind::Queued
+                    && self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationScheduleState::Created))
+                || (kind == LiveDelegationNarrationKind::Claimed
+                    && (self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                            == Some(LiveDelegationScheduleState::Claimed)
+                        || self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                            == Some(LiveDelegationScheduleState::Running)))
+                || (kind == LiveDelegationNarrationKind::Blocked
+                    && self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationScheduleState::Blocked))
+                || (kind == LiveDelegationNarrationKind::Completed
+                    && self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationScheduleState::Completed))
+                || (kind == LiveDelegationNarrationKind::SourceBusy
+                    && self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationScheduleState::Created))
+            }
+            guard "narration_advances" {
+                self.live_delegation_last_narration_by_operation.get_copied(operation_id) != Some(kind)
+            }
+            update {
+                self.live_delegation_last_narration_by_operation.insert(operation_id, kind);
+            }
+            to Idle
+            emit LiveDelegationNarrationAuthorized {
+                channel_id: channel_id,
+                interaction_id: interaction_id,
+                operation_id: operation_id,
+                provider_turn_correlation: provider_turn_correlation,
+                kind: kind
             }
         }
 
@@ -25454,11 +25756,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                     operation_id,
                     if self.live_active_interaction_by_channel.get_cloned(channel_id) == Some(interaction_id) { LiveDelegationResultDisposition::OpenTurn } else { LiveDelegationResultDisposition::DeferredContext }
                 );
-                if self.live_delegation_operation_by_channel.get_cloned(channel_id) == Some(operation_id) {
-                    self.live_delegation_interaction_by_channel.remove(channel_id);
-                    self.live_delegation_operation_by_channel.remove(channel_id);
-                    self.live_delegation_provider_turn_by_channel.remove(channel_id);
-                }
             }
             to Idle
             emit LiveDelegationResultReleaseAuthorized {
@@ -28145,9 +28442,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_active_interaction_by_channel.remove(channel_id);
                 self.live_awaiting_assistant_interaction_by_channel.remove(channel_id);
                 self.live_provider_turn_by_channel.remove(channel_id);
-                self.live_delegation_interaction_by_channel.remove(channel_id);
-                self.live_delegation_operation_by_channel.remove(channel_id);
-                self.live_delegation_provider_turn_by_channel.remove(channel_id);
+                self.live_delegation_active_worker_count_by_channel.remove(channel_id);
                 self.live_context_cursor_by_channel.remove(channel_id);
                 if self.live_bridge_operation_by_channel.contains_key(channel_id) {
                     self.live_bridge_cancellation_reason_by_operation.insert(

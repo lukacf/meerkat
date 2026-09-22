@@ -4268,21 +4268,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbandonLiveInteractionStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `AbandonLiveInteractionPreservingEarlierDelegationIdle`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `AbandonLiveInteractionPreservingEarlierDelegationAttached`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `AbandonLiveInteractionPreservingEarlierDelegationRunning`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `AbandonLiveInteractionPreservingEarlierDelegationRetired`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
-- `AbandonLiveInteractionPreservingEarlierDelegationStopped`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
 - `CompleteLiveInteractionIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4395,6 +4380,48 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveLiveDelegationWorkerRetirementStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequeueBlockedLiveDelegationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequeueBlockedLiveDelegationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequeueBlockedLiveDelegationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequeueUnstartedLiveDelegationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequeueUnstartedLiveDelegationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequeueUnstartedLiveDelegationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelQueuedLiveDelegationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelQueuedLiveDelegationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelQueuedLiveDelegationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelQueuedLiveDelegationRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CancelQueuedLiveDelegationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationNarrationIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationNarrationAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeLiveDelegationNarrationRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeLiveConsequentialEffectIdle`
@@ -7744,6 +7771,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveConsequentialEffectAuthorized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveDelegationRequeued`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationQueuedCancelled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveDelegationNarrationAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveDelegationResultReleaseAuthorized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8034,7 +8070,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `live_assistant_turn_has_frozen_typed_attribution`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `live_pending_delegation_is_serialized_and_complete`
+- `live_delegation_items_are_channel_bound_and_capped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_delegation_operation_has_exact_join_identity`

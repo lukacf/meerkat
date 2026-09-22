@@ -45,6 +45,8 @@ fn opened_authority() -> mm::MeerkatMachineAuthority {
         active_runtime_id: Some(runtime_id()),
         active_fence_token: Some(fence()),
         active_runtime_generation: Some(generation()),
+        live_delegation_channel_worker_cap:
+            meerkat_runtime::live_execution::LIVE_DELEGATION_CHANNEL_WORKER_CAP,
         ..Default::default()
     };
     state
@@ -5465,4 +5467,658 @@ fn close_custody_accepts_pending_or_activation_receipt_without_owner_echo() {
         Some(&identity()),
         "channel close custody never retires the durable member"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Parallel live delegation: several items per channel, a generated worker
+// cap, blocked-worker requeue, queued cancellation, and templated narration.
+// ---------------------------------------------------------------------------
+
+fn channel_operation(index: usize) -> mm::OperationId {
+    mm::OperationId(format!("operation-live-parallel-{index}"))
+}
+
+fn channel_interaction(index: usize) -> String {
+    format!("interaction-live-parallel-{index}")
+}
+
+fn channel_provider_turn(index: usize) -> String {
+    format!("opaque-provider-turn-parallel-{index}")
+}
+
+fn channel_worker(index: usize) -> String {
+    format!("live-worker-parallel-{index}")
+}
+
+/// Admit the `index`th delegation on the shared channel: provider user turn,
+/// delegation join, turn completion, and canonical transcript confirmation.
+fn admit_parallel_delegation(authority: &mut mm::MeerkatMachineAuthority, index: usize) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(index),
+            provider_turn_ref: channel_provider_turn(index),
+        },
+    )
+    .expect("provider user turn starts while earlier delegations keep running");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AdmitLiveDelegation {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(index),
+            operation_id: channel_operation(index),
+            provider_turn_correlation: channel_provider_turn(index),
+            delegation_identity_present: true,
+            actionable_input_present: true,
+            exact_join: true,
+        },
+    )
+    .expect("a further delegation is admitted on a channel with pending work");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::CompleteLiveInteraction {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            provider_turn_ref: channel_provider_turn(index),
+        },
+    )
+    .expect("provider user turn completes");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(index),
+            operation_id: channel_operation(index),
+            provider_turn_correlation: channel_provider_turn(index),
+            final_transcript_committed: true,
+            normalized_digest_matches: true,
+        },
+    )
+    .expect("canonical transcript confirms the queued delegation");
+}
+
+fn authorize_parallel_worker(
+    authority: &mut mm::MeerkatMachineAuthority,
+    index: usize,
+    worker: &str,
+) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(index),
+            operation_id: channel_operation(index),
+            provider_turn_correlation: channel_provider_turn(index),
+            worker_identity: worker.to_string(),
+            worker_ownership: mm::LiveDelegationWorkerOwnership::OwnedMember,
+        },
+    )
+}
+
+fn start_parallel_worker(authority: &mut mm::MeerkatMachineAuthority, index: usize) {
+    authorize_parallel_worker(authority, index, &channel_worker(index))
+        .expect("worker slot is available");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationWorkerStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(index),
+            operation_id: channel_operation(index),
+            worker_identity: channel_worker(index),
+            started: true,
+        },
+    )
+    .expect("worker start resolves");
+}
+
+fn record_parallel_terminal(
+    authority: &mut mm::MeerkatMachineAuthority,
+    index: usize,
+    worker: &str,
+    terminal: mm::LiveDelegationWorkerTerminalKind,
+) -> mm::MeerkatMachineTransition {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::RecordLiveDelegationWorkerTerminal {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(index),
+            operation_id: channel_operation(index),
+            worker_identity: worker.to_string(),
+            terminal,
+        },
+    )
+    .expect("worker terminal is recorded")
+}
+
+fn retire_parallel_worker(authority: &mut mm::MeerkatMachineAuthority, index: usize, worker: &str) {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationWorkerRetirement {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(index),
+            operation_id: channel_operation(index),
+            worker_identity: worker.to_string(),
+        },
+    )
+    .expect("terminal worker retirement is authorized");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationWorkerRetirement {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(index),
+            operation_id: channel_operation(index),
+            worker_identity: worker.to_string(),
+            retired: true,
+        },
+    )
+    .expect("worker is retired");
+}
+
+fn narrate(
+    authority: &mut mm::MeerkatMachineAuthority,
+    index: usize,
+    kind: mm::LiveDelegationNarrationKind,
+) -> Result<mm::MeerkatMachineTransition, mm::MeerkatMachineTransitionError> {
+    apply(
+        authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationNarration {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(index),
+            operation_id: channel_operation(index),
+            provider_turn_correlation: channel_provider_turn(index),
+            kind,
+        },
+    )
+}
+
+fn schedule_state(
+    authority: &mm::MeerkatMachineAuthority,
+    index: usize,
+) -> Option<mm::LiveDelegationScheduleState> {
+    authority
+        .state()
+        .live_delegation_schedule_state_by_operation
+        .get(&channel_operation(index))
+        .copied()
+}
+
+fn active_worker_count(authority: &mm::MeerkatMachineAuthority) -> u64 {
+    authority
+        .state()
+        .live_delegation_active_worker_count_by_channel
+        .get(CHANNEL)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[test]
+fn generated_initial_state_carries_the_runtime_worker_cap() {
+    assert_eq!(
+        meerkat_machine_kernels::generated::meerkat::initial_state()
+            .live_delegation_channel_worker_cap,
+        meerkat_runtime::live_execution::LIVE_DELEGATION_CHANNEL_WORKER_CAP
+    );
+    assert_eq!(
+        meerkat_runtime::live_execution::LIVE_DELEGATION_CHANNEL_WORKER_CAP,
+        4
+    );
+}
+
+#[test]
+fn several_delegations_coexist_per_channel_and_arrival_cancels_nothing() {
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    for index in 1..=3 {
+        admit_parallel_delegation(&mut authority, index);
+        assert_eq!(
+            schedule_state(&authority, index),
+            Some(mm::LiveDelegationScheduleState::Created)
+        );
+    }
+    start_parallel_worker(&mut authority, 1);
+    admit_parallel_delegation(&mut authority, 4);
+    assert_eq!(
+        schedule_state(&authority, 1),
+        Some(mm::LiveDelegationScheduleState::Running),
+        "a later arrival leaves the running worker untouched"
+    );
+    assert!(
+        authority
+            .state()
+            .live_delegation_cancellation_reason_by_operation
+            .is_empty()
+    );
+    let state = authority.state();
+    assert_eq!(
+        state.live_delegation_operation_by_interaction.len(),
+        4,
+        "every interaction owns exactly one delegation"
+    );
+    assert!(
+        state
+            .live_delegation_channel_by_operation
+            .values()
+            .all(|channel| channel == CHANNEL)
+    );
+}
+
+#[test]
+fn worker_cap_bounds_concurrent_workers_and_a_terminal_frees_the_slot() {
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    for index in 1..=5 {
+        admit_parallel_delegation(&mut authority, index);
+    }
+    for index in 1..=4 {
+        start_parallel_worker(&mut authority, index);
+    }
+    assert_eq!(active_worker_count(&authority), 4);
+    assert!(
+        authorize_parallel_worker(&mut authority, 5, &channel_worker(5)).is_err(),
+        "the fifth worker exceeds the generated per-channel cap"
+    );
+    assert_eq!(
+        schedule_state(&authority, 5),
+        Some(mm::LiveDelegationScheduleState::Created)
+    );
+
+    let terminal = record_parallel_terminal(
+        &mut authority,
+        2,
+        &channel_worker(2),
+        mm::LiveDelegationWorkerTerminalKind::Completed,
+    );
+    assert!(terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationWorkerTerminalRecorded {
+            result_eligible: true,
+            late: false,
+            ..
+        }
+    )));
+    assert_eq!(active_worker_count(&authority), 3);
+    assert_eq!(
+        schedule_state(&authority, 2),
+        Some(mm::LiveDelegationScheduleState::Completed)
+    );
+    start_parallel_worker(&mut authority, 5);
+    assert_eq!(active_worker_count(&authority), 4);
+    assert_eq!(
+        schedule_state(&authority, 5),
+        Some(mm::LiveDelegationScheduleState::Running)
+    );
+
+    // A failed start releases its slot without any terminal.
+    admit_parallel_delegation(&mut authority, 6);
+    record_parallel_terminal(
+        &mut authority,
+        1,
+        &channel_worker(1),
+        mm::LiveDelegationWorkerTerminalKind::Failed,
+    );
+    authorize_parallel_worker(&mut authority, 6, &channel_worker(6))
+        .expect("slot freed by failure");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationWorkerStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(6),
+            operation_id: channel_operation(6),
+            worker_identity: channel_worker(6),
+            started: false,
+        },
+    )
+    .expect("failed start resolves");
+    assert_eq!(
+        schedule_state(&authority, 6),
+        Some(mm::LiveDelegationScheduleState::Failed)
+    );
+    assert_eq!(active_worker_count(&authority), 3);
+}
+
+#[test]
+fn blocked_worker_is_never_result_eligible_and_requeues_only_after_retirement() {
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    admit_parallel_delegation(&mut authority, 1);
+    start_parallel_worker(&mut authority, 1);
+    let terminal = record_parallel_terminal(
+        &mut authority,
+        1,
+        &channel_worker(1),
+        mm::LiveDelegationWorkerTerminalKind::Blocked,
+    );
+    assert!(terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationWorkerTerminalRecorded {
+            terminal: mm::LiveDelegationWorkerTerminalKind::Blocked,
+            result_eligible: false,
+            ..
+        }
+    )));
+    assert_eq!(
+        schedule_state(&authority, 1),
+        Some(mm::LiveDelegationScheduleState::Blocked)
+    );
+    assert_eq!(active_worker_count(&authority), 0);
+    let requeue = |authority: &mut mm::MeerkatMachineAuthority| {
+        apply(
+            authority,
+            mm::MeerkatMachineInput::RequeueLiveDelegation {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: channel_interaction(1),
+                operation_id: channel_operation(1),
+            },
+        )
+    };
+    assert!(
+        requeue(&mut authority).is_err(),
+        "requeue waits for the blocked worker's physical retirement"
+    );
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::AuthorizeLiveDelegationResultRelease {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: channel_interaction(1),
+                operation_id: channel_operation(1),
+                provider_turn_correlation: channel_provider_turn(1),
+            },
+        )
+        .is_err(),
+        "a blocked worker has no result to release"
+    );
+    retire_parallel_worker(&mut authority, 1, &channel_worker(1));
+    let requeued = requeue(&mut authority).expect("retired blocked worker requeues");
+    assert!(requeued.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationRequeued { operation_id, .. }
+            if operation_id == &channel_operation(1)
+    )));
+    assert_eq!(
+        schedule_state(&authority, 1),
+        Some(mm::LiveDelegationScheduleState::Created)
+    );
+    assert!(
+        !authority
+            .state()
+            .live_delegation_worker_identity_by_operation
+            .contains_key(&channel_operation(1))
+    );
+    assert!(
+        requeue(&mut authority).is_err(),
+        "requeue is not repeatable"
+    );
+
+    // The same exact operation binds a fresh worker and completes normally.
+    authorize_parallel_worker(&mut authority, 1, "live-worker-parallel-1-second")
+        .expect("fresh worker binds to the requeued operation");
+    assert_eq!(
+        authority
+            .state()
+            .live_delegation_worker_identity_by_operation
+            .get(&channel_operation(1))
+            .map(String::as_str),
+        Some("live-worker-parallel-1-second")
+    );
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationWorkerStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(1),
+            operation_id: channel_operation(1),
+            worker_identity: "live-worker-parallel-1-second".to_string(),
+            started: true,
+        },
+    )
+    .expect("second worker runs");
+    assert_eq!(active_worker_count(&authority), 1);
+    let terminal = record_parallel_terminal(
+        &mut authority,
+        1,
+        "live-worker-parallel-1-second",
+        mm::LiveDelegationWorkerTerminalKind::Completed,
+    );
+    assert!(terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationWorkerTerminalRecorded {
+            result_eligible: true,
+            ..
+        }
+    )));
+    assert_eq!(
+        schedule_state(&authority, 1),
+        Some(mm::LiveDelegationScheduleState::Completed)
+    );
+}
+
+#[test]
+fn queued_cancellation_refuses_running_workers_and_closes_the_item_for_scheduling() {
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    admit_parallel_delegation(&mut authority, 1);
+    admit_parallel_delegation(&mut authority, 2);
+    start_parallel_worker(&mut authority, 1);
+    let cancel = |authority: &mut mm::MeerkatMachineAuthority, index: usize| {
+        apply(
+            authority,
+            mm::MeerkatMachineInput::CancelQueuedLiveDelegation {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                interaction_id: channel_interaction(index),
+                operation_id: channel_operation(index),
+            },
+        )
+    };
+    assert!(
+        cancel(&mut authority, 1).is_err(),
+        "a running worker is never cancelled here"
+    );
+    let cancelled = cancel(&mut authority, 2).expect("queued item cancels");
+    assert!(cancelled.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationQueuedCancelled { operation_id, .. }
+            if operation_id == &channel_operation(2)
+    )));
+    assert_eq!(
+        schedule_state(&authority, 2),
+        Some(mm::LiveDelegationScheduleState::Cancelled)
+    );
+    assert!(
+        authorize_parallel_worker(&mut authority, 2, &channel_worker(2)).is_err(),
+        "a cancelled item never binds a worker"
+    );
+    assert!(
+        cancel(&mut authority, 2).is_err(),
+        "cancellation is not repeatable"
+    );
+    assert_eq!(
+        schedule_state(&authority, 1),
+        Some(mm::LiveDelegationScheduleState::Running)
+    );
+}
+
+#[test]
+fn narration_follows_the_schedule_state_and_releases_each_kind_once() {
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    admit_parallel_delegation(&mut authority, 1);
+    assert!(
+        narrate(&mut authority, 1, mm::LiveDelegationNarrationKind::Claimed).is_err(),
+        "a queued item cannot be narrated as started"
+    );
+    let queued = narrate(&mut authority, 1, mm::LiveDelegationNarrationKind::Queued)
+        .expect("queued narration");
+    assert!(queued.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationNarrationAuthorized {
+            kind: mm::LiveDelegationNarrationKind::Queued,
+            operation_id,
+            ..
+        } if operation_id == &channel_operation(1)
+    )));
+    assert!(
+        narrate(&mut authority, 1, mm::LiveDelegationNarrationKind::Queued).is_err(),
+        "the same kind is released once per pass"
+    );
+    start_parallel_worker(&mut authority, 1);
+    narrate(&mut authority, 1, mm::LiveDelegationNarrationKind::Claimed)
+        .expect("running item narrates as started");
+    assert!(
+        narrate(
+            &mut authority,
+            1,
+            mm::LiveDelegationNarrationKind::Completed
+        )
+        .is_err(),
+        "completion narration waits for the recorded terminal"
+    );
+    record_parallel_terminal(
+        &mut authority,
+        1,
+        &channel_worker(1),
+        mm::LiveDelegationWorkerTerminalKind::Completed,
+    );
+    narrate(
+        &mut authority,
+        1,
+        mm::LiveDelegationNarrationKind::Completed,
+    )
+    .expect("completed item narrates as finished");
+    assert!(
+        narrate(&mut authority, 1, mm::LiveDelegationNarrationKind::Blocked).is_err(),
+        "a completed item is never narrated as blocked"
+    );
+}
+
+#[test]
+fn busy_source_start_failure_requeues_without_abandoning_the_interaction() {
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    admit_parallel_delegation(&mut authority, 1);
+    authorize_parallel_worker(&mut authority, 1, &channel_worker(1)).expect("worker slot");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::ResolveLiveDelegationWorkerStart {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(1),
+            operation_id: channel_operation(1),
+            worker_identity: channel_worker(1),
+            started: false,
+        },
+    )
+    .expect("busy source records a failed start");
+    assert_eq!(
+        schedule_state(&authority, 1),
+        Some(mm::LiveDelegationScheduleState::Failed)
+    );
+    assert_eq!(active_worker_count(&authority), 0);
+    let requeued = apply(
+        &mut authority,
+        mm::MeerkatMachineInput::RequeueLiveDelegation {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(1),
+            operation_id: channel_operation(1),
+        },
+    )
+    .expect("unstarted worker requeues without retirement");
+    assert!(requeued.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationRequeued { operation_id, .. }
+            if operation_id == &channel_operation(1)
+    )));
+    assert_eq!(
+        schedule_state(&authority, 1),
+        Some(mm::LiveDelegationScheduleState::Created)
+    );
+    assert!(
+        !authority
+            .state()
+            .live_abandoned_interactions
+            .contains(&channel_interaction(1)),
+        "a busy source never abandons the user's interaction"
+    );
+    narrate(
+        &mut authority,
+        1,
+        mm::LiveDelegationNarrationKind::SourceBusy,
+    )
+    .expect("queued item narrates the busy source");
+    assert!(
+        narrate(
+            &mut authority,
+            1,
+            mm::LiveDelegationNarrationKind::SourceBusy
+        )
+        .is_err(),
+        "busy narration is released once per pass"
+    );
+    start_parallel_worker(&mut authority, 1);
+    assert_eq!(
+        schedule_state(&authority, 1),
+        Some(mm::LiveDelegationScheduleState::Running)
+    );
+    let terminal = record_parallel_terminal(
+        &mut authority,
+        1,
+        &channel_worker(1),
+        mm::LiveDelegationWorkerTerminalKind::Completed,
+    );
+    assert!(terminal.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationWorkerTerminalRecorded {
+            result_eligible: true,
+            ..
+        }
+    )));
 }

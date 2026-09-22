@@ -194,6 +194,36 @@ them.
   for every read racing a head-canonical writer. It still never waits for a
   turn.
 
+- Public GPT Live client delegations run in parallel. Every client
+  delegation becomes an item in the mob's shared WorkGraph (labels `voice`
+  and `live-channel:<id>`, evidence naming the provider delegation, channel,
+  and source session); up to four forks per channel run at once
+  (`LIVE_DELEGATION_CHANNEL_WORKER_CAP`, enforced by the generated machine's
+  new `live_delegation_channel_worker_cap`), later requests wait in arrival
+  order until the WorkGraph reports them ready, and a new request never
+  supersedes or cancels an earlier one. Forks receive the WorkGraph tools
+  (`DelegationMemberOptions::grant_workgraph_tools`) and a briefing that names
+  their item; a fork that needs a sibling's result links a `blocks` edge and
+  releases its item, is retired without a result
+  (`LiveDelegationWorkerTerminalKind::Blocked`), and the same operation binds
+  a fresh worker with the sibling's result once the item is ready again
+  (`RequeueLiveDelegation`). Channel close cancels only items that never
+  started (`CancelQueuedLiveDelegation`); running forks finish and their
+  results are queued on the source member as internal work. A fork refused
+  because the source member was still mid-turn (`SourceBusy`) is requeued
+  through the same input and retried; the request is never dropped.
+  Executor state (queued, started, waiting on another request, waiting for
+  the source member's turn, finished) reaches the voice model only through
+  generated narration authority
+  (`AuthorizeLiveDelegationNarration`, `LiveDelegationNarrationAuthority`,
+  `ExperimentalGptLiveControlPlane::narrate_delegation`,
+  `LiveSidebandCommand::narrate_delegation`) with constant templates; without
+  a WorkGraph store the channel degrades to a strict serial queue.
+  `MeerkatMachine` gains `live_delegation_schedule_state`,
+  `requeue_live_delegation`, `cancel_queued_live_delegation`, and
+  `authorize_live_delegation_narration`; `MobMcpState::workgraph_service`
+  exposes the host WorkGraph service.
+
 ### Fixed
 
 - Compaction no longer mints an audit graph edge over inline media. When a
@@ -429,6 +459,49 @@ them.
   `meerkat::surface::materialize_prepared_session_actor_unattached_with_actor_slot`,
   `meerkat::session_runtime::recovery::inject_recovery_resources`, and
   `RecoveryContext::recovered_create_request_with_bindings`.
+- Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-runtime `meerkat_machine::dsl`): the per-channel single-slot state
+  `live_delegation_interaction_by_channel`,
+  `live_delegation_operation_by_channel`, and
+  `live_delegation_provider_turn_by_channel` are removed and replaced by
+  `live_delegation_operation_by_interaction`,
+  `live_delegation_channel_by_operation`,
+  `live_delegation_schedule_state_by_operation`,
+  `live_delegation_active_worker_count_by_channel`,
+  `live_delegation_channel_worker_cap`, and
+  `live_delegation_last_narration_by_operation` (`MeerkatMachineState` struct
+  literals and the generated `State` must add them); the invariant
+  `live_pending_delegation_is_serialized_and_complete` is replaced by
+  `live_delegation_items_are_channel_bound_and_capped`; the transition
+  `AbandonLiveInteractionPreservingEarlierDelegation` is removed and
+  `RequeueBlockedLiveDelegation`, `RequeueUnstartedLiveDelegation`,
+  `CancelQueuedLiveDelegation`, and `AuthorizeLiveDelegationNarration` are added (`TransitionId::*`
+  discriminants move); the inputs `RequeueLiveDelegation`,
+  `CancelQueuedLiveDelegation`, and `AuthorizeLiveDelegationNarration` are
+  added (`MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`, and
+  kernel `InputKind::*` discriminants move); the effects
+  `LiveDelegationRequeued`, `LiveDelegationQueuedCancelled`, and
+  `LiveDelegationNarrationAuthorized` are added (`MeerkatMachineEffect::*`,
+  `MeerkatMachineEffectVariant::*`, and kernel `EffectKind::*` discriminants
+  move); `LiveDelegationWorkerTerminalKind` gains `Blocked`
+  (`LiveDelegationWorkerTerminalKind::*` in the schema catalog, the kernel,
+  the runtime DSL bridge, and `meerkat_runtime::live_execution`); the enums
+  `LiveDelegationScheduleState` and `LiveDelegationNarrationKind` are added.
+  Arrival of a new delegation no longer drives `SupersedeLiveInteraction`;
+  the input remains for explicit cancellation.
+- `meerkat-live`: `LiveSidebandProviderCommand` gains the variant
+  `NarrateDelegationContext` (`LiveSidebandProviderCommand::*` discriminants
+  move); `LiveSidebandNarrationAuthority` and
+  `LiveSidebandCommand::narrate_delegation` are added.
+- `ExperimentalGptLiveControlPlane` gains the required method
+  `narrate_delegation` (implementors must add it);
+  `ExperimentalGptLiveNarrationDispatch` and
+  `ExperimentalGptLiveNarrationWaiter` are added.
+- `DelegationMemberOptions` gains the public field `grant_workgraph_tools`.
+- `GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS` is reworded: it now tells
+  the voice model that several delegated requests run at once and that the
+  executor reports each one's state (consumers matching the old text must
+  update).
 
 ### Changed
 

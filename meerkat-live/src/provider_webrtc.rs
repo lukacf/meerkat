@@ -680,6 +680,52 @@ impl LiveSidebandReleaseAuthority {
     }
 }
 
+/// Non-forgeable authority for one templated executor-state narration bound
+/// to an exact delegation. It is distinct from result release: it carries no
+/// result digest and can never publish executor output as a result.
+#[derive(Clone)]
+pub struct LiveSidebandNarrationAuthority {
+    binding: ProviderWebrtcBinding,
+    attempt: LiveSidebandAppendAttempt,
+    consumed: Arc<AtomicBool>,
+}
+
+impl fmt::Debug for LiveSidebandNarrationAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LiveSidebandNarrationAuthority")
+            .field("binding", &self.binding)
+            .field("attempt", &self.attempt)
+            .field("consumed", &self.consumed.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+impl LiveSidebandNarrationAuthority {
+    #[cfg(feature = "__meerkat-generated-authority-bridge")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __from_generated_narration_authority(
+        binding: ProviderWebrtcBinding,
+        narration_id: String,
+    ) -> Option<Self> {
+        Some(Self {
+            binding,
+            attempt: LiveSidebandAppendAttempt::__from_generated_append_id(format!(
+                "narration:{narration_id}"
+            ))?,
+            consumed: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    fn consume_once(&self) -> Result<(), LiveSidebandCommandError> {
+        self.consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| LiveSidebandCommandError::AuthorityAlreadyConsumed)
+    }
+}
+
 #[derive(PartialEq, Eq)]
 enum LiveSidebandCommandKind {
     AppendThinking {
@@ -710,6 +756,12 @@ enum LiveSidebandCommandKind {
         attempt: LiveSidebandAppendAttempt,
         delegation: LiveSidebandDelegationRef,
         disposition: LiveResultDisposition,
+        text: String,
+    },
+    NarrateDelegation {
+        binding: ProviderWebrtcBinding,
+        attempt: LiveSidebandAppendAttempt,
+        delegation: LiveSidebandDelegationRef,
         text: String,
     },
 }
@@ -754,6 +806,15 @@ pub enum LiveSidebandProviderCommand {
         disposition: LiveResultDisposition,
         text: String,
     },
+    /// Templated executor-state narration for one exact delegation. It is
+    /// lowered like a delegation-scoped commentary append and never carries
+    /// a result disposition.
+    NarrateDelegationContext {
+        binding: ProviderWebrtcBinding,
+        attempt: LiveSidebandAppendAttempt,
+        delegation: LiveSidebandDelegationRef,
+        text: String,
+    },
 }
 
 impl fmt::Debug for LiveSidebandCommand {
@@ -763,6 +824,7 @@ impl fmt::Debug for LiveSidebandCommand {
             LiveSidebandCommandKind::AppendInstructions { .. } => "append_instructions_context",
             LiveSidebandCommandKind::AppendSession { .. } => "append_session_context",
             LiveSidebandCommandKind::ReleaseDelegation { .. } => "release_delegation_context",
+            LiveSidebandCommandKind::NarrateDelegation { .. } => "narrate_delegation_context",
         };
         formatter
             .debug_struct("LiveSidebandCommand")
@@ -875,14 +937,39 @@ impl LiveSidebandCommand {
         })
     }
 
-    /// Commentary and delegation results are spoken aloud by the provider;
-    /// thinking and instructions appends are quiet.
+    /// Templated executor-state narration for one exact delegation. Consumes
+    /// the generated narration authority; it cannot carry a result.
+    pub fn narrate_delegation(
+        authority: LiveSidebandNarrationAuthority,
+        delegation: LiveSidebandDelegationRef,
+        text: impl Into<String>,
+    ) -> Result<Self, LiveSidebandCommandError> {
+        let text = require_sideband_text(text)?;
+        authority.consume_once()?;
+        let LiveSidebandNarrationAuthority {
+            binding,
+            attempt,
+            consumed: _,
+        } = authority;
+        Ok(Self {
+            kind: LiveSidebandCommandKind::NarrateDelegation {
+                binding,
+                attempt,
+                delegation,
+                text,
+            },
+        })
+    }
+
+    /// Commentary, delegation results, and delegation narration are spoken
+    /// aloud by the provider; thinking and instructions appends are quiet.
     #[must_use]
     pub fn is_spoken(&self) -> bool {
         matches!(
             self.kind,
             LiveSidebandCommandKind::AppendSession { .. }
                 | LiveSidebandCommandKind::ReleaseDelegation { .. }
+                | LiveSidebandCommandKind::NarrateDelegation { .. }
         )
     }
 
@@ -892,7 +979,8 @@ impl LiveSidebandCommand {
             LiveSidebandCommandKind::AppendThinking { binding, .. }
             | LiveSidebandCommandKind::AppendInstructions { binding, .. }
             | LiveSidebandCommandKind::AppendSession { binding, .. }
-            | LiveSidebandCommandKind::ReleaseDelegation { binding, .. } => binding,
+            | LiveSidebandCommandKind::ReleaseDelegation { binding, .. }
+            | LiveSidebandCommandKind::NarrateDelegation { binding, .. } => binding,
         }
     }
 
@@ -902,7 +990,8 @@ impl LiveSidebandCommand {
             LiveSidebandCommandKind::AppendThinking { attempt, .. }
             | LiveSidebandCommandKind::AppendInstructions { attempt, .. }
             | LiveSidebandCommandKind::AppendSession { attempt, .. }
-            | LiveSidebandCommandKind::ReleaseDelegation { attempt, .. } => attempt.clone(),
+            | LiveSidebandCommandKind::ReleaseDelegation { attempt, .. }
+            | LiveSidebandCommandKind::NarrateDelegation { attempt, .. } => attempt.clone(),
         }
     }
 
@@ -959,6 +1048,17 @@ impl LiveSidebandCommand {
                 attempt,
                 delegation,
                 disposition,
+                text,
+            },
+            LiveSidebandCommandKind::NarrateDelegation {
+                binding,
+                attempt,
+                delegation,
+                text,
+            } => LiveSidebandProviderCommand::NarrateDelegationContext {
+                binding,
+                attempt,
+                delegation,
                 text,
             },
         }

@@ -999,6 +999,13 @@ impl MobMcpState {
         self
     }
 
+    /// The mob-shared WorkGraph service, when the host supplied one. Live
+    /// delegation schedules its voice work items through it.
+    #[must_use]
+    pub fn workgraph_service(&self) -> Option<&meerkat::WorkGraphService> {
+        self.workgraph_service.as_ref()
+    }
+
     pub fn with_default_llm_client(mut self, client: Option<Arc<dyn LlmClient>>) -> Self {
         self.default_llm_client = client;
         self

@@ -49,7 +49,8 @@ use meerkat_openai::public_live::{
 };
 use meerkat_runtime::live_execution::{
     LiveContextAppendAuthority, LiveContextBootstrapAppendAuthority,
-    LiveDelegationResultDeliveryAuthority, LiveDelegationResultDeliveryObservation,
+    LiveDelegationNarrationAuthority, LiveDelegationResultDeliveryAuthority,
+    LiveDelegationResultDeliveryObservation,
 };
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -1222,6 +1223,16 @@ pub trait ExperimentalGptLiveControlPlane: Send + Sync {
         delegation: LiveSidebandDelegationRef,
         text: String,
     ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError>;
+
+    /// Client-context capability only. Templated executor-state narration for
+    /// one exact delegation, released under generated narration authority. It
+    /// is spoken by the provider like a delegation result but carries none.
+    async fn narrate_delegation(
+        &self,
+        authority: LiveDelegationNarrationAuthority,
+        delegation: LiveSidebandDelegationRef,
+        text: String,
+    ) -> Result<ExperimentalGptLiveNarrationDispatch, ExperimentalGptLiveBridgeError>;
 }
 
 #[async_trait]
@@ -1758,6 +1769,35 @@ impl ExperimentalGptLiveResultDeliveryWaiter {
     }
 }
 
+/// Outcome of handing one authorized narration to the provider. Narration is
+/// spoken commentary keyed to a delegation; it has no retry, recovery, or
+/// canonical-context lifecycle, so the outcome is only observed.
+#[derive(Debug)]
+pub enum ExperimentalGptLiveNarrationDispatch {
+    AwaitingAcknowledgement(ExperimentalGptLiveNarrationWaiter),
+    Resolved(meerkat_core::LiveAppendDeliveryOutcome),
+}
+
+pub struct ExperimentalGptLiveNarrationWaiter {
+    resolution_rx: oneshot::Receiver<meerkat_core::LiveAppendDeliveryOutcome>,
+}
+
+impl fmt::Debug for ExperimentalGptLiveNarrationWaiter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ExperimentalGptLiveNarrationWaiter([OPAQUE])")
+    }
+}
+
+impl ExperimentalGptLiveNarrationWaiter {
+    pub async fn resolve(
+        self,
+    ) -> Result<meerkat_core::LiveAppendDeliveryOutcome, ExperimentalGptLiveBridgeError> {
+        self.resolution_rx
+            .await
+            .map_err(|_| ExperimentalGptLiveBridgeError::ActiveBindingUnavailable)
+    }
+}
+
 pub struct ExperimentalGptLiveAppendWaiter {
     resolution_rx: oneshot::Receiver<ExperimentalGptLiveAppendResolution>,
 }
@@ -1805,6 +1845,10 @@ enum PendingExperimentalGptLiveDelivery {
         authority: LiveDelegationResultDeliveryAuthority,
         resolution_tx: oneshot::Sender<ExperimentalGptLiveResultDeliveryResolution>,
     },
+    DelegationNarration {
+        channel_id: meerkat_live::LiveChannelId,
+        resolution_tx: oneshot::Sender<meerkat_core::LiveAppendDeliveryOutcome>,
+    },
 }
 
 impl PendingExperimentalGptLiveDelivery {
@@ -1815,6 +1859,7 @@ impl PendingExperimentalGptLiveDelivery {
             Self::DelegationResult { authority, .. } => {
                 authority.operation().domain_correlation().channel_id()
             }
+            Self::DelegationNarration { channel_id, .. } => channel_id,
         }
     }
 }
@@ -4585,6 +4630,73 @@ impl ExperimentalGptLiveWebrtcTransport {
         self.dispatch_delegation_result(authority, command).await
     }
 
+    pub async fn narrate_delegation(
+        &self,
+        authority: LiveDelegationNarrationAuthority,
+        delegation: LiveSidebandDelegationRef,
+        text: impl Into<String>,
+    ) -> Result<ExperimentalGptLiveNarrationDispatch, ExperimentalGptLiveBridgeError> {
+        let text = require_context_text(text)?;
+        let binding = self
+            .active_binding(authority.session_id())
+            .await
+            .filter(|binding| {
+                binding.channel_id() == authority.operation().domain_correlation().channel_id()
+            })
+            .ok_or(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable)?;
+        let channel_id = binding.channel_id().clone();
+        let sideband = authority
+            .into_sideband_narration_authority(binding, &delegation)
+            .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+        let command = LiveSidebandCommand::narrate_delegation(sideband, delegation, text)
+            .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+        // Narration is spoken; never start it while the user is speaking.
+        let adapter = self
+            .registered_by_channel
+            .lock()
+            .await
+            .get(&channel_id)
+            .map(|registration| Arc::clone(&registration.adapter));
+        if let Some(adapter) = adapter {
+            adapter
+                .wait_for_quiet_user(SPOKEN_CONTEXT_USER_TURN_BOUND)
+                .await;
+        }
+        let attempt = command.attempt();
+        let (resolution_tx, resolution_rx) = oneshot::channel();
+        self.pending_deliveries.lock().await.insert(
+            attempt.clone(),
+            PendingExperimentalGptLiveDelivery::DelegationNarration {
+                channel_id,
+                resolution_tx,
+            },
+        );
+        let outcome = match self.send_authorized_command(command).await {
+            Ok(LiveSidebandCommandDelivery::Accepted) => {
+                return Ok(
+                    ExperimentalGptLiveNarrationDispatch::AwaitingAcknowledgement(
+                        ExperimentalGptLiveNarrationWaiter { resolution_rx },
+                    ),
+                );
+            }
+            Ok(LiveSidebandCommandDelivery::AmbiguousTerminal) => {
+                meerkat_core::LiveAppendDeliveryOutcome::Ambiguous
+            }
+            Err(ProviderWebrtcBrokerError::Rejected) => {
+                meerkat_core::LiveAppendDeliveryOutcome::Rejected
+            }
+            Err(_) => meerkat_core::LiveAppendDeliveryOutcome::Ambiguous,
+        };
+        let pending = self.pending_deliveries.lock().await.remove(&attempt);
+        if pending.is_none() {
+            return resolution_rx
+                .await
+                .map(ExperimentalGptLiveNarrationDispatch::Resolved)
+                .map_err(|_| ExperimentalGptLiveBridgeError::ActiveBindingUnavailable);
+        }
+        Ok(ExperimentalGptLiveNarrationDispatch::Resolved(outcome))
+    }
+
     async fn dispatch_generated_append(
         &self,
         authority: LiveContextAppendAuthority,
@@ -4839,6 +4951,13 @@ impl ExperimentalGptLiveWebrtcTransport {
                             ),
                         ));
                     }
+                }
+                PendingExperimentalGptLiveDelivery::DelegationNarration {
+                    resolution_tx, ..
+                } => {
+                    // Narration has no canonical lifecycle to resolve; a
+                    // dropped waiter simply stops observing the outcome.
+                    let _ = resolution_tx.send(outcome);
                 }
             }
             return Ok(Some(ExperimentalGptLiveControlObservation::Provider(
@@ -5338,6 +5457,16 @@ impl ExperimentalGptLiveControlPlane for ExperimentalGptLiveWebrtcTransport {
             self, authority, delegation, text,
         )
         .await
+    }
+
+    async fn narrate_delegation(
+        &self,
+        authority: LiveDelegationNarrationAuthority,
+        delegation: LiveSidebandDelegationRef,
+        text: String,
+    ) -> Result<ExperimentalGptLiveNarrationDispatch, ExperimentalGptLiveBridgeError> {
+        ExperimentalGptLiveWebrtcTransport::narrate_delegation(self, authority, delegation, text)
+            .await
     }
 }
 
@@ -5849,6 +5978,11 @@ async fn resolve_pending_deliveries(
                         },
                     });
                 }
+                PendingExperimentalGptLiveDelivery::DelegationNarration {
+                    resolution_tx, ..
+                } => {
+                    let _ = resolution_tx.send(outcome);
+                }
             }
         }
     }
@@ -6297,6 +6431,32 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                 self.lower_append_delivery(reservation, result).await
             }
             LiveSidebandProviderCommand::ReleaseDelegationContext {
+                attempt,
+                delegation,
+                text,
+                ..
+            } => {
+                let provider_delegation = self
+                    .correlations
+                    .lock()
+                    .await
+                    .delegations
+                    .get(delegation.__provider_opaque_value())
+                    .cloned()
+                    .ok_or(ProviderWebrtcBrokerError::Rejected)?;
+                let reservation = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .reserve(SidebandAppendLane::Delegation, attempt)?;
+                let result = self
+                    .session
+                    .append_delegation_context(&provider_delegation, text)
+                    .await;
+                self.lower_append_delivery(reservation, result).await
+            }
+            LiveSidebandProviderCommand::NarrateDelegationContext {
                 attempt,
                 delegation,
                 text,

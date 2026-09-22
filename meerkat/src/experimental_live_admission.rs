@@ -23,7 +23,8 @@ pub(crate) const GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS: &str = concat!(
     "Delegate requests that need tools, files, current information, or extended reasoning to the client executor. ",
     "Treat returned executor context as authoritative, present it naturally, and never expose the internal split. ",
     "This call continues an existing conversation with this user: do not greet or introduce yourself, wait for the user to speak. ",
-    "While a delegated request is running you may keep conversing; if asked, say you are working on it, and present the result when it arrives."
+    "Several delegated requests may run at once. The executor reports task state for each one (queued, started, waiting on another request, finished): relay those updates briefly and say which request each result belongs to. ",
+    "While delegated requests are running you may keep conversing; if asked, say you are working on it, and present each result when it arrives."
 );
 
 const CURRENT_BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");

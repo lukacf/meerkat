@@ -1261,7 +1261,23 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "LiveDelegationWorkerTerminalKind",
-                &["Completed", "Cancelled", "Failed"],
+                &["Completed", "Cancelled", "Failed", "Blocked"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveDelegationScheduleState",
+                &[
+                    "Created",
+                    "Claimed",
+                    "Running",
+                    "Completed",
+                    "Blocked",
+                    "Cancelled",
+                    "Failed",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveDelegationNarrationKind",
+                &["Queued", "Claimed", "Blocked", "Completed", "SourceBusy"],
             ),
             NamedTypeBinding::string_enum(
                 "LiveExecutionChannelPhase",
@@ -3009,6 +3025,9 @@ runtime_internal_inputs!(
         ResolveLiveDelegationWorkerStart,
         AuthorizeLiveDelegationTranscriptTerminalCancellation,
         SupersedeLiveInteraction,
+        RequeueLiveDelegation,
+        CancelQueuedLiveDelegation,
+        AuthorizeLiveDelegationNarration,
         ResolveLiveDelegationCancellation,
         RecordLiveDelegationWorkerTerminal,
         ReconcileRevokedLiveDelegationWorkerAfterRestart,

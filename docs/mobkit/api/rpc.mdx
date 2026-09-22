@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for MobKit runtime operations: gating, memor
 icon: "plug"
 ---
 
-*Mirrored from MobKit main at [f1c94c22711b](https://github.com/lukacf/meerkat-mobkit/commit/f1c94c22711b3817b099805a9d3f083924213e93) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [fc242fe9ddd7](https://github.com/lukacf/meerkat-mobkit/commit/fc242fe9ddd7cc3ca488afd5e1ee9434f2f59c3c) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
 
 MobKit exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `mobkit/capabilities` on the surface you use.
 

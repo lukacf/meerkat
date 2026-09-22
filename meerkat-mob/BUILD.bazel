@@ -215,7 +215,10 @@ rust_test(
         "src/runtime/recovery.rs",
         "src/runtime/state.rs",
     ],
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"]) + [
+        "tests/support/probe_shared.rs",
+        "tests/support/shared.rs",
+    ],
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.40",

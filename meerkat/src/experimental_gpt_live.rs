@@ -436,20 +436,29 @@ pub fn compose_public_session_instructions(
 
 /// Resolve the host preface for one canonical session, bounded, and compose
 /// the effective public session instructions.
+///
+/// The host future runs on its own task: a host that panics loses its
+/// preface for this open exactly like a host that is too slow, and neither
+/// can take the open path down with it.
 async fn resolve_public_session_instructions(
-    preface: Option<&dyn PublicGptLiveInstructionsPreface>,
+    preface: Option<Arc<dyn PublicGptLiveInstructionsPreface>>,
     session_id: &meerkat_core::SessionId,
     override_instructions: Option<String>,
 ) -> Option<String> {
     let preface = match preface {
         Some(provider) => {
-            match tokio::time::timeout(
-                PUBLIC_INSTRUCTIONS_PREFACE_BOUND,
-                provider.preface(session_id),
-            )
-            .await
-            {
-                Ok(preface) => preface,
+            let host_session_id = session_id.clone();
+            let host = tokio::spawn(async move { provider.preface(&host_session_id).await });
+            match tokio::time::timeout(PUBLIC_INSTRUCTIONS_PREFACE_BOUND, host).await {
+                Ok(Ok(preface)) => preface,
+                Ok(Err(join_error)) => {
+                    tracing::warn!(
+                        %session_id,
+                        error = %join_error,
+                        "public Live instructions preface host failed; opening without it"
+                    );
+                    None
+                }
                 Err(_) => {
                     tracing::warn!(
                         %session_id,
@@ -604,7 +613,7 @@ impl ExperimentalGptLiveOpenAuthority {
                 ..
             } => {
                 resolve_public_session_instructions(
-                    instructions_preface.as_deref(),
+                    instructions_preface.clone(),
                     session_id,
                     session_instructions.clone(),
                 )
@@ -761,7 +770,7 @@ impl ExperimentalGptLiveOpenAuthority {
         config: &meerkat_core::Config,
         identity: meerkat_core::SessionLlmIdentity,
         session_instructions: Option<String>,
-        instructions_preface: Option<&dyn PublicGptLiveInstructionsPreface>,
+        instructions_preface: Option<Arc<dyn PublicGptLiveInstructionsPreface>>,
     ) -> Result<ExperimentalGptLivePendingChannel, ExperimentalLiveOpenAuthorityError> {
         if execution_identity.profile_id != GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID {
             return Err(ExperimentalLiveOpenAuthorityError::AdmissionFailed);
@@ -955,7 +964,7 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
                     &config,
                     identity,
                     session_instructions.clone(),
-                    instructions_preface.as_deref(),
+                    instructions_preface.clone(),
                 )
                 .await?
                 .with_public_playback_policy(*playback_policy)
@@ -6679,15 +6688,25 @@ mod tests {
         }
     }
 
+    struct PanickingPreface;
+
+    #[async_trait::async_trait]
+    impl super::PublicGptLiveInstructionsPreface for PanickingPreface {
+        async fn preface(&self, _session_id: &meerkat_core::SessionId) -> Option<String> {
+            panic!("host preface implementation bug")
+        }
+    }
+
     #[tokio::test]
     async fn per_session_preface_is_resolved_for_the_session_being_opened() {
-        let provider: Option<&dyn super::PublicGptLiveInstructionsPreface> = Some(&MemberPreface);
+        let provider: Arc<dyn super::PublicGptLiveInstructionsPreface> = Arc::new(MemberPreface);
         let first = meerkat_core::SessionId::new();
         let second = meerkat_core::SessionId::new();
-        let first_text = super::resolve_public_session_instructions(provider, &first, None)
-            .await
-            .expect("instructions");
-        let second_text = super::resolve_public_session_instructions(provider, &second, None)
+        let first_text =
+            super::resolve_public_session_instructions(Some(Arc::clone(&provider)), &first, None)
+                .await
+                .expect("instructions");
+        let second_text = super::resolve_public_session_instructions(Some(provider), &second, None)
             .await
             .expect("instructions");
         assert_ne!(first_text, second_text);
@@ -6704,7 +6723,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stalled_preface_is_bounded_and_the_open_keeps_the_base_instructions() {
-        let provider: Option<&dyn super::PublicGptLiveInstructionsPreface> = Some(&StalledPreface);
+        let provider: Option<Arc<dyn super::PublicGptLiveInstructionsPreface>> =
+            Some(Arc::new(StalledPreface));
         let session = meerkat_core::SessionId::new();
         let composed = tokio::time::timeout(
             super::PUBLIC_INSTRUCTIONS_PREFACE_BOUND * 2,
@@ -6716,6 +6736,21 @@ mod tests {
         )
         .await
         .expect("the preface bound releases the open")
+        .expect("instructions");
+        assert_eq!(composed, "Custom base.");
+    }
+
+    #[tokio::test]
+    async fn panicking_preface_host_degrades_to_the_base_instructions() {
+        let provider: Option<Arc<dyn super::PublicGptLiveInstructionsPreface>> =
+            Some(Arc::new(PanickingPreface));
+        let session = meerkat_core::SessionId::new();
+        let composed = super::resolve_public_session_instructions(
+            provider,
+            &session,
+            Some("Custom base.".to_string()),
+        )
+        .await
         .expect("instructions");
         assert_eq!(composed, "Custom base.");
     }

@@ -61,7 +61,7 @@ async function prepare(command) {
     end_hysteresis_ms: 600,
     // Input transcript deltas are final once nothing more arrives for this
     // long (the public protocol has no explicit input-final event).
-    input_final_quiet_ms: 700,
+    input_final_quiet_ms: 1000,
     // Amplitude below which fixture samples count as silence when locating
     // the end of the spoken part of a fixture (100/32768).
     fixture_silence: 0.0031,
@@ -200,6 +200,7 @@ async function prepare(command) {
         timer: null,
       },
       inputTranscript: { pending: false, last_delta_ms: null, text: '', finals: [] },
+      lastFixtureStartMs: -1,
       response: { text: '', started_ms: null, index: 0 },
       playing: new Map(),
       scheduled: [],
@@ -294,6 +295,7 @@ async function prepare(command) {
         overlap_bound_ms: typeof meta.overlap_bound_ms === 'number' ? meta.overlap_bound_ms : 300,
       };
       state.playing.set(id, play);
+      state.lastFixtureStartMs = play.started_ms;
       state.pushTimeline('fixture_start', { id, name: fixtureName, duration_ms: Math.round(buffer.duration * 1000), speech_ms: play.speech_ms });
       const ended = new Promise((resolve) => {
         source.onended = () => {
@@ -328,6 +330,10 @@ async function prepare(command) {
       state.pushTimeline('response_end', { index: state.response.index, chars: text.length });
       state.response = { text: '', started_ms: null, index: state.response.index + 1 };
     };
+    // The peer knows exactly when the user is speaking: a fixture is inside
+    // its spoken part. Transcript deltas pausing mid-utterance, or assistant
+    // output arriving during a barge-in, must not finalize the input early.
+    state.userSpeaking = (t) => [...state.playing.values()].some((play) => t - play.started_ms <= play.speech_ms);
     state.finalizeInput = () => {
       const input = state.inputTranscript;
       if (!input.pending) return;
@@ -451,7 +457,9 @@ async function prepare(command) {
         state.pushTimeline('assistant_audio_end', { last_active_ms: energy.last_active_ms, started_ms: energy.active_since_ms, response: state.response.index });
       }
       const input = state.inputTranscript;
-      if (input.pending && t - input.last_delta_ms >= energyConfig.input_final_quiet_ms) state.finalizeInput();
+      if (input.pending && !state.userSpeaking(t) && t - input.last_delta_ms >= energyConfig.input_final_quiet_ms) {
+        state.finalizeInput();
+      }
       state.checkScheduled(t);
     }, energyConfig.window_ms);
     // ---- provider events ------------------------------------------------
@@ -501,9 +509,11 @@ async function prepare(command) {
         const delta = typeof parsed.delta === 'string' ? parsed.delta : typeof parsed.text === 'string' ? parsed.text : '';
         const finals = state.inputTranscript.finals;
         const lastFinal = finals[finals.length - 1];
-        if (!state.inputTranscript.pending && lastFinal && t - lastFinal.t_ms < 1500 && /^[\s.,!?;:]*$/.test(delta)) {
-          // Trailing punctuation the provider finalizes after the answer
-          // began belongs to the previous utterance, not a new one.
+        if (!state.inputTranscript.pending && lastFinal && t - lastFinal.t_ms < 4000
+          && state.lastFixtureStartMs < lastFinal.t_ms && !state.userSpeaking(t)) {
+          // The peer owns the user's speech: no fixture has started since the
+          // previous utterance was finalized, so a late-trickling transcript
+          // delta belongs to that utterance, not a new one.
           lastFinal.text += delta;
         } else {
           // A new user utterance closes the previous assistant response.
@@ -531,7 +541,7 @@ async function prepare(command) {
       if (parsed?.type === 'session.commentary.appended') {
         state.pushTimeline('commentary_appended', { event_index: state.events.length - 1 });
       }
-      if (assistantStarted && state.inputTranscript.pending) state.finalizeInput();
+      if (assistantStarted && state.inputTranscript.pending && !state.userSpeaking(t)) state.finalizeInput();
       if (assistantStarted && state.bargeIn.armedFixture) {
         const fixtureName = state.bargeIn.armedFixture;
         state.bargeIn.armedFixture = null;

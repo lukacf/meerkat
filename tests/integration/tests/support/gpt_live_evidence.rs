@@ -272,8 +272,8 @@ struct State {
     instructions_append_attempts: usize,
     framed_summary_attempts: usize,
     /// Instructions appends being reassembled from their fragments, keyed by
-    /// the append token shared by every fragment's client event id
-    /// (`meerkat-instructions-<token>-<index>`).
+    /// channel ordinal and the append token shared by every fragment's client
+    /// event id (`meerkat-instructions-<token>-<index>`).
     instructions_appends: HashMap<String, InstructionsAppendReassembly>,
 }
 
@@ -510,10 +510,12 @@ impl Journal {
                 // The broker sends an append as ordered UTF-8 fragments; the
                 // framing is recognised on the reassembled text so its length
                 // is not bound to the fragment size.
-                let token = instructions_append_token(client_event_id)
-                    .unwrap_or(client_event_id.as_str())
-                    .to_string();
-                let append = state.instructions_appends.entry(token).or_default();
+                // Append tokens restart with every channel's broker, so the
+                // key is scoped by the channel the fragment was sent on.
+                let token =
+                    instructions_append_token(client_event_id).unwrap_or(client_event_id.as_str());
+                let key = format!("{}:{token}", event.channel_ordinal);
+                let append = state.instructions_appends.entry(key).or_default();
                 append.text.push_str(text);
                 if !append.counted_as_framed
                     && append

@@ -3369,21 +3369,32 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             .and_then(|stem| stem.to_str())
             .unwrap_or_default()
             .to_owned();
-        // Spoken numerals are transcribed as words ("twenty twenty six"), so
-        // the check is on the file stem's alphabetic words.
-        let stem_words: Vec<String> = normalize_words(&plan_stem)
+        // The stem's tokens must all be spoken back: alphabetic words of at
+        // least three letters, and digit groups (an all-digit stem such as
+        // 2026-09-22 matches on its digit groups, leading zeros optional; a
+        // transcript may also spell numerals out, which this check does not
+        // attempt to reverse).
+        let stem_tokens: Vec<String> = normalize_words(&plan_stem)
             .split(' ')
-            .filter(|word| word.len() >= 3 && word.chars().all(char::is_alphabetic))
+            .filter(|word| {
+                (word.len() >= 3 && word.chars().all(char::is_alphabetic))
+                    || (!word.is_empty() && word.chars().all(|c| c.is_ascii_digit()))
+            })
             .map(str::to_owned)
             .collect();
         let normalized_answer1 = normalize_words(&answer1);
+        let token_spoken = |token: &str| {
+            normalized_answer1.contains(token)
+                || (token.chars().all(|c| c.is_ascii_digit())
+                    && normalized_answer1.contains(token.trim_start_matches('0')))
+        };
         record_tolerant(
             &evidence,
             channel,
             "S100",
             "answer_1_names_the_file",
-            !stem_words.is_empty() && stem_words.iter().all(|word| normalized_answer1.contains(word)),
-            format!("file={plan_stem:?} stem_words={stem_words:?} answer={:?}", answer1.trim()),
+            !stem_tokens.is_empty() && stem_tokens.iter().all(|token| token_spoken(token)),
+            format!("file={plan_stem:?} stem_tokens={stem_tokens:?} answer={:?}", answer1.trim()),
             &mut tolerant_failures,
         )?;
 

@@ -48,6 +48,10 @@ pub enum Stage {
     // S103 interrupt and recover.
     InterruptMonologue,
     InterruptBargeIn,
+    // S107 stuck close convergence.
+    StuckCloseJob,
+    StuckCloseCut,
+    StuckCloseJobCommit,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

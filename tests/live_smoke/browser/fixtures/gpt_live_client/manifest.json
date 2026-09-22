@@ -221,6 +221,28 @@
       "sample_rate_hz": 24000,
       "trailing_silence_ms": 1580,
       "notes": "S103 second correction 300 ms after the barge-in clip ends; the final executor input must carry Friday. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, verse), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "stuckclose_request",
+      "file": "stuckclose-request.wav",
+      "voice": "ballad",
+      "text": "Write a four line poem about lighthouses into a file called lighthouse.md, then read it back to me.",
+      "sha256": "93e25782e4aa78890ec12fbf4ea782dbd7260650465d5b56a531aa69dd8771c1",
+      "duration_ms": 8135,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S107 job request: the client delegation is running when the peer transport is cut and the host closes the channel. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, ballad), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "stuckclose_back",
+      "file": "stuckclose-back.wav",
+      "voice": "ballad",
+      "text": "Okay, I'm back. Can you hear me?",
+      "sha256": "4ac7fe126b9ad4c9055611a830de280a9a15c2dd87dd1288902703363e9db76d",
+      "duration_ms": 3533,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S107 first utterance on the reopened channel: a native answer proves the session came back. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, ballad), VAD-normalised, 1500 ms trailing-silence floor."
     }
   ]
 }

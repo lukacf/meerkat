@@ -225,6 +225,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s100_gpt_live_public_morning_standup, 100);
             scenario(e2e_smoke_s102_gpt_live_public_who_are_you, 102);
             scenario(e2e_smoke_s103_gpt_live_public_interrupt_and_recover, 103);
+            scenario(e2e_smoke_s107_gpt_live_public_stuck_close_convergence, 107);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
@@ -4262,6 +4263,28 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
+        107 => Some(&Spec {
+            id: Some(107),
+            lane: Lane::Smoke,
+            title: "GPT Live public real-audio stuck close convergence (transport cut mid-job, host close, reopen)",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_107_gpt_live_public_stuck_close_convergence",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
         73 => Some(&Spec {
             id: Some(73),
             lane: Lane::Smoke,
@@ -6591,6 +6614,10 @@ mod tests {
             (
                 103,
                 "e2e_scenario_103_gpt_live_public_interrupt_and_recover",
+            ),
+            (
+                107,
+                "e2e_scenario_107_gpt_live_public_stuck_close_convergence",
             ),
         ] {
             gpt_live_public_voice_scenario_shares_composition(id, test_name);

@@ -42,8 +42,10 @@ meerkat-session.workspace = true
 # jsonl: the shared multi-host fixture's persistent session service.
 meerkat-store = { workspace = true, features = ["memory", "sqlite", "jsonl"] }
 meerkat-tools.workspace = true
+reqwest = { workspace = true, features = ["multipart"] }
 serde = { workspace = true }
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 futures.workspace = true
@@ -115,10 +117,8 @@ ignored = [
 
 [dev-dependencies]
 tempfile.workspace = true
-reqwest = { workspace = true, features = ["multipart"] }
 base64.workspace = true
 chrono.workspace = true
-sha2.workspace = true
 axum.workspace = true
 meerkat-auth-core = { workspace = true, features = ["gcp-auth"] }
 meerkat-copilot.workspace = true

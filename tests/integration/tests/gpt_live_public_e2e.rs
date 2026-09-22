@@ -3231,7 +3231,7 @@ async fn answer_window(
 ///     after the assistant goes quiet, each resolving "that file" / "the
 ///     second one" through the previous exchange; exactly one client
 ///     delegation per request, executor input equal to the user's final
-///     transcript (protocol-anchored: the deltas below the following
+///     transcript (protocol-anchored: the deltas at or below the following
 ///     response's first output start_ms), files on disk with two headings;
 /// (c) a barge-in 600 ms into the second commentary readout: overlap beyond
 ///     the bound is a fault and the answer must be re-issued;

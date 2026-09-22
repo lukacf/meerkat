@@ -208,11 +208,15 @@ async function prepare(command) {
       // only as session.input_transcript.delta {start_ms,end_ms}; there is no
       // item-done or speech_started/stopped. A user utterance is final at the
       // role alternation on the provider timeline: the deltas whose start_ms
-      // lies below the first output_transcript.delta start_ms of the following
-      // response. A delta starting at or after that boundary is a new user
-      // row (the model answered before the last word). `pending` holds the
-      // deltas of the open utterance; `boundary` the response start that
-      // closes it once the fixture's spoken part has ended.
+      // is at or below the first output_transcript.delta start_ms of the
+      // following response belong to the utterance being answered (the
+      // assistant answers what the user has said, so a delta starting exactly
+      // at the response start is that utterance's tail). A delta starting
+      // strictly after the boundary is a new user row (the model answered
+      // before the last word). Arrival order plays no part; the runtime
+      // applies the same rule. `pending` holds the deltas of the open
+      // utterance; `boundary` the response start that closes it once the
+      // fixture's spoken part has ended.
       inputTranscript: { pending: [], boundary: null, finals: [], first_delta_ms: null },
       firstAudioPacketMs: null,
       lastFixtureStartMs: -1,
@@ -350,15 +354,16 @@ async function prepare(command) {
     // output arriving during a barge-in, must not finalize the input early.
     state.userSpeaking = (t) => [...state.playing.values()].some((play) => t - play.started_ms <= play.speech_ms);
     // Close the open utterance at `boundary` (a response's first output
-    // transcript start_ms): the deltas below it become one final whose t_ms
-    // is the arrival of its last delta and end_ms that delta's provider end;
-    // deltas at or above it stay pending as the next utterance. Never while
-    // the fixture's spoken part is still playing (the peer owns that floor).
+    // transcript start_ms): the deltas at or below it become one final whose
+    // t_ms is the arrival of its last delta and end_ms that delta's provider
+    // end; deltas strictly above it stay pending as the next utterance. Never
+    // while the fixture's spoken part is still playing (the peer owns that
+    // floor).
     state.finalizeInput = (t) => {
       const input = state.inputTranscript;
       if (input.boundary === null || state.userSpeaking(t)) return;
-      const closed = input.pending.filter((d) => d.start_ms === null || d.start_ms < input.boundary);
-      const rest = input.pending.filter((d) => d.start_ms !== null && d.start_ms >= input.boundary);
+      const closed = input.pending.filter((d) => d.start_ms === null || d.start_ms <= input.boundary);
+      const rest = input.pending.filter((d) => d.start_ms !== null && d.start_ms > input.boundary);
       if (closed.length > 0) {
         const last = closed[closed.length - 1];
         const final = {
@@ -566,10 +571,10 @@ async function prepare(command) {
           input.finals.push({ t_ms: t, start_ms, end_ms, closed_by: null, text: delta });
           state.pushTimeline('input_final', { t_ms: t, text: delta.slice(0, 400), index: input.finals.length - 1 });
         } else if (input.pending.length === 0 && lastFinal && lastFinal.closed_by !== null
-          && start_ms !== null && start_ms < lastFinal.closed_by) {
-          // Protocol-anchored: a delta that starts before the response that
-          // closed the previous utterance belongs to that utterance, however
-          // late it arrives.
+          && start_ms !== null && start_ms <= lastFinal.closed_by) {
+          // Protocol-anchored: a delta that starts at or before the response
+          // that closed the previous utterance belongs to that utterance,
+          // however late it arrives.
           lastFinal.text += delta;
           lastFinal.t_ms = t;
           lastFinal.end_ms = end_ms;

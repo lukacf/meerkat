@@ -27096,7 +27096,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "observation_counter_available" {
                 self.live_context_observation_ordinal_by_id.contains_key(observation_id)
-                || self.live_context_observation_counter_by_channel.get_copied(channel_id).get("value") < 18446744073709551615
+                || self.live_context_observation_counter_by_channel.get_copied(channel_id).get("value") < u64::MAX
             }
             update {
                 if !self.live_context_observation_ordinal_by_id.contains_key(observation_id) {

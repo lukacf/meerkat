@@ -752,6 +752,148 @@ fn record_source(
     id.into()
 }
 
+#[test]
+fn observation_counter_preserves_full_u64_range_and_exhaustion() {
+    let input = |id: &str| mm::MeerkatMachineInput::RecordLiveContextObservation {
+        session_id: SESSION.into(),
+        channel_id: CHANNEL.into(),
+        lease_id: "bootstrap-job".into(),
+        runtime_id: runtime_id(),
+        fence_token: fence(),
+        generation: generation(),
+        observation_id: id.into(),
+        observation_namespace: "bootstrap-job".into(),
+        observation_channel_id: CHANNEL.into(),
+    };
+    for counter in [i32::MAX as u64 + 1, u64::MAX - 1, u64::MAX] {
+        let mut authority = opened_authority();
+        stage_bootstrap(&mut authority, 3);
+        let mut state = authority.state().clone();
+        state
+            .live_context_observation_counter_by_channel
+            .insert(CHANNEL.into(), counter);
+        let mut authority = mm::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("high observation counters satisfy generated recovery invariants");
+        let before = authority.state().clone();
+        let recorded = apply(&mut authority, input("boundary-observation"));
+        if counter == u64::MAX {
+            assert!(matches!(
+                recorded,
+                Err(mm::MeerkatMachineTransitionError::GuardRejected { .. })
+            ));
+            assert_eq!(authority.state(), &before);
+            continue;
+        }
+
+        let recorded = recorded.expect("fresh observation below u64::MAX is admitted");
+        assert_eq!(
+            recorded.effects(),
+            &[mm::MeerkatMachineEffect::LiveContextObservationRecorded {
+                session_id: SESSION.into(),
+                channel_id: CHANNEL.into(),
+                lease_id: "bootstrap-job".into(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                observation_id: "boundary-observation".into(),
+                ordinal: counter + 1,
+            }]
+        );
+        assert_eq!(
+            authority
+                .state()
+                .live_context_observation_counter_by_channel[CHANNEL],
+            counter + 1
+        );
+        assert_eq!(
+            authority.state().live_context_observation_ordinal_by_id["boundary-observation"],
+            counter + 1
+        );
+        let after = authority.state().clone();
+        let replay = apply(&mut authority, input("boundary-observation"))
+            .expect("exact replay remains admitted even at u64::MAX");
+        assert_eq!(replay.effects(), recorded.effects());
+        assert_eq!(authority.state(), &after);
+        if counter == u64::MAX - 1 {
+            assert!(matches!(
+                apply(&mut authority, input("fresh-after-exhaustion")),
+                Err(mm::MeerkatMachineTransitionError::GuardRejected { .. })
+            ));
+            assert_eq!(authority.state(), &after);
+        }
+    }
+}
+
+#[test]
+fn observation_counter_exhaustion_does_not_relax_replay_scope() {
+    let mut authority = opened_authority();
+    stage_bootstrap(&mut authority, 3);
+    let mut state = authority.state().clone();
+    state
+        .live_context_observation_counter_by_channel
+        .insert(CHANNEL.into(), u64::MAX - 1);
+    let mut authority = mm::MeerkatMachineAuthority::recover_from_state(state)
+        .expect("high observation counter satisfies generated recovery invariants");
+    record_source(&mut authority, CHANNEL, "bootstrap-job", "last-observation");
+    let exhausted = authority.state().clone();
+
+    for mismatch in [
+        "session",
+        "channel",
+        "lease",
+        "runtime",
+        "fence",
+        "generation",
+        "namespace",
+        "observation_channel",
+    ] {
+        let mut input = mm::MeerkatMachineInput::RecordLiveContextObservation {
+            session_id: SESSION.into(),
+            channel_id: CHANNEL.into(),
+            lease_id: "bootstrap-job".into(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            observation_id: "last-observation".into(),
+            observation_namespace: "bootstrap-job".into(),
+            observation_channel_id: CHANNEL.into(),
+        };
+        let mm::MeerkatMachineInput::RecordLiveContextObservation {
+            session_id,
+            channel_id,
+            lease_id,
+            runtime_id,
+            fence_token,
+            generation,
+            observation_namespace,
+            observation_channel_id,
+            ..
+        } = &mut input
+        else {
+            unreachable!()
+        };
+        match mismatch {
+            "session" => *session_id = "wrong-session".into(),
+            "channel" => *channel_id = "wrong-channel".into(),
+            "lease" => *lease_id = "wrong-lease".into(),
+            "runtime" => *runtime_id = mm::AgentRuntimeId("wrong-runtime".into()),
+            "fence" => *fence_token = mm::FenceToken(fence_token.0 + 1),
+            "generation" => *generation = mm::Generation(generation.0 + 1),
+            "namespace" => *observation_namespace = "wrong-namespace".into(),
+            "observation_channel" => *observation_channel_id = "wrong-channel".into(),
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(
+                apply(&mut authority, input),
+                Err(mm::MeerkatMachineTransitionError::GuardRejected { .. })
+            ),
+            "{mismatch} mismatch must not replay an exhausted observation"
+        );
+        assert_eq!(authority.state(), &exhausted, "{mismatch}");
+    }
+}
+
 fn record_bootstrap_cut(
     authority: &mut mm::MeerkatMachineAuthority,
     channel: &str,

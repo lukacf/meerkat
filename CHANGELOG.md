@@ -38,10 +38,15 @@ them.
 ### Added
 
 - Public GPT Live open authority accepts `session_instructions_preface`
-  (`PublicGptLiveOpenAuthorityConfig`), host knowledge prepended to the
-  effective session instructions without replacing the default executor-split
-  and continuing-conversation guidance; `compose_public_session_instructions`
-  documents the precedence.
+  (`PublicGptLiveOpenAuthorityConfig`), a per-session
+  `PublicGptLiveInstructionsPreface` provider resolved at open for the canonical
+  session being opened, so one authority per mob can describe each backing
+  member (identity, role, peers, tools, skills). The preface is prepended to
+  the effective session instructions without replacing the default
+  executor-split and continuing-conversation guidance;
+  `compose_public_session_instructions` documents the precedence. The host call
+  is bounded by `PUBLIC_INSTRUCTIONS_PREFACE_BOUND` (2 s): on timeout the open
+  proceeds without a preface and warns.
 - `RealtimeMessageOrigin` records `provider_item_id` (read through
   `RealtimeMessageOrigin::provider_item_id`), the provider item a canonical
   live transcript row materialized from, so a console that showed the live
@@ -69,7 +74,10 @@ them.
 ### Breaking
 
 - `PublicGptLiveOpenAuthorityConfig` gains the public field
-  `session_instructions_preface` (struct literals must add it).
+  `session_instructions_preface: Option<Arc<dyn PublicGptLiveInstructionsPreface>>`
+  (struct literals must add it); new public trait
+  `PublicGptLiveInstructionsPreface` and constant
+  `PUBLIC_INSTRUCTIONS_PREFACE_BOUND` in `experimental_gpt_live`.
 - `RealtimeMessageOrigin` gains the private field `provider_item_id` and the
   public method `provider_item_id`; `RealtimeMaterializedRow` gains the public
   field `provider_item_id`.

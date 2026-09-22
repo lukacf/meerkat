@@ -348,11 +348,32 @@ pub struct PublicGptLiveOpenAuthorityConfig {
     /// instead so the executor-split and continuing-conversation guidance is
     /// kept.
     pub session_instructions: Option<String>,
-    /// Host knowledge prepended to the effective session instructions (the
-    /// override when set, otherwise the default). Precedence: preface, then
-    /// base instructions, then any startup context the open seeds.
-    pub session_instructions_preface: Option<String>,
+    /// Per-session host knowledge prepended to the effective session
+    /// instructions (the override when set, otherwise the default), resolved
+    /// at open for the canonical session being opened so one authority can
+    /// speak for many backing members. Precedence: preface, then base
+    /// instructions, then any startup context the open seeds.
+    pub session_instructions_preface: Option<Arc<dyn PublicGptLiveInstructionsPreface>>,
 }
+
+/// Host-supplied, per-session preface for the public Live session
+/// instructions.
+///
+/// Resolved inside the open path once the canonical session is known, so a
+/// host that runs one authority per mob can still describe the target member
+/// (identity, role, peers, tools, skills). The call is bounded by
+/// [`PUBLIC_INSTRUCTIONS_PREFACE_BOUND`]; a slow host loses its preface for
+/// that open, it cannot stall it.
+#[async_trait]
+pub trait PublicGptLiveInstructionsPreface: Send + Sync {
+    /// Host knowledge for this canonical session, prepended to the base
+    /// instructions at open. `None` or empty adds nothing.
+    async fn preface(&self, session_id: &meerkat_core::SessionId) -> Option<String>;
+}
+
+/// Longest the open path waits for a host's instructions preface.
+pub const PUBLIC_INSTRUCTIONS_PREFACE_BOUND: std::time::Duration =
+    std::time::Duration::from_secs(2);
 
 /// Host-selected bookkeeping policy for public Live's continuous media.
 ///
@@ -422,6 +443,37 @@ pub fn compose_public_session_instructions(
     }
 }
 
+/// Resolve the host preface for one canonical session, bounded, and compose
+/// the effective public session instructions.
+async fn resolve_public_session_instructions(
+    preface: Option<&dyn PublicGptLiveInstructionsPreface>,
+    session_id: &meerkat_core::SessionId,
+    override_instructions: Option<String>,
+) -> Option<String> {
+    let preface = match preface {
+        Some(provider) => {
+            match tokio::time::timeout(
+                PUBLIC_INSTRUCTIONS_PREFACE_BOUND,
+                provider.preface(session_id),
+            )
+            .await
+            {
+                Ok(preface) => preface,
+                Err(_) => {
+                    tracing::warn!(
+                        %session_id,
+                        bound_ms = PUBLIC_INSTRUCTIONS_PREFACE_BOUND.as_millis() as u64,
+                        "public Live instructions preface timed out; opening without it"
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    compose_public_session_instructions(preface.as_deref(), override_instructions)
+}
+
 /// Which provider path an open authority admits targets through.
 enum GptLiveOpenAdmission {
     #[cfg(feature = "experimental-gpt-live")]
@@ -430,6 +482,7 @@ enum GptLiveOpenAdmission {
     },
     Public {
         session_instructions: Option<String>,
+        instructions_preface: Option<Arc<dyn PublicGptLiveInstructionsPreface>>,
         playback_policy: PublicGptLivePlaybackPolicy,
     },
 }
@@ -518,10 +571,8 @@ impl ExperimentalGptLiveOpenAuthority {
             config.execution_identity,
             config.realm,
             GptLiveOpenAdmission::Public {
-                session_instructions: compose_public_session_instructions(
-                    config.session_instructions_preface.as_deref(),
-                    config.session_instructions,
-                ),
+                session_instructions: config.session_instructions,
+                instructions_preface: config.session_instructions_preface,
                 playback_policy: PublicGptLivePlaybackPolicy::default(),
             },
             config.transport,
@@ -545,6 +596,32 @@ impl ExperimentalGptLiveOpenAuthority {
             }
         }
         Ok(self)
+    }
+
+    /// Effective session instructions this authority would open `session_id`
+    /// with (preface resolution included). Test seam for the per-session
+    /// preface; the open path itself resolves inside `prepare_public_pending`.
+    #[cfg(test)]
+    async fn public_session_instructions_for(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Option<String> {
+        match &self.admission {
+            GptLiveOpenAdmission::Public {
+                session_instructions,
+                instructions_preface,
+                ..
+            } => {
+                resolve_public_session_instructions(
+                    instructions_preface.as_deref(),
+                    session_id,
+                    session_instructions.clone(),
+                )
+                .await
+            }
+            #[cfg(feature = "experimental-gpt-live")]
+            GptLiveOpenAdmission::Experimental { .. } => None,
+        }
     }
 
     fn validate_host_identity(
@@ -693,6 +770,7 @@ impl ExperimentalGptLiveOpenAuthority {
         config: &meerkat_core::Config,
         identity: meerkat_core::SessionLlmIdentity,
         session_instructions: Option<String>,
+        instructions_preface: Option<&dyn PublicGptLiveInstructionsPreface>,
     ) -> Result<ExperimentalGptLivePendingChannel, ExperimentalLiveOpenAuthorityError> {
         if execution_identity.profile_id != GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID {
             return Err(ExperimentalLiveOpenAuthorityError::AdmissionFailed);
@@ -735,8 +813,15 @@ impl ExperimentalGptLiveOpenAuthority {
                 },
             )
             .map_err(|_| ExperimentalLiveOpenAuthorityError::AdmissionFailed)?;
-        let session_instructions = session_instructions
-            .or_else(|| Some(crate::gpt_live_client_context_session_instructions().to_string()));
+        // The preface is per session: the host learns which member this
+        // canonical session backs and describes it here, after admission and
+        // before any provider IO.
+        let session_instructions = resolve_public_session_instructions(
+            instructions_preface,
+            canonical_session_id,
+            session_instructions,
+        )
+        .await;
         #[cfg(feature = "test-realtime-fixtures")]
         if let Some(base_url) = &self.test_base_url {
             return ExperimentalGptLivePendingChannel::__from_public_target_with_base_url(
@@ -870,6 +955,7 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
             }
             GptLiveOpenAdmission::Public {
                 session_instructions,
+                instructions_preface,
                 playback_policy,
             } => self
                 .prepare_public_pending(
@@ -878,6 +964,7 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
                     &config,
                     identity,
                     session_instructions.clone(),
+                    instructions_preface.as_deref(),
                 )
                 .await?
                 .with_public_playback_policy(*playback_policy)
@@ -6581,6 +6668,67 @@ mod tests {
         );
     }
 
+    struct MemberPreface;
+
+    #[async_trait::async_trait]
+    impl super::PublicGptLiveInstructionsPreface for MemberPreface {
+        async fn preface(&self, session_id: &meerkat_core::SessionId) -> Option<String> {
+            Some(format!(
+                "You speak for the member backing session {session_id}."
+            ))
+        }
+    }
+
+    struct StalledPreface;
+
+    #[async_trait::async_trait]
+    impl super::PublicGptLiveInstructionsPreface for StalledPreface {
+        async fn preface(&self, _session_id: &meerkat_core::SessionId) -> Option<String> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn per_session_preface_is_resolved_for_the_session_being_opened() {
+        let provider: Option<&dyn super::PublicGptLiveInstructionsPreface> = Some(&MemberPreface);
+        let first = meerkat_core::SessionId::new();
+        let second = meerkat_core::SessionId::new();
+        let first_text = super::resolve_public_session_instructions(provider, &first, None)
+            .await
+            .expect("instructions");
+        let second_text = super::resolve_public_session_instructions(provider, &second, None)
+            .await
+            .expect("instructions");
+        assert_ne!(first_text, second_text);
+        assert!(first_text.starts_with(&format!(
+            "You speak for the member backing session {first}.\n\n"
+        )));
+        assert!(second_text.starts_with(&format!(
+            "You speak for the member backing session {second}.\n\n"
+        )));
+        for text in [&first_text, &second_text] {
+            assert!(text.ends_with(crate::gpt_live_client_context_session_instructions()));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_preface_is_bounded_and_the_open_keeps_the_base_instructions() {
+        let provider: Option<&dyn super::PublicGptLiveInstructionsPreface> = Some(&StalledPreface);
+        let session = meerkat_core::SessionId::new();
+        let composed = tokio::time::timeout(
+            super::PUBLIC_INSTRUCTIONS_PREFACE_BOUND * 2,
+            super::resolve_public_session_instructions(
+                provider,
+                &session,
+                Some("Custom base.".to_string()),
+            ),
+        )
+        .await
+        .expect("the preface bound releases the open")
+        .expect("instructions");
+        assert_eq!(composed, "Custom base.");
+    }
+
     #[test]
     fn bootstrap_framing_fits_one_instructions_fragment() {
         // S99 evidence and the ordered-tail test recognise the summary by
@@ -8380,6 +8528,55 @@ mod tests {
             version: meerkat_contracts::WireLiveExecutionIdentityVersion::V1,
             profile_id: GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID.to_string(),
         }
+    }
+
+    struct RosterPreface;
+
+    #[async_trait]
+    impl PublicGptLiveInstructionsPreface for RosterPreface {
+        async fn preface(&self, session_id: &meerkat_core::SessionId) -> Option<String> {
+            Some(format!("Roster entry for session {session_id}."))
+        }
+    }
+
+    #[tokio::test]
+    async fn one_public_authority_resolves_a_distinct_preface_per_session() {
+        let realm = meerkat_core::RealmId::parse("voice").expect("realm");
+        let selected_binding = public_live_binding(&realm);
+        let mut config = public_live_authority_config(
+            &realm,
+            "marin",
+            public_live_identity(selected_binding.clone()),
+            Arc::new(CountingConfigSource {
+                reads: Arc::new(AtomicUsize::new(0)),
+                config: meerkat_core::Config::default(),
+            }),
+            Arc::new(NeverBindingAuthority {
+                calls: Arc::new(AtomicUsize::new(0)),
+                expected: selected_binding,
+            }),
+            Arc::new(ExperimentalGptLiveWebrtcTransport::new()),
+        );
+        config.session_instructions_preface = Some(Arc::new(RosterPreface));
+        let authority = ExperimentalGptLiveOpenAuthority::new_public(config).expect("authority");
+
+        let first = meerkat_core::SessionId::new();
+        let second = meerkat_core::SessionId::new();
+        let first_text = authority
+            .public_session_instructions_for(&first)
+            .await
+            .expect("instructions");
+        let second_text = authority
+            .public_session_instructions_for(&second)
+            .await
+            .expect("instructions");
+        assert_ne!(
+            first_text, second_text,
+            "one authority, two members, two identities"
+        );
+        assert!(first_text.starts_with(&format!("Roster entry for session {first}.\n\n")));
+        assert!(second_text.starts_with(&format!("Roster entry for session {second}.\n\n")));
+        assert!(first_text.ends_with(crate::gpt_live_client_context_session_instructions()));
     }
 
     #[tokio::test]

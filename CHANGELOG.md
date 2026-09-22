@@ -204,6 +204,32 @@ them.
   `ConnectionResetError` from `stdin.drain()` instead of the read loop's typed
   `CONNECTION_CLOSED` (with the stderr tail). The client now treats the
   write-side reset as the same event and returns the read loop's fault.
+- MeerkatMachine runtime-internal manifest: the eight LiveContext preparation
+  inputs (`BeginLiveContextPreparation`, `GenerateLiveContextPreparation`,
+  `FailLiveContextPreparation`, `AuthorizeLiveContextBootstrapAppend`,
+  `ResolveLiveContextBootstrapAppend`, `RecordLiveContextBootstrapAckCut`,
+  `RecordLiveContextObservation`, `ObserveLiveContextDeliveryReadiness`) were
+  declared runtime-internal by the schema but missing from
+  `meerkat_runtime`'s typed manifest, so `runtime_alphabet_parity_test` and
+  `runtime_schema_parity_test` failed. They are registered under
+  `LiveExecutionLifecycle` with the other LiveContext inputs.
+- `RealtimeSessionOpenProjectionError` classifies itself
+  (`RealtimeSessionOpenProjectionError::class()` returning
+  `RealtimeSessionOpenProjectionErrorClass::{InvalidRequest, Internal}`), and
+  `meerkat-rpc` maps that class to its wire code. The rpc handler used to match
+  the variants with a `#[cfg(feature = "openai-live")]` arm for `Summary`,
+  which is exhaustive only while the rpc and facade features agree; the
+  min-feature surface build (`meerkat_rpc_surface_min`) links the full-feature
+  facade and failed to compile.
+- The two session-scoped inproc resume tests in `factory_build_agent` bound the
+  same process-global participant name `resume-peer` and ran in parallel, so
+  whichever registered second failed as displacing a live incumbent. The
+  across-roots test now uses its own name.
+- The BuildBuddy wasm-check lane runs clippy through the sandbox toolchain's
+  own `cargo-clippy`. `cargo clippy` resolves that subcommand from
+  `$CARGO_HOME/bin` (the executor image's rustup proxy) before `PATH`, which
+  mixed the image's `clippy-driver` into a build whose dependencies the pinned
+  rustc had compiled (`E0514 compiled by an incompatible version of rustc`).
 - Public GPT Live client delegations no longer start the executor on a
   truncated request, and the spoken request is one canonical user row. The
   provider emits `session.delegation.created {offset_ms}` at the model's

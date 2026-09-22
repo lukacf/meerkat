@@ -209,10 +209,24 @@ jobs:
             echo "::error::No pull_request CI run appeared for ${pr_branch}" >&2
             exit 1
           fi
-          status=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .status)
-          if [[ "$status" == "action_required" ]]; then
+          # GitHub reports a run waiting for approval as status "completed"
+          # with conclusion "action_required" (the status field itself is
+          # never "action_required"). Check both, and confirm the approval
+          # took: the first live run of this workflow skipped the POST here
+          # and the pull request sat blocked until a human approved it.
+          run_state=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+            --jq '(.status // "") + "/" + (.conclusion // "")')
+          if [[ "$run_state" == *action_required* ]]; then
             gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/approve"
+            sleep 5
+            run_state=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+              --jq '(.status // "") + "/" + (.conclusion // "")')
+            if [[ "$run_state" == *action_required* ]]; then
+              echo "::error::CI run ${run_id} still awaits approval after the approve call (${run_state})" >&2
+              exit 1
+            fi
           fi
+          echo "pull_request CI run ${run_id}: ${run_state}"
           gh pr merge "${pr_url}" --auto --merge
           echo "Queued protected MobKit docs publication: ${pr_url}" >> "${GITHUB_STEP_SUMMARY}"
 

@@ -2633,14 +2633,31 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
                     .overlap_bound_ms(S100_BARGE_IN_OVERLAP_BOUND_MS),
             )
             .await?;
-        let commentary_audio_ms = live
-            .peer
-            .wait_for_timeline(
-                Duration::from_secs(45),
-                "assistant_audio_start of the commentary readout",
-                |t| s100_find(t, TimelineKind::AssistantAudioStart, commentary_ms).map(|e| e.t_ms),
-            )
-            .await?;
+        // First assistant energy at or after the commentary landed. The model
+        // may already be speaking (an acknowledgement or filler) when the
+        // commentary arrives, so this is an energy-window fact, not a fresh
+        // assistant_audio_start.
+        let commentary_audio_deadline = Instant::now() + Duration::from_secs(45);
+        let commentary_audio_ms = loop {
+            let report = live.peer.energy().await?;
+            if let Some(window) = report
+                .energy
+                .windows
+                .iter()
+                .find(|w| w.t_ms >= commentary_ms && w.rms >= report.energy.threshold)
+            {
+                break window.t_ms;
+            }
+            if Instant::now() >= commentary_audio_deadline {
+                let timeline = live.peer.timeline().await?;
+                return Err(format!(
+                    "no assistant audio within 45 s of commentary_appended at {commentary_ms} ms; timeline:\n{}",
+                    format_timeline(&timeline)
+                )
+                .into());
+            }
+            sleep(Duration::from_millis(100)).await;
+        };
         let turn2_timing = live
             .peer
             .wait_for_timeline(Duration::from_secs(5), "turn 2 timing", |t| {

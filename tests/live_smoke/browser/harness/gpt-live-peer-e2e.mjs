@@ -499,12 +499,20 @@ async function prepare(command) {
       }
       if (isInputDelta) {
         const delta = typeof parsed.delta === 'string' ? parsed.delta : typeof parsed.text === 'string' ? parsed.text : '';
-        // A new user utterance closes the previous assistant response.
-        if (state.response.text && !state.inputTranscript.pending) state.finishResponse();
-        state.inputTranscript.pending = true;
-        state.inputTranscript.last_delta_ms = t;
-        if (state.inputTranscript.text.length < 4000) state.inputTranscript.text += delta;
-        if (protocol !== 'public') state.finalizeInput();
+        const finals = state.inputTranscript.finals;
+        const lastFinal = finals[finals.length - 1];
+        if (!state.inputTranscript.pending && lastFinal && t - lastFinal.t_ms < 1500 && /^[\s.,!?;:]*$/.test(delta)) {
+          // Trailing punctuation the provider finalizes after the answer
+          // began belongs to the previous utterance, not a new one.
+          lastFinal.text += delta;
+        } else {
+          // A new user utterance closes the previous assistant response.
+          if (state.response.text && !state.inputTranscript.pending) state.finishResponse();
+          state.inputTranscript.pending = true;
+          state.inputTranscript.last_delta_ms = t;
+          if (state.inputTranscript.text.length < 4000) state.inputTranscript.text += delta;
+          if (protocol !== 'public') state.finalizeInput();
+        }
       }
       // Assistant-start boundary used to fire an armed barge-in. The private
       // protocol announces assistant turns; the public Live API has no turn

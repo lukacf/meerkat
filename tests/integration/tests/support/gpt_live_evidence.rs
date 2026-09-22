@@ -307,14 +307,14 @@ pub enum Record {
     },
     /// Per-turn response latency: user input final to first assistant
     /// audio, and end of user speech to first assistant audio.
-    /// Protocol-anchored: the input final is the arrival of the last
-    /// `session.input_transcript.delta` whose `start_ms` is at or below the
-    /// following response's first `output_transcript.delta` `start_ms` (role
-    /// alternation on the provider timeline; a delta starting exactly at the
-    /// response start is the answered utterance's tail, arrival order plays
-    /// no part, and the runtime applies the same rule); `input_final_end_ms` is that
-    /// delta's provider `end_ms`. `input_final_to_delegation_ms` compares the
-    /// `session.delegation.created` arrival against that final.
+    /// Protocol-anchored by arrival (join by arrival, alternation by
+    /// arrival), mirroring the runtime: for a delegated turn the utterance is
+    /// the `session.input_transcript.delta`s that arrived before
+    /// `session.delegation.created`; for a plain turn those that arrived
+    /// before the response's first `output_transcript.delta`. The input final
+    /// is the arrival of the last such delta and `input_final_end_ms` its
+    /// provider `end_ms`; `input_final_to_delegation_ms` is the
+    /// delegation.created arrival minus that (non-negative by construction).
     Latency {
         channel: u32,
         turn: u32,

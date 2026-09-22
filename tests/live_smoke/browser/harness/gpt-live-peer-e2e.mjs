@@ -204,20 +204,18 @@ async function prepare(command) {
         first_assistant_audio_ms: [],
         timer: null,
       },
-      // Protocol-anchored user input finals. Public Live carries user speech
-      // only as session.input_transcript.delta {start_ms,end_ms}; there is no
-      // item-done or speech_started/stopped. A user utterance is final at the
-      // role alternation on the provider timeline: the deltas whose start_ms
-      // is at or below the first output_transcript.delta start_ms of the
-      // following response belong to the utterance being answered (the
-      // assistant answers what the user has said, so a delta starting exactly
-      // at the response start is that utterance's tail). A delta starting
-      // strictly after the boundary is a new user row (the model answered
-      // before the last word). Arrival order plays no part; the runtime
-      // applies the same rule. `pending` holds the deltas of the open
-      // utterance; `boundary` the response start that closes it once the
-      // fixture's spoken part has ended.
-      inputTranscript: { pending: [], boundary: null, finals: [], first_delta_ms: null },
+      // Protocol-anchored user input finals, by arrival (join by arrival,
+      // alternation by arrival), mirroring the runtime. Public Live carries
+      // user speech only as session.input_transcript.delta; there is no
+      // item-done or speech_started/stopped. For a delegated turn the
+      // utterance closes when session.delegation.created ARRIVES: the runtime
+      // joins every delta received so far into the executor input. For a
+      // plain turn it closes when the response's first output_transcript.delta
+      // arrives. Any user delta arriving after the close is a new utterance
+      // and a new canonical row; late tails are never folded back (text
+      // preservation wins over timeline ties). `pending` holds the deltas of
+      // the open utterance.
+      inputTranscript: { pending: [], finals: [], first_delta_ms: null },
       firstAudioPacketMs: null,
       lastFixtureStartMs: -1,
       response: { text: '', started_ms: null, index: 0 },
@@ -349,38 +347,29 @@ async function prepare(command) {
       state.pushTimeline('response_end', { index: state.response.index, chars: text.length });
       state.response = { text: '', started_ms: null, index: state.response.index + 1 };
     };
-    // The peer knows exactly when the user is speaking: a fixture is inside
-    // its spoken part. Transcript deltas pausing mid-utterance, or assistant
-    // output arriving during a barge-in, must not finalize the input early.
-    state.userSpeaking = (t) => [...state.playing.values()].some((play) => t - play.started_ms <= play.speech_ms);
-    // Close the open utterance at `boundary` (a response's first output
-    // transcript start_ms): the deltas at or below it become one final whose
-    // t_ms is the arrival of its last delta and end_ms that delta's provider
-    // end; deltas strictly above it stay pending as the next utterance. Never
-    // while the fixture's spoken part is still playing (the peer owns that
-    // floor).
-    state.finalizeInput = (t) => {
+    // Close the open utterance now (`reason`: 'delegation' when
+    // session.delegation.created arrived, 'response' when the response's
+    // first output transcript delta arrived): every pending delta becomes one
+    // final whose t_ms is the arrival of its last delta and end_ms that
+    // delta's provider end.
+    state.closeUtterance = (t, reason) => {
       const input = state.inputTranscript;
-      if (input.boundary === null || state.userSpeaking(t)) return;
-      const closed = input.pending.filter((d) => d.start_ms === null || d.start_ms <= input.boundary);
-      const rest = input.pending.filter((d) => d.start_ms !== null && d.start_ms > input.boundary);
-      if (closed.length > 0) {
-        const last = closed[closed.length - 1];
-        const final = {
-          t_ms: last.t,
-          start_ms: closed[0].start_ms,
-          end_ms: last.end_ms,
-          closed_by: input.boundary,
-          text: closed.map((d) => d.text).join(''),
-        };
-        input.finals.push(final);
-        state.pushTimeline('input_final', {
-          t_ms: final.t_ms, start_ms: final.start_ms, end_ms: final.end_ms, closed_by: final.closed_by,
-          text: final.text.slice(0, 400), index: input.finals.length - 1,
-        });
-      }
-      input.pending = rest;
-      input.boundary = null;
+      if (input.pending.length === 0) return;
+      const last = input.pending[input.pending.length - 1];
+      const final = {
+        t_ms: last.t,
+        start_ms: input.pending[0].start_ms,
+        end_ms: last.end_ms,
+        closed_by: reason,
+        closed_at_ms: t,
+        text: input.pending.map((d) => d.text).join(''),
+      };
+      input.finals.push(final);
+      state.pushTimeline('input_final', {
+        t_ms: final.t_ms, start_ms: final.start_ms, end_ms: final.end_ms, closed_by: reason, closed_at_ms: t,
+        text: final.text.slice(0, 400), index: input.finals.length - 1,
+      });
+      input.pending = [];
     };
     // ---- scheduling ----------------------------------------------------
     state.armSchedule = (item) => {
@@ -496,7 +485,6 @@ async function prepare(command) {
         energy.assistant_active = false;
         state.pushTimeline('assistant_audio_end', { last_active_ms: energy.last_active_ms, started_ms: energy.active_since_ms, response: state.response.index });
       }
-      state.finalizeInput(t);
       state.checkScheduled(t);
     }, energyConfig.window_ms);
     // ---- media path up: first outbound user audio packet -----------------
@@ -566,20 +554,9 @@ async function prepare(command) {
         const input = state.inputTranscript;
         const start_ms = typeof parsed.start_ms === 'number' ? parsed.start_ms : null;
         const end_ms = typeof parsed.end_ms === 'number' ? parsed.end_ms : null;
-        const lastFinal = input.finals[input.finals.length - 1];
         if (protocol !== 'public') {
-          input.finals.push({ t_ms: t, start_ms, end_ms, closed_by: null, text: delta });
+          input.finals.push({ t_ms: t, start_ms, end_ms, closed_by: 'delta', closed_at_ms: t, text: delta });
           state.pushTimeline('input_final', { t_ms: t, text: delta.slice(0, 400), index: input.finals.length - 1 });
-        } else if (input.pending.length === 0 && lastFinal && lastFinal.closed_by !== null
-          && start_ms !== null && start_ms <= lastFinal.closed_by) {
-          // Protocol-anchored: a delta that starts at or before the response
-          // that closed the previous utterance belongs to that utterance,
-          // however late it arrives.
-          lastFinal.text += delta;
-          lastFinal.t_ms = t;
-          lastFinal.end_ms = end_ms;
-          const entry = state.timeline.findLast?.((e) => e.kind === 'input_final' && e.detail.index === input.finals.length - 1);
-          if (entry) { entry.detail.text = lastFinal.text.slice(0, 400); entry.detail.end_ms = end_ms; entry.detail.late_ms = t; }
         } else {
           // A new user utterance closes the previous assistant response.
           if (state.response.text && input.pending.length === 0) state.finishResponse();
@@ -598,6 +575,9 @@ async function prepare(command) {
         if (state.response.text.length < 20000) state.response.text += delta;
       }
       if (parsed?.type === 'session.delegation.created') {
+        // Join by arrival: the runtime's executor input is every user delta
+        // received before this event.
+        state.closeUtterance(t, 'delegation');
         // offset_ms is the model's decision point on the provider timeline
         // (the user's final word starts at that offset); t_ms is arrival.
         state.pushTimeline('delegation_created', {
@@ -616,13 +596,9 @@ async function prepare(command) {
       if (parsed?.type === 'session.commentary.appended') {
         state.pushTimeline('commentary_appended', { event_index: state.events.length - 1 });
       }
-      // Role alternation: the first output transcript delta of a response
-      // fixes the boundary that closes the open user utterance.
-      if (parsed?.type === 'session.output_transcript.delta' && state.inputTranscript.boundary === null
-        && state.inputTranscript.pending.length > 0 && typeof parsed.start_ms === 'number') {
-        state.inputTranscript.boundary = parsed.start_ms;
-        state.finalizeInput(t);
-      }
+      // Alternation by arrival: the response's first output transcript
+      // delta closes the open user utterance of a plain turn.
+      if (parsed?.type === 'session.output_transcript.delta') state.closeUtterance(t, 'response');
       if (assistantStarted && state.bargeIn.armedFixture) {
         const fixtureName = state.bargeIn.armedFixture;
         state.bargeIn.armedFixture = null;

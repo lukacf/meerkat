@@ -847,8 +847,12 @@ pub struct InputFinal {
     pub start_ms: Option<f64>,
     #[serde(default)]
     pub end_ms: Option<f64>,
+    /// `delegation` (closed when session.delegation.created arrived) or
+    /// `response` (closed when the response's first output delta arrived).
     #[serde(default)]
-    pub closed_by: Option<f64>,
+    pub closed_by: Option<String>,
+    #[serde(default)]
+    pub closed_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]

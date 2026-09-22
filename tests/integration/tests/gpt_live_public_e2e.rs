@@ -2839,9 +2839,9 @@ impl SpokenTurn {
             .map(|entry| entry.t_ms);
         Some(Self {
             speech_end_ms,
-            // The entry is pushed when the role alternation closes the
-            // utterance; the final itself is the arrival of its last delta
-            // (detail `t_ms`), which is what latencies are measured from.
+            // The entry is pushed when the utterance closes (delegation or
+            // response arrival); the final itself is the arrival of its last
+            // delta (detail `t_ms`), which is what latencies are measured from.
             input_final_ms: input_final.map(|entry| entry.detail_u64("t_ms").unwrap_or(entry.t_ms)),
             input_final_end_ms: input_final.and_then(|entry| entry.detail_f64("end_ms")),
             input_text: input_final
@@ -3231,8 +3231,8 @@ async fn answer_window(
 ///     after the assistant goes quiet, each resolving "that file" / "the
 ///     second one" through the previous exchange; exactly one client
 ///     delegation per request, executor input equal to the user's final
-///     transcript (protocol-anchored: the deltas at or below the following
-///     response's first output start_ms), files on disk with two headings;
+///     transcript (protocol-anchored by arrival: the deltas that arrived
+///     before session.delegation.created), files on disk with two headings;
 /// (c) a barge-in 600 ms into the second commentary readout: overlap beyond
 ///     the bound is a fault and the answer must be re-issued;
 /// (d) a spoken goodbye, a graceful client disconnect, host close converging
@@ -3587,10 +3587,10 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             .iter()
             .map(|r| normalize_words(&r.timing.input_text))
             .collect();
-        // Protocol-anchored row expectation: one canonical user row per
-        // user role alternation on the provider timeline (the browser's
-        // input finals), plus the typed seed. A user delta arriving after the
-        // assistant's response start is legitimately a new row.
+        // Protocol-anchored row expectation (by arrival): one canonical user
+        // row per user utterance closed by a delegation.created or a
+        // response's first output delta (the browser's input finals), plus
+        // the typed seed. A user delta arriving after the close is a new row.
         let finals = live.peer.energy().await?.input_finals;
         let user_alternations = finals.len();
         let exchanges = 1 + user_alternations;
@@ -3598,7 +3598,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             "GPT_LIVE_S100_ALTERNATIONS user_alternations={user_alternations} spoken_fixtures=5 finals={:?}",
             finals
                 .iter()
-                .map(|f| (f.t_ms, f.start_ms, f.end_ms, f.closed_by, f.text.chars().take(60).collect::<String>()))
+                .map(|f| (f.t_ms, f.start_ms, f.end_ms, f.closed_by.as_deref(), f.text.chars().take(60).collect::<String>()))
                 .collect::<Vec<_>>()
         );
         let history_deadline = Instant::now() + Duration::from_secs(20);

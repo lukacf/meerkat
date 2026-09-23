@@ -229,7 +229,12 @@ them.
   request whose dependency ends failed or cancelled (the WorkGraph treats
   only a completed blocker as satisfied) restarts with a replacement item and
   a preface naming what did not finish. Without a WorkGraph store the
-  channel degrades to a strict serial queue. The canonical transcript commit
+  channel degrades to a strict serial queue. The WorkGraph item title and
+  every narration name the request by the delegation window's user-only
+  transcript (`LiveDelegationExecutorInput::request_transcript`); the fork's
+  task is the composed executor text (`delegation_request_text`), and the
+  canonical user row and the provisional handoff keep the provider-final
+  transcript. The canonical transcript commit
   for a delegation happens when the item is dispatched and waits at most the
   source turn bound (`MobSessionService::
   commit_live_delegation_final_transcript_at_turn_boundary`,

@@ -372,6 +372,10 @@ impl Fixture {
                 turn,
                 delegation,
                 transcript.to_string(),
+                LiveDelegationExecutorInput {
+                    request_transcript: transcript.to_string(),
+                    assistant_context: String::new(),
+                },
             )
             .await
             .expect("delegation scheduled");

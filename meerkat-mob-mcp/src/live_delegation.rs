@@ -104,13 +104,6 @@ const WORKGRAPH_START_RETRY_DELAY: std::time::Duration = std::time::Duration::fr
 /// claim is retired and the failure is spoken.
 const WORKGRAPH_START_ATTEMPTS: u32 = 8;
 
-/// The one place the scheduler reads the user's request text for a
-/// delegation. Item titles, narration, and the fork's task all derive from
-/// this settled text, so a change in how the provider transcript settles
-/// lands here and nowhere else.
-fn delegation_request_text(provisional: &ProvisionalLiveHandoff) -> &str {
-    provisional.executor_input()
-}
 const LIVE_DELEGATION_CLEANUP_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_millis(25);
 const LIVE_DELEGATION_CLEANUP_RETRY_MAX_DELAY: std::time::Duration =
@@ -289,7 +282,13 @@ struct PendingDelegation {
     /// identifies the final transcript item at commit time.
     turn: LiveSidebandTurnRef,
     /// Provider-final transcript text, committed canonically at dispatch.
+    /// This is the canonical user row and the provisional handoff; it never
+    /// carries the composed executor text.
     final_transcript: String,
+    /// The provider window behind the delegation: `request_transcript` (the
+    /// user-only window text) names the WorkGraph item and every narration;
+    /// the composed `delegation_request_text` output is the fork's task.
+    executor_input: LiveDelegationExecutorInput,
     /// Canonical commit evidence and its reconciliation once committed; a
     /// deferred item keeps them so a retry never commits twice.
     transcript: Option<ConfirmedTranscript>,
@@ -3241,6 +3240,7 @@ impl ExperimentalLiveDelegationCoordinator {
             delegation,
             turn,
             final_transcript,
+            executor_input,
         )
         .await;
         self.completed_delegation_turns
@@ -3304,8 +3304,9 @@ impl ExperimentalLiveDelegationCoordinator {
         delegation: LiveSidebandDelegationRef,
         turn: LiveSidebandTurnRef,
         final_transcript: String,
+        executor_input: LiveDelegationExecutorInput,
     ) {
-        let title = narration_title(delegation_request_text(&provisional));
+        let title = narration_title(&executor_input.request_transcript);
         let workgraph = self.voice_workgraph(&mob_handle);
         let work = match workgraph.as_ref() {
             Some(workgraph) => match workgraph
@@ -3313,7 +3314,7 @@ impl ExperimentalLiveDelegationCoordinator {
                     provider_binding.channel_id(),
                     provider_binding.session_id(),
                     delegation.adapter_key(),
-                    delegation_request_text(&provisional),
+                    &executor_input.request_transcript,
                 )
                 .await
             {
@@ -3341,6 +3342,7 @@ impl ExperimentalLiveDelegationCoordinator {
             delegation,
             turn,
             final_transcript,
+            executor_input,
             transcript: None,
             workgraph,
             work,
@@ -3717,7 +3719,7 @@ impl ExperimentalLiveDelegationCoordinator {
                         pending.provider_binding.channel_id(),
                         pending.provider_binding.session_id(),
                         pending.delegation.adapter_key(),
-                        delegation_request_text(&pending.provisional),
+                        &pending.executor_input.request_transcript,
                     )
                     .await
                     .map_err(ScheduledStartFailure::WorkGraph)?;
@@ -3739,7 +3741,7 @@ impl ExperimentalLiveDelegationCoordinator {
             member.grant_workgraph_tools = true;
         }
         let task = task_after_failed_blockers(
-            &task_with_waited_results(delegation_request_text(&pending.provisional), &waited),
+            &task_with_waited_results(&delegation_request_text(&pending.executor_input), &waited),
             &pending.failed_blockers,
         );
         self.start_admitted_delegation(

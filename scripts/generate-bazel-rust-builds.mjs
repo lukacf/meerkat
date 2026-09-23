@@ -990,6 +990,20 @@ for (const consumer of localPackages.values()) {
   }
 }
 
+// Files of the root Bazel package that a crate reaches through an include
+// macro (meerkat-cli's help contract embeds docs/**). The root BUILD exports
+// them so the including target can name them in compile_data.
+const rootIncludedFiles = new Set();
+
+function bazelPackageDirOwning(absolute) {
+  let dir = dirname(absolute);
+  while (dir.startsWith(root) && dir !== root) {
+    if (existsSync(resolve(dir, "BUILD.bazel")) || existsSync(resolve(dir, "BUILD"))) return dir;
+    dir = dirname(dir);
+  }
+  return root;
+}
+
 function compileData(target, packageRoot, includeTests) {
   const paths = new Set(["Cargo.toml"]);
   const labels = new Set();
@@ -1031,6 +1045,21 @@ function compileData(target, packageRoot, includeTests) {
         if (owner) {
           const rel = relative(packageDir(owner), absolute).replaceAll("\\", "/");
           labels.add(`//${packageKey(owner)}:${rel}`);
+        } else if (absolute.startsWith(`${root}/`)) {
+          // Not a workspace member's file. If the root package owns it, the
+          // root BUILD exports it; a file under some other BUILD has no owner
+          // on this path and must fail generation instead of rustc on the
+          // executor ("couldn't read ..." was the first real Prebuild lane's
+          // second failure, for docs/** in meerkat-cli's help contract test).
+          const bazelPackage = bazelPackageDirOwning(absolute);
+          if (bazelPackage !== root) {
+            throw new Error(
+              `${relative(root, sourceFile)} includes ${relative(root, absolute)}, owned by Bazel package //${relative(root, bazelPackage)} which does not export it`,
+            );
+          }
+          const rel = relative(root, absolute).replaceAll("\\", "/");
+          rootIncludedFiles.add(rel);
+          labels.add(`//:${rel}`);
         }
       }
     }
@@ -1147,6 +1176,19 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `    visibility = ["//visibility:public"],`,
     `)`,
     ``,
+    ...(rootIncludedFiles.size
+      ? [
+          `# Root-package files that crates embed through include macros; see`,
+          `# compileData() in scripts/generate-bazel-rust-builds.mjs.`,
+          `exports_files(`,
+          `    [`,
+          ...[...rootIncludedFiles].sort().map((file) => `        ${q(file)},`),
+          `    ],`,
+          `    visibility = ["//visibility:public"],`,
+          `)`,
+          ``,
+        ]
+      : []),
     `filegroup(`,
     `    name = "repo_governance_files",`,
     `    srcs = glob(["Makefile", "scripts/*"], allow_empty = True),`,

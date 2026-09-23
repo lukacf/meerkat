@@ -71,6 +71,21 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# Root-package files that crates embed through include macros; see
+# compileData() in scripts/generate-bazel-rust-builds.mjs.
+exports_files(
+    [
+        "docs/cli/commands.mdx",
+        "docs/docs.json",
+        "docs/examples/mobpack.mdx",
+        "docs/examples/wasm.mdx",
+        "docs/guides/mobpack.mdx",
+        "docs/guides/mobs.mdx",
+        "docs/reference/mob-architecture.mdx",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "repo_governance_files",
     srcs = glob(["Makefile", "scripts/*"], allow_empty = True),

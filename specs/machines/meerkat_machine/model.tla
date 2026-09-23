@@ -12198,7 +12198,7 @@ CloseStandaloneTurn(arg_session_id, run_id, terminal_phase) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UnchangedFrame_97c7d3941fe77688
+    /\ UnchangedFrame_0e9c4aa536bcd75b
 
 
 ServiceTurnCommittedRunningToIdle(run_id) ==

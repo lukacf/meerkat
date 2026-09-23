@@ -171,6 +171,18 @@ sh_test(
 # Bazel-native unit lanes failed hundreds of tests on exactly that. A
 # nextest-parity per-test-process wrapper for the Bazel-native rust_test
 # targets is the follow-up cut from 0.8.41 (about half a day of work).
+# xtask's workflow tests run `machine-check-drift` in a nested repo-cargo
+# child that pipes generated source through rustfmt. The stable toolchain's
+# `bin/rustfmt` cannot load librustc_driver from the runfiles tree (exit 127,
+# 2026-09-23 unit lane); the Bazel xtask targets carry this pinned nightly
+# rustfmt with its rustc_lib for the same reason, so the nested children get it.
+NESTED_RUSTFMT_DATA = [
+    "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
+    "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
+    "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
+    "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin",
+]
+
 NATIVE_CARGO_EQUIVALENT_TESTS = {
     "unit_cargo_equivalent_test": "test-unit",
     "integration_fast_cargo_equivalent_test": "integration-fast",
@@ -185,7 +197,7 @@ NATIVE_CARGO_EQUIVALENT_TESTS = {
             "//:workspace_runfiles",
             "@cargo_nextest_darwin_arm64//:cargo-nextest",
             "@cargo_nextest_linux_x86_64//:cargo-nextest",
-        ] + RUST_TOOLCHAIN_DATA,
+        ] + RUST_TOOLCHAIN_DATA + NESTED_RUSTFMT_DATA,
         exec_properties = HEAVY_CARGO_EQUIVALENT_EXEC_PROPERTIES,
         size = "enormous",
         timeout = "eternal",

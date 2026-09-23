@@ -20,6 +20,7 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-arm64)
     host_triple="aarch64-apple-darwin"
     host_rust_toolchain="rust_macos_aarch64__aarch64-apple-darwin__stable_tools"
+    nested_rustfmt_toolchain="rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools"
     wasm_rust_toolchain="rust_macos_aarch64__wasm32-unknown-unknown__stable_tools"
     node_repo="node_darwin_arm64"
     python_repo="python_darwin_arm64"
@@ -30,6 +31,7 @@ case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)
     host_triple="x86_64-unknown-linux-gnu"
     host_rust_toolchain="rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools"
+    nested_rustfmt_toolchain="rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools"
     wasm_rust_toolchain="rust_linux_x86_64__wasm32-unknown-unknown__stable_tools"
     node_repo="node_linux_x86_64"
     python_repo="python_linux_x86_64"
@@ -250,6 +252,22 @@ configure_nested_cargo_workspace() {
   fi
   export XDG_CACHE_HOME="${TEST_TMPDIR}/xdg-cache"
   mkdir -p "${XDG_CACHE_HOME}"
+  # The stable toolchain's rustfmt cannot load librustc_driver from the
+  # runfiles tree (exit 127); xtask's drift child pipes generated source
+  # through RUSTFMT. Hand the children the pinned nightly rustfmt the Bazel
+  # xtask targets use, resolved while the runfiles variables still exist.
+  local nested_rustfmt
+  nested_rustfmt="$(find_runfile "*${nested_rustfmt_toolchain}*/bin/rustfmt")"
+  if [[ -z "${nested_rustfmt}" ]]; then
+    echo "pinned nightly rustfmt runfile was not found for nested cargo children" >&2
+    exit 127
+  fi
+  if ! "${nested_rustfmt}" --version >/dev/null 2>&1; then
+    echo "pinned nightly rustfmt does not run in this sandbox: ${nested_rustfmt}" >&2
+    "${nested_rustfmt}" --version >&2 || true
+    exit 127
+  fi
+  export RUSTFMT="${nested_rustfmt}"
   unset TEST_SRCDIR TEST_WORKSPACE RUNFILES_DIR RUNFILES_MANIFEST_FILE
   # repo-cargo consults rustup whenever it is on PATH: it swaps in the
   # rustup toolchain named by rust-toolchain.toml (1.94.1 on the executor

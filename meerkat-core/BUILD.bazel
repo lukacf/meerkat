@@ -2,6 +2,8 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 
+load("//:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
 
 
 filegroup(
@@ -59,7 +61,7 @@ rust_library(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -96,7 +98,7 @@ rust_library(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_agent_factory_build",
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
@@ -144,7 +146,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -214,7 +216,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -280,7 +282,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -346,7 +348,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -414,7 +416,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -480,7 +482,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -548,7 +550,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -620,7 +622,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -686,7 +688,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -751,7 +753,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -817,7 +819,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -883,7 +885,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -948,7 +950,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -1016,7 +1018,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -1082,7 +1084,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -1148,7 +1150,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -1214,7 +1216,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -1280,7 +1282,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -1346,7 +1348,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -1412,7 +1414,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -1478,7 +1480,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -1544,7 +1546,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [
@@ -1612,7 +1614,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "--cfg=meerkat_internal_generated_authority_bridge",
     ],
     compile_data = [

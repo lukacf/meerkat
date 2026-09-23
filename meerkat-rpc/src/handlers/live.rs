@@ -232,7 +232,6 @@ fn live_open_projection_error_code(error: &RealtimeSessionOpenProjectionError) -
         RealtimeSessionOpenProjectionError::Llm(
             meerkat_client::error::LlmError::InvalidInputShape { .. },
         ) => crate::error::INVALID_PARAMS,
-        #[cfg(feature = "openai-live")]
         RealtimeSessionOpenProjectionError::Summary(_) => crate::error::INTERNAL_ERROR,
         RealtimeSessionOpenProjectionError::Session(_)
         | RealtimeSessionOpenProjectionError::SessionMismatch { .. }
@@ -2456,6 +2455,21 @@ mod tests {
         assert_eq!(
             super::live_open_projection_error_code(&unsupported_shape),
             error::INVALID_PARAMS
+        );
+    }
+
+    #[test]
+    fn live_summary_projection_error_is_internal_on_every_feature_set() {
+        // The `Summary` variant is owned by `meerkat` regardless of this
+        // crate's `openai-live` feature, so the mapping must compile and hold
+        // without any cfg gate (feature-unified builds turn the variant on
+        // through other workspace members).
+        let summary = RealtimeSessionOpenProjectionError::Summary(
+            meerkat::session_runtime::errors::LiveContextSummaryError::TimedOut,
+        );
+        assert_eq!(
+            super::live_open_projection_error_code(&summary),
+            error::INTERNAL_ERROR
         );
     }
 

@@ -2033,7 +2033,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
                 active_skills: None,
             },
             keep_alive: false,
-            comms_name: Some("resume-peer".to_string()),
+            comms_name: Some("resume-peer-across-roots".to_string()),
             peer_meta: None,
             realm_id: None,
             instance_id: None,

@@ -77,8 +77,8 @@ pub fn repo_root() -> Result<PathBuf> {
     if let Some(root) = std::env::var_os("MEERKAT_WORKSPACE_ROOT") {
         return Ok(PathBuf::from(root));
     }
-    if let Ok(root) = std::env::current_dir()
-        && root.join("Cargo.toml").is_file()
+    if let Ok(current_dir) = std::env::current_dir()
+        && let Some(root) = workspace_root_containing(&current_dir)
     {
         return Ok(root);
     }
@@ -86,6 +86,25 @@ pub fn repo_root() -> Result<PathBuf> {
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| anyhow::anyhow!("failed to resolve repo root from xtask manifest dir"))
+}
+
+/// Nearest ancestor of `start` (inclusive) whose `Cargo.toml` declares the
+/// `[workspace]` table.
+///
+/// A member crate's own `Cargo.toml` is not evidence of the repo root: cargo
+/// runs test binaries with the current directory set to the package root, so
+/// `cargo test -p xtask` starts in `xtask/`, and accepting any manifest there
+/// pointed `repo_root()` at the crate instead of the workspace.
+fn workspace_root_containing(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|dir| manifest_declares_workspace(dir))
+        .map(Path::to_path_buf)
+}
+
+fn manifest_declares_workspace(dir: &Path) -> bool {
+    fs::read_to_string(dir.join("Cargo.toml"))
+        .is_ok_and(|manifest| manifest.lines().any(|line| line.trim() == "[workspace]"))
 }
 
 fn bazel_runfiles_workspace_root() -> Option<PathBuf> {
@@ -171,4 +190,52 @@ pub fn assert_directory_contents_match(expected_root: &Path, actual_root: &Path)
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod repo_root_tests {
+    use super::workspace_root_containing;
+    use std::fs;
+
+    #[test]
+    fn member_crate_directory_resolves_to_the_enclosing_workspace_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\n",
+        )
+        .expect("write workspace manifest");
+        let member = root.join("member");
+        fs::create_dir_all(member.join("src")).expect("create member");
+        fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"member\"\nversion = \"0.0.0\"\n",
+        )
+        .expect("write member manifest");
+
+        let resolved = workspace_root_containing(&member.join("src"))
+            .expect("nested directory resolves to workspace root");
+        assert_eq!(resolved, root);
+        assert_eq!(
+            workspace_root_containing(&member).as_deref(),
+            Some(root),
+            "a member crate manifest must not be mistaken for the workspace root"
+        );
+    }
+
+    #[test]
+    fn crate_without_an_enclosing_workspace_does_not_resolve() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let lone = temp.path().join("lone");
+        fs::create_dir_all(&lone).expect("create crate dir");
+        fs::write(
+            lone.join("Cargo.toml"),
+            "[package]\nname = \"lone\"\nversion = \"0.0.0\"\n",
+        )
+        .expect("write crate manifest");
+
+        assert_eq!(workspace_root_containing(&lone), None);
+    }
 }

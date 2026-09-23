@@ -351,3 +351,38 @@ pub enum LiveChannelVerbError {
     #[error("failed to build session config: {0}")]
     RefreshConfig(#[source] RealtimeSessionOpenProjectionError),
 }
+
+/// Typed failure of live context summary production.
+///
+/// Lives in the ungated error module because
+/// `live_orchestration::RealtimeSessionOpenProjectionError::Summary`
+/// must exist on every feature set: downstream surfaces match on that
+/// enum exhaustively and cannot cfg on this crate's `openai-live` feature.
+/// Only the `openai-live` summary pipeline constructs it.
+#[derive(Debug, thiserror::Error)]
+pub enum LiveContextSummaryError {
+    #[error("live summary byte bounds and timeout must be nonzero")]
+    InvalidBounds,
+    #[error("a generated full-window summary cannot also select a replay seed window")]
+    ConflictingSeedPolicy,
+    #[error("live summary input exceeds {max_bytes} bytes")]
+    InputTooLarge { max_bytes: usize },
+    #[error("live summary output exceeds {max_bytes} bytes")]
+    OutputTooLarge { max_bytes: usize },
+    #[error("live summary producer timed out")]
+    TimedOut,
+    #[error("live summary producer returned empty content")]
+    Empty,
+    #[error("live summary producer failed: {0}")]
+    Producer(String),
+    #[error("live summary source snapshot is no longer current")]
+    StaleSnapshot,
+    #[error("live summary and opening projection belong to different snapshots")]
+    ConflictingProjection,
+    #[error("prepared live provider does not support snapshot summaries")]
+    Unsupported,
+    #[error("live summary source serialization failed: {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("live summary source read failed: {0}")]
+    Session(#[from] SessionError),
+}

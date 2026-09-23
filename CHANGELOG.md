@@ -186,12 +186,6 @@ them.
   `scripts/repo-cargo` so source-level parity tests read the workspace instead
   of the crate directory; and a failing SDK job now prints its log tail, not
   only its head.
-- Machine codegen: the MeerkatMachine `observation_counter_available` guard
-  spelled `u64::MAX` as the literal `18446744073709551615`, which the DSL
-  lowers as a plain integer, so the rendered TLA model carried a literal TLC
-  cannot evaluate instead of the `RustU64Max` boundary constant
-  (`tla_renderer_abstracts_u64_max_literals_for_tlc` failed). The guard uses
-  `u64::MAX`; the meerkat machine and mob seam models are regenerated.
 - `xtask machine-verify` and the bounded adaptive TLC witness give the JVM
   launcher's main thread the deep stack through `JDK_JAVA_OPTIONS`. `-Xss` in
   `JAVA_TOOL_OPTIONS` sizes only JVM-created threads; TLC parses the module and
@@ -204,15 +198,6 @@ them.
   `ConnectionResetError` from `stdin.drain()` instead of the read loop's typed
   `CONNECTION_CLOSED` (with the stderr tail). The client now treats the
   write-side reset as the same event and returns the read loop's fault.
-- MeerkatMachine runtime-internal manifest: the eight LiveContext preparation
-  inputs (`BeginLiveContextPreparation`, `GenerateLiveContextPreparation`,
-  `FailLiveContextPreparation`, `AuthorizeLiveContextBootstrapAppend`,
-  `ResolveLiveContextBootstrapAppend`, `RecordLiveContextBootstrapAckCut`,
-  `RecordLiveContextObservation`, `ObserveLiveContextDeliveryReadiness`) were
-  declared runtime-internal by the schema but missing from
-  `meerkat_runtime`'s typed manifest, so `runtime_alphabet_parity_test` and
-  `runtime_schema_parity_test` failed. They are registered under
-  `LiveExecutionLifecycle` with the other LiveContext inputs.
 - CI budgets now fit the lanes that actually run: the GCP BuildBuddy SLO is
   3000s from control-plane start (was 1200s; the cold `//...` prebuild alone
   needs ~12-13 min and gates the native lanes, and the SDK Web suite's

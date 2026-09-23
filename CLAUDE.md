@@ -347,8 +347,9 @@ list.
 are:
 - `gcp-buildbuddy` - calls `buildbuddy.yml` in `full-fresh` mode for the
   broad GCP BuildBuddy lane: every Bazel lane runs on fresh output roots
-  (prebuild, static, all-features clippy, unit, integration-fast, authority
-  governance); SDK, WASM, feature-matrix, and audit jobs are path-selected but
+  (prebuild, static, all-features clippy, authority governance; unit and
+  integration-fast run the pre-push hook's nextest invocations as
+  cargo-equivalent actions, one process per test); SDK, WASM, feature-matrix, and audit jobs are path-selected but
   always run for real once selected. `scripts/buildbuddy-ci-lane` fails on any
   mode it does not implement instead of skipping the lane.
 - `github-hosted-dense-topology` — calls `mob-dense-topology.yml` to build a

@@ -205,9 +205,10 @@ pushes to `main`, `ci/**`, `feat/**`, and `feature/**`, and manual dispatches:
 
 - `gcp-buildbuddy` calls `buildbuddy.yml` in `full-fresh` mode. It starts the
   GCP control plane/executors and runs every Bazel lane on fresh output roots:
-  the prebuild, static checks, the native lanes (all-features clippy, unit,
-  integration-fast), and authority governance (seam inventory, RMAT audit,
-  machine authority). SDK suites, WASM check, minimal-feature, feature-matrix,
+  the prebuild, static checks, the native lanes (all-features clippy as a
+  Bazel aspect; unit and integration-fast as cargo-equivalent actions running
+  the pre-push hook's nextest invocations, one process per test), and
+  authority governance (seam inventory, RMAT audit, machine authority). SDK suites, WASM check, minimal-feature, feature-matrix,
   and audit jobs are still selected by their change classifiers, but a
   selected lane always runs for real. `scripts/buildbuddy-ci-lane` refuses any
   mode it does not implement: from 2026-08-28 to 2026-09-16 the workflow

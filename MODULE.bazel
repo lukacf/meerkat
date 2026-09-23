@@ -32,6 +32,24 @@ http_archive(
     urls = ["https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.4/cargo-deny-0.19.4-aarch64-apple-darwin.tar.gz"],
 )
 
+# cargo-nextest pinned for the cargo-equivalent unit and integration-fast
+# lanes (tools/buildbuddy:unit_cargo_equivalent_test and
+# :integration_fast_cargo_equivalent_test), which run the pre-push hook's
+# nextest invocations inside one remote action. The macOS asset is universal.
+http_archive(
+    name = "cargo_nextest_darwin_arm64",
+    build_file_content = 'exports_files(["cargo-nextest"])',
+    sha256 = "4830d430411148d17602a75cc880bfb4dc8dac153dea59a48a2ef4cc93577f07",
+    urls = ["https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-universal-apple-darwin.tar.gz"],
+)
+
+http_archive(
+    name = "cargo_nextest_linux_x86_64",
+    build_file_content = 'exports_files(["cargo-nextest"])',
+    sha256 = "66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e",
+    urls = ["https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-unknown-linux-gnu.tar.gz"],
+)
+
 http_archive(
     name = "cargo_deny_linux_x86_64",
     build_file_content = 'exports_files(["cargo-deny"])',

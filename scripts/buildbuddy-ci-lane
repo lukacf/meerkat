@@ -289,11 +289,15 @@ case "${lane}" in
   wasm-contract-tests)
     run_bazel_lane wasm-contract-rbe --jobs="${bazel_jobs}"
     ;;
+  # CI's unit and integration-fast lanes run the pre-push hook's nextest
+  # invocations as cargo-equivalent actions (one process per test); the
+  # Bazel-native rust_test forms stay on native-unit-tests and
+  # native-integration-fast for local use.
   test-unit)
-    run_bazel_lane workspace-unit-rbe --jobs="${bazel_jobs}"
+    run_bazel_lane unit-cargo-equivalent-rbe --jobs="${bazel_jobs}"
     ;;
   integration-fast)
-    run_bazel_lane workspace-integration-fast-rbe --jobs="${bazel_jobs}"
+    run_bazel_lane integration-fast-cargo-equivalent-rbe --jobs="${bazel_jobs}"
     ;;
   e2e-fast)
     run_bazel_lane e2e-fast-rbe --jobs="${bazel_jobs}"

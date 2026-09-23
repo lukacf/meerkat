@@ -24,6 +24,7 @@ case "$(uname -s)-$(uname -m)" in
     node_repo="node_darwin_arm64"
     python_repo="python_darwin_arm64"
     cargo_deny_repo="cargo_deny_darwin_arm64"
+    cargo_nextest_repo="cargo_nextest_darwin_arm64"
     wasm_pack_repo="wasm_pack_darwin_arm64"
     ;;
   Linux-x86_64)
@@ -33,6 +34,7 @@ case "$(uname -s)-$(uname -m)" in
     node_repo="node_linux_x86_64"
     python_repo="python_linux_x86_64"
     cargo_deny_repo="cargo_deny_linux_x86_64"
+    cargo_nextest_repo="cargo_nextest_linux_x86_64"
     wasm_pack_repo="wasm_pack_linux_x86_64"
     ;;
   *)
@@ -215,6 +217,19 @@ configure_cargo_deny() {
   export CARGO_DENY="${cargo_deny_bin}"
 }
 
+configure_cargo_nextest() {
+  local cargo_nextest_bin
+  cargo_nextest_bin="$(find_runfile "*${cargo_nextest_repo}/cargo-nextest")"
+  if [[ -z "${cargo_nextest_bin}" ]]; then
+    echo "pinned cargo-nextest runfile was not found" >&2
+    exit 127
+  fi
+  # Invoked directly (`cargo-nextest nextest run ...`), never through `cargo
+  # nextest`: Cargo resolves external subcommands from $CARGO_HOME/bin first,
+  # and CARGO_HOME here is the executor image's rustup home.
+  export CARGO_NEXTEST="${cargo_nextest_bin}"
+}
+
 configure_wasm_pack() {
   local wasm_pack_bin
   wasm_pack_bin="$(find_runfile "*${wasm_pack_repo}/wasm-pack")"
@@ -291,6 +306,27 @@ case "${lane}" in
     configure_rust "${host_rust_toolchain}"
     configure_cargo_deny
     "${CARGO_DENY}" check
+    ;;
+  # The Native unit and integration-fast lanes: the same nextest invocations
+  # scripts/pre-push-unit.sh runs (default features, kind(lib) for units,
+  # profile fast + kind(test) for integration), one process per test, with
+  # the hook's RUST_MIN_STACK. The workspace root and the `fast` profile in
+  # .config/nextest.toml come with the copied workspace.
+  test-unit)
+    configure_rust "${host_rust_toolchain}"
+    configure_cargo_nextest
+    export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
+    "${CARGO_NEXTEST}" nextest run --workspace \
+      -E 'kind(lib)' --no-tests=fail --no-fail-fast \
+      --show-progress none --status-level none --final-status-level fail
+    ;;
+  integration-fast)
+    configure_rust "${host_rust_toolchain}"
+    configure_cargo_nextest
+    export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
+    "${CARGO_NEXTEST}" nextest run --workspace \
+      --profile fast -E 'kind(test)' --no-tests=fail --no-fail-fast \
+      --show-progress none --status-level none --final-status-level fail
     ;;
   release-validate)
     configure_rust "${host_rust_toolchain}"

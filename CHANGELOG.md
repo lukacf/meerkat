@@ -262,16 +262,22 @@ them.
   use their own ids. Nine tests sharing `flow-mob`/`test_mob` collided on the
   process-global supervisor participant name when the binary ran them in
   parallel.
-- Bazel `rust_test` binaries run single-threaded (`RUST_TEST_THREADS=1`) and
-  are sized for it (`medium` by default, `large` for the heavy unit crates).
-  Cargo's unit and integration lanes run under nextest, one process per test;
-  a Bazel binary runs every test in one process on every core, and the first
-  real unit lane failed dozens of tests on state that is process-global by
-  design (inproc participant names across `meerkat-rest`, `meerkat-rpc`,
-  `meerkat-mob`, the realtime open projection memory budget, observability
-  counters). Unit binaries whose features enable WebRTC (`meerkat`,
-  `meerkat-live`) get `test.network: external`: their tests bind UDP sockets
-  and hung in the network-less default sandbox.
+- CI's unit and integration-fast lanes run the pre-push hook's nextest
+  invocations (`nextest run --workspace -E 'kind(lib)'` and
+  `--profile fast -E 'kind(test)'`, default features, `RUST_MIN_STACK`
+  33554432) as cargo-equivalent remote actions
+  (`//tools/buildbuddy:unit_cargo_equivalent_test`,
+  `:integration_fast_cargo_equivalent_test`, cargo-nextest 0.9.143 pinned in
+  MODULE.bazel), one process per test, exactly the Cargo lanes' semantics. A
+  Bazel `rust_test` runs a whole binary in one process, and the suite relies
+  on process-per-test cleanup for state that is process-global by design
+  (inproc participant names, the realtime projection memory budget); even run
+  single-threaded, the Bazel-native unit lane failed 561 `meerkat-mob` tests
+  on routes leaked by earlier tests. The Bazel-native `rust_test` targets
+  remain for local use, single-threaded and sized for it, with WebRTC-enabled
+  unit binaries granted `test.network: external`. Follow-up, cut from 0.8.41:
+  a nextest-parity per-test-process wrapper for the Bazel-native targets
+  (about half a day) so the unit lane can return to Bazel's remote cache.
 - The `agent_builder_policy_canary` build-script compiles pass
   `-Clinker=cc -Clink-self-contained=no` on Linux, the linker policy the
   test's Cargo runs already used: the rules_rust rustc in the Bazel runfiles

@@ -765,6 +765,9 @@ pub enum TimelineKind {
     AnchorFired,
     Disconnect,
     DelegationCreated,
+    /// The joined expected executor input recorded at a delegation.created
+    /// arrival (executor-input rule).
+    DelegationInput,
     CommentaryAppended,
     /// Any other provider event, by `type` in the detail.
     ProviderEvent,
@@ -855,10 +858,23 @@ pub struct InputFinal {
     pub closed_at_ms: Option<u64>,
 }
 
+/// The expected executor input of one delegation: every user transcript
+/// delta that arrived since the previous `session.delegation.created` (or
+/// connect), regardless of assistant output in between.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct DelegationInput {
+    pub t_ms: u64,
+    pub text: String,
+    #[serde(default)]
+    pub deltas: usize,
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EnergyReport {
     pub energy: EnergySummary,
     pub input_finals: Vec<InputFinal>,
+    #[serde(default)]
+    pub delegation_inputs: Vec<DelegationInput>,
 }
 
 impl EnergyReport {

@@ -216,6 +216,14 @@ async function prepare(command) {
       // preservation wins over timeline ties). `pending` holds the deltas of
       // the open utterance.
       inputTranscript: { pending: [], finals: [], first_delta_ms: null },
+      // Executor-input rule (runtime fix/live-history-carrier-and-executor-input):
+      // the executor input of a delegation is ALL user transcript received
+      // since the previous session.delegation.created arrival on the channel
+      // (or since connect), regardless of assistant output in between; the
+      // assistant transcript of that window travels as labelled context. Row
+      // expectations stay on `inputTranscript.finals` (utterances closed by
+      // arrival). `pending` holds the deltas since the last delegation.
+      delegationJoin: { pending: [], inputs: [] },
       firstAudioPacketMs: null,
       lastFixtureStartMs: -1,
       response: { text: '', started_ms: null, index: 0 },
@@ -561,6 +569,7 @@ async function prepare(command) {
           // A new user utterance closes the previous assistant response.
           if (state.response.text && input.pending.length === 0) state.finishResponse();
           if (input.pending.length < 400) input.pending.push({ t, start_ms, end_ms, text: delta });
+          if (state.delegationJoin.pending.length < 400) state.delegationJoin.pending.push({ t, start_ms, end_ms, text: delta });
         }
       }
       // Assistant-start boundary used to fire an armed barge-in. The private
@@ -578,6 +587,21 @@ async function prepare(command) {
         // Join by arrival: the runtime's executor input is every user delta
         // received before this event.
         state.closeUtterance(t, 'delegation');
+        // Executor-input rule: every user delta since the previous
+        // delegation.created arrival (or connect) forms this delegation's
+        // expected executor input.
+        {
+          const join = state.delegationJoin;
+          const input = {
+            t_ms: t,
+            deltas: join.pending.length,
+            since_ms: join.pending.length > 0 ? join.pending[0].t : null,
+            text: join.pending.map((d) => d.text).join(''),
+          };
+          join.inputs.push(input);
+          state.pushTimeline('delegation_input', { index: join.inputs.length - 1, deltas: input.deltas, text: input.text.slice(0, 400) });
+          join.pending = [];
+        }
         // offset_ms is the model's decision point on the provider timeline
         // (the user's final word starts at that offset); t_ms is arrival.
         state.pushTimeline('delegation_created', {
@@ -762,6 +786,7 @@ async function energy() {
         first_assistant_audio_ms: state.energy.first_assistant_audio_ms,
       },
       input_finals: state.inputTranscript.finals,
+      delegation_inputs: state.delegationJoin.inputs,
     };
   });
 }

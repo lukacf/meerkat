@@ -3231,8 +3231,9 @@ async fn answer_window(
 ///     after the assistant goes quiet, each resolving "that file" / "the
 ///     second one" through the previous exchange; exactly one client
 ///     delegation per request, executor input equal to the user's final
-///     transcript (protocol-anchored by arrival: the deltas that arrived
-///     before session.delegation.created), files on disk with two headings;
+///     transcript (executor-input rule: every user delta since the previous
+///     delegation.created arrival, or connect, regardless of assistant output
+///     in between), files on disk with two headings;
 /// (c) a barge-in 600 ms into the second commentary readout: overlap beyond
 ///     the bound is a fault and the answer must be re-issued;
 /// (d) a spoken goodbye, a graceful client disconnect, host close converging
@@ -3593,11 +3594,32 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         // request's executor input equal to the user's final transcript.
         // Failures are collected and asserted together after the evidence
         // records are written.
+        // Executor-input rule: the expected executor input of each delegation
+        // is every user delta since the previous delegation.created arrival
+        // (or connect), regardless of assistant output in between (the peer
+        // records it at each delegation.created; barge-in speech between two
+        // delegations therefore belongs to the later one).
         let requests = [&request1, &request2, &request3];
-        let spoken_inputs: Vec<String> = requests
+        let joined_inputs = live.peer.energy().await?.delegation_inputs;
+        let spoken_inputs: Vec<String> = joined_inputs
             .iter()
-            .map(|r| normalize_words(&r.timing.input_text))
+            .take(requests.len())
+            .map(|input| normalize_words(&input.text))
             .collect();
+        println!(
+            "GPT_LIVE_S100_EXPECTED_EXECUTOR_INPUTS {:?}",
+            joined_inputs
+                .iter()
+                .map(|i| (i.t_ms, i.deltas, i.text.chars().take(80).collect::<String>()))
+                .collect::<Vec<_>>()
+        );
+        if joined_inputs.len() < requests.len() {
+            deterministic_failures.push(format!(
+                "expected {} delegation inputs on the peer, recorded {}",
+                requests.len(),
+                joined_inputs.len()
+            ));
+        }
         // Protocol-anchored row expectation (by arrival): one canonical user
         // row per user utterance closed by a delegation.created or a
         // response's first output delta (the browser's input finals), plus

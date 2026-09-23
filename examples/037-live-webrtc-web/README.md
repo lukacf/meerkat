@@ -48,8 +48,9 @@ npm start
 
 Open http://127.0.0.1:4173/.
 
-With the server running and a Chrome installation available, the optional
-headless connectivity harness can capture fresh local evidence:
+With the server running and Playwright's bundled headless Chromium installed
+(`npx playwright install chromium-headless-shell`), the optional headless
+connectivity harness can capture fresh local evidence:
 
 ```bash
 npm run smoke:webrtc
@@ -139,7 +140,9 @@ RKAT_RPC=/absolute/path/to/rkat-rpc node tests/local-host-smoke.cjs
 It verifies asset/state routes, inactive-channel refusal, runtime reuse and
 subprocess teardown without opening a live channel.
 
-The regression suite uses real headless Chrome with synthetic browser primitives,
+The regression suite uses Playwright's bundled headless Chromium (set
+`PLAYWRIGHT_CHROMIUM_CHANNEL=chrome` to run it against an installed Google
+Chrome instead) with synthetic browser primitives,
 fake timers and local HTTP assets, plus fake JSON-RPC executables driven by the
 real SDK. It exercises the actual cockpit, shared smoke negotiation, ICE waits,
 transcript model and runtime initialization. No physical audio/video or OpenAI

@@ -7,7 +7,7 @@ RKAT_RPC ?= $(RKAT_TARGET)/debug/rkat-rpc
 
 .DEFAULT_GOAL := verify
 .NOTPARALLEL:
-.PHONY: verify rust standalone codemob mdm sdk shell web realtime hosts web-runtime wasm-comms
+.PHONY: verify rust standalone codemob mdm sdk shell web realtime hosts web-runtime wasm-comms browsers
 
 # These are deterministic checks, not external-provider or physical-device tests.
 verify: rust standalone sdk shell web realtime
@@ -45,10 +45,18 @@ shell: hosts web-runtime
 	cd "$(ROOT)" && RKAT="$(RKAT)" $(PYTHON) examples/028-mobpack-release-triage-sh/test_packaging.py
 	cd "$(ROOT)" && RKAT="$(RKAT)" node --test --test-force-exit examples/029-web-incident-war-room-sh/test_browser_skills.mjs
 
+# Browser suites run Playwright's bundled headless Chromium; no Google Chrome
+# install is needed. Each package installs the build its own Playwright pins.
+browsers:
+	cd "$(ROOT)" && npm --prefix examples/031-wasm-mini-diplomacy-sh/web exec -- playwright install chromium-headless-shell
+	cd "$(ROOT)" && npm --prefix examples/032-wasm-webcm-agent/web exec -- playwright install chromium-headless-shell
+	cd "$(ROOT)" && npm --prefix examples/033-the-office-demo-sh/web exec -- playwright install chromium
+	cd "$(ROOT)" && npm --prefix examples/037-live-webrtc-web exec -- playwright install chromium-headless-shell
+
 wasm-comms: web-runtime
 	cd "$(ROOT)" && node --test --test-force-exit sdks/web/tests/wasm_mob_comms.test.mjs
 
-web: wasm-comms
+web: browsers wasm-comms
 	cd "$(ROOT)" && npm --prefix examples/031-wasm-mini-diplomacy-sh/web test
 	cd "$(ROOT)" && npm --prefix examples/031-wasm-mini-diplomacy-sh/web run build
 	cd "$(ROOT)" && npm --prefix examples/032-wasm-webcm-agent/web test
@@ -59,7 +67,7 @@ web: wasm-comms
 	cd "$(ROOT)" && npm --prefix examples/033-the-office-demo-sh/web run build
 	cd "$(ROOT)" && npm --prefix examples/033-the-office-demo-sh/web run test:offline
 
-realtime: hosts
+realtime: browsers hosts
 	cd "$(ROOT)" && PYTHONPATH=sdks/python $(PYTHON) -m unittest discover -s examples/036-realtime-audio-py -p 'test_*.py' -v
 	cd "$(ROOT)" && PYTHONPATH=sdks/python $(PYTHON) examples/036-realtime-audio-py/main.py --help
 	cd "$(ROOT)" && npm --prefix examples/037-live-webrtc-web run check

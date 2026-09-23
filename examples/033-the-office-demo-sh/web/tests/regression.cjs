@@ -8,7 +8,9 @@ const assert = require("node:assert/strict");
 const ts = require("typescript");
 const { createProviderFixture } = require("./provider-fixture.cjs");
 const base = path.resolve(__dirname, "..");
-const profile = path.join(base, ".regression-browser");
+// Short, unique profile directory: Chromium binds a Unix socket under it and
+// a checkout path can exceed the platform's socket path limit.
+const profile = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "office-regression-"));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const bodies = {};
 for (const file of ["types", "config", "agents", "events", "topology", "incidents", "scenarios", "llm-bridge", "knowledge", "main"]) {
@@ -186,20 +188,31 @@ async function main() {
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  assert(!fs.existsSync(profile), "Refusing to reuse an existing browser profile");
-  fs.mkdirSync(profile);
-  const chrome = spawn(process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", [
+  // Playwright's bundled Chromium by default (`npx playwright install chromium`);
+  // CHROME_BIN overrides it with any Chrome/Chromium binary. Like Playwright's
+  // default launch, run without the Chromium sandbox unless CHROME_SANDBOX=1:
+  // hosts that disable unprivileged user namespaces otherwise abort at start.
+  const chromeBin = process.env.CHROME_BIN || require("playwright").chromium.executablePath();
+  assert(fs.existsSync(chromeBin), `Chromium binary missing at ${chromeBin}; run 'npx playwright install chromium' or set CHROME_BIN`);
+  const chrome = spawn(chromeBin, [
     "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
     "--disable-component-update", "--disable-sync", "--disable-extensions", "--remote-debugging-port=0",
+    ...(process.env.CHROME_SANDBOX === "1" ? [] : ["--no-sandbox"]),
     "--user-data-dir=" + profile, "--disk-cache-dir=" + path.join(profile, "cache"), "about:blank",
-  ], { env: { ...process.env, TMPDIR: profile }, stdio: "ignore" });
+  ], { env: { ...process.env, TMPDIR: profile }, stdio: ["ignore", "ignore", "pipe"] });
+  let chromeStderr = "";
+  chrome.stderr.on("data", chunk => { chromeStderr = (chromeStderr + chunk).slice(-4000); });
+  // Registered before anything can fail so the teardown never waits for an
+  // exit that already happened (a signal-killed Chrome has exitCode null).
+  const chromeExited = new Promise(resolve => chrome.once("exit", resolve));
+  const chromeAlive = () => chrome.exitCode === null && chrome.signalCode === null;
   let browser;
   const pages = [];
   let blocked = 0;
   try {
     const portFile = path.join(profile, "DevToolsActivePort");
-    for (let i = 0; i < 200 && !fs.existsSync(portFile); i++) await sleep(50);
-    assert(fs.existsSync(portFile), "Chrome must be installed (or set CHROME_BIN)");
+    for (let i = 0; i < 200 && !fs.existsSync(portFile) && chromeAlive(); i++) await sleep(50);
+    assert(fs.existsSync(portFile), `Chromium at ${chromeBin} did not expose DevTools${chromeAlive() ? "" : ` (exited: code ${chrome.exitCode}, signal ${chrome.signalCode})`}: ${chromeStderr.trim()}`);
     const [port, socket] = fs.readFileSync(portFile, "utf8").split("\n");
     browser = await CDP.connect(`ws://127.0.0.1:${port}${socket}`);
     async function page(route = "/fixture", provider = null) {
@@ -689,12 +702,17 @@ async function main() {
   } finally {
     for (const p of pages) p.ws.close();
     browser?.ws.close();
-    if (chrome.exitCode === null) {
-      const exited = new Promise(resolve => chrome.once("exit", resolve));
-      chrome.kill("SIGTERM"); await exited;
-    }
+    if (chromeAlive()) chrome.kill("SIGTERM");
+    await chromeExited;
     await new Promise(resolve => server.close(resolve));
-    fs.rmSync(profile, { recursive: true, force: true });
+    // Chromium helper processes can still be flushing the profile right after
+    // the browser process exits; retry, and never fail the run on cleanup.
+    for (const deadline = Date.now() + 15_000; ; await sleep(200)) {
+      try { fs.rmSync(profile, { recursive: true, force: true }); break; }
+      catch (error) {
+        if (Date.now() > deadline) { console.warn(`leaving browser profile ${profile}: ${error.message}`); break; }
+      }
+    }
   }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

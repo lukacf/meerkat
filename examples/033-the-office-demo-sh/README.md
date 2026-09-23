@@ -101,7 +101,9 @@ npm test
 npm run test:offline
 ```
 
-The tests use Chrome (`CHROME_BIN` may override its path), actual compiled
+The tests run Playwright's bundled headless Chromium (install it once with
+`npx --prefix web playwright install chromium`; `CHROME_BIN` overrides the
+binary, and `CHROME_SANDBOX=1` keeps the Chromium sandbox on), actual compiled
 TypeScript/DOM handlers and real Cytoscape. The separate `test:offline` lane
 requires a healthy built-page WASM bootstrap, stop/admission and resume.
 It also verifies the unchanged admin policy in all ten initial role skills and

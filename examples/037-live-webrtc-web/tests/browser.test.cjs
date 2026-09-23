@@ -17,8 +17,10 @@ before(async () => {
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   url = `http://127.0.0.1:${server.address().port}/`;
+  // Playwright's bundled headless Chromium by default; set
+  // PLAYWRIGHT_CHROMIUM_CHANNEL=chrome to run against an installed Google Chrome.
   browser = await chromium.launch({
-    channel: "chrome", headless: true,
+    channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || undefined, headless: true,
     args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
   });
 });

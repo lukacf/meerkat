@@ -143,6 +143,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/auth_binding_single_parser.rs",
@@ -244,6 +252,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/cli_auth_flow.rs",
@@ -345,6 +361,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/cli_mobpack_live_smoke.rs",
@@ -446,6 +470,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/cli_mobpack_live_smoke.rs",
@@ -556,6 +588,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/cli_mobpack_live_smoke.rs",
@@ -666,6 +706,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/cli_mobpack_live_smoke.rs",
@@ -776,6 +824,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/help_mobpack_contract.rs",
@@ -874,6 +930,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/live_smoke_cli.rs",
@@ -975,6 +1039,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/live_smoke_cli.rs",
@@ -1085,6 +1157,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/mcp_convention_roots.rs",
@@ -1183,6 +1263,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/runtime_backed_ingress.rs",
@@ -1283,6 +1371,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/slim_feature_graph.rs",
@@ -1391,6 +1487,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/sqlite_tools_full_reuse.rs",
@@ -1491,6 +1595,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/storage_doctor.rs",
@@ -1589,6 +1701,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/storage_migrate.rs",
@@ -1687,6 +1807,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/system_cli_export_atif.rs",
@@ -1788,6 +1916,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/system_cli_export_atif.rs",
@@ -1897,6 +2033,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/system_cli_init.rs",
@@ -1998,6 +2142,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/system_cli_init.rs",
@@ -2107,6 +2259,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/system_cli_mcp_pending.rs",
@@ -2208,6 +2368,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/system_cli_mcp_pending.rs",
@@ -2317,6 +2485,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/system_cli_resume.rs",
@@ -2418,6 +2594,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/system_cli_resume.rs",
@@ -2527,6 +2711,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/support/deterministic_mob_provider.rs",
@@ -2630,6 +2822,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/support/deterministic_mob_provider.rs",
@@ -2742,6 +2942,13 @@ rust_test(
         "Cargo.toml",
         "src/main.rs",
     ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
         "//meerkat-mob:tests/support/probe.rs",
         "//meerkat-mob:tests/support/probe_shared.rs",
     ],
@@ -2849,6 +3056,13 @@ rust_test(
         "Cargo.toml",
         "src/main.rs",
     ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
         "//meerkat-mob:tests/support/probe.rs",
         "//meerkat-mob:tests/support/probe_shared.rs",
     ],
@@ -2963,6 +3177,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/support/deterministic_mob_provider.rs",
@@ -3066,6 +3288,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/support/deterministic_mob_provider.rs",
@@ -3177,6 +3407,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/support/deterministic_mob_provider.rs",
@@ -3288,6 +3526,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+    ] + [
+        "//:docs/cli/commands.mdx",
+        "//:docs/docs.json",
+        "//:docs/examples/mobpack.mdx",
+        "//:docs/examples/wasm.mdx",
+        "//:docs/guides/mobpack.mdx",
+        "//:docs/guides/mobs.mdx",
+        "//:docs/reference/mob-architecture.mdx",
     ],
     srcs = [
         "tests/wholeblob_repair_cli.rs",

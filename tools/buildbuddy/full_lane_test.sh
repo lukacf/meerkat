@@ -251,6 +251,27 @@ configure_nested_cargo_workspace() {
   export XDG_CACHE_HOME="${TEST_TMPDIR}/xdg-cache"
   mkdir -p "${XDG_CACHE_HOME}"
   unset TEST_SRCDIR TEST_WORKSPACE RUNFILES_DIR RUNFILES_MANIFEST_FILE
+  # repo-cargo consults rustup whenever it is on PATH: it swaps in the
+  # rustup toolchain named by rust-toolchain.toml (1.94.1 on the executor
+  # image, not the pinned 1.94.0 the lane built with) and exports that
+  # toolchain's RUSTFMT. On 2026-09-23 the xtask drift child's rustfmt exited
+  # at once and the write failed with a broken pipe. Pin the nested cargo to
+  # the sandbox toolchain and hide rustup from the children.
+  export CARGO_BIN="${CARGO}"
+  local dir kept=()
+  local IFS=:
+  for dir in ${PATH}; do
+    if [[ -n "${dir}" && ! -x "${dir}/rustup" ]]; then
+      kept+=("${dir}")
+    fi
+  done
+  unset IFS
+  PATH="$(IFS=:; printf '%s' "${kept[*]}")"
+  export PATH
+  if command -v rustup >/dev/null 2>&1; then
+    echo "rustup is still reachable by nested cargo children: ${PATH}" >&2
+    exit 1
+  fi
 }
 
 configure_wasm_pack() {

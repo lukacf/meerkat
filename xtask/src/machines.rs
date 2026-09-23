@@ -4540,19 +4540,26 @@ fn rustfmt_source(source: &str) -> Result<String> {
         .spawn()
         .context("spawn rustfmt for machine codegen")?;
 
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .context("open rustfmt stdin for machine codegen")?;
-        stdin
-            .write_all(source.as_bytes())
-            .context("write generated machine source to rustfmt")?;
-    }
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("open rustfmt stdin for machine codegen")?;
+    let write_result = stdin.write_all(source.as_bytes());
+    drop(stdin);
 
     let output = child
         .wait_with_output()
         .context("wait for rustfmt during machine codegen")?;
+    if let Err(error) = write_result {
+        // A rustfmt that exits before reading (a rustup proxy without the
+        // component, a binary missing its libraries) surfaces here as a
+        // broken pipe; its own stderr is the only clue, so carry it.
+        bail!(
+            "write generated machine source to rustfmt: {error}; rustfmt exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     if !output.status.success() {
         bail!(
             "rustfmt failed for generated machine code: {}",

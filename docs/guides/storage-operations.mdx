@@ -325,9 +325,20 @@ the same procedure.
 Meerkat and MobKit both render image blob ids as `sha256:<64 lowercase hex
 digits>`, and both feed a media type, a `0x00` separator and the image into
 SHA-256. They hash different representations of the image, so the same PNG
-carries a different id in each system. Never compare a meerkat content blob id
-with a MobKit blob id, and never look one up in the other's store: the ids are
-indistinguishable by shape and the lookup simply misses.
+carries a different id under each recipe. Never compare a meerkat content blob
+id with a MobKit blob id: the ids are indistinguishable by shape.
+
+Which recipe a MobKit-backed store applies depends on the entry point, not on
+the store. Every image that reaches a MobKit store through meerkat's
+`BlobStore` face (`Base64BlobStoreAdapter::put_image`, used by the gateway, the
+unified runtime and the console voice host) and every image uploaded through
+the console (`mobkit/blob/upload`, multipart `image_upload` placeholders) is
+addressed with meerkat's `content_blob_id` and stored under the canonical media
+type, so meerkat's read-back verification accepts it. Only blobs written
+through MobKit's native `BinaryBlobStore::put_bytes` (non-image `mobkit/blob/*`
+objects) carry the raw-bytes form, as do image blobs written by MobKit builds
+that predate this rule. A MobKit store resolves both forms through both faces,
+so references written before the rule keep hydrating.
 
 | | Meerkat `content_blob_id` | MobKit `compute_blob_id` |
 | --- | --- | --- |
@@ -335,7 +346,7 @@ indistinguishable by shape and the lookup simply misses.
 | Media type | canonicalized (`MediaType::canonical_str`: lowercase, parameters dropped) | as passed, byte for byte |
 | Payload hashed | the exact base64 string handed to `BlobStore::put_image` | the decoded raw bytes handed to `BinaryBlobStore::put_bytes` |
 | Recipe | `sha256(canonical_media_type \|\| 0x00 \|\| base64_text)` | `sha256(media_type \|\| 0x00 \|\| raw_bytes)` |
-| Minted by | every meerkat `BlobStore` (the required addressing for external backends), inline image externalization in the runtime input path, transcript-identity digests | `ObjectStoreBlobStore::put_bytes` for `mobkit/blob/*` objects and the HTTP `/blobs/{id}` serving path |
+| Minted by | every meerkat `BlobStore` (the required addressing for external backends), inline image externalization in the runtime input path, transcript-identity digests; in MobKit, `Base64BlobStoreAdapter::put_image` and console image uploads via `put_meerkat_image_bytes` | `ObjectStoreBlobStore::put_bytes` for non-image `mobkit/blob/*` objects and the HTTP `/blobs/{id}` serving path; image blobs written before MobKit adopted meerkat's address |
 | Verified by | `verify_stored_image_blob` and image hydration recompute `content_blob_id` from the returned payload and refuse a mismatch (`BlobIdentityMismatch`) | `is_valid_blob_id` checks only the `sha256:` shape; the object path is the hex under a two-character prefix directory |
 
 Why the same image differs: base64 text of a byte string is not that byte
@@ -348,8 +359,10 @@ base64 text.
 How to recognize which form you hold: the string does not tell you, the
 provenance does. An id that appears in a meerkat session document (an
 externalized image row, an audit edge, a hydration error, a `BlobIdentityMismatch`)
-is a meerkat content blob id. An id that appears in a MobKit blob object path,
-a `/blobs/{id}` URL, or `mobkit/blob/*` metadata is a MobKit blob id. MobKit's
+is a meerkat content blob id, including when the store behind it is MobKit's.
+An id minted for a non-image object by `put_bytes`, or for an image by a MobKit
+build that predates meerkat addressing, is a MobKit blob id; both appear in
+blob object paths, `/blobs/{id}` URLs and `mobkit/blob/*` metadata. MobKit's
 local object store also still reads a legacy layout whose ids were minted over
 the base64 text without media-type canonicalization; those legacy ids equal
 meerkat's only when the media type was already canonical.

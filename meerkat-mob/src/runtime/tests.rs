@@ -2499,6 +2499,31 @@ impl MockSessionService {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Whether the mock has entered `start_turn` for `session_id`: the
+    /// autonomous spawn kickoff turn is running (and, when a
+    /// turn-finalization gate is installed, the runtime lap holds it).
+    async fn has_started_turn_for(&self, session_id: &SessionId) -> bool {
+        self.start_turn_prompts
+            .read()
+            .await
+            .iter()
+            .any(|(id, _)| id == session_id)
+    }
+
+    /// Let a keep-alive (autonomous host) turn on `session_id` return the
+    /// way the provider would: the mock's `start_turn` is parked on this
+    /// notifier until the host loop releases it.
+    async fn release_keep_alive_turn(&self, session_id: &SessionId) {
+        let notifier = self
+            .keep_alive_notifiers
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no keep-alive turn registered for {session_id}"));
+        notifier.notify_waiters();
+    }
+
     fn start_turn_call_count(&self) -> u64 {
         self.start_turn_calls.load(Ordering::Acquire)
     }
@@ -21609,24 +21634,52 @@ async fn delegation_execution_service_runs_on_a_real_durable_fork_and_retires_on
     );
 }
 
+/// Spawn an autonomous `worker` whose spawn kickoff turn is the running
+/// turn a durable fork must wait for. The turn-finalization gate is installed
+/// before the spawn so the source's runtime lap holds a real mutex for the
+/// turn's duration (the mock's boundary is a no-op until a gate exists), and
+/// the caller only proceeds once the mock has entered that turn, which is
+/// the observable "boundary held" state. Returns the source's session id and
+/// the spawn wall clock, this host's own unstarved baseline for the fork
+/// budget.
+async fn spawn_busy_autonomous_source(
+    handle: &MobHandle,
+    service: &MockSessionService,
+    source_identity: &AgentIdentity,
+) -> (SessionId, Duration) {
+    let _gate = service.install_non_reentrant_turn_finalization_gate();
+    let spawn_started = Instant::now();
+    let source = handle
+        .spawn(ProfileName::from("worker"), source_identity.clone(), None)
+        .await
+        .expect("spawn busy delegation source");
+    let spawn_elapsed = spawn_started.elapsed();
+    let source_session_id = source
+        .bridge_session_id()
+        .cloned()
+        .expect("source bridge session");
+    // The kickoff turn is admitted by the source's runtime lap, which runs
+    // after `spawn` returns; wait for the mock to enter it. A slow host only
+    // lengthens this wait, it cannot make the turn start unobserved.
+    let budget = (spawn_elapsed * 3).max(Duration::from_secs(10));
+    let deadline = Instant::now() + budget;
+    while !service.has_started_turn_for(&source_session_id).await {
+        assert!(
+            Instant::now() < deadline,
+            "source kickoff turn did not start within {budget:?} (spawn took {spawn_elapsed:?})"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    (source_session_id, spawn_elapsed)
+}
+
 #[tokio::test]
 async fn durable_fork_delegation_waits_for_a_busy_source_turn_boundary_then_forks() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_return_exact_run_result(true);
     let source_identity = AgentIdentity::from("delegation-busy-source");
-    let source = handle
-        .spawn(ProfileName::from("worker"), source_identity.clone(), None)
-        .await
-        .expect("spawn busy delegation source");
-    assert!(
-        source.bridge_session_id().is_some(),
-        "source bridge session"
-    );
-    // Hold the turn-finalization boundary the way a running turn does: a
-    // real mutex the fork must wait on (an entry gate would be consumed by
-    // whichever acquirer came first, which under load is not the fork).
-    let gate = service.install_non_reentrant_turn_finalization_gate();
-    let held_turn = Arc::clone(&gate).lock_owned().await;
+    let (source_session_id, spawn_elapsed) =
+        spawn_busy_autonomous_source(&handle, &service, &source_identity).await;
     let child_identity = AgentIdentity::from("delegation-busy-child");
     let request = DelegationExecutionRequest::new(
         child_identity.clone(),
@@ -21639,7 +21692,9 @@ async fn durable_fork_delegation_waits_for_a_busy_source_turn_boundary_then_fork
         let delegation_service = delegation_service.clone();
         async move { delegation_service.start(request).await }
     });
-    // While the boundary is held the delegation must not have forked.
+    // While the source's turn runs the delegation must not have forked. This
+    // window must elapse; a slow host can only lengthen the wait, because the
+    // boundary is held by the running turn, not by a timer.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         !start.is_finished(),
@@ -21653,10 +21708,17 @@ async fn durable_fork_delegation_waits_for_a_busy_source_turn_boundary_then_fork
             .is_none(),
         "no fork may exist before the source boundary is released"
     );
-    drop(held_turn);
-    let execution = tokio::time::timeout(Duration::from_secs(10), start)
+    // The source's turn returns; its lap finalizes under the boundary and
+    // releases it, and the waiting fork cuts the branch.
+    service.release_keep_alive_turn(&source_session_id).await;
+    let fork_budget = (spawn_elapsed * 3).max(Duration::from_secs(10));
+    let execution = tokio::time::timeout(fork_budget, start)
         .await
-        .expect("delegation resumes once the boundary is released")
+        .unwrap_or_else(|_| {
+            panic!(
+                "delegation resumes once the boundary is released (budget {fork_budget:?} from spawn baseline {spawn_elapsed:?})"
+            )
+        })
         .expect("join")
         .expect("durable-fork delegation starts after the boundary");
     let terminalized = execution.await_terminal().await;
@@ -21680,18 +21742,10 @@ async fn durable_fork_delegation_reports_source_busy_after_the_bounded_wait() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_return_exact_run_result(true);
     let source_identity = AgentIdentity::from("delegation-stuck-source");
-    let source = handle
-        .spawn(ProfileName::from("worker"), source_identity.clone(), None)
-        .await
-        .expect("spawn stuck delegation source");
-    assert!(
-        source.bridge_session_id().is_some(),
-        "source bridge session"
-    );
-    // A turn that never finalizes within the bound: hold the real boundary
-    // mutex for the whole test.
-    let gate = service.install_non_reentrant_turn_finalization_gate();
-    let _held_turn = Arc::clone(&gate).lock_owned().await;
+    // A turn that never finalizes within the bound: the kickoff turn is never
+    // released, so the source's lap holds the boundary for the whole test.
+    let (_source_session_id, _spawn_elapsed) =
+        spawn_busy_autonomous_source(&handle, &service, &source_identity).await;
     let request = DelegationExecutionRequest::new(
         AgentIdentity::from("delegation-stuck-child"),
         "never starts",

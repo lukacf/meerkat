@@ -810,7 +810,7 @@ struct MockCommsRuntime {
     peer_lifecycle_max_in_flight: AtomicU64,
     inbox_notify: Arc<tokio::sync::Notify>,
     mob_machine_trust_owner: std::sync::RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
-    trust_mutation_gate: std::sync::RwLock<Option<Arc<TestRuntimeControlBarrier>>>,
+    trust_mutation_gate: std::sync::RwLock<Option<TrustMutationGate>>,
     outbound_content_taint: std::sync::RwLock<Option<meerkat_core::comms::SenderContentTaint>>,
 }
 
@@ -977,9 +977,11 @@ impl MockCommsRuntime {
         TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
             .map_err(SendError::Validation)?;
         let gate = self.trust_mutation_gate.read().expect("trust gate").clone();
-        if let Some(gate) = gate {
-            gate.boundary_calls.fetch_add(1, Ordering::Release);
-            gate.wait_for_release().await;
+        if let Some(gate) = gate
+            && gate.parks(source)
+        {
+            gate.barrier.boundary_calls.fetch_add(1, Ordering::Release);
+            gate.barrier.wait_for_release().await;
         }
         let peer_id = peer.peer_id.to_string();
         let mut peers = self.trusted_peers.write().await;
@@ -1666,6 +1668,52 @@ impl Drop for AtomicInFlightGuard<'_> {
 }
 
 /// A mock session service that creates sessions with mock comms runtimes.
+/// Parks trusted-peer installs on one mock runtime behind a barrier.
+///
+/// `sources` narrows the gate to exact generated trust authorities. A gate
+/// without a filter parks every install on the runtime, including the
+/// supervisor publish that a reconstructed member's own meerkat-runtime
+/// performs while it comes up. A test whose precondition is "the mob's resume
+/// topology mutation is parked" must therefore name that source: otherwise the
+/// barrier's first entry can be the supervisor publish, and the test proceeds
+/// before the topology phase owns the wiring graph.
+#[derive(Clone)]
+struct TrustMutationGate {
+    barrier: Arc<TestRuntimeControlBarrier>,
+    sources: Option<Vec<meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind>>,
+}
+
+impl TrustMutationGate {
+    fn parks(&self, source: meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind) -> bool {
+        self.sources
+            .as_ref()
+            .is_none_or(|sources| sources.contains(&source))
+    }
+}
+
+impl MockCommsRuntime {
+    /// Park every trusted-peer install on this runtime behind `barrier`.
+    fn park_trust_mutations(&self, barrier: Arc<TestRuntimeControlBarrier>) {
+        *self.trust_mutation_gate.write().expect("trust gate") = Some(TrustMutationGate {
+            barrier,
+            sources: None,
+        });
+    }
+
+    /// Park only the trusted-peer installs whose generated authority source is
+    /// one of `sources`; every other install proceeds unparked.
+    fn park_trust_mutations_from(
+        &self,
+        barrier: Arc<TestRuntimeControlBarrier>,
+        sources: impl IntoIterator<Item = meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind>,
+    ) {
+        *self.trust_mutation_gate.write().expect("trust gate") = Some(TrustMutationGate {
+            barrier,
+            sources: Some(sources.into_iter().collect()),
+        });
+    }
+}
+
 struct TestRuntimeControlBarrier {
     boundary_calls: AtomicU64,
     hard_calls: AtomicU64,

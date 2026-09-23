@@ -136,7 +136,7 @@ impl Drop for ReleaseTrustGate {
 async fn park_trust_mutations(mob: &WiringMob, index: usize) -> Arc<TestRuntimeControlBarrier> {
     let gate = Arc::new(TestRuntimeControlBarrier::new());
     let comms = mob.comms(index).await;
-    *comms.trust_mutation_gate.write().expect("trust gate") = Some(Arc::clone(&gate));
+    comms.park_trust_mutations(Arc::clone(&gate));
     gate
 }
 

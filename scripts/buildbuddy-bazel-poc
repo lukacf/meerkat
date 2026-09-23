@@ -429,7 +429,10 @@ case "${command}" in
   sdk-suites-rbe)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_test"
+    # One action per SDK suite so the cold rkat-rpc and wasm builds land on
+    # separate executors; the single-action form is
+    # //tools/buildbuddy:sdk_suites_cargo_equivalent_test.
+    default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_tests"
     extra_args+=(
       --test_output=errors
       --test_summary=terse

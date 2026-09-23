@@ -589,7 +589,9 @@ else
   bad "BuildBuddy workflow does not match the simplified GCP lane map"
 fi
 
-if grep -Fq 'default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
+if grep -Fq 'default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_tests"' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'name = "sdk_suites_cargo_equivalent_tests"' tools/buildbuddy/BUILD.bazel &&
+  grep -Fq '"sdk_web_cargo_equivalent_test": "sdk-web"' tools/buildbuddy/BUILD.bazel &&
   grep -Fq 'default_target="//tools/buildbuddy:wasm_contract_cargo_equivalent_tests"' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'default_target="//tools/buildbuddy:wasm_check_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'default_target="//tools/buildbuddy:security_audit_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&

@@ -354,6 +354,46 @@ case "${lane}" in
     wait_parallel_jobs
     make verify-sdk-wrapper-freshness CARGO="${CARGO}" PYTHON="${PYTHON}"
     ;;
+  # The three suites below are the `sdk-suites` lane split one suite per
+  # remote action (see SDK_SUITE_CARGO_EQUIVALENT_TESTS in BUILD.bazel). Each
+  # keeps exactly the steps the combined lane ran for that suite: the Python
+  # and TypeScript suites resolve the rkat-rpc binary, so they build it; the
+  # Web suite builds the wasm bundle and never spawns rkat-rpc; the wrapper
+  # freshness check needs cargo and python and rides with the Python suite.
+  sdk-python)
+    configure_rust "${host_rust_toolchain}"
+    configure_python
+    "${CARGO}" build -p meerkat-rpc
+    (
+      cd sdks/python &&
+      "${PYTHON}" -m pip install --upgrade pip &&
+      "${PYTHON}" -m pip install -e ".[dev]" &&
+      "${PYTHON}" -m pytest -q tests
+    )
+    make verify-sdk-wrapper-freshness CARGO="${CARGO}" PYTHON="${PYTHON}"
+    ;;
+  sdk-typescript)
+    configure_rust "${host_rust_toolchain}"
+    configure_node
+    "${CARGO}" build -p meerkat-rpc
+    (
+      cd sdks/typescript &&
+      npm install --ignore-scripts &&
+      npm run build &&
+      npm test
+    )
+    ;;
+  sdk-web)
+    configure_rust_with_wasm_target
+    configure_node
+    configure_wasm_pack
+    (
+      cd sdks/web &&
+      npm install --ignore-scripts &&
+      npm run build &&
+      npm test
+    )
+    ;;
   wasm-check)
     configure_rust_with_wasm_target
     append_rust_cfg 'getrandom_backend="wasm_js"'

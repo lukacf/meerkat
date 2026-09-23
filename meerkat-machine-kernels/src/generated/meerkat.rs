@@ -13461,6 +13461,7 @@ pub struct State {
     pub live_close_result_sequence: u64,
     pub live_close_observation_sequence_by_channel: std::collections::BTreeMap<String, u64>,
     pub live_close_status_by_channel: std::collections::BTreeMap<String, LiveClosePublicStatus>,
+    pub live_close_settlement_deferred_channels: std::collections::BTreeSet<String>,
     pub live_command_result_sequence: u64,
     pub live_command_acceptance_sequence_by_channel: std::collections::BTreeMap<String, u64>,
     pub live_command_kind_by_channel: std::collections::BTreeMap<String, LiveCommandPublicKind>,
@@ -15508,6 +15509,16 @@ pub mod inputs {
         pub close_observation_sequence: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeferLiveCloseSettlement {
+        pub session_id: String,
+        pub channel_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveCloseSettlement {
+        pub session_id: String,
+        pub channel_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordLiveCommandAccepted {
         pub channel_id: String,
         pub command: LiveCommandPublicKind,
@@ -16339,6 +16350,8 @@ pub enum Input {
     AbandonLiveOpenAdmission(inputs::AbandonLiveOpenAdmission),
     RecordLiveRefreshQueued(inputs::RecordLiveRefreshQueued),
     RecordLiveCloseClosed(inputs::RecordLiveCloseClosed),
+    DeferLiveCloseSettlement(inputs::DeferLiveCloseSettlement),
+    ResolveLiveCloseSettlement(inputs::ResolveLiveCloseSettlement),
     RecordLiveCommandAccepted(inputs::RecordLiveCommandAccepted),
     RecordLiveCommandRejected(inputs::RecordLiveCommandRejected),
     RecordLiveChannelRequestRejected(inputs::RecordLiveChannelRequestRejected),
@@ -16851,6 +16864,8 @@ impl Input {
             Self::AbandonLiveOpenAdmission(_) => InputKind::AbandonLiveOpenAdmission,
             Self::RecordLiveRefreshQueued(_) => InputKind::RecordLiveRefreshQueued,
             Self::RecordLiveCloseClosed(_) => InputKind::RecordLiveCloseClosed,
+            Self::DeferLiveCloseSettlement(_) => InputKind::DeferLiveCloseSettlement,
+            Self::ResolveLiveCloseSettlement(_) => InputKind::ResolveLiveCloseSettlement,
             Self::RecordLiveCommandAccepted(_) => InputKind::RecordLiveCommandAccepted,
             Self::RecordLiveCommandRejected(_) => InputKind::RecordLiveCommandRejected,
             Self::RecordLiveChannelRequestRejected(_) => {
@@ -17274,6 +17289,8 @@ pub enum InputKind {
     AbandonLiveOpenAdmission,
     RecordLiveRefreshQueued,
     RecordLiveCloseClosed,
+    DeferLiveCloseSettlement,
+    ResolveLiveCloseSettlement,
     RecordLiveCommandAccepted,
     RecordLiveCommandRejected,
     RecordLiveChannelRequestRejected,
@@ -18304,6 +18321,16 @@ pub mod effects {
         pub authority_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveCloseSettlementDeferred {
+        pub session_id: String,
+        pub channel_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveCloseSettlementResolved {
+        pub session_id: String,
+        pub channel_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveDelegationRequeued {
         pub channel_id: String,
         pub interaction_id: String,
@@ -19106,6 +19133,8 @@ pub enum Effect {
     LiveAssistantPlaybackSegmentAdvanced(effects::LiveAssistantPlaybackSegmentAdvanced),
     LiveProviderTurnFinished(effects::LiveProviderTurnFinished),
     LiveConsequentialEffectAuthorized(effects::LiveConsequentialEffectAuthorized),
+    LiveCloseSettlementDeferred(effects::LiveCloseSettlementDeferred),
+    LiveCloseSettlementResolved(effects::LiveCloseSettlementResolved),
     LiveDelegationRequeued(effects::LiveDelegationRequeued),
     LiveDelegationQueuedCancelled(effects::LiveDelegationQueuedCancelled),
     LiveDelegationNarrationAuthorized(effects::LiveDelegationNarrationAuthorized),
@@ -19354,6 +19383,8 @@ pub enum EffectKind {
     LiveAssistantPlaybackSegmentAdvanced,
     LiveProviderTurnFinished,
     LiveConsequentialEffectAuthorized,
+    LiveCloseSettlementDeferred,
+    LiveCloseSettlementResolved,
     LiveDelegationRequeued,
     LiveDelegationQueuedCancelled,
     LiveDelegationNarrationAuthorized,
@@ -21482,6 +21513,16 @@ pub enum TransitionId {
     RecordLiveCloseClosedRunning,
     RecordLiveCloseClosedRetired,
     RecordLiveCloseClosedStopped,
+    DeferLiveCloseSettlementIdle,
+    DeferLiveCloseSettlementAttached,
+    DeferLiveCloseSettlementRunning,
+    DeferLiveCloseSettlementRetired,
+    DeferLiveCloseSettlementStopped,
+    ResolveLiveCloseSettlementIdle,
+    ResolveLiveCloseSettlementAttached,
+    ResolveLiveCloseSettlementRunning,
+    ResolveLiveCloseSettlementRetired,
+    ResolveLiveCloseSettlementStopped,
     RecordLiveCommandAcceptedIdle,
     RecordLiveCommandAcceptedAttached,
     RecordLiveCommandAcceptedRunning,
@@ -22670,6 +22711,7 @@ pub fn initial_state() -> State {
         live_close_result_sequence: 0,
         live_close_observation_sequence_by_channel: Default::default(),
         live_close_status_by_channel: Default::default(),
+        live_close_settlement_deferred_channels: Default::default(),
         live_command_result_sequence: 0,
         live_command_acceptance_sequence_by_channel: Default::default(),
         live_command_kind_by_channel: Default::default(),

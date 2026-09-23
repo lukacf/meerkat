@@ -5030,6 +5030,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordLiveCloseClosedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `DeferLiveCloseSettlementIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferLiveCloseSettlementAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferLiveCloseSettlementRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferLiveCloseSettlementRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeferLiveCloseSettlementStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveCloseSettlementIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveCloseSettlementAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveCloseSettlementRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveCloseSettlementRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveLiveCloseSettlementStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecordLiveCommandAcceptedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -7786,6 +7816,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `LiveConsequentialEffectAuthorized`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LiveCloseSettlementDeferred`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `LiveCloseSettlementResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `LiveDelegationRequeued`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8086,6 +8122,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_delegation_items_are_channel_bound_and_capped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `live_close_settlement_deferral_is_for_closed_channels`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `live_delegation_operation_has_exact_join_identity`

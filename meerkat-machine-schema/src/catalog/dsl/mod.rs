@@ -2847,6 +2847,8 @@ runtime_internal_inputs!(
         RecordLiveChannelStatus,
         RecordLiveChannelRequestRejected,
         RecordLiveCloseClosed,
+        DeferLiveCloseSettlement,
+        ResolveLiveCloseSettlement,
         RecordLiveCommandAccepted,
         RecordLiveCommandRejected,
         RecordLiveRefreshQueued,

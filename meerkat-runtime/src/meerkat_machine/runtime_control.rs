@@ -11505,16 +11505,101 @@ impl MeerkatMachine {
         session_id: &SessionId,
         channel_id: &meerkat_live::LiveChannelId,
     ) -> bool {
+        self.live_channel_activity_for_session(session_id, channel_id)
+            .await
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "live")]
+    /// Record that `channel_id`'s close-time assistant playback settlement
+    /// was deferred past a running member turn. Refused while the channel
+    /// is still bound: the debt exists only for a closed channel.
+    pub async fn defer_live_close_settlement(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<(), RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        self.apply_session_dsl_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::DeferLiveCloseSettlement {
+                session_id: session_id.to_string(),
+                channel_id: channel_id.to_string(),
+            },
+            "DeferLiveCloseSettlement",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(session_id, "DeferLiveCloseSettlement")
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "live")]
+    /// The deferred close-time playback settlement for `channel_id` ran.
+    pub async fn resolve_live_close_settlement(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<(), RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        self.apply_session_dsl_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::ResolveLiveCloseSettlement {
+                session_id: session_id.to_string(),
+                channel_id: channel_id.to_string(),
+            },
+            "ResolveLiveCloseSettlement",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(session_id, "ResolveLiveCloseSettlement")
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "live")]
+    /// Closed channels of `session_id` whose playback settlement is still
+    /// deferred.
+    pub async fn live_close_settlement_deferred_channels(
+        &self,
+        session_id: &SessionId,
+    ) -> Vec<meerkat_live::LiveChannelId> {
         self.session_dsl_state(session_id)
             .await
-            .ok()
-            .and_then(|state| {
+            .map(|state| {
                 state
-                    .live_active_channel_by_session
-                    .get(&session_id.to_string())
-                    .cloned()
+                    .live_close_settlement_deferred_channels
+                    .iter()
+                    .map(|channel| meerkat_live::LiveChannelId::new(channel.clone()))
+                    .collect()
             })
-            .is_some_and(|active| active == channel_id.to_string())
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "live")]
+    /// Whether `channel_id` is the session's active live channel, or `None`
+    /// when the session's machine state could not be read. A caller that
+    /// acts on "inactive" (for example by merging a delegation result into
+    /// the source member) must treat `None` as unknown and retry instead.
+    pub async fn live_channel_activity_for_session(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Option<bool> {
+        let state = self.session_dsl_state(session_id).await.ok()?;
+        Some(
+            state
+                .live_active_channel_by_session
+                .get(&session_id.to_string())
+                .is_some_and(|active| *active == channel_id.to_string()),
+        )
     }
 
     #[cfg(feature = "live")]

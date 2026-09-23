@@ -1359,6 +1359,57 @@ async fn terminal_landing_between_transport_retirement_and_machine_close_merges_
     fx.handle.shutdown().await.expect("shutdown");
 }
 
+/// The reverse close order: the machine records the close before the
+/// transport's sweep runs. The delivery task, retrying against a retired
+/// provider binding, sees the machine channel inactive and merges the
+/// result; the sweep that follows must find nothing left to merge.
+#[tokio::test]
+async fn machine_close_before_the_transport_sweep_merges_a_pending_result_once() {
+    let mut fx = fixture(true).await;
+    let operation = fx.delegate("late", "long running late job").await;
+    let running = fx.next_call().await;
+    assert!(running.user_text.contains("long running late job"));
+
+    // The provider binding is gone but no sweep has run: the worker's
+    // terminal lands on the still-active machine channel and its delivery
+    // keeps retrying.
+    fx.control
+        .binding_unavailable
+        .store(true, std::sync::atomic::Ordering::Release);
+    fx.client.release(running.index);
+    wait_until(WAIT, || async {
+        fx.schedule_state(&operation).await
+            == Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Completed)
+    })
+    .await;
+    fx.expect_no_call().await;
+
+    // Machine close first: the delivery task takes the post-close path.
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("machine close");
+    let merge = fx.next_call().await;
+    assert!(
+        merge
+            .user_text
+            .contains("finished after the voice call ended"),
+        "{}",
+        merge.user_text
+    );
+    fx.client.release(merge.index);
+
+    // The transport sweep runs after the task merged: nothing merges twice.
+    fx.coordinator
+        .cancel_channel_binding(&fx.provider_binding)
+        .await;
+    fx.expect_no_call().await;
+    assert!(fx.control.releases.lock().await.is_empty());
+    assert!(fx.coordinator.retained.lock().await.is_empty());
+    fx.assert_nothing_cancelled();
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
 // The source member is mid-turn when the delegation arrives. The bounded
 // fork wait ends in the typed `LiveDelegationStartFailure::SourceBusy`; the
 // coordinator requeues the exact operation, narrates SourceBusy, and starts

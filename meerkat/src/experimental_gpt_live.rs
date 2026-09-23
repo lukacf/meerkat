@@ -10517,6 +10517,120 @@ mod tests {
         retire_sideband_actors(active).await;
     }
 
+    /// Finding C (S104): a close while the member's own turn is running must
+    /// not wait for that turn. The close records its result and defers the
+    /// playback settlement; the deferred task settles once the turn releases
+    /// its boundary, and the machine's deferral resolves exactly then.
+    #[tokio::test]
+    async fn deferred_close_settlement_waits_for_the_member_turn_boundary_then_resolves() {
+        use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
+
+        let persistence = crate::PersistenceBundle::new(
+            Arc::new(crate::MemoryStore::new()),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let factory = crate::AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut builder = crate::FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(Arc::new(meerkat_client::TestClient::default()));
+        let (service, runtime) =
+            crate::surface::build_runtime_backed_service(builder, 4, persistence);
+        let service = Arc::new(service);
+        let session = crate::Session::new();
+        let session_id = session.id().clone();
+        let executor_service = Arc::clone(&service);
+        let executor_runtime = Arc::clone(&runtime);
+        Box::pin(crate::surface::materialize_session(
+            &service,
+            &runtime,
+            session,
+            crate::CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-realtime-2".to_string(),
+                prompt: meerkat_core::ContentInput::Text(String::new()),
+                system_prompt: crate::SystemPromptOverride::Disable,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            },
+            move |materialized_session_id| {
+                crate::surface::default_persistent_executor(
+                    executor_service,
+                    executor_runtime,
+                    materialized_session_id,
+                )
+            },
+        ))
+        .await
+        .expect("materialize deferred-settlement fixture session");
+        let channel_id = meerkat_live::LiveChannelId::new("deferred-close-settlement");
+        runtime
+            .resolve_live_open_admission(
+                &session_id,
+                &channel_id,
+                &meerkat_core::SessionLlmIdentity {
+                    model: "gpt-realtime-2".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+            )
+            .await
+            .expect("channel admitted");
+        runtime
+            .abandon_live_open_admission(&session_id, &channel_id)
+            .await
+            .expect("channel closed");
+
+        // The member's turn holds its finalization boundary across the close.
+        let boundary = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        runtime
+            .defer_live_close_settlement(&session_id, &channel_id)
+            .await
+            .expect("deferral recorded on the closed channel");
+        let settlement = tokio::spawn(
+            crate::session_runtime::live_orchestration::settle_live_close_playback_deferred(
+                Arc::clone(&service),
+                Arc::clone(&runtime),
+                session_id.clone(),
+                channel_id.clone(),
+            ),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !settlement.is_finished(),
+            "settlement waits for the running turn instead of failing"
+        );
+        assert_eq!(
+            runtime
+                .live_close_settlement_deferred_channels(&session_id)
+                .await,
+            vec![channel_id.clone()],
+            "the deferral stays recorded while the turn runs"
+        );
+
+        // The turn ends: the playback row settles and the deferral resolves.
+        drop(boundary);
+        tokio::time::timeout(std::time::Duration::from_secs(5), settlement)
+            .await
+            .expect("settlement finishes once the boundary frees")
+            .expect("settlement task");
+        assert!(
+            runtime
+                .live_close_settlement_deferred_channels(&session_id)
+                .await
+                .is_empty(),
+            "the machine no longer holds the deferral"
+        );
+    }
+
     #[tokio::test]
     async fn provider_observation_tasks_do_not_read_before_outer_commit_gate() {
         let reads = Arc::new(AtomicUsize::new(0));

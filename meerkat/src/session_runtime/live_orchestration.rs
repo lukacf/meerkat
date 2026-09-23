@@ -54,6 +54,18 @@ use crate::session_runtime::errors::LiveOpenPrecheckError;
 /// Lives here, outside the provider-gated experimental module, because the
 /// close verb applies it on every feature set.
 pub const LIVE_CLOSE_CONFIRMATION_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long one deferred close-time playback settlement waits for the
+/// member's turn-finalization boundary before trying again. A member turn is
+/// bounded by its own tool round; ten minutes covers the longest ordinary
+/// turn without holding the settlement task forever.
+pub const LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND: std::time::Duration =
+    std::time::Duration::from_secs(600);
+
+/// Bounded waits for one deferred settlement before it is given up with a
+/// warning; the deferral stays recorded on the closed channel.
+pub const LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS: usize = 6;
+
 #[cfg(feature = "openai-live")]
 use crate::session_runtime::live_summary;
 
@@ -722,6 +734,13 @@ pub fn builtin_tool_visibility_witness() -> meerkat_core::ToolVisibilityWitness 
     }
 }
 
+#[cfg(all(
+    test,
+    feature = "session-store",
+    feature = "live",
+    not(target_arch = "wasm32")
+))]
+pub(crate) use orchestrator::settle_live_close_playback_deferred;
 /// Phase 4 R1: surface-agnostic [`LiveOrchestrator`] that owns the
 /// load-bearing live-channel methods previously stranded on
 /// `meerkat-rpc::SessionRuntime`.
@@ -946,6 +965,58 @@ mod orchestrator {
             &self,
             session_id: &SessionId,
         ) -> Result<(), LiveIngressError>;
+    }
+
+    /// Settle a closed channel's pending assistant playback row once the
+    /// member's turn boundary is free. Runs off the close path: `live/close`
+    /// records its result first and this task follows. Each wait is bounded by
+    /// [`super::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND`]; a session that is gone has
+    /// nothing left to settle and resolves the deferral as well.
+    pub(crate) async fn settle_live_close_playback_deferred<B: SessionAgentBuilder + 'static>(
+        service: Arc<PersistentSessionService<B>>,
+        runtime: Arc<MeerkatMachine>,
+        session_id: SessionId,
+        channel_id: LiveChannelId,
+    ) {
+        for attempt in 1..=super::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS {
+            match service
+                .resolve_live_assistant_playback_on_channel_close_within(
+                    &session_id,
+                    channel_id.clone(),
+                    super::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND,
+                )
+                .await
+            {
+                Err(SessionError::Busy { .. }) => {
+                    tracing::warn!(
+                        %channel_id,
+                        attempt,
+                        "deferred live close settlement still waits for the member turn boundary"
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        %channel_id,
+                        "deferred live close settlement found nothing to settle"
+                    );
+                }
+            }
+            if let Err(error) = runtime
+                .resolve_live_close_settlement(&session_id, &channel_id)
+                .await
+            {
+                tracing::warn!(%error, %channel_id, "deferred live close settlement could not be resolved in the machine");
+            }
+            return;
+        }
+        tracing::warn!(
+            %channel_id,
+            attempts = super::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS,
+            "deferred live close settlement gave up waiting for the member turn boundary; the deferral stays recorded"
+        );
     }
 
     impl<B: SessionAgentBuilder + 'static> LiveOrchestrator<'_, B> {
@@ -3388,21 +3459,19 @@ mod orchestrator {
             Ok(Some(result))
         }
 
-        /// Least time a close waits for the member's running turn to reach its
-        /// finalization boundary, even when the transport drain consumed the
-        /// whole of `LIVE_CLOSE_CONFIRMATION_BOUND`.
-        ///
-        /// Worst case for one `live/close` request: the transport drain on a
-        /// dead remote takes the full confirmation bound (15 s), then this
-        /// floor (2 s), so a close returns within 17 s. A member turn still
-        /// running past that is `CloseSettlementBusy`: the machine channel
-        /// stays active as the retry anchor with the transport already
-        /// retired, and the delegation coordinator merges any result that
-        /// lands meanwhile once the machine records the close.
-        const LIVE_CLOSE_TURN_SETTLEMENT_FLOOR: std::time::Duration =
-            std::time::Duration::from_secs(2);
-
         /// `live/close`: reserve → generated close authority → host commit.
+        ///
+        /// The physical close and the commit-target read are the only steps
+        /// on the caller's future; from the commit target on, settlement, the
+        /// generated commit, and the host realization run on one owned task,
+        /// so a caller that stops observing (an RPC deadline, a dropped
+        /// response) cannot leave the transport retired with the machine
+        /// channel still active. Close-time assistant playback settlement
+        /// never waits out a running member turn: when the turn boundary is
+        /// held, the close records its result at once and the playback row
+        /// settles on a deferred task once the boundary frees
+        /// (`DeferLiveCloseSettlement`, `LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND`),
+        /// so a close with a running executor returns like an idle close.
         pub async fn close_live_channel(
             &self,
             host: &LiveAdapterHost,
@@ -3410,7 +3479,6 @@ mod orchestrator {
             expected_session: Option<&SessionId>,
         ) -> Result<LiveCloseResult, LiveChannelVerbError> {
             let request = LiveChannelRequestPublicKind::Close;
-            let close_started = std::time::Instant::now();
             let Some(session_id) = self
                 .runtime_adapter
                 .live_session_for_active_channel(channel_id)
@@ -3437,46 +3505,45 @@ mod orchestrator {
                         "physical adapter close failed before generated terminal authority: {error}"
                     ),
                 })?;
-            // The provider transport must have drained final output through
-            // canonical projection before close-specific Unmeasured settlement
-            // is allowed to discard any still-unmeasured playback target. A
-            // member turn still running at this point (an existing-member
-            // delegation executing the spoken request, or a fork holding the
-            // boundary) is waited for within what remains of the close bound,
-            // so one close request converges instead of failing busy.
-            let settlement_bound = super::LIVE_CLOSE_CONFIRMATION_BOUND
-                .saturating_sub(close_started.elapsed())
-                .max(Self::LIVE_CLOSE_TURN_SETTLEMENT_FLOOR);
-            self.service
-                .resolve_live_assistant_playback_on_channel_close_within(
-                    &session_id,
-                    channel_id.clone(),
-                    settlement_bound,
-                )
-                .await
-                .map_err(|error| match error {
-                    SessionError::Busy { .. } => LiveChannelVerbError::CloseSettlementBusy {
-                        channel_id: channel_id.to_string(),
-                        session_id: session_id.to_string(),
-                    },
-                    error => LiveChannelVerbError::HostCommit {
-                        message: format!(
-                            "failed to resolve pending assistant playback before close: {error}"
-                        ),
-                    },
-                })?;
             let target = host
                 .channel_close_commit_target(&observation)
                 .await
                 .map_err(|error| LiveChannelVerbError::HostCommit {
                     message: error.to_string(),
                 })?;
+            let service = Arc::clone(self.service);
             let runtime = Arc::clone(self.runtime_adapter);
             let channel = channel_id.clone();
-            // The generated commit and its host realization share one owned
-            // task. Cancelling an RPC observer cannot drop the accepted handoff.
+            // Settlement, the generated commit, and its host realization share
+            // one owned task. Cancelling an RPC observer cannot drop the
+            // accepted handoff.
             let commit = tokio::spawn(async move {
                 let result = async {
+                    // The provider transport has drained final output through
+                    // canonical projection, so close-specific Unmeasured
+                    // settlement may discard any still-unmeasured playback
+                    // target. A member turn still running here (an
+                    // existing-member delegation executing the spoken request,
+                    // or a fork holding the boundary) is never waited for: the
+                    // settlement is deferred to the turn boundary and the
+                    // close proceeds.
+                    let settlement_deferred = match service
+                        .resolve_live_assistant_playback_on_channel_close(
+                            &session_id,
+                            channel.clone(),
+                        )
+                        .await
+                    {
+                        Ok(_) => false,
+                        Err(SessionError::Busy { .. }) => true,
+                        Err(error) => {
+                            return Err(LiveChannelVerbError::HostCommit {
+                                message: format!(
+                                    "failed to resolve pending assistant playback before close: {error}"
+                                ),
+                            });
+                        }
+                    };
                     let authority = runtime
                         .resolve_live_close_result(&session_id, &observation)
                         .await
@@ -3494,6 +3561,28 @@ mod orchestrator {
                             message: error.to_string(),
                         })?;
                     runtime.retire_live_assistant_output_handles(&session_id, &channel);
+                    if settlement_deferred {
+                        match runtime
+                            .defer_live_close_settlement(&session_id, &channel)
+                            .await
+                        {
+                            Ok(()) => {
+                                tokio::spawn(settle_live_close_playback_deferred(
+                                    Arc::clone(&service),
+                                    Arc::clone(&runtime),
+                                    session_id.clone(),
+                                    channel.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    %channel,
+                                    "deferred live close settlement could not be recorded; the playback row settles at the next close"
+                                );
+                            }
+                        }
+                    }
                     Ok(live_close_result_from_machine_authority(&authority))
                 }
                 .await;

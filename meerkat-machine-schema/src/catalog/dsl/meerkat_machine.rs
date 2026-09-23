@@ -3914,6 +3914,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_close_result_sequence: u64,
             live_close_observation_sequence_by_channel: Map<String, u64>,
             live_close_status_by_channel: Map<String, Enum<LiveClosePublicStatus>>,
+            // Closed channels whose close-time assistant playback settlement
+            // was deferred past a running member turn; cleared when the
+            // owner settles the playback row at the turn boundary.
+            live_close_settlement_deferred_channels: Set<String>,
             live_command_result_sequence: u64,
             live_command_acceptance_sequence_by_channel: Map<String, u64>,
             live_command_kind_by_channel: Map<String, Enum<LiveCommandPublicKind>>,
@@ -4486,6 +4490,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_close_result_sequence = 0,
             live_close_observation_sequence_by_channel = EmptyMap,
             live_close_status_by_channel = EmptyMap,
+            live_close_settlement_deferred_channels = EmptySet,
             live_command_result_sequence = 0,
             live_command_acceptance_sequence_by_channel = EmptyMap,
             live_command_kind_by_channel = EmptyMap,
@@ -6026,6 +6031,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             AbandonLiveOpenAdmission { session_id: String, channel_id: String },
             RecordLiveRefreshQueued { channel_id: String, queue_acceptance_sequence: u64 },
             RecordLiveCloseClosed { session_id: String, channel_id: String, close_observation_sequence: u64 },
+            DeferLiveCloseSettlement { session_id: String, channel_id: String },
+            ResolveLiveCloseSettlement { session_id: String, channel_id: String },
             RecordLiveCommandAccepted {
                 channel_id: String,
                 command: Enum<LiveCommandPublicKind>,
@@ -7148,6 +7155,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: OperationId,
                 authority_id: String,
             },
+            LiveCloseSettlementDeferred { session_id: String, channel_id: String },
+            LiveCloseSettlementResolved { session_id: String, channel_id: String },
             LiveDelegationRequeued {
                 channel_id: String,
                 interaction_id: String,
@@ -7871,6 +7880,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition LiveInteractionCompleted => local seam OwnerRealizationOnly,
         disposition LiveConsequentialEffectAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationRequeued => local seam OwnerRealizationOnly,
+        disposition LiveCloseSettlementDeferred => local seam OwnerRealizationOnly,
+        disposition LiveCloseSettlementResolved => local seam OwnerRealizationOnly,
         disposition LiveDelegationQueuedCancelled => local seam OwnerRealizationOnly,
         disposition LiveDelegationNarrationAuthorized => external seam OwnerRealizationOnly,
         disposition LiveDelegationResultReleaseAuthorized => external seam OwnerRealizationOnly,
@@ -8765,6 +8776,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
                     == Some(LiveDelegationScheduleState::Failed)
                 || !self.live_delegation_worker_identity_by_operation.contains_key(operation_id))
+        }
+
+        invariant live_close_settlement_deferral_is_for_closed_channels {
+            for_all(channel_id in self.live_close_settlement_deferred_channels,
+                !self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                && !self.live_channel_session_by_channel.contains_key(channel_id))
         }
 
         invariant live_delegation_operation_has_exact_join_identity {
@@ -28688,6 +28705,50 @@ macro_rules! meerkat_catalog_machine_dsl {
         // acceptance, but it cannot construct `sent`, `committed`,
         // `interrupted`, or `truncated` public truth without this generated
         // effect.
+        // A close never waits out a running member turn. When close-time
+        // assistant playback settlement finds the session's turn boundary
+        // held, the close records its result and the owner settles the
+        // playback row once the boundary is free; this records that debt on
+        // the closed channel so it is visible and settled exactly once.
+        transition DeferLiveCloseSettlement {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DeferLiveCloseSettlement { session_id, channel_id }
+            guard "session_id_present" { session_id != "" }
+            guard "channel_id_present" { channel_id != "" }
+            guard "channel_is_closed" {
+                !self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                && !self.live_channel_session_by_channel.contains_key(channel_id)
+            }
+            guard "not_already_deferred" {
+                !self.live_close_settlement_deferred_channels.contains(channel_id)
+            }
+            update {
+                self.live_close_settlement_deferred_channels.insert(channel_id);
+            }
+            to Idle
+            emit LiveCloseSettlementDeferred {
+                session_id: session_id,
+                channel_id: channel_id
+            }
+        }
+
+        transition ResolveLiveCloseSettlement {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ResolveLiveCloseSettlement { session_id, channel_id }
+            guard "session_id_present" { session_id != "" }
+            guard "settlement_is_deferred" {
+                self.live_close_settlement_deferred_channels.contains(channel_id)
+            }
+            update {
+                self.live_close_settlement_deferred_channels.remove(channel_id);
+            }
+            to Idle
+            emit LiveCloseSettlementResolved {
+                session_id: session_id,
+                channel_id: channel_id
+            }
+        }
+
         transition RecordLiveCommandAccepted {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RecordLiveCommandAccepted {

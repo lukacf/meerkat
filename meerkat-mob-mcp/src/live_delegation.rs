@@ -3967,13 +3967,19 @@ impl ExperimentalLiveDelegationCoordinator {
     /// The channel closed under a retained result. Stop further provider
     /// delivery attempts and, for an owned fork whose result never crossed
     /// the provider boundary, merge it into the source member exactly once.
+    /// The result text is taken under the lock, so whichever of the close
+    /// sweep and the delivery task reaches this first merges and the other
+    /// finds nothing, whatever order the machine close and the transport
+    /// retirement arrive in.
     async fn merge_result_after_channel_close(&self, retained: &Arc<RetainedDelegation>) {
         let undelivered = {
             let mut result = retained.result.lock().await;
             result.terminal_ineligible = true;
-            (!result.dispatch_crossed)
-                .then(|| result.result_text.clone())
-                .flatten()
+            if result.dispatch_crossed {
+                None
+            } else {
+                result.result_text.take()
+            }
         };
         if retained.admission.worker_ownership() == LiveDelegationWorkerOwnership::OwnedMember
             && let Some(text) = undelivered
@@ -4514,13 +4520,16 @@ impl ExperimentalLiveDelegationCoordinator {
                         // result takes the post-close path (merged into the
                         // source member) instead of retrying forever against
                         // a channel that will never come back.
-                        if !coordinator
+                        // An unreadable machine state is unknown, not
+                        // inactive: the attempt is retried, never merged.
+                        if coordinator
                             .runtime
-                            .live_channel_is_active_for_session(
+                            .live_channel_activity_for_session(
                                 task_retained.runtime_binding.session_id(),
                                 task_retained.runtime_binding.channel_id(),
                             )
                             .await
+                            == Some(false)
                         {
                             coordinator
                                 .merge_result_after_channel_close(&task_retained)

@@ -324,6 +324,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_close_result_sequence`: `u64`
 - `live_close_observation_sequence_by_channel`: `Map<String, u64>`
 - `live_close_status_by_channel`: `Map<String, LiveClosePublicStatus>`
+- `live_close_settlement_deferred_channels`: `Set<String>`
 - `live_command_result_sequence`: `u64`
 - `live_command_acceptance_sequence_by_channel`: `Map<String, u64>`
 - `live_command_kind_by_channel`: `Map<String, LiveCommandPublicKind>`
@@ -741,6 +742,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AbandonLiveOpenAdmission`(session_id: String, channel_id: String)
 - `RecordLiveRefreshQueued`(channel_id: String, queue_acceptance_sequence: u64)
 - `RecordLiveCloseClosed`(session_id: String, channel_id: String, close_observation_sequence: u64)
+- `DeferLiveCloseSettlement`(session_id: String, channel_id: String)
+- `ResolveLiveCloseSettlement`(session_id: String, channel_id: String)
 - `RecordLiveCommandAccepted`(channel_id: String, command: LiveCommandPublicKind, command_acceptance_sequence: u64)
 - `RecordLiveCommandRejected`(channel_id: String, command: LiveCommandPublicKind, rejection: LiveCommandRejectionReason)
 - `RecordLiveChannelRequestRejected`(channel_id: String, request: LiveChannelRequestPublicKind, rejection: LiveChannelRequestRejectionReason)
@@ -1000,6 +1003,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveAssistantPlaybackSegmentAdvanced`(channel_id: String, interaction_id: String, assistant_turn_ref: String, segment: u64)
 - `LiveProviderTurnFinished`(channel_id: String, interaction_id: String, provider_turn_ref: String)
 - `LiveConsequentialEffectAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, authority_id: String)
+- `LiveCloseSettlementDeferred`(session_id: String, channel_id: String)
+- `LiveCloseSettlementResolved`(session_id: String, channel_id: String)
 - `LiveDelegationRequeued`(channel_id: String, interaction_id: String, operation_id: OperationId)
 - `LiveDelegationQueuedCancelled`(channel_id: String, interaction_id: String, operation_id: OperationId)
 - `LiveDelegationNarrationAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, kind: LiveDelegationNarrationKind)
@@ -1344,6 +1349,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_provider_turn_occupancy_has_exact_interaction`
 - `live_assistant_turn_has_frozen_typed_attribution`
 - `live_delegation_items_are_channel_bound_and_capped`
+- `live_close_settlement_deferral_is_for_closed_channels`
 - `live_delegation_operation_has_exact_join_identity`
 - `live_delegation_worker_binding_is_exact`
 - `live_delegation_existing_member_has_worker_binding`
@@ -17886,6 +17892,106 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_binding_matches_if_present`
   - `close_observation_sequence_advances`
 - Emits: `LiveCloseResultResolved`
+- To: `Stopped`
+
+### `DeferLiveCloseSettlementIdle`
+- From: `Idle`
+- On: `DeferLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `channel_is_closed`
+  - `not_already_deferred`
+- Emits: `LiveCloseSettlementDeferred`
+- To: `Idle`
+
+### `DeferLiveCloseSettlementAttached`
+- From: `Attached`
+- On: `DeferLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `channel_is_closed`
+  - `not_already_deferred`
+- Emits: `LiveCloseSettlementDeferred`
+- To: `Attached`
+
+### `DeferLiveCloseSettlementRunning`
+- From: `Running`
+- On: `DeferLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `channel_is_closed`
+  - `not_already_deferred`
+- Emits: `LiveCloseSettlementDeferred`
+- To: `Running`
+
+### `DeferLiveCloseSettlementRetired`
+- From: `Retired`
+- On: `DeferLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `channel_is_closed`
+  - `not_already_deferred`
+- Emits: `LiveCloseSettlementDeferred`
+- To: `Retired`
+
+### `DeferLiveCloseSettlementStopped`
+- From: `Stopped`
+- On: `DeferLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `channel_is_closed`
+  - `not_already_deferred`
+- Emits: `LiveCloseSettlementDeferred`
+- To: `Stopped`
+
+### `ResolveLiveCloseSettlementIdle`
+- From: `Idle`
+- On: `ResolveLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `settlement_is_deferred`
+- Emits: `LiveCloseSettlementResolved`
+- To: `Idle`
+
+### `ResolveLiveCloseSettlementAttached`
+- From: `Attached`
+- On: `ResolveLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `settlement_is_deferred`
+- Emits: `LiveCloseSettlementResolved`
+- To: `Attached`
+
+### `ResolveLiveCloseSettlementRunning`
+- From: `Running`
+- On: `ResolveLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `settlement_is_deferred`
+- Emits: `LiveCloseSettlementResolved`
+- To: `Running`
+
+### `ResolveLiveCloseSettlementRetired`
+- From: `Retired`
+- On: `ResolveLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `settlement_is_deferred`
+- Emits: `LiveCloseSettlementResolved`
+- To: `Retired`
+
+### `ResolveLiveCloseSettlementStopped`
+- From: `Stopped`
+- On: `ResolveLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `settlement_is_deferred`
+- Emits: `LiveCloseSettlementResolved`
 - To: `Stopped`
 
 ### `RecordLiveCommandAcceptedIdle`

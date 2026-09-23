@@ -979,6 +979,8 @@ meerkat_machine_runtime_internal_inputs!(
         RecordLiveChannelRequestRejected,
         RecordLiveChannelStatus,
         RecordLiveCloseClosed,
+        DeferLiveCloseSettlement,
+        ResolveLiveCloseSettlement,
         RecordLiveCommandAccepted,
         RecordLiveCommandRejected,
         RecordLiveRefreshQueued,

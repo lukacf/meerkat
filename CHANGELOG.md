@@ -250,6 +250,37 @@ them.
   `MobMcpState::workgraph_service` exposes the host WorkGraph service as the
   host scoped it.
 
+
+- Live context mirror: an assistant row committed from the live channel
+  itself (realtime materialization, no context observation) now carries a
+  channel `realtime_origin`, so the mirror classifies it as
+  `LiveRealtimeTranscript`: already present in the channel, never echoed
+  back, and, with no observation claim, not reasserted after a bootstrap
+  summary. Before, such rows were re-mirrored as `ParentSessionServiceTurn`.
+  This is the intended disposition: the speech already exists in the
+  channel, and the concurrent bootstrap summary carries earlier speech
+  forward.
+- The MobKit documentation mirror on docs.rkat.ai tracks MobKit main instead
+  of releases. `Publish MobKit docs` now runs on the `mobkit-docs-updated`
+  dispatch that MobKit sends for every push to main touching `docs/`, on a
+  nightly catch-up, and on manual dispatch; it refuses commits that are not
+  on MobKit main and drops the release identity, latestness, and registry
+  checks. The regenerated snapshot lands through a pull request whose CI run
+  the workflow approves at once, or directly to main when an admin-held
+  `MOBKIT_DOCS_PR_TOKEN` secret exists. Mirrored pages carry the exact
+  MobKit commit and date instead of a release version, the manifest records
+  `source_branch`, and the nightly lag check compares the mirrored commit
+  with MobKit main by docs-touching commits rather than by release count.
+- Windows release binaries are cross-compiled from Linux with cargo-xwin
+  (clang-cl, lld-link, the Windows SDK) and then verified on a Windows runner.
+  The native windows-latest build ran 190 to 275 minutes on every release from
+  v0.8.11 to v0.8.39 and lost its runner at 162 minutes on v0.8.40, because
+  Windows has no memory overcommit and the generated machine crates peak above
+  13 GB; the same build takes about 20 minutes at four jobs on Linux. The
+  Windows-only pagefile, disk-reclaim, `CARGO_BUILD_JOBS=2`, and opt-level
+  mitigations are gone, so Windows binaries get full release codegen again.
+  Archive names and layout are unchanged.
+
 ### Fixed
 
 - Compaction no longer mints an audit graph edge over inline media. When a
@@ -340,14 +371,10 @@ them.
   request as well as from an accepted `session.close`), settles gracefully
   the moment the provider confirms, and otherwise retires the transport
   locally and reports `Closed` instead of failing every retry with
-  `remote_close_unavailable` while the session stayed bound. A close issued
-  while the member's own turn is still running (an existing-member delegation
-  executing the spoken request, or a fork holding the turn boundary) now
-  waits for that turn's boundary within what remains of the close bound
-  (`PersistentSessionService::
-  resolve_live_assistant_playback_on_channel_close_within`, floor 2 s)
-  instead of failing the first request with `CloseSettlementBusy`; a turn
-  still running past the bound is busy as before.
+  `remote_close_unavailable` while the session stayed bound.
+  `PersistentSessionService::resolve_live_assistant_playback_on_channel_close_within`
+  waits, bounded, for the session's turn boundary and backs the deferred
+  close settlement described below.
 - A refused live lifecycle fact (for example a cancellation outcome that
   arrives after the worker's own terminal was recorded) no longer ends the
   provider stream for the whole channel: the fact fails closed on its own,
@@ -381,6 +408,23 @@ them.
   "finished" sentence and the result it introduces are released under one
   hold of the channel's delegation append lane, so another worker's
   narration or result cannot land between them.
+- Closing a live channel while the member's own turn is still running (an
+  existing-member delegation executing the spoken request) returns like an
+  idle close instead of waiting for that turn or failing busy. Close-time
+  assistant playback settlement that finds the turn boundary held is
+  deferred: the close records its result, the generated machine records the
+  debt on the closed channel (`DeferLiveCloseSettlement`,
+  `live_close_settlement_deferred_channels`), and an owned task settles the
+  playback row once the boundary frees (`LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND`
+  per wait, `LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS` waits) and resolves the
+  debt (`ResolveLiveCloseSettlement`). From the commit-target read on, the
+  settlement, generated commit, and host realization run on one owned task,
+  so a caller that stops observing a slow close (an RPC deadline) can no
+  longer leave the transport retired with the machine channel still active
+  through the settlement wait, which
+  made the session unprojectable ("session not found"), refused typed turns
+  ("no captured live actor authority"), and blocked a reopen. Live S104 hit
+  this when the executor turn outlived the harness's close bound.
 - A delegation result released to a live channel but not yet delivered when
   the channel closes no longer violates the generated machine's exact-once
   delivery invariant (a debug panic on the delivery task, the result then
@@ -389,7 +433,11 @@ them.
   a delivery as `InterruptedByClose`, and the delegation coordinator merges a
   result whose delivery finds the machine channel closed into the source
   member exactly once, the same post-close path a worker that finishes after
-  the close takes.
+  the close takes; the result text is taken under the retained result's lock
+  so the close sweep and the delivery task cannot both merge it, whichever
+  order the machine close and the transport retirement arrive in
+  (`MeerkatMachine::live_channel_activity_for_session` reports an unreadable
+  machine state as unknown, which is retried, never merged).
 - A live lifecycle fact that fails is now typed
   (`ExperimentalLiveLifecycleObservationError`): a refusal while the channel
   is still bound fails that fact alone and the provider stream continues;
@@ -602,6 +650,18 @@ them.
   `NarrateDelegationContext` (`LiveSidebandProviderCommand::*` discriminants
   move); `LiveSidebandNarrationAuthority` and
   `LiveSidebandCommand::narrate_delegation` are added.
+- `MeerkatMachine` gains `defer_live_close_settlement`,
+  `resolve_live_close_settlement`, and
+  `live_close_settlement_deferred_channels`; the generated machine gains the
+  state `live_close_settlement_deferred_channels`, the inputs
+  `DeferLiveCloseSettlement` and `ResolveLiveCloseSettlement`
+  (`MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`, and kernel
+  `InputKind::*` discriminants move), the effects `LiveCloseSettlementDeferred`
+  and `LiveCloseSettlementResolved` (`MeerkatMachineEffect::*`,
+  `MeerkatMachineEffectVariant::*`, and kernel `EffectKind::*` discriminants
+  move), the transitions of the same names (`TransitionId::*` discriminants
+  move), and the invariant
+  `live_close_settlement_deferral_is_for_closed_channels`.
 - `ExperimentalLiveBoundChannelActivator::observe_provider_lifecycle` returns
   `Result<(), ExperimentalLiveLifecycleObservationError>` (implementors must
   classify a failure as `Refused` or `CustodyLost`); `LIVE_CLOSE_CONFIRMATION_BOUND`
@@ -625,38 +685,6 @@ them.
   the voice model that several delegated requests run at once and that the
   executor reports each one's state (consumers matching the old text must
   update).
-
-### Changed
-
-- Live context mirror: an assistant row committed from the live channel
-  itself (realtime materialization, no context observation) now carries a
-  channel `realtime_origin`, so the mirror classifies it as
-  `LiveRealtimeTranscript`: already present in the channel, never echoed
-  back, and, with no observation claim, not reasserted after a bootstrap
-  summary. Before, such rows were re-mirrored as `ParentSessionServiceTurn`.
-  This is the intended disposition: the speech already exists in the
-  channel, and the concurrent bootstrap summary carries earlier speech
-  forward.
-- The MobKit documentation mirror on docs.rkat.ai tracks MobKit main instead
-  of releases. `Publish MobKit docs` now runs on the `mobkit-docs-updated`
-  dispatch that MobKit sends for every push to main touching `docs/`, on a
-  nightly catch-up, and on manual dispatch; it refuses commits that are not
-  on MobKit main and drops the release identity, latestness, and registry
-  checks. The regenerated snapshot lands through a pull request whose CI run
-  the workflow approves at once, or directly to main when an admin-held
-  `MOBKIT_DOCS_PR_TOKEN` secret exists. Mirrored pages carry the exact
-  MobKit commit and date instead of a release version, the manifest records
-  `source_branch`, and the nightly lag check compares the mirrored commit
-  with MobKit main by docs-touching commits rather than by release count.
-- Windows release binaries are cross-compiled from Linux with cargo-xwin
-  (clang-cl, lld-link, the Windows SDK) and then verified on a Windows runner.
-  The native windows-latest build ran 190 to 275 minutes on every release from
-  v0.8.11 to v0.8.39 and lost its runner at 162 minutes on v0.8.40, because
-  Windows has no memory overcommit and the generated machine crates peak above
-  13 GB; the same build takes about 20 minutes at four jobs on Linux. The
-  Windows-only pagefile, disk-reclaim, `CARGO_BUILD_JOBS=2`, and opt-level
-  mitigations are gone, so Windows binaries get full release codegen again.
-  Archive names and layout are unchanged.
 
 ## [0.8.40] - 2026-09-17
 

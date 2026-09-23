@@ -2170,6 +2170,77 @@ fn newer_user_turn_does_not_suppress_a_running_workers_result() {
     );
 }
 
+/// Close-time playback settlement deferred past a running member turn is
+/// recorded only on a closed channel and resolved exactly once.
+#[test]
+fn close_settlement_deferral_is_recorded_on_closed_channels_and_resolved_once() {
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    let defer = |authority: &mut mm::MeerkatMachineAuthority| {
+        apply(
+            authority,
+            mm::MeerkatMachineInput::DeferLiveCloseSettlement {
+                session_id: SESSION.to_string(),
+                channel_id: CHANNEL.to_string(),
+            },
+        )
+    };
+    let resolve = |authority: &mut mm::MeerkatMachineAuthority| {
+        apply(
+            authority,
+            mm::MeerkatMachineInput::ResolveLiveCloseSettlement {
+                session_id: SESSION.to_string(),
+                channel_id: CHANNEL.to_string(),
+            },
+        )
+    };
+    assert!(
+        defer(&mut authority).is_err(),
+        "a bound channel has no deferred settlement: the close settles inline"
+    );
+    assert!(resolve(&mut authority).is_err(), "nothing is deferred yet");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AbandonLiveOpenAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+        },
+    )
+    .expect("channel closes");
+    let deferred = defer(&mut authority).expect("closed channel records the deferral");
+    assert!(deferred.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveCloseSettlementDeferred { channel_id, .. }
+            if channel_id == CHANNEL
+    )));
+    assert!(
+        authority
+            .state()
+            .live_close_settlement_deferred_channels
+            .contains(CHANNEL)
+    );
+    assert!(
+        defer(&mut authority).is_err(),
+        "one deferral per closed channel"
+    );
+    let resolved = resolve(&mut authority).expect("the deferred settlement resolves");
+    assert!(resolved.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveCloseSettlementResolved { channel_id, .. }
+            if channel_id == CHANNEL
+    )));
+    assert!(
+        !authority
+            .state()
+            .live_close_settlement_deferred_channels
+            .contains(CHANNEL)
+    );
+    assert!(
+        resolve(&mut authority).is_err(),
+        "a settlement resolves once"
+    );
+}
+
 /// A result released to the channel and authorized for delivery, but not
 /// yet resolved when the channel closes, is interrupted by the close: the
 /// machine records `InterruptedByClose` as its exact terminal observation

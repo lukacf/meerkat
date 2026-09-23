@@ -643,7 +643,16 @@ them.
   unchanged for existing variants; exhaustive matches must add the arm). New
   public items: `WorkOwnerKey::mob_agent`, `WorkOwnerKey::as_mob_agent`,
   `MobAgentOwner` (with `MobAgentOwner::realm_id`), and
-  `mob_agent_owner_id_parts`, re-exported from `meerkat`.
+  `mob_agent_owner_id_parts`, re-exported from `meerkat`. Host impact: a
+  goal or reassignment whose target is a mob member must be created through
+  `meerkat_mob::mob_scoped_workgraph_service(&host_service, &mob_id)` (realm
+  `mob.<mob_id>`); the same request on a host-realm service, including the
+  RPC, REST, MCP and MobKit console paths that use the host's service, is
+  refused with `AttentionTargetRealmMismatch` instead of being stored.
+  Member-bound bindings already stored in a host realm by earlier releases
+  are not visible to members after this release: list them with
+  `list_attention` on the host realm, create the goal again in the mob
+  realm, and pause the host-realm binding.
 - `MobError::MemberRestoreFailed` gains the field
   `hold: Option<DurableResumeHold>` (`MobError` struct literals and exhaustive
   struct patterns on `MemberRestoreFailed` must name it or use `..`): meerkat's

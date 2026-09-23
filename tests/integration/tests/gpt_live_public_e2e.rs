@@ -2809,6 +2809,23 @@ const S100_MEDIAN_LATENCY_BOUND_MS: i64 = 3000;
 /// Prefix the mob runtime renders in front of a delegated voice request
 /// (`meerkat_mob::runtime::delegation::render_live_delegation_execution_context`).
 const S100_DELEGATION_CONTEXT_PREFIX: &str = "Live delegation execution context: execute this already committed voice request (not a new user utterance).";
+/// Start of the labelled assistant-context section the runtime appends to a
+/// delegated task (`LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING`): the request
+/// is everything before it, the assistant transcript of the window only
+/// after it.
+const ASSISTANT_CONTEXT_HEADING_START: &str = "assistant already generated on the call meanwhile";
+
+/// Split a normalized executor task into its request part and, when the
+/// runtime appended one, the labelled assistant-context part.
+fn split_executor_task(task: &str) -> (String, Option<String>) {
+    match task.find(ASSISTANT_CONTEXT_HEADING_START) {
+        Some(index) => (
+            task[..index].trim().to_owned(),
+            Some(task[index..].trim().to_owned()),
+        ),
+        None => (task.trim().to_owned(), None),
+    }
+}
 
 /// Timing of one spoken turn read off the browser timeline.
 #[derive(Debug)]
@@ -3664,13 +3681,27 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             rows.spoken,
             rows.executor_inputs
         );
+        // The committed executor task is the user transcript of the window,
+        // then (only when the assistant generated output in that window) the
+        // labelled assistant-context section; the request part must equal
+        // the joined user window exactly, and the assistant transcript may
+        // appear only under the heading.
         for (index, input) in spoken_inputs.iter().enumerate() {
             match rows.executor_inputs.get(index) {
-                Some(executor_input) if executor_input == input => {}
-                Some(executor_input) => deterministic_failures.push(format!(
-                    "request {} executor input differs from the user's final transcript: executor={executor_input:?} transcript={input:?}",
-                    index + 1
-                )),
+                Some(task) => {
+                    let (request, context) = split_executor_task(task);
+                    println!(
+                        "GPT_LIVE_S100_EXECUTOR_TASK request={} request_text={request:?} assistant_context={:?}",
+                        index + 1,
+                        context.as_deref().map(|c| c.chars().take(160).collect::<String>())
+                    );
+                    if &request != input {
+                        deterministic_failures.push(format!(
+                            "request {} executor input differs from the user transcript window: executor={request:?} window={input:?}",
+                            index + 1
+                        ));
+                    }
+                }
                 None => deterministic_failures.push(format!(
                     "request {} has no executor input row in the canonical history",
                     index + 1
@@ -4420,7 +4451,10 @@ async fn run_s103_interrupt_and_recover(
             ));
         }
         match rows.executor_inputs.first() {
-            Some(input) => {
+            Some(task) => {
+                // Only the request part (the user transcript of the window);
+                // the assistant's interjections sit under the heading.
+                let (input, _context) = split_executor_task(task);
                 let missing: Vec<&str> = S103_TOKENS
                     .iter()
                     .copied()
@@ -4456,7 +4490,10 @@ async fn run_s103_interrupt_and_recover(
             channel,
             "S103",
             "last_executor_input_carries_friday",
-            rows.executor_inputs.last().is_some_and(|input| input.contains("friday"))
+            rows
+                .executor_inputs
+                .last()
+                .is_some_and(|task| split_executor_task(task).0.contains("friday"))
                 || rows.spoken.iter().any(|row| row.contains("friday")),
             format!("executor_inputs={:?}", rows.executor_inputs),
             &mut tolerant_failures,

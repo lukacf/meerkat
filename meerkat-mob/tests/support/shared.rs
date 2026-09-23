@@ -867,6 +867,28 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
             .await
     }
 
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &meerkat_core::SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        bound: std::time::Duration,
+    ) -> Result<
+        meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary,
+        meerkat_core::service::SessionError,
+    > {
+        self.inner
+            .commit_live_delegation_final_transcript_at_turn_boundary(
+                machine,
+                session_id,
+                provisional,
+                final_event,
+                bound,
+            )
+            .await
+    }
+
     async fn observe_session_resume_authority(
         &self,
         session_id: &meerkat_core::SessionId,

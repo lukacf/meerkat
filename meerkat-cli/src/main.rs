@@ -10365,6 +10365,28 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        bound: std::time::Duration,
+    ) -> Result<
+        meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary,
+        meerkat_core::service::SessionError,
+    > {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_final_transcript_at_turn_boundary(
+            &self.inner,
+            machine,
+            session_id,
+            provisional,
+            final_event,
+            bound,
+        )
+        .await
+    }
+
     async fn observe_session_resume_authority(
         &self,
         session_id: &SessionId,
@@ -13441,6 +13463,28 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
             session_id,
             provisional,
             final_event,
+        )
+        .await
+    }
+
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        bound: std::time::Duration,
+    ) -> Result<
+        meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary,
+        meerkat_core::service::SessionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_final_transcript_at_turn_boundary(
+            &self.inner,
+            machine,
+            session_id,
+            provisional,
+            final_event,
+            bound,
         )
         .await
     }
@@ -21437,6 +21481,19 @@ default_model = "gemma"
             _provisional: meerkat_core::ProvisionalLiveHandoff,
             _final_event: meerkat_core::RealtimeTranscriptEvent,
         ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+            Err(SessionError::Unsupported(
+                "CLI test service does not support live delegation canonical projection".into(),
+            ))
+        }
+
+        async fn commit_live_delegation_final_transcript_at_turn_boundary(
+            &self,
+            _machine: &meerkat_runtime::MeerkatMachine,
+            _session_id: &SessionId,
+            _provisional: meerkat_core::ProvisionalLiveHandoff,
+            _final_event: meerkat_core::RealtimeTranscriptEvent,
+            _bound: std::time::Duration,
+        ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
             Err(SessionError::Unsupported(
                 "CLI test service does not support live delegation canonical projection".into(),
             ))

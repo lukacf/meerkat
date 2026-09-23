@@ -1170,6 +1170,25 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_final_transcript_at_turn_boundary(
+            &self.service,
+            machine,
+            session_id,
+            provisional,
+            final_event,
+            bound,
+        )
+        .await
+    }
+
     #[cfg(feature = "openai-live")]
     async fn capture_live_bridge_execution_snapshot(
         &self,

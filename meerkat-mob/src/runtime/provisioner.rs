@@ -8383,6 +8383,20 @@ mod tests {
                     ))
                 }
 
+                async fn commit_live_delegation_final_transcript_at_turn_boundary(
+                    &self,
+                    _machine: &meerkat_runtime::MeerkatMachine,
+                    _session_id: &CoreSessionId,
+                    _provisional: meerkat_core::ProvisionalLiveHandoff,
+                    _final_event: meerkat_core::RealtimeTranscriptEvent,
+                    _bound: std::time::Duration,
+                ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError>
+                {
+                    Err(SessionError::Unsupported(
+                        "stub service does not support live delegation canonical projection".into(),
+                    ))
+                }
+
                 async fn create_session_under_runtime_turn_boundary(
                     &self,
                     _req: meerkat_core::service::CreateSessionRequest,

@@ -2449,6 +2449,20 @@ pub enum DurableForkAtTurnBoundary {
     SourceBusy { waited: std::time::Duration },
 }
 
+/// Outcome of a live delegation's canonical final-transcript commit that
+/// first waited, bounded, for the source session's turn-finalization
+/// boundary.
+///
+/// `Committed` carries the sealed commit evidence: the boundary was won and
+/// the transcript was persisted under it. `SourceBusy` means the source was
+/// still mid-turn when the bound elapsed; nothing was committed and the
+/// caller may retry the exact same commit later.
+#[derive(Debug, Clone)]
+pub enum LiveFinalTranscriptCommitAtTurnBoundary {
+    Committed(crate::FinalLiveUserTranscriptCommitEvidence),
+    SourceBusy { waited: std::time::Duration },
+}
+
 /// Runtime-state admission the durable fork owner applies to the source
 /// session before it observes the transcript to branch.
 ///

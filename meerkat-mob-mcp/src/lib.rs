@@ -4577,6 +4577,19 @@ impl MobSessionService for LocalSessionService {
         ))
     }
 
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        Err(SessionError::Unsupported(
+            "live delegation canonical projection requires a runtime-backed persistent session service".into(),
+        ))
+    }
+
     async fn materialize_session_resume_verdict(
         &self,
         session_id: &SessionId,
@@ -7760,6 +7773,19 @@ mod tests {
             _provisional: meerkat_core::ProvisionalLiveHandoff,
             _final_event: meerkat_core::RealtimeTranscriptEvent,
         ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+            Err(SessionError::Unsupported(
+                "mock session service does not support live delegation canonical projection".into(),
+            ))
+        }
+
+        async fn commit_live_delegation_final_transcript_at_turn_boundary(
+            &self,
+            _machine: &meerkat_runtime::MeerkatMachine,
+            _session_id: &SessionId,
+            _provisional: meerkat_core::ProvisionalLiveHandoff,
+            _final_event: meerkat_core::RealtimeTranscriptEvent,
+            _bound: std::time::Duration,
+        ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
             Err(SessionError::Unsupported(
                 "mock session service does not support live delegation canonical projection".into(),
             ))

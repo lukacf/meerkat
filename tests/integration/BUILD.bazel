@@ -156,7 +156,7 @@ rust_test(
         "fast",
         "unit",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//:repo_governance_files",
         "//:workspace_cargo_manifests",
@@ -173,6 +173,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -296,6 +297,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -370,6 +372,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(
@@ -443,6 +446,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(
@@ -535,6 +539,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(
@@ -609,6 +614,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(
@@ -684,6 +690,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(
@@ -757,6 +764,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(
@@ -831,6 +839,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(
@@ -909,6 +918,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -980,6 +990,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1049,6 +1060,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1118,6 +1130,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1191,6 +1204,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1263,6 +1277,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1332,6 +1347,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1401,6 +1417,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1470,6 +1487,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1541,6 +1559,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1612,6 +1631,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1686,6 +1706,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1756,6 +1777,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1830,6 +1852,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "tests/integration",
@@ -1914,6 +1937,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RKAT_TEST_BIN_RKAT_RPC": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
         "RKAT_TEST_BIN_RKAT_REST": "$(rootpath //meerkat-rest:rkat_rest_bin)",
     },
@@ -2000,6 +2024,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RKAT_TEST_BIN_RKAT": "$(rootpath //meerkat-cli:rkat)",
         "RKAT_TEST_BIN_RKAT_RPC": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
     },
@@ -2086,6 +2111,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RKAT_TEST_BIN_RKAT": "$(rootpath //meerkat-cli:rkat)",
         "RKAT_TEST_BIN_RKAT_REST": "$(rootpath //meerkat-rest:rkat_rest_bin)",
     },

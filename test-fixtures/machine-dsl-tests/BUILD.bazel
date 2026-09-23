@@ -90,7 +90,7 @@ rust_test(
         "fast",
         "unit",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//:test_fixtures",
         "//meerkat-machine-schema:package_runfiles",
@@ -101,6 +101,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-dsl:meerkat_machine_dsl",
@@ -163,6 +164,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "CARGO_TARGET_DIR": "trybuild-target",
     },
     proc_macro_deps = [

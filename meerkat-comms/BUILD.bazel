@@ -138,13 +138,14 @@ rust_test(
         "fast",
         "unit",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//meerkat-contracts:package_runfiles",
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-comms",
@@ -203,6 +204,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-comms",
@@ -257,10 +259,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-comms",
@@ -315,10 +318,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-comms",
@@ -373,10 +377,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-comms",
@@ -431,10 +436,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-comms",
@@ -493,6 +499,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-comms",
@@ -547,10 +554,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-comms",

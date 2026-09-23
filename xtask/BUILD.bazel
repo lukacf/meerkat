@@ -94,7 +94,7 @@ rust_test(
         "fast",
         "unit",
     ],
-    size = "medium",
+    size = "large",
     data = [
         "//:repo_governance_files",
         "//:test_fixtures",
@@ -166,6 +166,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -253,7 +254,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:github_workflows",
@@ -293,6 +294,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
@@ -346,7 +348,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:github_workflows",
@@ -359,6 +361,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -411,7 +414,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:repo_governance_files",
@@ -438,6 +441,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
@@ -509,6 +513,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
@@ -562,7 +567,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//meerkat-core:cargo_manifest",
@@ -576,6 +581,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -628,7 +634,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:workspace_cargo_manifests",
@@ -695,6 +701,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -748,7 +755,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:github_workflows",
@@ -763,6 +770,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -816,7 +824,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//meerkat-core:package_runfiles",
@@ -829,6 +837,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -903,6 +912,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -966,6 +976,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
@@ -1019,7 +1030,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//meerkat-runtime:package_runfiles",
         "tests/rustfmt_host.sh",
@@ -1030,6 +1041,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -1082,7 +1094,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//:workspace_runfiles",
         "tests/rustfmt_host.sh",
@@ -1093,6 +1105,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",

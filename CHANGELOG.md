@@ -338,7 +338,14 @@ them.
   request as well as from an accepted `session.close`), settles gracefully
   the moment the provider confirms, and otherwise retires the transport
   locally and reports `Closed` instead of failing every retry with
-  `remote_close_unavailable` while the session stayed bound.
+  `remote_close_unavailable` while the session stayed bound. A close issued
+  while the member's own turn is still running (an existing-member delegation
+  executing the spoken request, or a fork holding the turn boundary) now
+  waits for that turn's boundary within what remains of the close bound
+  (`PersistentSessionService::
+  resolve_live_assistant_playback_on_channel_close_within`, floor 2 s)
+  instead of failing the first request with `CloseSettlementBusy`; a turn
+  still running past the bound is busy as before.
 - A refused live lifecycle fact (for example a cancellation outcome that
   arrives after the worker's own terminal was recorded) no longer ends the
   provider stream for the whole channel: the fact fails closed on its own,

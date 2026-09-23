@@ -6997,6 +6997,48 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
             .try_lock_owned()
             .map_err(|_| SessionError::Busy { id: id.clone() })?;
+        self.resolve_live_assistant_playback_on_channel_close_under_boundary(
+            id,
+            channel_id,
+            turn_finalization_guard,
+        )
+        .await
+    }
+
+    /// [`Self::resolve_live_assistant_playback_on_channel_close`] that waits
+    /// at most `bound` for the session's turn-finalization boundary.
+    ///
+    /// A close issued while the member's own turn is still running (an
+    /// existing-member delegation executing the spoken request, or the
+    /// short window in which a durable fork holds the boundary) settles once
+    /// that turn reaches its boundary instead of refusing on the first
+    /// request. The wait stays bounded because the running turn may itself
+    /// be awaiting this close; past the bound the close is `Busy` and the
+    /// caller retries, exactly as before.
+    pub async fn resolve_live_assistant_playback_on_channel_close_within(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        bound: std::time::Duration,
+    ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
+        let gate = self.turn_finalization_gate_for_session(id).await;
+        let turn_finalization_guard = tokio::time::timeout(bound, gate.lock_owned())
+            .await
+            .map_err(|_| SessionError::Busy { id: id.clone() })?;
+        self.resolve_live_assistant_playback_on_channel_close_under_boundary(
+            id,
+            channel_id,
+            turn_finalization_guard,
+        )
+        .await
+    }
+
+    async fn resolve_live_assistant_playback_on_channel_close_under_boundary(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        turn_finalization_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
         let _mutation_guard = self
             .realtime_transcript_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
             .await?;
@@ -13650,13 +13692,13 @@ mod tests {
 
     #[tokio::test]
     async fn live_close_refuses_busy_turn_boundary_and_can_retry() {
-        let service = PersistentSessionService::new(
+        let service = Arc::new(PersistentSessionService::new(
             DummyBuilder,
             4,
             Arc::new(MemoryStore::new()),
             Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
-        );
+        ));
         let session_id = service
             .create_session(create_request("seed", InitialTurnPolicy::Defer))
             .await
@@ -13673,7 +13715,52 @@ mod tests {
         .await
         .expect("close must not wait for a pending turn's durable boundary");
         assert!(matches!(result, Err(SessionError::Busy { .. })));
+        // The bounded variant waits for the running turn's boundary instead
+        // of refusing, and settles as soon as the turn releases it.
+        let bounded_service = Arc::clone(&service);
+        let bounded_session = session_id.clone();
+        let bounded_channel = channel.clone();
+        let bounded = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let result = bounded_service
+                .resolve_live_assistant_playback_on_channel_close_within(
+                    &bounded_session,
+                    bounded_channel,
+                    std::time::Duration::from_secs(5),
+                )
+                .await;
+            (result, started.elapsed())
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !bounded.is_finished(),
+            "the bounded close waits for the turn"
+        );
         drop(boundary);
+        let (bounded_result, waited) = bounded.await.expect("bounded close task");
+        assert!(
+            bounded_result
+                .expect("bounded close settles once the turn ends")
+                .is_none()
+        );
+        assert!(
+            waited >= std::time::Duration::from_millis(150)
+                && waited < std::time::Duration::from_secs(5),
+            "settled when the turn released the boundary: {waited:?}"
+        );
+        // Held past the bound, the bounded variant is Busy like the unbounded one.
+        let held = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        let result = service
+            .resolve_live_assistant_playback_on_channel_close_within(
+                &session_id,
+                channel.clone(),
+                std::time::Duration::from_millis(100),
+            )
+            .await;
+        assert!(matches!(result, Err(SessionError::Busy { .. })));
+        drop(held);
         assert!(
             service
                 .resolve_live_assistant_playback_on_channel_close(&session_id, channel)

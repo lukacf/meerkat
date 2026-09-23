@@ -3375,6 +3375,12 @@ mod orchestrator {
             Ok(Some(result))
         }
 
+        /// Least time a close waits for the member's running turn to reach its
+        /// finalization boundary, even when the transport drain consumed the
+        /// rest of `LIVE_CLOSE_CONFIRMATION_BOUND`.
+        const LIVE_CLOSE_TURN_SETTLEMENT_FLOOR: std::time::Duration =
+            std::time::Duration::from_secs(2);
+
         /// `live/close`: reserve → generated close authority → host commit.
         pub async fn close_live_channel(
             &self,
@@ -3383,6 +3389,7 @@ mod orchestrator {
             expected_session: Option<&SessionId>,
         ) -> Result<LiveCloseResult, LiveChannelVerbError> {
             let request = LiveChannelRequestPublicKind::Close;
+            let close_started = std::time::Instant::now();
             let Some(session_id) = self
                 .runtime_adapter
                 .live_session_for_active_channel(channel_id)
@@ -3411,9 +3418,20 @@ mod orchestrator {
                 })?;
             // The provider transport must have drained final output through
             // canonical projection before close-specific Unmeasured settlement
-            // is allowed to discard any still-unmeasured playback target.
+            // is allowed to discard any still-unmeasured playback target. A
+            // member turn still running at this point (an existing-member
+            // delegation executing the spoken request, or a fork holding the
+            // boundary) is waited for within what remains of the close bound,
+            // so one close request converges instead of failing busy.
+            let settlement_bound = crate::experimental_gpt_live::LIVE_CLOSE_CONFIRMATION_BOUND
+                .saturating_sub(close_started.elapsed())
+                .max(Self::LIVE_CLOSE_TURN_SETTLEMENT_FLOOR);
             self.service
-                .resolve_live_assistant_playback_on_channel_close(&session_id, channel_id.clone())
+                .resolve_live_assistant_playback_on_channel_close_within(
+                    &session_id,
+                    channel_id.clone(),
+                    settlement_bound,
+                )
                 .await
                 .map_err(|error| match error {
                     SessionError::Busy { .. } => LiveChannelVerbError::CloseSettlementBusy {

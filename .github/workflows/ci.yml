@@ -75,6 +75,10 @@ env:
   # workflow-level env, and upload-artifact rejects paths containing `..`.
   SCCACHE_ERROR_LOG: /home/runner/work/_temp/sccache.log
   SCCACHE_LOG: info
+  # Never exit on idle: the mob lib-test link runs for minutes with no rustc
+  # request, the default 600 s idle exit took the server down mid-lane, and
+  # the post-step then reported a fresh server's zero statistics.
+  SCCACHE_IDLE_TIMEOUT: "0"
   # One stable repo-cargo lane key on every runner, so the generated
   # toolchain wrapper path is identical across runs and lanes.
   RUST_LANE_ID: ci
@@ -390,13 +394,6 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
-      - name: Verify the sccache server is up
-        shell: bash
-        run: |
-          set -euo pipefail
-          sccache --start-server || true
-          sccache --show-stats | grep -E 'Cache location|Compile requests'
-
       - name: Clippy (changed packages, all targets, all features)
         shell: bash
         env:
@@ -467,13 +464,6 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
-      - name: Verify the sccache server is up
-        shell: bash
-        run: |
-          set -euo pipefail
-          sccache --start-server || true
-          sccache --show-stats | grep -E 'Cache location|Compile requests'
-
       - name: Unit tests (changed packages, lib and bin targets)
         shell: bash
         env:
@@ -536,13 +526,6 @@ jobs:
           shared-key: ci-registry
           cache-targets: "false"
           cache-on-failure: true
-
-      - name: Verify the sccache server is up
-        shell: bash
-        run: |
-          set -euo pipefail
-          sccache --start-server || true
-          sccache --show-stats | grep -E 'Cache location|Compile requests'
 
       - name: Check the reverse-dependency closure
         shell: bash

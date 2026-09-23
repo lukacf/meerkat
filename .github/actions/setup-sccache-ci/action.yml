@@ -82,3 +82,31 @@ runs:
           echo "backend=local" >> "${GITHUB_OUTPUT}"
           echo "sccache backend: local disk only (GCS identity unavailable: bucket='${BUCKET}', auth outcome='${GCP_OUTCOME}')"
         fi
+
+    - name: Start the sccache server read-write
+      shell: bash
+      env:
+        BACKEND: ${{ steps.select.outputs.backend }}
+      run: |
+        set -euo pipefail
+        # sccache probes the bucket with one shared object (.sccache_check)
+        # at server start; when every lane of a run starts within the same
+        # second, GCS's per-object mutation rate limit (429) fails the probe
+        # for some of them and that server silently runs ReadOnly for the
+        # whole lane. Stagger the start and restart until the server reports
+        # ReadWrite (the GCS backend only; the local fallback has no probe).
+        for attempt in 1 2 3 4 5 6; do
+          sccache --stop-server >/dev/null 2>&1 || true
+          if [[ -n "${SCCACHE_ERROR_LOG:-}" ]]; then : > "${SCCACHE_ERROR_LOG}"; fi
+          sleep "$((RANDOM % 10 + attempt))"
+          sccache --start-server
+          if [[ "${BACKEND}" == "gcs" && -n "${SCCACHE_ERROR_LOG:-}" ]] && grep -q 'server has setup with ReadOnly' "${SCCACHE_ERROR_LOG}"; then
+            echo "sccache server came up ReadOnly (bucket write probe rate-limited); restarting (attempt ${attempt})"
+            continue
+          fi
+          break
+        done
+        sccache --show-stats | grep -E 'Cache location|Compile requests'
+        if [[ "${BACKEND}" == "gcs" && -n "${SCCACHE_ERROR_LOG:-}" ]]; then
+          grep -E 'server has setup with' "${SCCACHE_ERROR_LOG}" | tail -1
+        fi

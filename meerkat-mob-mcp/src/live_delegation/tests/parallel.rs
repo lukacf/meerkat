@@ -416,6 +416,10 @@ impl Fixture {
     /// the generated schedule state instead of provider releases.
     /// Wait for one operation's generated schedule state; on timeout, dump
     /// the coordinator's and runtime's view so a stall names its stage.
+    #[allow(
+        clippy::panic,
+        reason = "a timed-out test wait fails with the diagnostic dump as its message"
+    )]
     async fn wait_for_schedule_state(
         &mut self,
         operation: &OperationId,
@@ -621,6 +625,10 @@ impl Fixture {
 /// location is captured before the first await so a timeout names the wait
 /// that failed.
 #[track_caller]
+#[allow(
+    clippy::panic,
+    reason = "a timed-out test wait fails with its call site as the message"
+)]
 fn wait_until<F, Fut>(
     timeout: std::time::Duration,
     mut condition: F,

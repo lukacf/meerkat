@@ -8697,9 +8697,13 @@ mod tests {
         }
     }
 
-    fn flow_enabled_definition() -> serde_json::Value {
+    // `mob_id` must be unique per test: the supervisor binds
+    // `<mob_id>/__mob_supervisor__` in the process-global inproc registry, and
+    // parallel tests creating the same mob fail with a live-route rejection
+    // (2026-09-23 native unit lane, nine tests).
+    fn flow_enabled_definition(mob_id: &str) -> serde_json::Value {
         json!({
-            "id": "flow-mob",
+            "id": mob_id,
             "orchestrator": {
                 "profile": "lead"
             },
@@ -8809,7 +8813,7 @@ mod tests {
         ));
         let d = MobMcpDispatcher::new(state);
 
-        let mob_id = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
+        let mob_id = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-e2e-flow-and-destroy-removes-mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
             .as_str()
             .unwrap()
             .to_string();
@@ -8957,7 +8961,7 @@ mod tests {
         ));
         let d = MobMcpDispatcher::new(state);
 
-        let mob_id = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
+        let mob_id = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-stop-resume-round-trip","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await["mob_id"]
             .as_str()
             .unwrap()
             .to_string();
@@ -9024,7 +9028,7 @@ mod tests {
             &d,
             "mob_create",
             json!({
-                "definition": flow_enabled_definition()
+                "definition": flow_enabled_definition("flow-mob-flow-tools-dispatch-run-status-cancel")
             }),
         )
         .await;
@@ -9122,7 +9126,7 @@ mod tests {
         let created = call_tool(
             &dispatcher,
             "mob_create",
-            json!({ "definition": flow_enabled_definition() }),
+            json!({ "definition": flow_enabled_definition("flow-mob-workgraph-flow-bridge-projects-terminal-failure-before-retry-eligibility") }),
         )
         .await;
         let mob_id = created["mob_id"].as_str().expect("mob id").to_string();
@@ -9202,7 +9206,9 @@ mod tests {
                 .with_workgraph_service(Some(workgraph.clone())),
         );
         let dispatcher = MobMcpDispatcher::new(state.clone());
-        let mut definition = flow_enabled_definition();
+        let mut definition = flow_enabled_definition(
+            "flow-mob-workgraph-flow-bridge-closes-only-after-evidence-and-replays-exact-launch",
+        );
         definition["flows"]["demo"]["steps"]["start"]["output_format"] = json!("text");
 
         let created = call_tool(
@@ -9295,7 +9301,7 @@ mod tests {
         let created = call_tool(
             &dispatcher,
             "mob_create",
-            json!({ "definition": flow_enabled_definition() }),
+            json!({ "definition": flow_enabled_definition("flow-mob-public-mcp-dispatches-durable-workgraph-flow-launch-and-reconcile") }),
         )
         .await;
         let mob_id = created["mob_id"].as_str().expect("mob id").to_string();
@@ -9418,7 +9424,7 @@ mod tests {
         let created = call_tool(
             &dispatcher,
             "mob_create",
-            json!({ "definition": flow_enabled_definition() }),
+            json!({ "definition": flow_enabled_definition("flow-mob-workgraph-flow-bridge-observes-exact-run-without-broad-list-grant") }),
         )
         .await;
         let mob_id = meerkat_mob::MobId::from(created["mob_id"].as_str().expect("mob id"));
@@ -9487,7 +9493,7 @@ mod tests {
         let created = call_tool(
             &dispatcher,
             "mob_create",
-            json!({ "definition": flow_enabled_definition() }),
+            json!({ "definition": flow_enabled_definition("flow-mob-revoked-launch-authority-terminalizes-precommitted-binding") }),
         )
         .await;
         let mob_id = MobId::from(created["mob_id"].as_str().expect("mob id"));
@@ -9710,7 +9716,7 @@ mod tests {
         ));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-spawn-runtime-mode-defaults-and-override","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
 
         call_tool(
@@ -9756,7 +9762,7 @@ mod tests {
         ));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-spawn-many-dispatches-batch","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
 
         let spawned = call_tool(
@@ -9802,7 +9808,7 @@ mod tests {
         ));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-spawn-many-dispatches-typed-failure-cause","profiles":{"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
 
         let spawned = call_tool(
@@ -9837,7 +9843,7 @@ mod tests {
         ));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-wait-kickoff-returns-member-snapshots","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
         call_tool(
             &d,
@@ -9940,7 +9946,7 @@ mod tests {
         ));
         let d = MobMcpDispatcher::new(state);
 
-        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
+        let created = call_tool(&d, "mob_create", json!({"definition":{"id":"test_mob-wait-kickoff-completes-after-initial-turn","orchestrator":{"profile":"lead"},"profiles":{"lead":{"model":"claude-opus-4-8","external_addressable":true,"tools":{"comms":true}},"worker":{"model":"claude-sonnet-4-6","tools":{"comms":true}}}}})).await;
         let mob_id = created["mob_id"].as_str().unwrap().to_string();
         call_tool(
             &d,

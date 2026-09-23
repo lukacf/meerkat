@@ -9022,6 +9022,54 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(BoundaryPersistencePlan { commits })
     }
 
+    /// Diagnose, and with `apply` repair, a WholeBlob session whose committed
+    /// document the current decoder refuses because its live rows no longer
+    /// preserve the graph-proved audited endpoint (the "reload_required on
+    /// every send" wedge).
+    ///
+    /// The repair re-anchors the committed document on its live rows: no
+    /// message is dropped or changed; the audited transcript graph, its
+    /// rewrite prefix authority and the pending compaction projection intents
+    /// are removed from the document metadata, and the store authority
+    /// advances through the ordinary compare-and-swap. The pending outbox row
+    /// is left for the runtime's normal finalization. It refuses while a live
+    /// actor still owns the session, because that actor's in-memory state,
+    /// not the committed document, is then the authority.
+    pub async fn repair_whole_blob_audited_endpoint(
+        &self,
+        session_id: &SessionId,
+        apply: bool,
+    ) -> Result<
+        meerkat_runtime::store::whole_blob_repair::WholeBlobAuditedEndpointRepairReport,
+        AgentError,
+    > {
+        let live_actor = self
+            .live_checkpointers
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .is_some();
+        if live_actor {
+            return Err(AgentError::InternalError(format!(
+                "session {session_id} still has a live actor; stop or evict it before repairing its committed WholeBlob document"
+            )));
+        }
+        let runtime_id = LogicalRuntimeId::for_session(session_id);
+        meerkat_runtime::store::whole_blob_repair::repair_whole_blob_audited_endpoint(
+            self.runtime_store.as_ref(),
+            &runtime_id,
+            apply,
+        )
+        .await
+        .map_err(|error| {
+            AgentError::InternalError(format!(
+                "WholeBlob audited-endpoint repair failed for session {session_id}: {error}"
+            ))
+        })
+    }
+
     pub async fn checkpoint_committed_runtime_session_snapshot(
         &self,
         id: &SessionId,

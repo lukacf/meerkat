@@ -12154,6 +12154,49 @@ ORDER BY runtime_id";
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
         }
 
+        async fn load_committed_whole_blob_bytes(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<(Arc<Vec<u8>>, WholeBlobStoreAuthority)>, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "load_committed_whole_blob_bytes",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = conn
+                    .transaction()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let observed = match load_whole_blob_store_authority(&tx, &runtime_id)? {
+                    None => None,
+                    Some(authority) => {
+                        let bytes = tx
+                            .query_row(
+                                "SELECT session_snapshot FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
+                                params![authority.blob_sha256()],
+                                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                            )
+                            .optional()
+                            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                            .ok_or_else(|| {
+                                session_authority_conflict(
+                                    &runtime_id,
+                                    "WholeBlob authority references a missing body",
+                                )
+                            })?;
+                        Some((Arc::new(bytes), authority))
+                    }
+                };
+                tx.rollback()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                Ok(observed)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
         async fn load_committed_whole_blob_snapshot(
             &self,
             runtime_id: &LogicalRuntimeId,

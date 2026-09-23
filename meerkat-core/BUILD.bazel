@@ -1496,6 +1496,72 @@ rust_test(
     ),
 )
 
+rust_test(
+    name = "wholeblob_compaction_media_guard_test",
+    aliases = aliases(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "wholeblob_compaction_media_guard",
+    crate_root = "tests/wholeblob_compaction_media_guard.rs",
+    crate_features = [
+        "__meerkat-facade-agent-factory-build",
+        "__meerkat-generated-authority-bridge",
+        "__meerkat-live-authority-bridge",
+        "jsonschema",
+        "schema",
+        "test-support",
+    ],
+    edition = "2024",
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+    ],
+    compile_data = [
+        "Cargo.toml",
+        "src/config_template.toml",
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.provenance.json",
+    ],
+    srcs = [
+        "tests/wholeblob_compaction_media_guard.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_BIN_NAME": "wholeblob_compaction_media_guard",
+        "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
 test_suite(
     name = "fast_tests",
     tests = [
@@ -1518,5 +1584,6 @@ test_suite(
         ":transcript_digest_budget_test",
         ":transcript_graph_ingress_validation_test",
         ":v0_8_10_ob3_recovery_migration_test",
+        ":wholeblob_compaction_media_guard_test",
     ],
 )

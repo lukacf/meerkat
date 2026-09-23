@@ -501,6 +501,32 @@ pub struct InMemoryRuntimeStore {
 }
 
 impl InMemoryRuntimeStore {
+    /// Install committed WholeBlob body bytes verbatim, bypassing every
+    /// writer-side guard, so recovery tests can start from a document the
+    /// current decoder refuses. The authority advances exactly as a real
+    /// commit would.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn inject_committed_whole_blob_bytes_for_test(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_id: &meerkat_core::types::SessionId,
+        bytes: Vec<u8>,
+    ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError> {
+        let blob_sha256 = whole_blob_body_sha256(&bytes);
+        let mut inner = self.inner.lock().await;
+        let authority = issue_whole_blob_store_authority(
+            inner.session_authorities.get(&runtime_id.0),
+            session_id,
+            &blob_sha256,
+        )?;
+        inner.sessions.insert(runtime_id.0.clone(), Arc::new(bytes));
+        inner
+            .session_authorities
+            .insert(runtime_id.0.clone(), authority.clone());
+        Ok(authority)
+    }
+
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner::default())),
@@ -2001,6 +2027,25 @@ impl super::RuntimeSessionAuthorityOps for InMemoryRuntimeStore {
         let offset = filter.offset.unwrap_or(0).min(entries.len());
         let limit = filter.limit.unwrap_or(usize::MAX);
         Ok(entries.into_iter().skip(offset).take(limit).collect())
+    }
+
+    async fn load_committed_whole_blob_bytes(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<(Arc<Vec<u8>>, WholeBlobStoreAuthority)>, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        let Some(bytes) = inner.sessions.get(&runtime_id.0) else {
+            return Ok(None);
+        };
+        let authority = inner
+            .session_authorities
+            .get(&runtime_id.0)
+            .cloned()
+            .ok_or_else(|| RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: runtime_id.0.clone(),
+                detail: "WholeBlob body has no paired store authority".to_string(),
+            })?;
+        Ok(Some((Arc::clone(bytes), authority)))
     }
 
     async fn load_committed_whole_blob_snapshot(

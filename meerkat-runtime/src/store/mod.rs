@@ -7,6 +7,7 @@
 pub mod memory;
 #[cfg(feature = "sqlite-store")]
 pub mod sqlite;
+pub mod whole_blob_repair;
 mod whole_blob_rewrite;
 
 pub use meerkat_core::{HeadCanonicalProvisionalTailAuthority, WholeBlobProvisionalTailAuthority};
@@ -833,6 +834,19 @@ impl std::io::Write for WholeBlobSessionWriter {
 fn encode_whole_blob_session(
     session: &meerkat_core::Session,
 ) -> Result<(Arc<Vec<u8>>, String), RuntimeStoreError> {
+    // Same writer-side refusal as `Session::to_persisted_artifact`: never mint
+    // a WholeBlob body the current-envelope decoder would refuse.
+    if let Some(divergence) = session.audited_endpoint_divergence().map_err(|error| {
+        RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: session.id().to_string(),
+            detail: format!("audited endpoint could not be verified before encoding: {error}"),
+        }
+    })? {
+        return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: session.id().to_string(),
+            detail: format!("refusing to persist a WholeBlob document whose {divergence}"),
+        });
+    }
     let mut writer = WholeBlobSessionWriter {
         bytes: Vec::new(),
         hasher: Sha256::new(),
@@ -7786,6 +7800,23 @@ pub trait RuntimeSessionAuthorityOps: Send + Sync {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<CommittedWholeBlobSnapshot>, RuntimeStoreError>;
+    /// Load the committed WholeBlob body bytes and their store authority
+    /// WITHOUT decoding them into a `Session`.
+    ///
+    /// This is the recovery seam for a committed document the current-envelope
+    /// decoder refuses; ordinary readers must keep using
+    /// [`Self::load_committed_whole_blob_snapshot`], whose decode is the
+    /// authority check. Stores that cannot serve raw bytes report
+    /// `Unsupported`.
+    async fn load_committed_whole_blob_bytes(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<(Arc<Vec<u8>>, WholeBlobStoreAuthority)>, RuntimeStoreError> {
+        let _ = runtime_id;
+        Err(RuntimeStoreError::Unsupported(
+            "this runtime store cannot serve raw committed WholeBlob bytes".to_string(),
+        ))
+    }
 
     async fn commit_prepared_whole_blob_snapshot_cas(
         &self,

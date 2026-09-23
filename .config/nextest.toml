@@ -110,6 +110,14 @@ filter = 'test(=runtime::tests::actor_isolation::load_one_wedged_member_does_not
 threads-required = 8
 
 [[profile.default.overrides]]
+# Waits up to 10s for a delegation fork to resume once a held turn boundary
+# is released; timed out in 2 of 4 runs on the shared 30-vCPU executor and
+# never locally. Same treatment as the latency test above: reserve threads,
+# keep the bound.
+filter = 'test(=runtime::tests::durable_fork_delegation_waits_for_a_busy_source_turn_boundary_then_forks)'
+threads-required = 8
+
+[[profile.default.overrides]]
 # The workspace unit lane uses the default profile and discovers these lib
 # tests too, so the cohort has to hold there as well.
 filter = 'test(~test_external_tcp)'

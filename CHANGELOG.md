@@ -381,6 +381,22 @@ them.
   "finished" sentence and the result it introduces are released under one
   hold of the channel's delegation append lane, so another worker's
   narration or result cannot land between them.
+- A delegation result released to a live channel but not yet delivered when
+  the channel closes no longer violates the generated machine's exact-once
+  delivery invariant (a debug panic on the delivery task, the result then
+  retried against a retired transport forever). Both close transitions
+  (`RecordLiveCloseClosed`, `AbandonLiveOpenAdmission`) now terminalize such
+  a delivery as `InterruptedByClose`, and the delegation coordinator merges a
+  result whose delivery finds the machine channel closed into the source
+  member exactly once, the same post-close path a worker that finishes after
+  the close takes.
+- A live lifecycle fact that fails is now typed
+  (`ExperimentalLiveLifecycleObservationError`): a refusal while the channel
+  is still bound fails that fact alone and the provider stream continues;
+  lost custody (no bound channel, or a machine binding under another fence
+  or generation) ends the stream instead of leaving a call that refuses every
+  turn. `ExperimentalLiveBoundChannelActivator::observe_provider_lifecycle`
+  returns that error.
 - The generated machine's revoked-worker restart reconciliation
   (`ReconcileRevokedLiveDelegationWorkerAfterRestartFresh`) settles the
   operation's schedule state with its recorded terminal; it previously left
@@ -413,7 +429,8 @@ them.
 - Closing a live channel whose remote side is already gone now converges
   instead of failing on every retry. `ExperimentalGptLiveWebrtcTransport`
   retired an unconfirmed closure only when the provider had accepted
-  `session.close` at least `LIVE_CLOSE_CONFIRMATION_BOUND` (20 s) earlier;
+  `session.close` at least `LIVE_CLOSE_CONFIRMATION_BOUND` (then 20 s, now
+  15 s) earlier;
   when the remote had hung up the close request itself was rejected, the
   clock never started, and every `live/close` failed with
   `remote_close_unavailable` (surfaced by MobKit as "experimental live
@@ -585,6 +602,11 @@ them.
   `NarrateDelegationContext` (`LiveSidebandProviderCommand::*` discriminants
   move); `LiveSidebandNarrationAuthority` and
   `LiveSidebandCommand::narrate_delegation` are added.
+- `ExperimentalLiveBoundChannelActivator::observe_provider_lifecycle` returns
+  `Result<(), ExperimentalLiveLifecycleObservationError>` (implementors must
+  classify a failure as `Refused` or `CustodyLost`); `LIVE_CLOSE_CONFIRMATION_BOUND`
+  is defined on `meerkat::session_runtime::live_orchestration` and re-exported
+  from `experimental_gpt_live`.
 - `ExperimentalGptLiveControlPlane` gains the required method
   `narrate_delegation` (implementors must add it);
   `ExperimentalGptLiveNarrationDispatch` and

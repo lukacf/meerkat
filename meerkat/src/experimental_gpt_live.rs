@@ -414,14 +414,10 @@ pub use meerkat_openai::public_live::thinking_capture;
 pub const LIVE_CLOSE_QUIET_APPEND_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long a requested closure may go unsettled before the owner retires the
-/// transport locally: counted from an accepted `session.close` that the
-/// provider never confirms, and also from the first close request when the
-/// provider never accepts one (the remote side already hung up). One close
-/// request observes the drain for this whole bound, so a channel whose
-/// remote is gone converges on its first request instead of failing every
-/// retry with the same unavailable error. Recovery-driven closes keep the
-/// binding for retry so a slow but progressing drain can settle.
-pub const LIVE_CLOSE_CONFIRMATION_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
+/// transport locally. Defined on the ungated orchestration module so the
+/// close verb can apply it on every feature set; re-exported here for the
+/// transport and its callers.
+pub use crate::session_runtime::live_orchestration::LIVE_CLOSE_CONFIRMATION_BOUND;
 
 /// One observation slice of the closing drain inside a close request.
 const LIVE_CLOSE_DRAIN_WAIT_SLICE: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1280,6 +1276,34 @@ pub trait ExperimentalGptLiveControlPlane: Send + Sync {
     ) -> Result<ExperimentalGptLiveNarrationDispatch, ExperimentalGptLiveBridgeError>;
 }
 
+/// Why one provider lifecycle fact was not applied.
+///
+/// The observation pump treats the two differently: a refused fact fails
+/// closed on its own and the provider stream continues for the user, while
+/// lost custody (no bound channel, no generated binding for the observation's
+/// session and channel) means nothing further can be applied and the pump
+/// ends the stream instead of leaving a call that refuses every turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExperimentalLiveLifecycleObservationError {
+    /// The machine or the owner refused this fact; the channel is intact.
+    Refused(String),
+    /// The observation's channel has no running custody or generated binding.
+    CustodyLost(String),
+}
+
+impl std::fmt::Display for ExperimentalLiveLifecycleObservationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(reason) => write!(f, "lifecycle observation refused: {reason}"),
+            Self::CustodyLost(reason) => {
+                write!(f, "lifecycle observation lost channel custody: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExperimentalLiveLifecycleObservationError {}
+
 #[async_trait]
 pub trait ExperimentalLiveBoundChannelActivator: Send + Sync {
     /// Reserve the exact binding without spawning work or projecting facts.
@@ -1300,7 +1324,7 @@ pub trait ExperimentalLiveBoundChannelActivator: Send + Sync {
     async fn observe_provider_lifecycle(
         &self,
         observation: &LiveSidebandObservation,
-    ) -> Result<(), String>;
+    ) -> Result<(), ExperimentalLiveLifecycleObservationError>;
 
     /// Cancel and await the exact prepared/running binding idempotently.
     async fn deactivate_bound_channel(
@@ -5696,17 +5720,31 @@ fn spawn_sideband_actors(
                     // One refused lifecycle fact fails that fact closed, not
                     // the channel: transcript projection and delivery
                     // receipts for the same observation still flow, and the
-                    // provider stream keeps running for the user.
-                    if lifecycle_observation
-                        && let Err(error) = activation
+                    // provider stream keeps running for the user. Lost
+                    // custody is different: nothing further can be applied
+                    // for this channel, so the stream ends instead of
+                    // leaving a call that refuses every turn.
+                    if lifecycle_observation {
+                        match activation
                             .activator
                             .observe_provider_lifecycle(&observation)
                             .await
-                    {
-                        tracing::warn!(
-                            error,
-                            "experimental live lifecycle observation was refused; the channel continues"
-                        );
+                        {
+                            Ok(()) => {}
+                            Err(ExperimentalLiveLifecycleObservationError::Refused(reason)) => {
+                                tracing::warn!(
+                                    reason,
+                                    "experimental live lifecycle observation was refused; the channel continues"
+                                );
+                            }
+                            Err(ExperimentalLiveLifecycleObservationError::CustodyLost(reason)) => {
+                                tracing::warn!(
+                                    reason,
+                                    "experimental live lifecycle observation lost channel custody; the provider stream ends"
+                                );
+                                break;
+                            }
+                        }
                     }
                     if adapter_observation
                         && observation_adapter
@@ -8015,7 +8053,7 @@ mod tests {
         async fn observe_provider_lifecycle(
             &self,
             _observation: &LiveSidebandObservation,
-        ) -> Result<(), String> {
+        ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
             Ok(())
         }
 
@@ -8083,7 +8121,10 @@ mod tests {
         async fn observe_provider_lifecycle(
             &self,
             observation: &LiveSidebandObservation,
-        ) -> Result<(), String> {
+        ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
+            let refused = |error: meerkat_runtime::RuntimeDriverError| {
+                ExperimentalLiveLifecycleObservationError::Refused(error.to_string())
+            };
             match observation.kind() {
                 LiveSidebandObservationKind::TurnStarted {
                     role: LiveSidebandTurnRole::User,
@@ -8093,7 +8134,7 @@ mod tests {
                     .observe_live_provider_turn_started(observation)
                     .await
                     .map(|_| ())
-                    .map_err(|error| error.to_string()),
+                    .map_err(refused),
                 LiveSidebandObservationKind::TurnFinished {
                     role: LiveSidebandTurnRole::User,
                     ..
@@ -8102,7 +8143,7 @@ mod tests {
                     .observe_live_provider_turn_finished(observation)
                     .await
                     .map(|_| ())
-                    .map_err(|error| error.to_string()),
+                    .map_err(refused),
                 _ => Ok(()),
             }
         }
@@ -8200,7 +8241,7 @@ mod tests {
         async fn observe_provider_lifecycle(
             &self,
             _observation: &LiveSidebandObservation,
-        ) -> Result<(), String> {
+        ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
             Ok(())
         }
 
@@ -8501,7 +8542,7 @@ mod tests {
         async fn observe_provider_lifecycle(
             &self,
             _observation: &LiveSidebandObservation,
-        ) -> Result<(), String> {
+        ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
             Ok(())
         }
 
@@ -10237,6 +10278,8 @@ mod tests {
         lifecycle_calls: AtomicUsize,
         all_seen: Notify,
         expected: usize,
+        /// Report the first fact as lost custody instead of a refusal.
+        lose_custody: bool,
     }
 
     #[async_trait]
@@ -10259,13 +10302,21 @@ mod tests {
         async fn observe_provider_lifecycle(
             &self,
             _observation: &LiveSidebandObservation,
-        ) -> Result<(), String> {
+        ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
             let call = self.lifecycle_calls.fetch_add(1, AtomicOrdering::SeqCst) + 1;
             if call >= self.expected {
                 self.all_seen.notify_waiters();
             }
             if call == 1 {
-                Err("guard rejected transition (fixture refusal)".to_string())
+                Err(if self.lose_custody {
+                    ExperimentalLiveLifecycleObservationError::CustodyLost(
+                        "no exact running channel custody (fixture)".to_string(),
+                    )
+                } else {
+                    ExperimentalLiveLifecycleObservationError::Refused(
+                        "guard rejected transition (fixture refusal)".to_string(),
+                    )
+                })
             } else {
                 Ok(())
             }
@@ -10322,6 +10373,7 @@ mod tests {
             lifecycle_calls: AtomicUsize::new(0),
             all_seen: Notify::new(),
             expected,
+            lose_custody: false,
         });
         let transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());
         let (retirement_tx, _retirement_rx) = mpsc::channel(1);
@@ -10364,6 +10416,103 @@ mod tests {
             activator.lifecycle_calls.load(AtomicOrdering::SeqCst),
             expected,
             "the refused lifecycle observation must not end the observation actor"
+        );
+        retire_sideband_actors(active).await;
+    }
+
+    /// Lost custody is different from a refusal: once the observation's
+    /// channel has no running custody, nothing further can be applied, so
+    /// the observation actor ends the provider stream instead of leaving a
+    /// call that refuses every later turn.
+    #[tokio::test]
+    async fn lost_custody_lifecycle_observation_ends_the_provider_stream() {
+        let session_id = meerkat_core::SessionId::new();
+        let channel_id = meerkat_live::LiveChannelId::new("lost-custody-lifecycle-ends");
+        let binding = ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let mut observations = VecDeque::new();
+        for index in 0..3 {
+            let turn = LiveSidebandTurnRef::__from_provider_observation(
+                &channel_id,
+                format!("turn-{index}"),
+                format!("provider-turn-{index}"),
+            )
+            .expect("turn ref");
+            observations.push_back(LiveSidebandObservation::new(
+                binding.clone(),
+                LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ));
+            observations.push_back(LiveSidebandObservation::new(
+                binding.clone(),
+                LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: format!("utterance {index}"),
+                },
+            ));
+        }
+        let expected = observations.len();
+        let sideband: Arc<dyn ProviderWebrtcSidebandSession> = Arc::new(FloodingSideband {
+            observations: std::sync::Mutex::new(observations),
+            fail_close: false,
+        });
+        let activator = Arc::new(RefusingFirstLifecycleActivator {
+            lifecycle_calls: AtomicUsize::new(0),
+            all_seen: Notify::new(),
+            expected,
+            lose_custody: true,
+        });
+        let transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());
+        let (retirement_tx, _retirement_rx) = mpsc::channel(1);
+        let active = spawn_sideband_actors(
+            binding.clone(),
+            sideband,
+            test_deferred_adapter(),
+            1,
+            retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
+        );
+        *active.activation_gate.prepared.lock().await =
+            Some(Arc::new(PreparedExperimentalGptLiveActivation {
+                runtime: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+                runtime_binding:
+                    meerkat_runtime::live_execution::LiveDelegationRuntimeBinding::__test_new(
+                        session_id.clone(),
+                        channel_id.clone(),
+                        meerkat_runtime::identifiers::LogicalRuntimeId::new("fixture-runtime"),
+                        1,
+                        1,
+                    ),
+                activator: Arc::clone(&activator) as Arc<dyn ExperimentalLiveBoundChannelActivator>,
+                control: Arc::clone(&transport) as Arc<dyn ExperimentalGptLiveControlPlane>,
+                live_adapter_host: Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+                    meerkat_live::NoOpProjectionSink,
+                ))),
+                public_observation_publisher: Arc::new(NoopPublicObservationPublisher),
+            }));
+        active
+            .activation_gate
+            .committed
+            .store(true, Ordering::Release);
+        active.activation_gate.changed.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !active.observation_actor.is_finished() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("lost custody ends the observation actor");
+        assert_eq!(
+            activator.lifecycle_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "no lifecycle fact is applied after custody was lost"
         );
         retire_sideband_actors(active).await;
     }

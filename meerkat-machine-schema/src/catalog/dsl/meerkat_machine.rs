@@ -8705,6 +8705,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             // terminal), and on a still-bound channel their slot count is
             // positive. A counter that drifted from the scheduled workers is
             // therefore visible.
+            //
+            // The exact equality "count == number of Claimed/Running
+            // operations bound to this channel" is not expressible in this
+            // DSL: `count(value)` counts occurrences of one value in a Set or
+            // Seq, `len()` measures a whole collection, and there is no
+            // filtered count or comprehension over a Map's values (the
+            // operations of one channel are the values of
+            // `live_delegation_channel_by_operation` equal to `channel_id`).
+            // Nested `Map<String, Set<..>>` state cannot be mutated per element
+            // either, so a per-channel operation set cannot be maintained. The
+            // implications above are the strongest expressible form.
             && for_all(operation_id in self.live_delegation_schedule_state_by_operation.keys(),
                 (!(self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
                         == Some(LiveDelegationWorkerPhase::StartAuthorized)
@@ -23649,6 +23660,23 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_active_interaction_by_channel.remove(channel_id);
                 self.live_awaiting_assistant_interaction_by_channel.remove(channel_id);
                 self.live_provider_turn_by_channel.remove(channel_id);
+                // A result released to this channel and not yet resolved is
+                // interrupted by the close. Its delivery ends here as the exact
+                // terminal observation `InterruptedByClose`, never as a
+                // delivery: the shell merges such a result into the source
+                // member as internal work, and the machine holds no delivery
+                // for a channel that no longer exists.
+                if self.live_result_delivery_operation_by_channel.contains_key(channel_id) {
+                    self.live_result_delivery_observation_by_operation.insert(
+                        self.live_result_delivery_operation_by_channel.get_cloned(channel_id).get("value"),
+                        LiveDelegationResultDeliveryObservation::InterruptedByClose
+                    );
+                    self.live_result_delivery_channel_by_operation.remove(
+                        self.live_result_delivery_operation_by_channel.get_cloned(channel_id).get("value"));
+                    self.live_result_delivery_digest_by_operation.remove(
+                        self.live_result_delivery_operation_by_channel.get_cloned(channel_id).get("value"));
+                    self.live_result_delivery_operation_by_channel.remove(channel_id);
+                }
                 self.live_delegation_active_worker_count_by_channel.remove(channel_id);
                 if self.live_bridge_operation_by_channel.contains_key(channel_id) {
                     if !self.live_bridge_execution_terminal_by_operation.contains_key(
@@ -28570,6 +28598,23 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_active_interaction_by_channel.remove(channel_id);
                 self.live_awaiting_assistant_interaction_by_channel.remove(channel_id);
                 self.live_provider_turn_by_channel.remove(channel_id);
+                // A result released to this channel and not yet resolved is
+                // interrupted by the close. Its delivery ends here as the exact
+                // terminal observation `InterruptedByClose`, never as a
+                // delivery: the shell merges such a result into the source
+                // member as internal work, and the machine holds no delivery
+                // for a channel that no longer exists.
+                if self.live_result_delivery_operation_by_channel.contains_key(channel_id) {
+                    self.live_result_delivery_observation_by_operation.insert(
+                        self.live_result_delivery_operation_by_channel.get_cloned(channel_id).get("value"),
+                        LiveDelegationResultDeliveryObservation::InterruptedByClose
+                    );
+                    self.live_result_delivery_channel_by_operation.remove(
+                        self.live_result_delivery_operation_by_channel.get_cloned(channel_id).get("value"));
+                    self.live_result_delivery_digest_by_operation.remove(
+                        self.live_result_delivery_operation_by_channel.get_cloned(channel_id).get("value"));
+                    self.live_result_delivery_operation_by_channel.remove(channel_id);
+                }
                 self.live_delegation_active_worker_count_by_channel.remove(channel_id);
                 self.live_context_cursor_by_channel.remove(channel_id);
                 if self.live_bridge_operation_by_channel.contains_key(channel_id) {

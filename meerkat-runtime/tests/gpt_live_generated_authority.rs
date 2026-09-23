@@ -2170,6 +2170,111 @@ fn newer_user_turn_does_not_suppress_a_running_workers_result() {
     );
 }
 
+/// A result released to the channel and authorized for delivery, but not
+/// yet resolved when the channel closes, is interrupted by the close: the
+/// machine records `InterruptedByClose` as its exact terminal observation
+/// and holds no delivery for the closed channel, so the shell can merge the
+/// result into the source member without a second delivery ever existing.
+#[test]
+fn result_released_but_undelivered_at_close_is_interrupted_by_the_close() {
+    const RESULT_DIGEST: &str = "undelivered-at-close-digest";
+    let mut authority = opened_authority();
+    bind_experimental(&mut authority, 0);
+    admit_provider_turn_delegation(&mut authority);
+    prepare_confirmed_completed_worker(&mut authority);
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultRelease {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+        },
+    )
+    .expect("completed result is released");
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AuthorizeLiveDelegationResultDelivery {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: INTERACTION.to_string(),
+            operation_id: operation_id(),
+            provider_turn_correlation: PROVIDER_TURN.to_string(),
+            result_digest: RESULT_DIGEST.to_string(),
+            disposition: mm::LiveDelegationResultDisposition::OpenTurn,
+        },
+    )
+    .expect("delivery is authorized while the channel is bound");
+    assert!(
+        authority
+            .state()
+            .live_result_delivery_channel_by_operation
+            .contains_key(&operation_id())
+    );
+
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::AbandonLiveOpenAdmission {
+            session_id: SESSION.to_string(),
+            channel_id: CHANNEL.to_string(),
+        },
+    )
+    .expect("the channel closes under the pending delivery");
+    let state = authority.state();
+    assert_eq!(
+        state
+            .live_result_delivery_observation_by_operation
+            .get(&operation_id()),
+        Some(&mm::LiveDelegationResultDeliveryObservation::InterruptedByClose),
+        "the close is the delivery's exact terminal observation"
+    );
+    assert!(
+        !state
+            .live_result_delivery_channel_by_operation
+            .contains_key(&operation_id())
+    );
+    assert!(
+        !state
+            .live_result_delivery_digest_by_operation
+            .contains_key(&operation_id())
+    );
+    assert!(
+        !state
+            .live_result_delivery_operation_by_channel
+            .contains_key(CHANNEL)
+    );
+    assert_eq!(
+        state
+            .live_delegation_worker_terminal_by_operation
+            .get(&operation_id()),
+        Some(&mm::LiveDelegationWorkerTerminalKind::Completed),
+        "the close never rewrites durable executor completion"
+    );
+    assert!(
+        apply(
+            &mut authority,
+            mm::MeerkatMachineInput::ResolveLiveDelegationResultDelivery {
+                channel_id: CHANNEL.to_string(),
+                runtime_id: runtime_id(),
+                fence_token: fence(),
+                generation: generation(),
+                operation_id: operation_id(),
+                result_digest: RESULT_DIGEST.to_string(),
+                replacement_channel_id: String::new(),
+                canonical_seed_cursor: 0,
+                observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
+            },
+        )
+        .is_err(),
+        "no delivery can resolve after the close terminalized it"
+    );
+}
+
 #[test]
 fn newer_user_turn_suppresses_late_old_result_speech_without_cancelling_completion() {
     const NEW_INTERACTION: &str = "22222222-2222-4222-8222-222222222222";

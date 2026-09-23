@@ -13,7 +13,7 @@ use std::sync::Arc;
 use meerkat::experimental_gpt_live::{
     ExperimentalGptLiveBridgeError, ExperimentalGptLiveControlObservation,
     ExperimentalGptLiveControlPlane, ExperimentalGptLiveNarrationDispatch,
-    ExperimentalGptLiveResultDeliveryDispatch,
+    ExperimentalGptLiveResultDeliveryDispatch, ExperimentalLiveLifecycleObservationError,
 };
 use meerkat_core::exact_operation::ExactOperationIdentity;
 use meerkat_core::ops::OperationId;
@@ -2895,7 +2895,7 @@ impl ExperimentalLiveDelegationCoordinator {
     async fn observe_provider_lifecycle(
         &self,
         observation: &LiveSidebandObservation,
-    ) -> Result<(), String> {
+    ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
         let key = (
             observation.binding().session_id().clone(),
             observation.binding().channel_id().clone(),
@@ -2917,10 +2917,48 @@ impl ExperimentalLiveDelegationCoordinator {
                     )
             });
         if !bound {
-            return Err(
+            return Err(ExperimentalLiveLifecycleObservationError::CustodyLost(
                 "provider lifecycle observation has no exact running channel custody".to_string(),
-            );
+            ));
         }
+        let applied = self.apply_provider_lifecycle(observation).await;
+        match applied {
+            Ok(()) => Ok(()),
+            Err(reason) => Err(self.classify_lifecycle_failure(observation, reason).await),
+        }
+    }
+
+    /// A lifecycle fact the runtime did not apply is a refusal while the
+    /// observation's channel is still bound in the machine with the same
+    /// fence and generation; once that binding is gone (the channel closed or
+    /// was rebound under the observation), nothing further can be applied and
+    /// the failure is lost custody. Both are typed state reads, never a
+    /// reading of the error text.
+    async fn classify_lifecycle_failure(
+        &self,
+        observation: &LiveSidebandObservation,
+        reason: String,
+    ) -> ExperimentalLiveLifecycleObservationError {
+        let binding = observation.binding();
+        let bound = self
+            .runtime
+            .live_delegation_runtime_binding(binding.session_id(), binding.channel_id())
+            .await
+            .is_ok_and(|runtime_binding| {
+                runtime_binding.generation() == binding.runtime_generation().get()
+                    && runtime_binding.fence_token() == binding.runtime_fence().get()
+            });
+        if bound {
+            ExperimentalLiveLifecycleObservationError::Refused(reason)
+        } else {
+            ExperimentalLiveLifecycleObservationError::CustodyLost(reason)
+        }
+    }
+
+    async fn apply_provider_lifecycle(
+        &self,
+        observation: &LiveSidebandObservation,
+    ) -> Result<(), String> {
         match observation.kind() {
             LiveSidebandObservationKind::TurnStarted {
                 role: meerkat_live::LiveSidebandTurnRole::User,
@@ -3926,6 +3964,25 @@ impl ExperimentalLiveDelegationCoordinator {
         }
     }
 
+    /// The channel closed under a retained result. Stop further provider
+    /// delivery attempts and, for an owned fork whose result never crossed
+    /// the provider boundary, merge it into the source member exactly once.
+    async fn merge_result_after_channel_close(&self, retained: &Arc<RetainedDelegation>) {
+        let undelivered = {
+            let mut result = retained.result.lock().await;
+            result.terminal_ineligible = true;
+            (!result.dispatch_crossed)
+                .then(|| result.result_text.clone())
+                .flatten()
+        };
+        if retained.admission.worker_ownership() == LiveDelegationWorkerOwnership::OwnedMember
+            && let Some(text) = undelivered
+        {
+            self.merge_result_into_source(retained, &text).await;
+        }
+        self.remove_retained_delegation(retained).await;
+    }
+
     /// A worker that finished after its voice channel closed still merges:
     /// its result is queued on the source member as ordinary internal work.
     async fn merge_result_into_source(&self, retained: &RetainedDelegation, result_text: &str) {
@@ -4450,6 +4507,26 @@ impl ExperimentalLiveDelegationCoordinator {
                 {
                     Ok(()) => break,
                     Err(error) => {
+                        // The provider binding may be gone for good: a worker
+                        // whose terminal landed after the transport retired
+                        // but before the machine recorded the close. Once the
+                        // machine no longer holds the channel active, the
+                        // result takes the post-close path (merged into the
+                        // source member) instead of retrying forever against
+                        // a channel that will never come back.
+                        if !coordinator
+                            .runtime
+                            .live_channel_is_active_for_session(
+                                task_retained.runtime_binding.session_id(),
+                                task_retained.runtime_binding.channel_id(),
+                            )
+                            .await
+                        {
+                            coordinator
+                                .merge_result_after_channel_close(&task_retained)
+                                .await;
+                            break;
+                        }
                         tracing::warn!(%error, %task_operation_id, "owned live result delivery retry remains pending");
                         tokio::time::sleep(retry_delay).await;
                         retry_delay = retry_delay
@@ -4987,18 +5064,7 @@ impl ExperimentalLiveDelegationCoordinator {
             retained.result.lock().await.terminal_ineligible = true;
             self.settle_result_delivery_task(retained.operation.operation_id())
                 .await;
-            let undelivered = {
-                let result = retained.result.lock().await;
-                (!result.dispatch_crossed)
-                    .then(|| result.result_text.clone())
-                    .flatten()
-            };
-            if retained.admission.worker_ownership() == LiveDelegationWorkerOwnership::OwnedMember
-                && let Some(text) = undelivered
-            {
-                self.merge_result_into_source(&retained, &text).await;
-            }
-            self.remove_retained_delegation(&retained).await;
+            self.merge_result_after_channel_close(&retained).await;
         }
         self.settle_responses_retirement_debt_for_binding(binding)
             .await;
@@ -5053,7 +5119,7 @@ impl meerkat::experimental_gpt_live::ExperimentalLiveBoundChannelActivator
     async fn observe_provider_lifecycle(
         &self,
         observation: &LiveSidebandObservation,
-    ) -> Result<(), String> {
+    ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
         ExperimentalLiveDelegationCoordinator::observe_provider_lifecycle(self, observation).await
     }
 
@@ -6663,6 +6729,10 @@ mod tests {
         releases: Mutex<Vec<(String, String)>>,
         /// Narrations and result releases in the order the provider saw them.
         events: Mutex<Vec<ExactProjectionControlEvent>>,
+        /// The provider transport has been retired: every release and
+        /// narration reports `ActiveBindingUnavailable`, as the real control
+        /// plane does between the physical close and the machine's close.
+        binding_unavailable: std::sync::atomic::AtomicBool,
     }
 
     #[cfg(feature = "experimental-gpt-live-gate0-harness")]
@@ -6746,6 +6816,12 @@ mod tests {
             text: String,
         ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError>
         {
+            if self
+                .binding_unavailable
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable);
+            }
             self.releases
                 .lock()
                 .await
@@ -6785,6 +6861,12 @@ mod tests {
             _delegation: LiveSidebandDelegationRef,
             text: String,
         ) -> Result<ExperimentalGptLiveNarrationDispatch, ExperimentalGptLiveBridgeError> {
+            if self
+                .binding_unavailable
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable);
+            }
             self.narrations
                 .lock()
                 .await

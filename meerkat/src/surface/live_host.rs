@@ -1023,18 +1023,39 @@ impl<B: SessionAgentBuilder + 'static>
     async fn observe_provider_lifecycle(
         &self,
         observation: &meerkat_live::LiveSidebandObservation,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::experimental_gpt_live::ExperimentalLiveLifecycleObservationError> {
         if matches!(
             observation.kind(),
             meerkat_live::LiveSidebandObservationKind::TurnStarted {
                 role: meerkat_live::LiveSidebandTurnRole::Assistant,
                 ..
             }
-        ) {
-            self.runtime
-                .observe_live_assistant_turn_started(observation)
+        ) && let Err(error) = self
+            .runtime
+            .observe_live_assistant_turn_started(observation)
+            .await
+        {
+            // A refusal while the channel is still bound in the machine fails
+            // this fact alone; a channel the machine no longer binds under
+            // this observation's fence and generation is lost custody.
+            let binding = observation.binding();
+            let bound = self
+                .runtime
+                .live_delegation_runtime_binding(binding.session_id(), binding.channel_id())
                 .await
-                .map_err(|error| error.to_string())?;
+                .is_ok_and(|runtime_binding| {
+                    runtime_binding.generation() == binding.runtime_generation().get()
+                        && runtime_binding.fence_token() == binding.runtime_fence().get()
+                });
+            return Err(if bound {
+                crate::experimental_gpt_live::ExperimentalLiveLifecycleObservationError::Refused(
+                    error.to_string(),
+                )
+            } else {
+                crate::experimental_gpt_live::ExperimentalLiveLifecycleObservationError::CustodyLost(
+                    error.to_string(),
+                )
+            });
         }
         self.downstream_activator
             .observe_provider_lifecycle(observation)

@@ -41,6 +41,19 @@ use meerkat_llm_core::realtime_session::RealtimeSessionOpenConfig;
 use std::num::NonZeroUsize;
 
 use crate::session_runtime::errors::LiveOpenPrecheckError;
+
+/// How long a requested closure may go unsettled before the owner retires the
+/// transport locally: counted from an accepted `session.close` that the
+/// provider never confirms, and also from the first close request when the
+/// provider never accepts one (the remote side already hung up). One close
+/// request observes the drain for this whole bound, so a channel whose
+/// remote is gone converges on its first request instead of failing every
+/// retry with the same unavailable error. Recovery-driven closes keep the
+/// binding for retry so a slow but progressing drain can settle.
+///
+/// Lives here, outside the provider-gated experimental module, because the
+/// close verb applies it on every feature set.
+pub const LIVE_CLOSE_CONFIRMATION_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
 #[cfg(feature = "openai-live")]
 use crate::session_runtime::live_summary;
 
@@ -3377,7 +3390,15 @@ mod orchestrator {
 
         /// Least time a close waits for the member's running turn to reach its
         /// finalization boundary, even when the transport drain consumed the
-        /// rest of `LIVE_CLOSE_CONFIRMATION_BOUND`.
+        /// whole of `LIVE_CLOSE_CONFIRMATION_BOUND`.
+        ///
+        /// Worst case for one `live/close` request: the transport drain on a
+        /// dead remote takes the full confirmation bound (15 s), then this
+        /// floor (2 s), so a close returns within 17 s. A member turn still
+        /// running past that is `CloseSettlementBusy`: the machine channel
+        /// stays active as the retry anchor with the transport already
+        /// retired, and the delegation coordinator merges any result that
+        /// lands meanwhile once the machine records the close.
         const LIVE_CLOSE_TURN_SETTLEMENT_FLOOR: std::time::Duration =
             std::time::Duration::from_secs(2);
 
@@ -3423,7 +3444,7 @@ mod orchestrator {
             // delegation executing the spoken request, or a fork holding the
             // boundary) is waited for within what remains of the close bound,
             // so one close request converges instead of failing busy.
-            let settlement_bound = crate::experimental_gpt_live::LIVE_CLOSE_CONFIRMATION_BOUND
+            let settlement_bound = super::LIVE_CLOSE_CONFIRMATION_BOUND
                 .saturating_sub(close_started.elapsed())
                 .max(Self::LIVE_CLOSE_TURN_SETTLEMENT_FLOOR);
             self.service

@@ -19,12 +19,19 @@ impl Drop for Workspace {
     }
 }
 
-/// One model call observed by the scripted client: its index and the text
-/// of the user-role messages it carried.
+/// One model call observed by the scripted client: its index, the text of
+/// every user-role message it carried, and the text of the last one.
+///
+/// A durable fork inherits the source member's transcript, which already
+/// holds the committed spoken requests of every delegation on the channel,
+/// so `user_text` of one fork can name another delegation's request. The
+/// fork's own task is always the last user message; tests that must tell
+/// two forks apart read `task_text`.
 #[derive(Debug, Clone)]
 struct ObservedCall {
     index: usize,
     user_text: String,
+    task_text: String,
 }
 
 struct ScriptedClient {
@@ -97,15 +104,16 @@ impl meerkat_client::LlmClient for ScriptedClient {
         &'a self,
         request: &'a meerkat_client::LlmRequest,
     ) -> meerkat_client::types::LlmStream<'a> {
-        let user_text = request
+        let user_messages = request
             .messages
             .iter()
             .filter_map(|message| match message {
                 meerkat_core::Message::User(user) => Some(user.text_content()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect::<Vec<_>>();
+        let task_text = user_messages.last().cloned().unwrap_or_default();
+        let user_text = user_messages.join("\n");
         let response = futures::stream::once(async move {
             let index = self.calls.fetch_add(1, Ordering::SeqCst);
             let mut call = InFlightCall {
@@ -113,7 +121,11 @@ impl meerkat_client::LlmClient for ScriptedClient {
                 cancelled: self.cancelled.clone(),
                 completed: false,
             };
-            let _ = self.entered.send(ObservedCall { index, user_text });
+            let _ = self.entered.send(ObservedCall {
+                index,
+                user_text,
+                task_text,
+            });
             self.gate(index)
                 .acquire()
                 .await
@@ -402,6 +414,102 @@ impl Fixture {
     /// Result delivery to the provider needs the experimental context
     /// binding this fixture does not open, so completion is observed through
     /// the generated schedule state instead of provider releases.
+    /// Wait for one operation's generated schedule state; on timeout, dump
+    /// the coordinator's and runtime's view so a stall names its stage.
+    async fn wait_for_schedule_state(
+        &mut self,
+        operation: &OperationId,
+        expected: meerkat_runtime::live_execution::LiveDelegationScheduleState,
+    ) {
+        let started = std::time::Instant::now();
+        while started.elapsed() < WAIT {
+            if self.schedule_state(operation).await == Some(expected) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let snapshots = self
+            .runtime
+            .live_delegation_recovery_snapshots(&self.session_id)
+            .await
+            .map(|snapshots| {
+                snapshots
+                    .iter()
+                    .map(|snapshot| {
+                        format!(
+                            "{}: phase={:?} terminal={:?} late={}",
+                            snapshot.operation_id(),
+                            snapshot.phase(),
+                            snapshot.terminal(),
+                            snapshot.late()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+        let schedules = {
+            let schedules = self.coordinator.schedules.lock().await;
+            schedules
+                .values()
+                .map(|schedule| {
+                    format!(
+                        "queue={:?} running={:?} pending={:?}",
+                        schedule.queue,
+                        schedule.running,
+                        schedule
+                            .pending
+                            .iter()
+                            .map(|(id, pending)| format!(
+                                "{id}: blocked={} deferred={} attempts={}",
+                                pending.blocked, pending.deferred, pending.start_attempts
+                            ))
+                            .collect::<Vec<_>>()
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let retained = self
+            .coordinator
+            .retained
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let active = self
+            .coordinator
+            .active
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut cancelled = Vec::new();
+        while let Ok(index) = self.cancelled.try_recv() {
+            cancelled.push(index);
+        }
+        let mut entered = Vec::new();
+        while let Ok(call) = self.entered.try_recv() {
+            entered.push((
+                call.index,
+                call.task_text.chars().take(60).collect::<String>(),
+            ));
+        }
+        let items = if self.workgraph.is_some() {
+            self.voice_items()
+                .await
+                .iter()
+                .map(|item| format!("{} {:?} rev={}", item.title, item.status, item.revision))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        panic!(
+            "operation {operation} did not reach {expected:?} within {WAIT:?}: state={:?}\nsnapshots={snapshots:?}\nschedules={schedules:?}\nretained={retained:?}\nactive={active:?}\ncancelled_calls={cancelled:?}\nunconsumed_calls={entered:?}\nitems={items:?}\nnarrations={:?}",
+            self.schedule_state(operation).await,
+            self.narrations().await,
+        );
+    }
+
     async fn wait_for_completed(&self, operations: &[OperationId]) {
         wait_until(WAIT, || async {
             let mut all = true;
@@ -509,21 +617,37 @@ impl Fixture {
     }
 }
 
-async fn wait_until<F, Fut>(timeout: std::time::Duration, mut condition: F)
+/// Poll `condition` until it holds or `timeout` elapses. The caller's
+/// location is captured before the first await so a timeout names the wait
+/// that failed.
+#[track_caller]
+fn wait_until<F, Fut>(
+    timeout: std::time::Duration,
+    mut condition: F,
+) -> impl std::future::Future<Output = ()>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    tokio::time::timeout(timeout, async {
-        loop {
-            if condition().await {
-                return;
+    let caller = std::panic::Location::caller();
+    async move {
+        tokio::time::timeout(timeout, async {
+            loop {
+                if condition().await {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("condition holds before the timeout");
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "condition at {}:{} did not hold within {timeout:?}",
+                caller.file(),
+                caller.line()
+            )
+        });
+    }
 }
 
 fn kinds(narrations: &[(LiveDelegationNarrationKind, String)]) -> Vec<LiveDelegationNarrationKind> {
@@ -699,7 +823,7 @@ async fn blocked_worker_is_retired_and_requeued_with_the_dependency_result() {
             .collect::<std::collections::BTreeSet<_>>(),
         [0, 1].into_iter().collect()
     );
-    let first_call_index = if first_call.user_text.contains("quarterly") {
+    let first_call_index = if first_call.task_text.contains("quarterly") {
         first_call.index
     } else {
         second_call.index
@@ -742,11 +866,10 @@ async fn blocked_worker_is_retired_and_requeued_with_the_dependency_result() {
         .await
         .expect("release behind the blocker");
     fx.client.release(second_call_index);
-
-    wait_until(WAIT, || async {
-        fx.schedule_state(&second).await
-            == Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Blocked)
-    })
+    fx.wait_for_schedule_state(
+        &second,
+        meerkat_runtime::live_execution::LiveDelegationScheduleState::Blocked,
+    )
     .await;
     wait_until(WAIT, || async {
         fx.narrations()
@@ -1012,7 +1135,7 @@ async fn blocked_worker_restarts_with_a_preface_when_its_blocker_fails() {
         .await;
     let first_call = fx.next_call().await;
     let second_call = fx.next_call().await;
-    let first_call_index = if first_call.user_text.contains("quarterly") {
+    let first_call_index = if first_call.task_text.contains("quarterly") {
         first_call.index
     } else {
         second_call.index
@@ -1047,10 +1170,10 @@ async fn blocked_worker_restarts_with_a_preface_when_its_blocker_fails() {
         .await
         .expect("release behind the blocker");
     fx.client.release(second_call_index);
-    wait_until(WAIT, || async {
-        fx.schedule_state(&second).await
-            == Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Blocked)
-    })
+    fx.wait_for_schedule_state(
+        &second,
+        meerkat_runtime::live_execution::LiveDelegationScheduleState::Blocked,
+    )
     .await;
     fx.expect_no_call().await;
 
@@ -1160,6 +1283,72 @@ async fn blocked_worker_restarts_with_a_preface_when_its_blocker_fails() {
         "{narrations:?}"
     );
     fx.close().await;
+}
+
+/// Finding 2 (close-time terminal race): the transport retires and the close
+/// sweep runs while a fork is still running; its terminal lands while the
+/// machine still holds the channel active, so the result is scheduled for
+/// provider delivery against a binding that is gone. Once the machine
+/// records the close the result merges into the source exactly once, and
+/// nothing reaches the retired provider channel.
+#[tokio::test]
+async fn terminal_landing_between_transport_retirement_and_machine_close_merges_once() {
+    let mut fx = fixture(true).await;
+    let operation = fx.delegate("late", "long running late job").await;
+    let running = fx.next_call().await;
+    assert!(running.user_text.contains("long running late job"));
+
+    // Physical close: the transport is gone and the sweep skips the running
+    // fork; the machine still binds the channel.
+    fx.control
+        .binding_unavailable
+        .store(true, std::sync::atomic::Ordering::Release);
+    fx.coordinator
+        .cancel_channel_binding(&fx.provider_binding)
+        .await;
+    assert!(
+        fx.runtime
+            .live_channel_is_active_for_session(&fx.session_id, fx.binding.channel_id())
+            .await
+    );
+
+    // The worker finishes in the window: its terminal is recorded on the
+    // still-active machine channel and provider delivery cannot land.
+    fx.client.release(running.index);
+    wait_until(WAIT, || async {
+        fx.schedule_state(&operation).await
+            == Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Completed)
+    })
+    .await;
+    fx.expect_no_call().await;
+    assert!(fx.control.releases.lock().await.is_empty());
+
+    // The machine records the close: the pending delivery is interrupted by
+    // the close and the retained result merges into the source once.
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("machine close");
+    let merge = fx.next_call().await;
+    assert!(
+        merge
+            .user_text
+            .contains("finished after the voice call ended"),
+        "{}",
+        merge.user_text
+    );
+    fx.client.release(merge.index);
+    fx.expect_no_call().await;
+    assert!(
+        fx.control.releases.lock().await.is_empty(),
+        "nothing reaches the retired provider channel"
+    );
+    wait_until(WAIT, || async {
+        fx.coordinator.retained.lock().await.is_empty()
+    })
+    .await;
+    fx.assert_nothing_cancelled();
+    fx.handle.shutdown().await.expect("shutdown");
 }
 
 // The source member is mid-turn when the delegation arrives. The bounded

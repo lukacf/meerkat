@@ -54,9 +54,13 @@ on:
       - ready_for_review
   workflow_dispatch: {}
 
+# Pull requests: one group per PR, a newer push cancels the older run. Pushes
+# to main: one group per commit and no cancellation, so every main commit
+# completes its run and gets attested even when merges land back to back (a
+# per-ref group cancelled 35918370610 and 35920687943 before their gates).
 concurrency:
-  group: pr-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}-{1}', github.ref_name, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   actions: read

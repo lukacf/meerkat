@@ -160,7 +160,10 @@ them.
   always; generated-contract freshness and machine/protocol drift run when
   their paths change; wasm-check and the Python/TypeScript SDK suites run
   when their inputs change. Pushes trigger CI on `main` only, so a branch
-  head runs once through its pull request instead of twice. The gate runs
+  head runs once through its pull request instead of twice; a push to
+  `main` runs in a per-commit concurrency group with no cancellation, so
+  back-to-back merges each complete and attest (a per-ref group cancelled
+  the first two main runs of the new workflow before their gates). The gate runs
   under `!cancelled()` so a superseded run no longer leaves a failed
   `CI gate` on the head. Successful
   `main` pushes emit a schema-4 attestation (backend `github-hosted-cargo`),

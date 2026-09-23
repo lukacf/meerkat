@@ -152,8 +152,10 @@ them.
   concern), and the canonical row still confirms the digest chain; only the
   worker task text changes. A backchannel ("mm-hm") mid-request no longer
   splits the request across two delegations, and a request answered natively
-  between two delegations is visible to the executor as context. (behaviour
-  change, not measured by the semver gate)
+  between two delegations is visible to the executor as context. A delegation
+  that arrives with no new user transcript in its window re-presents the
+  previous request, as before. (behaviour change, not measured by the semver
+  gate)
 - Concurrent (open-media-first) GPT Live context bootstrap no longer reads the
   committed transcript body on the open path. The strict open admits the
   summary against the body-free committed boundary and hands back the pending
@@ -333,18 +335,18 @@ them.
 
 ### Breaking
 - `SessionError` gains the variant `WholeBlobAuditedEndpointDivergence { id }`
-- `meerkat_openai::gpt_live_broker::GptLiveBrokerObservation::ClientDelegationFinal`
-  gains the fields `request_transcript: String` and `assistant_context: String`
-  (exhaustive struct patterns must name them or use `..`).
-- `meerkat_live::LiveSidebandObservationKind::DelegationRequested` gains the
-  fields `request_transcript: String` and `assistant_context: String`
-  (exhaustive struct patterns must name them or use `..`).
   (`SessionError::*` exhaustive matches must add the arm) and
   `DurableResumeHold` gains `AuditedEndpointDivergence` (`DurableResumeHold::*`);
   `RuntimeStoreError` (`#[non_exhaustive]`) gains `AuditedEndpointDivergence`.
   `PersistentSessionService::repair_whole_blob_audited_endpoint` and
   `meerkat_runtime::store::whole_blob_repair::repair_whole_blob_audited_endpoint`
   take an `accept_shorter: bool` parameter.
+- `meerkat_openai::gpt_live_broker::GptLiveBrokerObservation::ClientDelegationFinal`
+  gains the fields `request_transcript: String` and `assistant_context: String`
+  (exhaustive struct patterns must name them or use `..`).
+- `meerkat_live::LiveSidebandObservationKind::DelegationRequested` gains the
+  fields `request_transcript: String` and `assistant_context: String`
+  (exhaustive struct patterns must name them or use `..`).
 
 - `PublicGptLiveOpenAuthorityConfig` gains the public field
   `session_instructions_preface: Option<Arc<dyn PublicGptLiveInstructionsPreface>>`

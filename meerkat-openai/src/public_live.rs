@@ -801,13 +801,13 @@ impl PublicLiveBrokerSession {
         text: impl Into<String>,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         let text = require_context(text)?;
-        let fragments = thinking_fragments(&text);
-        let count = fragments
-            .clone()
-            .take(SessionState::MAX_PENDING_APPENDS + 1)
-            .count();
-        let token = self.state.lock().await.reserve_thinking_append(count)?;
-        for (index, content) in fragments.enumerate() {
+        let fragments = context_fragments(&text);
+        let token = self
+            .state
+            .lock()
+            .await
+            .reserve_thinking_append(fragments.len())?;
+        for (index, content) in fragments.into_iter().enumerate() {
             let event = Self::thinking_event(token, index, content.to_owned());
             self.deliver_append(token, event).await?;
         }
@@ -824,15 +824,38 @@ impl PublicLiveBrokerSession {
         &self,
         text: impl Into<String>,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
-        let text = require_context(text)?;
-        let fragments = thinking_fragments(&text);
-        let count = fragments
-            .clone()
-            .take(SessionState::MAX_PENDING_APPENDS + 1)
-            .count();
-        let token = self.state.lock().await.reserve_instructions_append(count)?;
-        for (index, content) in fragments.enumerate() {
-            let event = Self::instructions_event(token, index, content.to_owned());
+        self.append_instructions_context_sections(vec![text.into()])
+            .await
+    }
+
+    /// Append trusted knowledge as ordered sections that never share a
+    /// fragment: every section starts at a fragment boundary, so a framing
+    /// preface is acknowledged as its own fragment(s) and the knowledge it
+    /// frames arrives intact from the first byte of the next fragment
+    /// (measured against gpt-live-1: a summary sentence cut mid-word across
+    /// the framing's fragment boundary was recalled about half the time).
+    /// Blank sections are skipped; the total must be non-empty. One token,
+    /// exact receipts, and the same rejection and close semantics as
+    /// [`Self::append_instructions_context`].
+    pub async fn append_instructions_context_sections(
+        &self,
+        sections: Vec<String>,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        let fragments: Vec<String> = sections
+            .iter()
+            .filter(|section| !section.trim().is_empty())
+            .flat_map(|section| context_fragments(section).into_iter().map(str::to_owned))
+            .collect();
+        if fragments.is_empty() {
+            return Err(GptLiveBrokerError::MissingContext);
+        }
+        let token = self
+            .state
+            .lock()
+            .await
+            .reserve_instructions_append(fragments.len())?;
+        for (index, content) in fragments.into_iter().enumerate() {
+            let event = Self::instructions_event(token, index, content);
             self.deliver_append(token, event).await?;
         }
         Ok(token)
@@ -1630,11 +1653,9 @@ impl SessionState {
         }
         self.seen_delegation_ids.insert(delegation.id.clone());
         let reference = GptLiveDelegationRef(delegation.id);
-        // The executor-input window is anchored on this protocol event
-        // whatever its target: it holds every transcript delta received
-        // since the previous `session.delegation.created` (or since open).
-        let (request_transcript, assistant_context) = self.take_delegation_window();
         if delegation.target != DelegationTarget::Client {
+            // No executor input is produced, so the window stays open: the
+            // user's words are not drained by a delegation nobody acts on.
             self.queued_observations.push_back(
                 GptLiveBrokerObservation::DelegationActionableInputUnsupported {
                     delegation: reference,
@@ -1642,6 +1663,10 @@ impl SessionState {
             );
             return Ok(());
         }
+        // The executor-input window is anchored on this protocol event: it
+        // holds every transcript delta received since the previous client
+        // `session.delegation.created` (or since open).
+        let (request_transcript, assistant_context) = self.take_delegation_window();
         // The executor request is the whole window's user transcript. The
         // provider's backchannels ("mm-hm", "sure") are designed behaviour
         // and carry no turn boundary, so an assistant delta between two
@@ -1743,16 +1768,41 @@ fn instructions_event_id(token: GptLiveAppendToken, index: usize) -> String {
     format!("meerkat-instructions-{}-{index}", token.0)
 }
 
-fn thinking_fragments(mut text: &str) -> impl Iterator<Item = &str> + Clone {
-    std::iter::from_fn(move || {
-        if text.is_empty() {
-            return None;
+/// Largest payload of one fragmented append, a conservative byte bound for
+/// the provider's 500-token append limit.
+const CONTEXT_FRAGMENT_MAX_BYTES: usize = 500;
+
+/// Split `text` into ordered fragments of at most [`CONTEXT_FRAGMENT_MAX_BYTES`]
+/// whose concatenation is exactly `text`. A fragment ends at the end of the
+/// last whitespace run inside its window, so no word (or number, or quoted
+/// phrase) is cut in two and the next fragment starts on a non-blank
+/// character; fragments are therefore often shorter than the bound. A single
+/// token longer than the bound has no whitespace to cut at and falls back to
+/// a byte split on a UTF-8 character boundary, which the provider still
+/// accepts (the bound is what matters on the wire, the seam only matters for
+/// recall). The result is bounded by the caller's pending-append limit.
+fn context_fragments(mut text: &str) -> Vec<&str> {
+    let mut fragments = Vec::new();
+    while !text.is_empty() {
+        if text.len() <= CONTEXT_FRAGMENT_MAX_BYTES {
+            fragments.push(text);
+            break;
         }
-        let end = text.floor_char_boundary(text.len().min(500));
-        let (fragment, remaining) = text.split_at(end);
+        let window = text.floor_char_boundary(CONTEXT_FRAGMENT_MAX_BYTES);
+        // End of the last whitespace run that finishes inside the window:
+        // the cut lands after the blank, before the next non-blank char.
+        let cut = text[..window]
+            .char_indices()
+            .rev()
+            .filter(|(_, ch)| ch.is_whitespace())
+            .map(|(index, ch)| index + ch.len_utf8())
+            .find(|end| text[*end..].starts_with(|ch: char| !ch.is_whitespace()))
+            .unwrap_or(window);
+        let (fragment, remaining) = text.split_at(cut);
+        fragments.push(fragment);
         text = remaining;
-        Some(fragment)
-    })
+    }
+    fragments
 }
 
 fn map_live_error(error: LiveError) -> GptLiveBrokerError {
@@ -2516,7 +2566,7 @@ mod tests {
             "🦀日本語 é\n".repeat(150),
             format!("{}🦀tail", "x".repeat(499)),
         ] {
-            let fragments = thinking_fragments(&text).collect::<Vec<_>>();
+            let fragments = context_fragments(&text);
             assert_eq!(fragments.concat(), text);
             assert!(fragments.len() > 1);
             for (index, &fragment) in fragments.iter().enumerate() {
@@ -2545,9 +2595,9 @@ mod tests {
                 assert!(!format!("{event:?}").contains(fragment));
             }
         }
-        assert_eq!(thinking_fragments("").count(), 0);
-        assert_eq!(thinking_fragments(&"x".repeat(500)).count(), 1);
-        assert_eq!(thinking_fragments(&"x".repeat(501)).count(), 2);
+        assert_eq!(context_fragments("").len(), 0);
+        assert_eq!(context_fragments(&"x".repeat(500)).len(), 1);
+        assert_eq!(context_fragments(&"x".repeat(501)).len(), 2);
     }
 
     #[test]
@@ -2938,6 +2988,39 @@ mod tests {
     }
 
     #[test]
+    fn non_client_delegation_leaves_the_window_open() {
+        // A delegation nobody acts on produces no executor input, so it must
+        // not drain the user's words: the next client delegation still sees
+        // everything since open.
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(input_delta("first half ")))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_r", "responses")))
+            .unwrap();
+        assert!(matches!(
+            drain(&mut state).last(),
+            Some(GptLiveBrokerObservation::DelegationActionableInputUnsupported { .. })
+        ));
+        state
+            .apply_frame(frame(input_delta("second half")))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_c", "client")))
+            .unwrap();
+        let joined: Vec<_> = drain(&mut state)
+            .into_iter()
+            .filter(|o| matches!(o, GptLiveBrokerObservation::ClientDelegationFinal { .. }))
+            .collect();
+        assert!(matches!(
+            joined.as_slice(),
+            [GptLiveBrokerObservation::ClientDelegationFinal { request_transcript, .. }]
+                if request_transcript == "first half second half"
+        ));
+    }
+
+    #[test]
     fn two_requests_without_assistant_speech_are_separate_windows() {
         let mut state = SessionState::default();
         state.apply_frame(frame(input_delta("first task"))).unwrap();
@@ -3091,6 +3174,150 @@ mod tests {
                 && request_transcript == "first half"
                 && assistant_context == "working on it"
         ));
+    }
+
+    #[test]
+    fn context_fragments_cut_at_whitespace_and_rejoin_exactly() {
+        let text = "alpha ".repeat(120) + "omega";
+        let fragments = context_fragments(&text);
+        assert!(fragments.len() >= 2);
+        assert_eq!(fragments.concat(), text, "byte-exact join");
+        for fragment in &fragments {
+            assert!(fragment.len() <= CONTEXT_FRAGMENT_MAX_BYTES);
+        }
+        for fragment in &fragments[..fragments.len() - 1] {
+            assert!(
+                fragment.ends_with(' '),
+                "a fragment ends at the end of a whitespace run"
+            );
+        }
+        for fragment in &fragments[1..] {
+            assert!(
+                fragment.starts_with(|ch: char| !ch.is_whitespace()),
+                "the next fragment starts on a word"
+            );
+        }
+        // Short text is one fragment, untouched.
+        assert_eq!(context_fragments("short text"), vec!["short text"]);
+    }
+
+    #[test]
+    fn context_fragments_fall_back_to_a_byte_split_for_one_long_token() {
+        // No whitespace anywhere: the only legal cut is a UTF-8 boundary at
+        // the bound. Multi-byte characters never straddle a fragment.
+        let text = "ü".repeat(600);
+        let fragments = context_fragments(&text);
+        assert_eq!(fragments.concat(), text);
+        assert!(
+            fragments
+                .iter()
+                .all(|f| f.len() <= CONTEXT_FRAGMENT_MAX_BYTES)
+        );
+        assert_eq!(fragments.len(), 3);
+        assert_eq!(fragments[0].len(), 500);
+        // A long token after some words: the words go first, the token is
+        // byte-split on its own.
+        let mixed = format!("lead words {}", "x".repeat(900));
+        let fragments = context_fragments(&mixed);
+        assert_eq!(fragments.concat(), mixed);
+        assert_eq!(fragments[0], "lead words ");
+        assert_eq!(fragments[1].len(), 500);
+    }
+
+    #[tokio::test]
+    async fn instructions_sections_never_share_a_fragment() {
+        // A framing preface followed by a summary: the preface is its own
+        // fragment even though both would fit one window together, the
+        // summary starts intact at the next fragment boundary, and the
+        // wire bytes concatenate to exactly preface + summary.
+        let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+        let attach_instructions =
+            move |State(capture): State<SharedCapture>, upgrade: WebSocketUpgrade| async move {
+                upgrade.on_upgrade(move |mut socket| async move {
+                    let mut commands = Vec::new();
+                    for _ in 0..3 {
+                        let event = recv_json(&mut socket, &capture).await;
+                        assert_eq!(event["type"], "session.instructions.append");
+                        commands.push(event);
+                    }
+                    for command in &commands {
+                        let mut ack = ack(command["event_id"].as_str());
+                        ack["type"] = json!("session.instructions.appended");
+                        send_json(&mut socket, ack).await;
+                    }
+                    let mute = recv_json(&mut socket, &capture).await;
+                    assert_eq!(mute["type"], "session.input_audio.mute");
+                    let close = recv_json(&mut socket, &capture).await;
+                    assert_eq!(close["type"], "session.close");
+                    send_json(&mut socket, session_closed()).await;
+                })
+            };
+        let app = Router::new()
+            .route("/v1/live/sessions", post(create_session))
+            .route(
+                "/v1/live/sessions/{session_id}/attach",
+                get(attach_instructions),
+            )
+            .with_state(Arc::clone(&capture));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let factory = PublicLiveBrokerFactory::__try_from_target_with_base_url(
+            realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
+            &format!("http://{address}/v1/"),
+        )
+        .unwrap();
+        let (_, session) = factory
+            .open(PublicLiveOpenConfig::new("v=0", "marin").unwrap())
+            .await
+            .unwrap()
+            .into_parts();
+        let framing = "Frame this. ".to_string();
+        let summary = "Historical vault phrase: copper otter. ".repeat(20);
+        let token = session
+            .append_instructions_context_sections(vec![framing.clone(), summary.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            session.state.lock().await.outstanding_receipt_count(),
+            3,
+            "one receipt reserved per fragment"
+        );
+        loop {
+            match session.next_observation().await.unwrap() {
+                Some(GptLiveBrokerObservation::InstructionsContextAppendAcknowledged {
+                    token: acknowledged,
+                }) => {
+                    assert_eq!(acknowledged, token);
+                    break;
+                }
+                Some(_) => {}
+                None => panic!("stream ended before the acknowledgement"),
+            }
+        }
+        let sent: Vec<String> = capture
+            .lock()
+            .unwrap()
+            .client_events
+            .iter()
+            .filter(|event| event["type"] == "session.instructions.append")
+            .map(|event| event["content"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[0], framing, "the framing is fragment 0 alone");
+        assert!(sent[1].starts_with("Historical vault phrase"));
+        assert!(sent[1].ends_with(' '), "the summary is cut at whitespace");
+        assert!(
+            sent[2].starts_with(|ch: char| !ch.is_whitespace()),
+            "the next fragment starts on a word"
+        );
+        assert!(sent.iter().all(|f| f.len() <= CONTEXT_FRAGMENT_MAX_BYTES));
+        assert_eq!(sent.concat(), format!("{framing}{summary}"), "bytes exact");
+        session.close().await.unwrap();
+        while session.next_observation().await.unwrap().is_some() {}
+        server.abort();
     }
 
     #[test]

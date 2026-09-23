@@ -59,14 +59,17 @@ pub(crate) struct LiveDelegationExecutorInput {
 }
 
 /// Heading of the labelled context section in the executor task text.
-pub(crate) const LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING: &str = "Assistant already said on the call meanwhile (context only, not part of the request; \
-     do not repeat it, and treat anything it already answered as answered):";
+pub(crate) const LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING: &str = "Assistant already generated on the call meanwhile (context only, not part of the request; \
+     the user may not have heard all of it; do not repeat it, and treat anything it already \
+     answered as answered):";
 
 /// The one seam that turns a delegation's provider window into the worker's
 /// task text. The request is the user transcript of the whole window; the
-/// assistant's native speech in that window is appended as a separately
+/// assistant's native output in that window is appended as a separately
 /// labelled section so the worker can see what was already answered, and is
-/// never merged into the request itself.
+/// never merged into the request itself. The label says "generated", not
+/// "said": after a barge-in the transcript can describe audio the user never
+/// heard.
 pub(crate) fn delegation_request_text(input: &LiveDelegationExecutorInput) -> String {
     let request = input.request_transcript.trim();
     let context = input.assistant_context.trim();

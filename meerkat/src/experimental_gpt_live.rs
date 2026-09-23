@@ -1941,6 +1941,15 @@ trait ExperimentalGptLiveBrokerSession: Send + Sync {
         })
     }
 
+    /// Instructions sections that must not share a wire fragment. The default
+    /// joins them, for sessions without fragment control.
+    async fn append_instructions_context_sections(
+        &self,
+        sections: Vec<String>,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        self.append_instructions_context(sections.concat()).await
+    }
+
     async fn append_delegation_context(
         &self,
         delegation: &GptLiveDelegationRef,
@@ -2023,6 +2032,13 @@ impl ExperimentalGptLiveBrokerSession for PublicLiveBrokerSession {
         text: String,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         PublicLiveBrokerSession::append_instructions_context(self, text).await
+    }
+
+    async fn append_instructions_context_sections(
+        &self,
+        sections: Vec<String>,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        PublicLiveBrokerSession::append_instructions_context_sections(self, sections).await
     }
 
     async fn append_delegation_context(
@@ -4496,9 +4512,16 @@ impl ExperimentalGptLiveWebrtcTransport {
         // generated authority is bound to the exact summary digest above;
         // the framing is wire presentation and keeps the summary subordinate
         // to what was said live.
-        let wire_text = format!("{LIVE_CONTEXT_BOOTSTRAP_FRAMING}\n{text}");
-        let command = LiveSidebandCommand::append_instructions_context(sideband, wire_text)
-            .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+        // The framing is its own fragment and the summary starts at the next
+        // fragment boundary (measured: with a 500-byte cut through the first
+        // summary sentence, recall of a planted phrase was 3/7; see the
+        // fragmenter in meerkat-openai `context_fragments`).
+        let command = LiveSidebandCommand::append_framed_instructions_context(
+            sideband,
+            LIVE_CONTEXT_BOOTSTRAP_FRAMING,
+            text,
+        )
+        .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
         let attempt = command.attempt();
         let (resolution_tx, resolution_rx) = oneshot::channel();
         self.pending_deliveries.lock().await.insert(
@@ -6235,14 +6258,32 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                 let result = self.session.append_thinking_context(text).await;
                 self.lower_append_delivery(reservation, result).await
             }
-            LiveSidebandProviderCommand::AppendInstructionsContext { attempt, text, .. } => {
+            LiveSidebandProviderCommand::AppendInstructionsContext {
+                attempt,
+                text,
+                seam,
+                ..
+            } => {
                 let reservation = self
                     .correlations
                     .lock()
                     .await
                     .appends
                     .reserve(SidebandAppendLane::Instructions, attempt)?;
-                let result = self.session.append_instructions_context(text).await;
+                // A seam marks where the framed knowledge starts; the broker
+                // starts a new fragment there. The bytes on the wire are the
+                // same `text` either way.
+                let result = if seam > 0 && seam < text.len() && text.is_char_boundary(seam) {
+                    let (framing, body) = text.split_at(seam);
+                    self.session
+                        .append_instructions_context_sections(vec![
+                            framing.to_owned(),
+                            body.to_owned(),
+                        ])
+                        .await
+                } else {
+                    self.session.append_instructions_context(text).await
+                };
                 self.lower_append_delivery(reservation, result).await
             }
             LiveSidebandProviderCommand::AppendSessionContext { attempt, text, .. } => {

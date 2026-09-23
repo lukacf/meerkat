@@ -693,6 +693,11 @@ enum LiveSidebandCommandKind {
         attempt: LiveSidebandAppendAttempt,
         cursor: u64,
         text: String,
+        /// Byte offset in `text` where the framed knowledge starts; the
+        /// provider adapter starts a new wire fragment there so the framing
+        /// preface never shares a fragment with what it frames. Zero when
+        /// the text has no preface.
+        seam: usize,
     },
     AppendSession {
         binding: ProviderWebrtcBinding,
@@ -733,6 +738,8 @@ pub enum LiveSidebandProviderCommand {
         attempt: LiveSidebandAppendAttempt,
         cursor: u64,
         text: String,
+        /// See [`LiveSidebandCommandKind::AppendInstructions::seam`].
+        seam: usize,
     },
     AppendSessionContext {
         binding: ProviderWebrtcBinding,
@@ -797,6 +804,32 @@ impl LiveSidebandCommand {
                 attempt: authority.attempt,
                 cursor: authority.cursor,
                 text,
+                seam: 0,
+            },
+        })
+    }
+
+    /// Trusted knowledge behind a framing preface. The wire text is
+    /// `framing`, a newline, then `body`; the seam after the newline makes
+    /// the provider adapter start `body` in its own fragment, so the framing
+    /// is acknowledged alone and the knowledge arrives intact.
+    pub fn append_framed_instructions_context(
+        authority: LiveSidebandAppendAuthority,
+        framing: &str,
+        body: impl Into<String>,
+    ) -> Result<Self, LiveSidebandCommandError> {
+        let framing = require_sideband_text(framing.to_owned())?;
+        let body = require_sideband_text(body)?;
+        authority.consume_once()?;
+        let text = format!("{framing}\n{body}");
+        let seam = framing.len() + 1;
+        Ok(Self {
+            kind: LiveSidebandCommandKind::AppendInstructions {
+                binding: authority.binding,
+                attempt: authority.attempt,
+                cursor: authority.cursor,
+                text,
+                seam,
             },
         })
     }
@@ -896,11 +929,13 @@ impl LiveSidebandCommand {
                 attempt,
                 cursor,
                 text,
+                seam,
             } => LiveSidebandProviderCommand::AppendInstructionsContext {
                 binding,
                 attempt,
                 cursor,
                 text,
+                seam,
             },
             LiveSidebandCommandKind::AppendSession {
                 binding,

@@ -342,8 +342,8 @@ list.
 
 ### GitHub Workflows
 
-**CI** (`.github/workflows/ci.yml`) runs on pushes to `main`, `ci/**`,
-`feat/**`, and `feature/**`, PRs, and manual dispatch. It is Cargo-only on
+**CI** (`.github/workflows/ci.yml`) runs on pushes to `main`, PRs, and
+manual dispatch (a branch head runs once, via its PR). It is Cargo-only on
 GitHub-hosted runners and sized to a 20-minute push-to-terminal budget:
 - `changes` classifies the diff with `scripts/ci-cargo-lanes.mjs` (fail
   closed: every Rust-relevant change yields lanes; unmapped Rust paths, a
@@ -354,7 +354,8 @@ GitHub-hosted runners and sized to a 20-minute push-to-terminal budget:
   `machine-check-drift`/`protocol-check-drift` when machine authority changed.
 - `clippy` and `unit`: one lane per shard of the directly changed packages
   (`clippy --no-deps --all-targets --all-features -D warnings`,
-  `nextest --lib --bins --profile fast`).
+  `nextest --lib --bins --profile ci-pr`, the fast lane minus wall-clock
+  latency bounds that nightly and release keep).
 - `closure-check`: `cargo check --all-targets --all-features` over the
   reverse-dependency closure of the changed packages.
 - `wasm-check` and `sdk-host` when their inputs changed.

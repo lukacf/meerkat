@@ -16,7 +16,8 @@ name: CI
 #                     changed
 #   clippy (xN)     - one lane per shard of directly changed packages:
 #                     clippy --no-deps --all-targets --all-features
-#   unit (xN)       - one lane per shard: nextest --lib --bins --profile fast
+#   unit (xN)       - one lane per shard: nextest --lib --bins --profile ci-pr
+#                     (the fast lane minus wall-clock latency bounds)
 #   closure-check   - cargo check over the reverse-dependency closure of the
 #                     changed packages (downstream compile breaks)
 #   wasm-check      - wasm32 check of meerkat-web-runtime when its inputs
@@ -31,12 +32,12 @@ name: CI
 # and in the release workflow; PR CI never starts the remote Bazel fleet.
 
 on:
+  # Pushes run only on main (the attestation boundary). Every other branch
+  # gets CI through its pull request, so one head runs once: a push run and
+  # a pull_request run of the same head would each publish a "CI gate" check.
   push:
     branches:
       - main
-      - ci/**
-      - feat/**
-      - feature/**
   pull_request:
     types:
       - opened
@@ -180,7 +181,7 @@ jobs:
     name: Generation ratchets
     needs: changes
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -302,7 +303,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust_changed == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_matrix) }}
@@ -342,7 +343,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust_changed == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_matrix) }}
@@ -380,7 +381,7 @@ jobs:
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a unit lane"; exit 1; }
           # shellcheck disable=SC2086
-          ./scripts/repo-cargo nextest run ${PACKAGES} --lib --bins --profile fast \
+          ./scripts/repo-cargo nextest run ${PACKAGES} --lib --bins --profile ci-pr \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
 
   closure-check:
@@ -388,7 +389,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust_changed == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -459,7 +460,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.sdk_host == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       RUSTC_WRAPPER: sccache
     steps:

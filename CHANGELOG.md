@@ -126,7 +126,9 @@ them.
   paths and fails closed: any `.rs`, `Cargo.toml`, `Cargo.lock`, `.cargo/`,
   nextest, toolchain, build-wrapper, or `ci.yml` change yields at least one
   `clippy --no-deps --all-targets --all-features` lane and one
-  `nextest --lib --bins --profile fast` lane over the directly changed
+  `nextest --lib --bins --profile ci-pr` lane (the fast lane minus the two
+  `actor_isolation` wall-clock latency bounds, which nightly and release
+  keep running unchanged) over the directly changed
   packages (packed into at most six parallel shards), a `cargo check
   --all-targets --all-features` lane over their reverse-dependency closure,
   and the gate asserts that those lanes ran; an unmapped Rust path, a missing
@@ -135,8 +137,10 @@ them.
   Format, docs, semver self-test, version parity, and lock consistency run
   always; generated-contract freshness and machine/protocol drift run when
   their paths change; wasm-check and the Python/TypeScript SDK suites run
-  when their inputs change. The gate runs under `!cancelled()` so a
-  superseded run no longer leaves a failed `CI gate` on the head. Successful
+  when their inputs change. Pushes trigger CI on `main` only, so a branch
+  head runs once through its pull request instead of twice. The gate runs
+  under `!cancelled()` so a superseded run no longer leaves a failed
+  `CI gate` on the head. Successful
   `main` pushes emit a schema-4 attestation (backend `github-hosted-cargo`),
   which the release workflow accepts alongside the legacy schemas.
 - Everything else moved off the pull-request path: nightly now runs the full

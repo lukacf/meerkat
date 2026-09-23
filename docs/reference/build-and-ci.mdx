@@ -201,8 +201,8 @@ need the unbounded verification set.
 ## CI Shape
 
 Pull-request CI is `.github/workflows/ci.yml`. It runs on pull requests,
-pushes to `main`, `ci/**`, `feat/**`, and `feature/**`, and manual
-dispatches, entirely with Cargo on GitHub-hosted `ubuntu-latest` runners
+pushes to `main`, and manual dispatches (a branch head runs once, through its
+pull request), entirely with Cargo on GitHub-hosted `ubuntu-latest` runners
 (4 vCPU), and it is sized to a 20-minute push-to-terminal budget:
 
 | Job | Runs | Command |
@@ -211,7 +211,7 @@ dispatches, entirely with Cargo on GitHub-hosted `ubuntu-latest` runners
 | `fmt-governance` | always | `make fmt-check docs-check semver-breaks-selftest verify-version-parity verify-lock-consistency verify-bazel-module-lock-inputs check-rust-release-config ci-lanes-selftest` plus the release doctor contract test |
 | `ratchets` | always (steps conditional) | schema, SDK codegen, event inventory, RPC/REST surface, and SDK wrapper freshness when generated-contract paths changed; `machine-check-drift` and `protocol-check-drift` when machine-authority paths changed |
 | `clippy` (one lane per shard) | Rust-relevant change | `repo-cargo clippy -p <changed packages> --no-deps --all-targets --all-features -- -D warnings` |
-| `unit` (one lane per shard) | Rust-relevant change | `repo-cargo nextest run -p <changed packages> --lib --bins --profile fast` |
+| `unit` (one lane per shard) | Rust-relevant change | `repo-cargo nextest run -p <changed packages> --lib --bins --profile ci-pr` (the fast lane minus the wall-clock latency bounds, which nightly and release keep) |
 | `closure-check` | Rust-relevant change | `repo-cargo check -p <reverse-dependency closure> --all-targets --all-features` (catches downstream compile breaks the direct lanes miss) |
 | `wasm-check` | web-runtime, contracts, or workspace-wide change | `make wasm-check` |
 | `sdk-host` | `sdks/python`, `sdks/typescript`, or SDK tooling change | `make test-sdk-python test-sdk-typescript` |

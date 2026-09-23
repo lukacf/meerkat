@@ -156,7 +156,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
     }
     for lane in [
         "--no-deps --all-targets --all-features -- -D warnings",
-        "--lib --bins --profile fast",
+        "--lib --bins --profile ci-pr",
         "--all-features",
         "make fmt-check",
         "make docs-check",

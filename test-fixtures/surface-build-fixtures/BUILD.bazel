@@ -44,7 +44,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "embedded_min",
         "CARGO_MANIFEST_DIR": "test-fixtures/surface-build-fixtures",
     },
@@ -74,7 +74,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "runtime_backed_min",
         "CARGO_MANIFEST_DIR": "test-fixtures/surface-build-fixtures",
     },
@@ -112,7 +112,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "live_roundtrip",
         "CARGO_MANIFEST_DIR": "./test-fixtures/surface-build-fixtures",
     },

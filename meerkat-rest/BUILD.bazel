@@ -51,7 +51,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
     proc_macro_deps = all_crate_deps(
@@ -101,7 +101,7 @@ rust_library(
         "//meerkat-rest:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
     proc_macro_deps = all_crate_deps(
@@ -155,7 +155,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
     tags = [
@@ -221,7 +221,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "rkat-rest",
         "CARGO_MANIFEST_DIR": "meerkat-rest",
     },
@@ -281,7 +281,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "binary_fatal_error_display",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
@@ -352,7 +352,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "binary_http_e2e",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
@@ -426,7 +426,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "live_continue_tmp",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
@@ -498,7 +498,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "live_rest_matrix",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
@@ -576,7 +576,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "live_rest_regression",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
@@ -648,7 +648,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "regression_persistent",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
@@ -719,7 +719,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "rest_auth_endpoints",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
@@ -790,7 +790,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "rest_catalog_regression",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
@@ -861,7 +861,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "runtime_backed_ingress",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
@@ -934,7 +934,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "system_rest_resume",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
@@ -1006,7 +1006,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "system_rest_resume",
         "CARGO_MANIFEST_DIR": "./meerkat-rest",
     },
@@ -1069,7 +1069,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_MANIFEST_DIR": "meerkat-rest",
     },
     tags = [
@@ -1111,7 +1111,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "rkat-rest",
         "CARGO_MANIFEST_DIR": "meerkat-rest",
     },
@@ -1159,7 +1159,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_MANIFEST_DIR": "meerkat-rest",
     },
     tags = [
@@ -1205,7 +1205,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "rkat-rest",
         "CARGO_MANIFEST_DIR": "meerkat-rest",
     },

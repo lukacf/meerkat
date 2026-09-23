@@ -44,7 +44,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_MANIFEST_DIR": "./meerkat-machine-codegen",
     },
     proc_macro_deps = all_crate_deps(
@@ -76,7 +76,7 @@ rust_library(
         "//meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_MANIFEST_DIR": "./meerkat-machine-codegen",
     },
     proc_macro_deps = all_crate_deps(
@@ -112,7 +112,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_MANIFEST_DIR": "./meerkat-machine-codegen",
     },
     tags = [
@@ -171,7 +171,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "artifacts_semantic_model",
         "CARGO_MANIFEST_DIR": "./meerkat-machine-codegen",
     },
@@ -229,7 +229,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "named_type_binding_respected",
         "CARGO_MANIFEST_DIR": "./meerkat-machine-codegen",
     },
@@ -287,7 +287,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "render_contracts",
         "CARGO_MANIFEST_DIR": "./meerkat-machine-codegen",
     },
@@ -350,7 +350,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "routed_effect_module_shape",
         "CARGO_MANIFEST_DIR": "./meerkat-machine-codegen",
     },
@@ -410,7 +410,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "runtime_alphabet_parity",
         "CARGO_MANIFEST_DIR": "./meerkat-machine-codegen",
     },
@@ -472,7 +472,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.40",
+        "CARGO_PKG_VERSION": "0.8.41",
         "CARGO_BIN_NAME": "runtime_schema_parity",
         "CARGO_MANIFEST_DIR": "./meerkat-machine-codegen",
     },

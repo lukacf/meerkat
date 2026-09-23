@@ -4742,8 +4742,18 @@ class MeerkatClient:
             "params": params,
         }
         response_future = self._dispatcher.expect_response(request_id)
-        self._process.stdin.write((json.dumps(request) + "\n").encode())
-        await self._process.stdin.drain()
+        try:
+            self._process.stdin.write((json.dumps(request) + "\n").encode())
+            await self._process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            # The child closed its stdin: it has exited or is exiting. The read
+            # loop owns the typed fault for that (CONNECTION_CLOSED with the
+            # stderr tail explaining the exit) and fails `response_future` when
+            # stdout reaches EOF, which follows the pipe reset. Winning the
+            # race on the write side must not leak the raw OSError over it.
+            if self._dispatcher.transport_fault is not None:
+                raise self._dispatcher.transport_fault from exc
+            return await response_future
         return await response_future
 
     # -- Binary resolution (unchanged from original) -----------------------

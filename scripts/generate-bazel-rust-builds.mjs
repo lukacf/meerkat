@@ -1692,6 +1692,12 @@ for (const pkg of localPackages.values()) {
         // resolves ownership anchors against a full workspace type index);
         // the 60s "small" budget times out on remote executors.
         attrs.splice(attrs.length - 1, 0, `    size = "medium",`);
+      } else if (key === "meerkat-machine-codegen" && target.name === "render_contracts") {
+        // Renders the full canonical machine and composition catalog (the
+        // mob seam model alone is ~100k TLA lines) once per contract, 36
+        // times over: 52s on a 192-core host, past the 60s "small" budget on
+        // the remote executors.
+        attrs.splice(attrs.length - 1, 0, `    size = "medium",`);
       } else if (tags.includes("fast")) {
         attrs.splice(attrs.length - 1, 0, `    size = "small",`);
       }
@@ -1946,6 +1952,18 @@ for (const pkg of localPackages.values()) {
           `        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": ${q(agentFactoryBridgeSymbolSuffix)},`,
         );
       }
+      // A `#[path = "../../tests/..."]` module reached from `src/` (meerkat-mob's
+      // runtime tests include the shared placement fixture) compiles into the
+      // unit test but lives outside the `src/**` glob. Follow the module graph
+      // from the crate root and name every in-package source the glob misses.
+      // An include that leaves the package has no Bazel owner on this path and
+      // fails generation loudly instead of failing rustc on the executor.
+      const unitExtraSrcs = testSourceInputs(target, pkg, dir).paths.filter(
+        (path) => !path.startsWith("src/"),
+      );
+      const unitSrcsExpr = unitExtraSrcs.length
+        ? `glob(["src/**/*.rs"]) + ${listExpr(unitExtraSrcs, 8)}`
+        : srcsExpr;
       const unitAttrs = [
         `    name = ${q(unitName)},`,
         `    aliases = ${aliasesExpr.replace(`aliases(package_name = ${q(key)})`, `aliases(\n        package_name = ${q(key)},\n        normal = True,\n        normal_dev = True,\n        proc_macro = True,\n        proc_macro_dev = True,\n    )`)},`,
@@ -1954,7 +1972,7 @@ for (const pkg of localPackages.values()) {
         `    crate_features = ${listExpr(crateFeaturesFor(key, pkg))},`,
         `    edition = "2024",`,
         `    compile_data = ${compileDataExpr},`,
-        `    srcs = ${srcsExpr},`,
+        `    srcs = ${unitSrcsExpr},`,
         `    visibility = ${rustTargetVisibility(key)},`,
         `    rustc_env = {\n${unitRustcEnv.join("\n")}\n    },`,
         `    tags = ${listExpr(["fast", "unit"])},`,

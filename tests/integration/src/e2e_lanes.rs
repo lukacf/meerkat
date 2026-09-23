@@ -223,6 +223,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s98_gpt_live_public_playback_settlement_and_reopen, 98);
             scenario(e2e_smoke_s99_gpt_live_public_concurrent_context, 99);
             scenario(e2e_smoke_s100_gpt_live_public_morning_standup, 100);
+            scenario(e2e_smoke_s101_gpt_live_public_busy_backend, 101);
             scenario(e2e_smoke_s102_gpt_live_public_who_are_you, 102);
             scenario(e2e_smoke_s103_gpt_live_public_interrupt_and_recover, 103);
             scenario(e2e_smoke_s104_gpt_live_public_handoff_voice_typed_voice, 104);
@@ -4220,6 +4221,28 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
+        101 => Some(&Spec {
+            id: Some(101),
+            lane: Lane::Smoke,
+            title: "GPT Live public real-audio busy backend (slow job, quick question, second slow job in parallel)",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_101_gpt_live_public_busy_backend",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
         102 => Some(&Spec {
             id: Some(102),
             lane: Lane::Smoke,
@@ -6633,6 +6656,7 @@ mod tests {
     fn gpt_live_public_voice_scenarios_share_the_public_live_shard_composition() {
         for (id, test_name) in [
             (100, "e2e_scenario_100_gpt_live_public_morning_standup"),
+            (101, "e2e_scenario_101_gpt_live_public_busy_backend"),
             (102, "e2e_scenario_102_gpt_live_public_who_are_you"),
             (
                 103,

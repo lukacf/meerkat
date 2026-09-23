@@ -59,6 +59,8 @@ pub enum Stage {
     HandoffBack,
     // Shared: a silence hold right after an open or reopen (greeting check).
     SilenceHold,
+    // S101 busy backend.
+    BusyJobs,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -388,6 +390,16 @@ pub enum Record {
     HostLoad {
         moment: String,
         loadavg: String,
+    },
+    /// Mob-scoped WorkGraph items behind the channel's delegations: `items`
+    /// at or above `expected_delegations` is parallel mode (the coordinator
+    /// scheduled through WorkGraph); none is the serial fallback.
+    WorkGraph {
+        channel: u32,
+        items: usize,
+        expected_delegations: usize,
+        mode: String,
+        titles: Vec<String>,
     },
     /// A tolerant (model-dependent) check: recorded with its outcome, never
     /// a gate on its own. The deterministic checks assert.

@@ -248,12 +248,12 @@
       "name": "handoff_job",
       "file": "handoff-job.wav",
       "voice": "alloy",
-      "text": "Start a job for me. Write a short ode to coffee into a file called coffee.md, at least six lines, and make sure the last line mentions a nightjar. Read it back to me when it's done.",
-      "sha256": "25b9f9e2b4755f74ddf9d3a8e1e63cc1a0062b56379ce0964f02396eaebcf82d",
-      "duration_ms": 11697,
+      "text": "Start a job for me. Write a short ode to coffee into a file called coffee.md, at least six lines, and make sure the last line mentions a lantern. Read it back to me when it's done.",
+      "sha256": "76ae58a55f0d322e2a5a4a5743c6388f1117e5af54fe08cd6fef4c92c07bf54b",
+      "duration_ms": 12980,
       "sample_rate_hz": 24000,
-      "trailing_silence_ms": 1575,
-      "notes": "S104 job started by voice; the live channel closes while it runs. The result token nightjar is planted by the test. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor."
+      "trailing_silence_ms": 1580,
+      "notes": "S104 job started by voice; the live channel closes while it runs. The result token lantern is planted by the test (a single common word the recognizer does not split, unlike nightjar which came back as 'night jar'). Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor."
     },
     {
       "name": "handoff_back",
@@ -265,6 +265,39 @@
       "sample_rate_hz": 24000,
       "trailing_silence_ms": 1580,
       "notes": "S104 first utterance after the reopen: the answer window should carry the job's planted result token and the typed turn's fact. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, alloy), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "busy_job1",
+      "file": "busy-job1.wav",
+      "voice": "ash",
+      "text": "Start a slow job for me: in the shell, sleep for twenty-five seconds and then create a file called marker-one.txt, and tell me when it's done.",
+      "sha256": "37132663f0ce0f64c39513014a72ec40f56db88b36d2c17ba3de008e2491a839",
+      "duration_ms": 10635,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S101 job 1 at connect: a deliberately slow executor job (shell sleep 25 s, then a marker file). Minted with `voice_fixtures mint` (gpt-4o-mini-tts, ash), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "busy_quick",
+      "file": "busy-quick.wav",
+      "voice": "ash",
+      "text": "While that runs, a quick one: how many files are in the workspace right now? Just the number.",
+      "sha256": "00cf287027555e9e29c0dae9cd92d43d2446dc79ff5eec319c34ec64e75db869",
+      "duration_ms": 7252,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S101 unrelated quick question 5 s after job 1's delegation; it must not cancel job 1 and should finish before it under parallel scheduling. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, ash), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "busy_job2",
+      "file": "busy-job2.wav",
+      "voice": "ash",
+      "text": "And hand the executor a second slow job right away, don't wait for the first one: sleep twenty seconds, then create marker-two.txt, and tell me when that one is done too.",
+      "sha256": "ad160affd9ca4b627ed498c8108934cef95c3c84945611bf2abcbae7cd68791a",
+      "duration_ms": 13655,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S101 job 2 12 s after job 1's delegation; phrased as an explicit second delegation so the model does not answer it natively while job 1 runs. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, ash), VAD-normalised, 1500 ms trailing-silence floor."
     }
   ]
 }

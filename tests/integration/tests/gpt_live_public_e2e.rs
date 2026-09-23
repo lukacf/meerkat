@@ -587,6 +587,8 @@ struct PublicLiveHarness {
     channel_id: Value,
     session_id: meerkat_core::SessionId,
     mob_id: String,
+    mobs: Arc<meerkat_mob_mcp::MobMcpState>,
+    execution_policy: LiveDelegationExecutionPolicy,
     server_task: tokio::task::AbortHandle,
     shared: Option<(SharedPublicLive, ExactChannel)>,
     unmeasured_publication_fault: Option<Arc<AtomicBool>>,
@@ -664,6 +666,66 @@ impl PublicLiveHarness {
         assert_eq!(custody.phase(), &ExperimentalLiveChannelPhaseStatus::Closed);
         if let Some(evidence) = &self.evidence {
             evidence.channel(evidence.current_channel()?, evidence::ChannelAction::Closed)?;
+        }
+        Ok(())
+    }
+
+    /// Journal the mob-scoped WorkGraph items behind this channel's
+    /// delegations: at least one item per delegation proves the coordinator
+    /// scheduled through WorkGraph (parallel mode), none means the serial
+    /// fallback. Deterministic when `expected_delegations` > 0.
+    async fn record_workgraph_mode(
+        &mut self,
+        scenario: &str,
+        expected_delegations: usize,
+        failures: &mut Vec<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let evidence = self
+            .evidence
+            .clone()
+            .ok_or("workgraph record needs an evidence journal")?;
+        let channel = evidence.current_channel()?;
+        let service = self
+            .mobs
+            .workgraph_service_for_mob(&meerkat_mob::MobId::from(self.mob_id.as_str()))?
+            .ok_or("the mob state has no WorkGraph service (serial fallback host)")?;
+        let items = service
+            .list(meerkat::WorkItemFilter {
+                include_terminal: true,
+                ..Default::default()
+            })
+            .await?;
+        let titles: Vec<String> = items
+            .iter()
+            .map(|item| {
+                format!(
+                    "{:?} {}",
+                    item.status,
+                    item.title.chars().take(60).collect::<String>()
+                )
+            })
+            .collect();
+        let mode = if items.len() >= expected_delegations && !items.is_empty() {
+            "parallel"
+        } else {
+            "serial_fallback"
+        };
+        evidence.record(EvidenceRecord::WorkGraph {
+            channel,
+            items: items.len(),
+            expected_delegations,
+            mode: mode.to_owned(),
+            titles: titles.clone(),
+        })?;
+        println!(
+            "GPT_LIVE_{scenario}_WORKGRAPH mode={mode} items={} expected_delegations={expected_delegations} titles={titles:?}",
+            items.len()
+        );
+        if expected_delegations > 0 && items.len() < expected_delegations {
+            failures.push(format!(
+                "voice delegation ran on the serial fallback: {} WorkGraph items for {expected_delegations} delegations",
+                items.len()
+            ));
         }
         Ok(())
     }
@@ -873,6 +935,7 @@ async fn open_public_live_with_summary(
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
+        shared_host: false,
     })
     .await
 }
@@ -907,6 +970,11 @@ struct PublicLiveOpen<'a> {
     /// host (factory summarizer, 4 MiB / 16 KiB / 60 s, `Concurrent`).
     /// Requires `evidence`; implies unmeasured playback.
     summary_bootstrap: bool,
+    /// Compose the shared exact-receipt member host (browser peer answered
+    /// through `SharedPublicLive`) for a non-ExistingMember policy too, so
+    /// DurableFork scenarios get the same evidence and timeline. Implied for
+    /// ExistingMember.
+    shared_host: bool,
 }
 
 /// A second mob member for scenarios about "who else is around".
@@ -930,6 +998,7 @@ async fn open_public_live_with(
         extra_members,
         instructions_preface,
         summary_bootstrap,
+        shared_host,
     } = options;
     let concurrent = bootstrap.is_some() || unmeasured_playback || summary_bootstrap;
     let evidence = bootstrap
@@ -960,10 +1029,16 @@ async fn open_public_live_with(
         meerkat_models::canonical(),
     ));
     let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-    let persistence = meerkat::PersistenceBundle::new(
+    // A real WorkGraph store: the mob state rescopes it to the mob's realm
+    // (`mob.<id>`, default namespace) exactly as MobKit does, so live
+    // delegation schedules through WorkGraph items (parallel mode) instead
+    // of the DisabledWorkGraphStore serial fallback.
+    let persistence = meerkat::PersistenceBundle::new_with_subsystem_stores(
         session_store,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         Arc::new(meerkat_store::MemoryBlobStore::new()) as Arc<dyn BlobStore>,
+        Arc::new(meerkat::DisabledScheduleStore),
+        Arc::new(meerkat::MemoryWorkGraphStore::new()),
     );
     let runtime = Arc::new(SessionRuntime::new_with_config_store(
         factory.clone(),
@@ -1159,7 +1234,8 @@ async fn open_public_live_with(
     .with_live_webrtc(webrtc.clone())
     .with_live_webrtc_answer_transport(public_transport.clone());
     let mut unmeasured_publication_fault = None;
-    let shared = if execution_policy == LiveDelegationExecutionPolicy::ExistingMember {
+    let shared = if execution_policy == LiveDelegationExecutionPolicy::ExistingMember || shared_host
+    {
         let member_host = ServiceMemberLiveHost::new(ServiceMemberLiveHostConfig {
             service: runtime.inner().service.clone(),
             runtime_adapter: runtime.runtime_adapter(),
@@ -1284,6 +1360,8 @@ async fn open_public_live_with(
             channel_id: json!(exact.id),
             session_id,
             mob_id,
+            mobs: Arc::clone(&mobs),
+            execution_policy,
             server_task: server_task.abort_handle(),
             shared: Some((shared, exact)),
             unmeasured_publication_fault,
@@ -1345,6 +1423,8 @@ async fn open_public_live_with(
         channel_id,
         session_id,
         mob_id,
+        mobs,
+        execution_policy,
         server_task: server_task.abort_handle(),
         shared: None,
         unmeasured_publication_fault: None,
@@ -3036,11 +3116,20 @@ async fn wait_executor_turn(
         });
         if let Some(snapshot) = fresh {
             seen.insert(snapshot.operation_id().to_string());
-            if snapshot.worker_identity() != "voice-executor"
-                || snapshot.worker_ownership() != LiveDelegationWorkerOwnership::ExistingMember
-            {
+            let expected_ownership = match live.execution_policy {
+                LiveDelegationExecutionPolicy::ExistingMember => {
+                    LiveDelegationWorkerOwnership::ExistingMember
+                }
+                LiveDelegationExecutionPolicy::DurableFork => {
+                    LiveDelegationWorkerOwnership::OwnedMember
+                }
+            };
+            let identity_ok = live.execution_policy
+                != LiveDelegationExecutionPolicy::ExistingMember
+                || snapshot.worker_identity() == "voice-executor";
+            if !identity_ok || snapshot.worker_ownership() != expected_ownership {
                 return Err(format!(
-                    "delegated turn ran on {} ({:?}), not the existing voice-executor",
+                    "delegated turn ran on {} ({:?}), expected {expected_ownership:?} of voice-executor",
                     snapshot.worker_identity(),
                     snapshot.worker_ownership()
                 )
@@ -3315,6 +3404,7 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
+        shared_host: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -3740,6 +3830,8 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
             }
         }
 
+        live.record_workgraph_mode("S100", 3, &mut deterministic_failures).await?;
+
         // Tolerant latency: median input_final -> first assistant audio.
         let mut latencies: Vec<i64> = [
             request1.timing.input_final_to_audio_ms(),
@@ -3930,6 +4022,7 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
         }],
         instructions_preface: Some(preface.clone()),
         summary_bootstrap: false,
+        shared_host: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -4243,6 +4336,7 @@ async fn run_s103_interrupt_and_recover(
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
+        shared_host: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -4622,6 +4716,7 @@ async fn run_s107_stuck_close_convergence(
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
+        shared_host: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -4778,6 +4873,8 @@ async fn run_s107_stuck_close_convergence(
             &mut tolerant_failures,
         )?;
 
+        live.record_workgraph_mode("S107", 1, &mut deterministic_failures).await?;
+
         // Reopen on the same session within the bound, then a native check.
         let reopen_requested = Instant::now();
         let reopened = timeout(S107_REOPEN_BOUND, live.reopen()).await;
@@ -4874,7 +4971,9 @@ async fn run_s107_stuck_close_convergence(
 // ===========================================================================
 
 /// Result token the spoken request plants in the job's output.
-const S104_RESULT_TOKEN: &str = "nightjar";
+/// A single common word the speech recognizer does not split (nightjar came
+/// back as "night jar", so the token never appeared in any transcript).
+const S104_RESULT_TOKEN: &str = "lantern";
 /// Typed follow-up during the closure; its fact is a second oracle.
 const S104_TYPED_PROMPT: &str = "Typed while the voice call is down: remember that the meeting room is called Osprey. Reply with one short sentence.";
 const S104_TYPED_TOKEN: &str = "osprey";
@@ -4981,6 +5080,7 @@ async fn run_s104_handoff_voice_typed_voice(
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: true,
+        shared_host: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -5251,26 +5351,8 @@ async fn run_s104_handoff_voice_typed_voice(
 }
 
 // ===========================================================================
-// Scenarios 101, 105, 106: scaffolding, blocked on runtime fixes
+// Scenarios 105, 106: scaffolding, blocked on runtime fixes
 // ===========================================================================
-
-/// Scenario 101 (busy backend, voice ash): a deliberately slow executor job
-/// (shell sleep 25 s then a marker file), an unrelated quick question at
-/// job_start + 5 s, a second slow job at +12 s. Deterministic: the first job
-/// completes (marker present, completed in the journal) and is not cancelled
-/// by supersede; all three delegations commit final transcripts;
-/// CommentaryAppend for each finishing job arrives while the channel is
-/// live. Tolerant: quick question answered within 3 s median.
-///
-/// Blocked: `supersede_previous_delegation` cancels the running executor and
-/// the cancellation guard rejection tears the session down (S103 finding 2);
-/// lands after the WorkGraph scheduler on feat/workgraph-live-delegation.
-/// Not registered in e2e_lanes or the Turbo S list.
-#[tokio::test]
-#[ignore = "blocked: feat/workgraph-live-delegation (supersede cancels the running executor); scaffolding only"]
-async fn e2e_scenario_101_gpt_live_public_busy_backend() -> Result<(), Box<dyn std::error::Error>> {
-    Err("S101 is scaffolding: implement after the WorkGraph live-delegation scheduler lands".into())
-}
 
 /// Scenario 105 (fork and merge, voice echo): DurableFork policy; request A
 /// forks M1 and writes artifact A; request B (after A completes) doubles the
@@ -5312,6 +5394,348 @@ async fn e2e_scenario_105_gpt_live_public_fork_and_merge() -> Result<(), Box<dyn
 #[ignore = "blocked: live close convergence with a delegation in flight (S107); scaffolding only"]
 async fn e2e_scenario_106_gpt_live_public_long_haul() -> Result<(), Box<dyn std::error::Error>> {
     Err("S106 is scaffolding: implement after the close convergence fix lands".into())
+}
+
+// ===========================================================================
+// Scenario 101: busy backend (slow job, quick question, second slow job)
+// ===========================================================================
+
+/// Quick question and second job offsets after job 1's delegation.created.
+const S101_QUICK_OFFSET_MS: u64 = 5000;
+const S101_JOB2_OFFSET_MS: u64 = 12_000;
+/// Tolerant bound: the quick question's input final -> its commentary.
+const S101_QUICK_ANSWER_BOUND_MS: i64 = 3000;
+
+/// Scenario 101: with the WorkGraph-scheduled DurableFork policy, a slow
+/// executor job (shell sleep 25 s, then marker-one.txt) is running when the
+/// user asks an unrelated quick question at +5 s and starts a second slow job
+/// (sleep 20 s, marker-two.txt) at +12 s.
+///
+/// Deterministic: three client delegations; every executor turn reaches
+/// Completed (job 1 is not cancelled by supersede); at least two delegations
+/// run concurrently (parallel scheduling, journaled with the WorkGraph
+/// items); both marker files exist; a commentary append landed for each
+/// finished job while the channel was live; three executor inputs committed
+/// to the canonical session; graceful close. Tolerant: the quick question's
+/// input final -> first commentary under 3 s.
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_101_gpt_live_public_busy_backend() -> Result<(), Box<dyn std::error::Error>> {
+    let evidence = Journal::create_for("S101", "marker".to_owned())?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = timeout(
+        Duration::from_secs(720),
+        run_s101_busy_backend(evidence.clone()),
+    )
+    .await;
+    let finished = evidence.finish(match &result {
+        Ok(Ok(())) => evidence::Outcome::Passed,
+        Ok(Err(_)) => evidence::Outcome::Failed,
+        Err(_) => evidence::Outcome::TimedOut,
+    });
+    result.map_err(|_| "S101 overall deadline expired")??;
+    finished?;
+    Ok(())
+}
+
+async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+        )
+        .with_test_writer()
+        .try_init();
+    require_api_key()?;
+    let started = Instant::now();
+    evidence.stage(EvidenceStage::Opening)?;
+    let mut live = open_public_live_with(PublicLiveOpen {
+        temp_prefix: "gpt-live-public-busy-e2e-",
+        operator_principal: "scenario-101-operator",
+        execution_policy: LiveDelegationExecutionPolicy::DurableFork,
+        bootstrap: None,
+        seed_prompt: None,
+        evidence: Some(evidence.clone()),
+        unmeasured_playback: true,
+        executor_instructions: Some(vec![
+            "You are the executor behind a voice assistant. Your current working directory is the \
+             scratch workspace; do every file operation there with the shell tool. When asked to \
+             sleep for N seconds and then create a file, run exactly one shell command of the form \
+             `sleep N && touch <file>` and, once it returns, say in one short sentence that the file \
+             is created. When asked how many files are in the workspace, run `ls -1 | wc -l` and \
+             answer with the number in one short sentence."
+                .to_owned(),
+        ]),
+        extra_members: Vec::new(),
+        instructions_preface: None,
+        summary_bootstrap: false,
+        shared_host: true,
+    })
+    .await?;
+    let connected_ms = started.elapsed().as_millis();
+    let workspace = live._temp.path().join("project");
+    let _server_guard = AbortScenarioServer(live.server_task.clone());
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let channel = evidence.current_channel()?;
+    let mut tolerant_failures = Vec::new();
+    let mut deterministic_failures: Vec<String> = Vec::new();
+    let result = async {
+        evidence.stage(EvidenceStage::Connected)?;
+
+        // Job 1, then the quick question and job 2 anchored on job 1's
+        // delegation (the user talks over whatever the assistant is saying;
+        // overlap is not the measurement here).
+        evidence.stage(EvidenceStage::BusyJobs)?;
+        let job1 = live
+            .peer
+            .play_at(&PlayAt::new("busy_job1", Anchor::Now, 0).overlap_bound_ms(60_000))
+            .await?;
+        let job1_start_ms = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(30), "job 1 fixture_start", |t| {
+                fixture_start_entry(t, job1).map(|e| e.t_ms)
+            })
+            .await?;
+        let job1_delegation_ms = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(60), "job 1 delegation_created", |t| {
+                timeline_find(t, TimelineKind::DelegationCreated, job1_start_ms).map(|e| e.t_ms)
+            })
+            .await?;
+        let quick = live
+            .peer
+            .play_at(
+                &PlayAt::new("busy_quick", Anchor::Now, S101_QUICK_OFFSET_MS).overlap_bound_ms(60_000),
+            )
+            .await?;
+        let job2 = live
+            .peer
+            .play_at(
+                &PlayAt::new("busy_job2", Anchor::Now, S101_JOB2_OFFSET_MS).overlap_bound_ms(60_000),
+            )
+            .await?;
+        live.record_time_to_talk("S101", &mut tolerant_failures).await?;
+
+        // Three delegations, then every executor turn terminal; the peak
+        // number of simultaneously non-terminal turns is the parallelism.
+        let timeline = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(120), "three delegation_created entries", |t| {
+                (t.iter().filter(|e| e.kind == TimelineKind::DelegationCreated).count() >= 3)
+                    .then(|| t.to_vec())
+            })
+            .await?;
+        let delegation_times: Vec<u64> = timeline
+            .iter()
+            .filter(|e| e.kind == TimelineKind::DelegationCreated)
+            .map(|e| e.t_ms)
+            .collect();
+        let runtime = live.shared()?.0.runtime.clone();
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let mut max_concurrent = 0usize;
+        let mut terminal_at: std::collections::BTreeMap<String, (u128, String)> =
+            std::collections::BTreeMap::new();
+        loop {
+            let snapshots = runtime
+                .live_delegation_recovery_snapshots(&live.session_id)
+                .await?;
+            let running = snapshots.iter().filter(|s| s.terminal().is_none()).count();
+            max_concurrent = max_concurrent.max(running);
+            for snapshot in snapshots.iter().filter(|s| s.terminal().is_some()) {
+                terminal_at
+                    .entry(snapshot.operation_id().to_string())
+                    .or_insert_with(|| {
+                        (
+                            started.elapsed().as_millis(),
+                            format!("{:?}", snapshot.terminal()),
+                        )
+                    });
+            }
+            if snapshots.len() >= 3 && terminal_at.len() >= 3 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "not every executor turn reached terminality within 180 s: snapshots={} terminal={:?}; {}",
+                    snapshots.len(),
+                    terminal_at,
+                    delegated_executor_diagnostic(&mut live.rpc, &live.mob_id).await
+                )
+                .into());
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+        let jobs_done_ms = started.elapsed().as_millis();
+        println!(
+            "GPT_LIVE_S101_JOBS job1_delegation_ms={job1_delegation_ms} delegation_created_ms={delegation_times:?} max_concurrent={max_concurrent} terminal={terminal_at:?} jobs_done_at_ms={jobs_done_ms}"
+        );
+        for (operation, (at_ms, terminal)) in &terminal_at {
+            if !terminal.contains("Completed") {
+                deterministic_failures.push(format!(
+                    "delegation {operation} ended {terminal} at {at_ms} ms (a running job must not be cancelled by supersede)"
+                ));
+            }
+        }
+        if max_concurrent < 2 {
+            deterministic_failures.push(format!(
+                "no two delegations ran concurrently (max_concurrent={max_concurrent}); the channel is still serial"
+            ));
+        }
+        // Commentary for each finished job while the channel is live.
+        let commentaries = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(60), "three commentary_appended entries", |t| {
+                let count = t.iter().filter(|e| e.kind == TimelineKind::CommentaryAppended).count();
+                (count >= 3).then_some(count)
+            })
+            .await;
+        let timeline = live.peer.timeline().await?;
+        let commentary_times: Vec<u64> = timeline
+            .iter()
+            .filter(|e| e.kind == TimelineKind::CommentaryAppended)
+            .map(|e| e.t_ms)
+            .collect();
+        if let Err(error) = commentaries {
+            deterministic_failures.push(format!(
+                "fewer than three commentary appends while live (got {:?}): {error}",
+                commentary_times.len()
+            ));
+        }
+        let quick_timing = SpokenTurn::from_timeline(&timeline, quick);
+        let job2_timing = SpokenTurn::from_timeline(&timeline, job2);
+        let quick_answer_ms = quick_timing
+            .as_ref()
+            .and_then(|q| q.input_final_ms)
+            .and_then(|final_ms| {
+                commentary_times
+                    .iter()
+                    .find(|t| **t > final_ms)
+                    .map(|t| *t as i64 - final_ms as i64)
+            });
+        println!(
+            "GPT_LIVE_S101_TURNS quick_heard={:?} job2_heard={:?} commentary_appended_ms={commentary_times:?} quick_input_final_to_first_commentary_ms={quick_answer_ms:?}",
+            quick_timing.as_ref().map(|t| t.input_text.as_str()),
+            job2_timing.as_ref().map(|t| t.input_text.as_str())
+        );
+        record_tolerant(
+            &evidence,
+            channel,
+            "S101",
+            "quick_question_answered_under_3s",
+            quick_answer_ms.is_some_and(|ms| ms < S101_QUICK_ANSWER_BOUND_MS),
+            format!("quick_input_final_to_first_commentary_ms={quick_answer_ms:?}"),
+            &mut tolerant_failures,
+        )?;
+        // The recognizer renders "marker-one.txt" as "marker1" or "marker
+        // one"; the executor follows what it heard, so the deterministic fact
+        // is two distinct marker files, not their exact spelling.
+        let markers: Vec<String> = std::fs::read_dir(&workspace)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|name| name.to_lowercase().contains("marker"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        println!("GPT_LIVE_S101_MARKERS files={markers:?}");
+        if markers.len() < 2 {
+            deterministic_failures.push(format!(
+                "expected two marker files in the workspace, found {markers:?}"
+            ));
+        }
+        live.record_workgraph_mode("S101", 3, &mut deterministic_failures).await?;
+
+        // Let the readouts finish, then close.
+        wait_for_settled(&mut live, Duration::from_secs(4), Duration::from_secs(60)).await?;
+        evidence.stage(EvidenceStage::Closing)?;
+        live.record_uplink("S101").await?;
+        let close = close_or_record(&mut live, &evidence, channel, "S101", &mut deterministic_failures).await?;
+
+        let history = live
+            .rpc
+            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":400}), 30)
+            .await?;
+        // Under DurableFork the executor-input rows live in the fork sessions;
+        // the canonical (voice) session commits each delegation's final
+        // transcript as assistant rows after the spoken user row. Deterministic:
+        // three spoken user rows, each followed by at least one assistant row.
+        let rows = s100_user_rows(&history);
+        let messages = history["messages"].as_array().cloned().unwrap_or_default();
+        let roles: Vec<&str> = messages.iter().filter_map(|x| x["role"].as_str()).collect();
+        let mut answered_rows = 0usize;
+        let mut spoken_rows = 0usize;
+        for (index, message) in messages.iter().enumerate() {
+            if message["role"].as_str() != Some("user") {
+                continue;
+            }
+            let text = normalize_words(&history_text(&json!({"messages":[message]})));
+            if text.starts_with("result of the voice request") || text.starts_with(&normalize_words(S100_DELEGATION_CONTEXT_PREFIX)) {
+                continue;
+            }
+            spoken_rows += 1;
+            let answered = messages[index + 1..]
+                .iter()
+                .take_while(|m| m["role"].as_str() != Some("user"))
+                .any(|m| m["role"].as_str().is_some_and(|role| role.contains("assistant")));
+            if answered {
+                answered_rows += 1;
+            }
+        }
+        println!(
+            "GPT_LIVE_S101_HISTORY spoken_rows={spoken_rows} answered_rows={answered_rows} executor_inputs={:?} user_rows={:?} roles={roles:?}",
+            rows.executor_inputs, rows.spoken
+        );
+        if spoken_rows < 3 || answered_rows < 3 {
+            deterministic_failures.push(format!(
+                "final transcripts not committed for every delegation: spoken user rows={spoken_rows}, followed by assistant rows={answered_rows} (three required)"
+            ));
+        }
+        let timeline = live.peer.timeline().await?;
+        let report = live.peer.energy().await?;
+        evidence.record(EvidenceRecord::Energy {
+            channel,
+            windows: report.downsampled_windows(3000),
+        })?;
+        evidence.record(EvidenceRecord::Timeline {
+            channel,
+            entries: timeline.clone(),
+        })?;
+        let mut faults = evidence.faults()?;
+        faults.extend(live.peer.faults().await?);
+        if !faults.is_empty() {
+            deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
+        }
+        println!(
+            "GPT_LIVE_S101_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} jobs_done_at_ms={jobs_done_ms} commentaries={} close_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            started.elapsed().as_millis(),
+            commentary_times.len(),
+            close.map(|c| c.ms)
+        );
+        println!("GPT_LIVE_S101_TIMELINE\n{}", format_timeline(&timeline));
+        if !deterministic_failures.is_empty() {
+            return Err(format!(
+                "S101 deterministic checks failed:\n  - {}",
+                deterministic_failures.join("\n  - ")
+            )
+            .into());
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+    let browser_flush = live.peer.stop_evidence().await;
+    let outcome = if result.is_ok() && browser_flush.is_ok() {
+        evidence.stage(EvidenceStage::Finished)?;
+        evidence::Outcome::Passed
+    } else {
+        evidence::Outcome::Failed
+    };
+    let retained = evidence.finish(outcome);
+    live.peer.close().await;
+    live.server_task.abort();
+    result?;
+    retained?;
+    browser_flush?;
+    Ok(())
 }
 
 /// Scenario 98: the public Live lifecycle facts that no provider event

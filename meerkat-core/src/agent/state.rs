@@ -2843,6 +2843,26 @@ where
                                     error = %error,
                                     "compaction preconditions failed; skipping compaction"
                                 );
+                                // No rewrite was prepared: the transcript is
+                                // exactly what the caller committed (a partial
+                                // externalization only moved images to their
+                                // persisted form). Publish the typed failure so
+                                // the skip is observable, then continue the turn.
+                                if !crate::event_tap::tap_emit(
+                                    &self.event_tap,
+                                    event_tx.as_ref(),
+                                    AgentEvent::CompactionFailed {
+                                        reason: crate::event::CompactionFailureReason::transcript_rewrite_failed(
+                                            error.clone(),
+                                        ),
+                                    },
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "compaction event stream receiver dropped before precondition CompactionFailed"
+                                    );
+                                }
                                 Err(crate::agent::compact::CompactionError::InvalidRebuild(
                                     error,
                                 ))
@@ -12236,6 +12256,131 @@ mod tests {
         fn is_persistent(&self) -> bool {
             false
         }
+    }
+
+    /// Blob store double whose `put_image` always fails, so a compaction
+    /// boundary cannot externalize inline media.
+    struct FailingPutBlobStore;
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl BlobStore for FailingPutBlobStore {
+        async fn put_image(
+            &self,
+            _media_type: &str,
+            _data: &str,
+        ) -> Result<BlobRef, BlobStoreError> {
+            Err(BlobStoreError::ReadFailed("blob store offline".to_string()))
+        }
+        async fn get(&self, blob_id: &BlobId) -> Result<BlobPayload, BlobStoreError> {
+            Err(BlobStoreError::NotFound(blob_id.clone()))
+        }
+        async fn delete(&self, _blob_id: &BlobId) -> Result<(), BlobStoreError> {
+            Ok(())
+        }
+        fn is_persistent(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_pre_compaction_externalization_skips_the_attempt_with_a_typed_failure() {
+        // The blob store refuses every put at the compaction boundary, so the
+        // pre-compaction externalization fails. The attempt must be skipped
+        // with a typed CompactionFailed, no rewrite may be prepared (row count
+        // and content unchanged, no compaction summary), and the turn itself
+        // continues.
+        let mut session = crate::Session::new();
+        session.push(Message::User(UserMessage::text("older context")));
+        session.push(Message::BlockAssistant(
+            crate::types::BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ),
+        ));
+        session.push(Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Text {
+                text: "look at this".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: "A".repeat(4_096),
+                },
+            },
+        ])));
+        let rows_before = session.messages().len();
+        let client = Arc::new(FailingCompactionLlmClient::new());
+        let curator = Arc::new(SubstitutingCurator::new());
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .compactor(Arc::new(RetainingTailCompactor {
+                boundaries_seen: Mutex::new(0),
+            }))
+            .compaction_curator(curator.clone())
+            .with_blob_store(Arc::new(FailingPutBlobStore))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.run("first".into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("the turn continues after a skipped compaction");
+        let events: Vec<crate::event::AgentEvent> =
+            std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let failures: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::event::AgentEvent::CompactionFailed { reason } => {
+                    Some(format!("{reason:?}"))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            failures.len(),
+            1,
+            "exactly one typed CompactionFailed: {failures:?}"
+        );
+        assert!(
+            failures[0].contains("externalized before compaction"),
+            "the reason names the precondition: {failures:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, crate::event::AgentEvent::CompactionCompleted { .. })),
+            "no compaction may complete after the precondition failed"
+        );
+        assert_eq!(
+            curator.seen_windows().len(),
+            0,
+            "the compactor must not run when the precondition failed"
+        );
+        // Two turns appended their own rows; the seeded rows are untouched and
+        // no compaction summary exists.
+        let messages = agent.session().messages();
+        assert!(messages.len() > rows_before);
+        assert!(
+            !messages.iter().any(|message| matches!(
+                message,
+                Message::User(user) if user.transcript_role.is_compaction_summary()
+            )),
+            "no rewrite was prepared"
+        );
+        assert!(
+            messages.iter().any(|message| matches!(
+                message,
+                Message::User(user) if user.content.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Image { data: ImageData::Inline { .. }, .. }
+                ))
+            )),
+            "the inline image row is still present and inline"
+        );
+        assert_eq!(agent.session().audited_endpoint_divergence().unwrap(), None);
     }
 
     /// Test compactor that summarizes everything before the first image-bearing

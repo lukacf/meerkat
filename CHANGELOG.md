@@ -180,8 +180,15 @@ them.
   `--realm-backend jsonl` was passed on the first invocation. A diagnose now
   writes nothing to the store and creates no manifest or store; a missing
   database is a typed refusal naming the path; a head-canonical database is
-  refused typed. The report of a document that decodes carries its real
-  `live_row_count` instead of 0.
+  refused typed. A database whose runtime-store schema is older than the
+  binary is refused through a read-only preflight instead of being migrated
+  in place; the only writes an open can still make are SQLite's own (the
+  `.mfence` lock sibling, WAL sidecars, and the journal-mode conversion for a
+  database not yet in WAL mode). The report of a document that decodes
+  carries its real `live_row_count` instead of 0. A compaction whose
+  pre-rewrite media externalization fails now publishes a typed
+  `CompactionFailed` (transcript rewrite failure naming the externalization)
+  instead of only logging the skipped attempt.
 - The invalid-realm-id error names the accepted form (the realm directory name:
   ASCII letters, digits, `-` or `_`) and that a MobKit gateway's meerkat-level
   realm is `mobkit` under its state directory, since the `mob.<name>` id in

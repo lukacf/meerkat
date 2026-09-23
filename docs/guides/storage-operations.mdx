@@ -260,9 +260,13 @@ failure. For a session that is already wedged, repair it once:
    database: it never creates a realm manifest or any other store, a missing
    database is a typed refusal naming the path it looked for, and a database
    pinned to the head-canonical profile is refused because this repair only
-   applies to WholeBlob documents. (SQLite's own `runtime.sqlite3.mfence`
-   lock sibling and WAL sidecars may appear; they are not stores.) No
-   `--realm-backend` flag is needed.
+   applies to WholeBlob documents. A database whose runtime-store schema is
+   older than the `rkat` binary is refused through a read-only preflight
+   rather than migrated in place; open it once with the gateway that owns it
+   (or a matching `rkat`) first. The only writes an open can make are
+   SQLite's own: the `runtime.sqlite3.mfence` lock sibling, the WAL sidecars,
+   and the journal-mode conversion to WAL for a database not already in WAL
+   mode. No `--realm-backend` flag is needed.
 3. Diagnose, then apply:
 
 ```bash

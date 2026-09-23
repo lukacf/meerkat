@@ -102,10 +102,17 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "the push-to-terminal budget is 1200 seconds from run creation"
     );
     assert!(
-        ci.contains("group: pr-${{ github.event.pull_request.number || github.ref }}"),
-        "one concurrency group per PR (or ref)"
+        ci.contains("format('pr-{0}', github.event.pull_request.number)"),
+        "one concurrency group per pull request"
     );
-    assert!(ci.contains("cancel-in-progress: true"));
+    assert!(
+        ci.contains("format('main-{0}-{1}', github.ref_name, github.sha)"),
+        "one concurrency group per pushed commit, so main runs never cancel each other"
+    );
+    assert!(
+        ci.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"),
+        "only pull-request runs are cancelled by a newer push"
+    );
 
     let jobs = doc
         .get("jobs")

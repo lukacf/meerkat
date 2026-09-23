@@ -270,10 +270,12 @@ graph.
 
 ## CI Retry And Concurrency
 
-Pull request CI uses one concurrency group per PR (`pr-<number>`, or
-`pr-<ref>` for pushes) with `cancel-in-progress: true`. Starting another
-PR-associated attempt in that group automatically cancels the older
-in-progress attempt, even when nobody issues an explicit cancel command. The
+Pull request CI uses one concurrency group per PR (`pr-<number>`) with
+`cancel-in-progress: true`. Starting another PR-associated attempt in that
+group automatically cancels the older in-progress attempt, even when nobody
+issues an explicit cancel command. Pushes to `main` use one group per commit
+(`main-main-<sha>`) with no cancellation, so back-to-back merges each
+complete their run and emit their attestation. The
 `CI gate` job runs under `!cancelled()`, so a superseded run surfaces as
 cancelled rather than leaving a failed `CI gate` context on the head. The
 reusable BuildBuddy workflow (nightly and release) serializes its shared

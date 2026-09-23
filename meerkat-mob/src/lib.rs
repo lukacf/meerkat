@@ -257,6 +257,7 @@ pub use runtime::bridge_protocol::{
 };
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::local_bridge::LocalMobRuntimeBridge;
+pub use runtime::mob_scoped_workgraph_service;
 #[cfg(all(
     any(test, feature = "test-support"),
     feature = "runtime-adapter",

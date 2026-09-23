@@ -1274,3 +1274,114 @@ async fn stop_waits_for_warm_construction_without_blocking_query_progress() {
         .expect("reload observation settles")
         .expect("reload reply");
 }
+
+/// The HomeCore 2026-09-22 wedge on the reload path: the member's committed
+/// WholeBlob document is refused by the audited-endpoint guard, so the cold
+/// reload's resume verdict fails with meerkat's typed
+/// `SessionError::WholeBlobAuditedEndpointDivergence`. The verdict must reach
+/// the `reload_member_registration` caller typed (`durable_resume_hold()` and
+/// the structured `durable_resume_hold` token), never laundered into a
+/// `MemberRestoreFailed { reason }` string, so a host can park the member with
+/// the sanctioned repair commands instead of retrying a reload that can never
+/// read the document. A registration for the session is retained, the member
+/// is Broken in the roster, and every later refusal minted from the recorded
+/// restore failure carries the same typed hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reload_carries_the_audited_endpoint_divergence_typed() {
+    let mob = create_isolation_mob(2).await;
+    mob.degrade_member(0).await;
+    mob.store.fail_commit(mob.session(0), false);
+    let registration = mob
+        .adapter
+        .current_session_registration_witness(mob.session(0))
+        .await
+        .expect("degraded registration");
+    mob.service
+        .set_resume_verdict_divergence(mob.session(0))
+        .await;
+
+    let failure = tokio::time::timeout(
+        Duration::from_secs(5),
+        mob.handle.reload_member_registration(mob.member(0)),
+    )
+    .await
+    .expect("a refused document settles the reload")
+    .expect_err("a refused document cannot be reloaded");
+    assert_eq!(
+        failure.durable_resume_hold(),
+        Some(meerkat_core::service::DurableResumeHold::AuditedEndpointDivergence),
+        "the typed hold must survive the reload path: {failure:?}"
+    );
+    assert!(
+        matches!(
+            failure,
+            MobError::SessionError(SessionError::WholeBlobAuditedEndpointDivergence { ref id })
+                if id == mob.session(0)
+        ),
+        "the reload must return meerkat's typed refusal itself, got {failure:?}"
+    );
+    let data = failure
+        .structured_data()
+        .expect("the typed refusal projects structured data");
+    assert_eq!(
+        SessionError::durable_resume_hold_from_data(&data),
+        Some(meerkat_core::service::DurableResumeHold::AuditedEndpointDivergence),
+        "{data}"
+    );
+    let retained = mob
+        .adapter
+        .current_session_registration_witness(mob.session(0))
+        .await
+        .expect("a refused document leaves a registration for the session in place");
+    assert_eq!(
+        retained.session_id(),
+        registration.session_id(),
+        "the retained registration belongs to the same durable session"
+    );
+
+    // The machine recorded the revival failure: the member is Broken in the
+    // roster, and every later refusal minted from that record carries the
+    // same typed hold (not only the first reply), so a host that asks again
+    // still classifies "needs the sanctioned repair" typed.
+    assert_eq!(
+        mob.handle
+            .member_status(mob.member(0))
+            .await
+            .expect("member status")
+            .status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+    let again = tokio::time::timeout(
+        Duration::from_secs(5),
+        mob.handle.reload_member_registration(mob.member(0)),
+    )
+    .await
+    .expect("a Broken member answers")
+    .expect_err("a Broken member refuses the registration reload");
+    assert!(
+        matches!(
+            again,
+            MobError::MemberRestoreFailed {
+                hold: Some(meerkat_core::service::DurableResumeHold::AuditedEndpointDivergence),
+                ref session_id,
+                ..
+            } if session_id.as_ref() == Some(mob.session(0))
+        ),
+        "the Broken refusal must carry the typed hold, got {again:?}"
+    );
+    assert_eq!(
+        again.durable_resume_hold(),
+        Some(meerkat_core::service::DurableResumeHold::AuditedEndpointDivergence)
+    );
+    let data = again
+        .structured_data()
+        .expect("a held restore failure projects structured data");
+    assert_eq!(
+        SessionError::durable_resume_hold_from_data(&data),
+        Some(meerkat_core::service::DurableResumeHold::AuditedEndpointDivergence),
+        "{data}"
+    );
+    // Reviving a Broken member after the operator's repair is the host's
+    // retire + resume path (MobKit's `reload_member` on a held identity); the
+    // registration reload stays refused typed until then.
+}

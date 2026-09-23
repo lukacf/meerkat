@@ -4313,6 +4313,74 @@ impl std::fmt::Display for LiveDelegationCancellationReason {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveDelegationNarrationKind {
+    #[default]
+    #[serde(rename = "Queued")]
+    Queued,
+    #[serde(rename = "Claimed")]
+    Claimed,
+    #[serde(rename = "Blocked")]
+    Blocked,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "SourceBusy")]
+    SourceBusy,
+    #[serde(rename = "Failed")]
+    Failed,
+}
+impl LiveDelegationNarrationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Claimed => "Claimed",
+            Self::Blocked => "Blocked",
+            Self::Completed => "Completed",
+            Self::SourceBusy => "SourceBusy",
+            Self::Failed => "Failed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveDelegationNarrationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Queued" => Ok(Self::Queued),
+            "Claimed" => Ok(Self::Claimed),
+            "Blocked" => Ok(Self::Blocked),
+            "Completed" => Ok(Self::Completed),
+            "SourceBusy" => Ok(Self::SourceBusy),
+            "Failed" => Ok(Self::Failed),
+            other => Err(format!(
+                "invalid LiveDelegationNarrationKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveDelegationNarrationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveDelegationNarrationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationReconciliation {
     #[default]
     #[serde(rename = "Provisional")]
@@ -4545,6 +4613,78 @@ impl std::fmt::Display for LiveDelegationResultSpeechDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum LiveDelegationScheduleState {
+    #[default]
+    #[serde(rename = "Created")]
+    Created,
+    #[serde(rename = "Claimed")]
+    Claimed,
+    #[serde(rename = "Running")]
+    Running,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Blocked")]
+    Blocked,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "Failed")]
+    Failed,
+}
+impl LiveDelegationScheduleState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "Created",
+            Self::Claimed => "Claimed",
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Blocked => "Blocked",
+            Self::Cancelled => "Cancelled",
+            Self::Failed => "Failed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LiveDelegationScheduleState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Created" => Ok(Self::Created),
+            "Claimed" => Ok(Self::Claimed),
+            "Running" => Ok(Self::Running),
+            "Completed" => Ok(Self::Completed),
+            "Blocked" => Ok(Self::Blocked),
+            "Cancelled" => Ok(Self::Cancelled),
+            "Failed" => Ok(Self::Failed),
+            other => Err(format!(
+                "invalid LiveDelegationScheduleState value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveDelegationScheduleState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LiveDelegationScheduleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LiveDelegationWorkerOwnership {
     #[default]
     #[serde(rename = "OwnedMember")]
@@ -4675,6 +4815,8 @@ pub enum LiveDelegationWorkerTerminalKind {
     Cancelled,
     #[serde(rename = "Failed")]
     Failed,
+    #[serde(rename = "Blocked")]
+    Blocked,
 }
 impl LiveDelegationWorkerTerminalKind {
     pub fn as_str(&self) -> &'static str {
@@ -4682,6 +4824,7 @@ impl LiveDelegationWorkerTerminalKind {
             Self::Completed => "Completed",
             Self::Cancelled => "Cancelled",
             Self::Failed => "Failed",
+            Self::Blocked => "Blocked",
         }
     }
 }
@@ -4692,6 +4835,7 @@ impl std::convert::TryFrom<&str> for LiveDelegationWorkerTerminalKind {
             "Completed" => Ok(Self::Completed),
             "Cancelled" => Ok(Self::Cancelled),
             "Failed" => Ok(Self::Failed),
+            "Blocked" => Ok(Self::Blocked),
             other => Err(format!(
                 "invalid LiveDelegationWorkerTerminalKind value `{other}`"
             )),
@@ -13182,9 +13326,14 @@ pub struct State {
     pub live_assistant_turn_channel_by_ref: std::collections::BTreeMap<String, String>,
     pub live_assistant_playback_segment_by_turn: std::collections::BTreeMap<String, u64>,
     pub live_abandoned_interactions: std::collections::BTreeSet<String>,
-    pub live_delegation_interaction_by_channel: std::collections::BTreeMap<String, String>,
-    pub live_delegation_operation_by_channel: std::collections::BTreeMap<String, OperationId>,
-    pub live_delegation_provider_turn_by_channel: std::collections::BTreeMap<String, String>,
+    pub live_delegation_operation_by_interaction: std::collections::BTreeMap<String, OperationId>,
+    pub live_delegation_channel_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_delegation_schedule_state_by_operation:
+        std::collections::BTreeMap<OperationId, LiveDelegationScheduleState>,
+    pub live_delegation_active_worker_count_by_channel: std::collections::BTreeMap<String, u64>,
+    pub live_delegation_channel_worker_cap: u64,
+    pub live_delegation_last_narration_by_operation:
+        std::collections::BTreeMap<OperationId, LiveDelegationNarrationKind>,
     pub live_delegation_interaction_by_operation: std::collections::BTreeMap<OperationId, String>,
     pub live_delegation_provider_turn_by_operation: std::collections::BTreeMap<OperationId, String>,
     pub live_delegation_reconciliation_by_operation:
@@ -13312,6 +13461,7 @@ pub struct State {
     pub live_close_result_sequence: u64,
     pub live_close_observation_sequence_by_channel: std::collections::BTreeMap<String, u64>,
     pub live_close_status_by_channel: std::collections::BTreeMap<String, LiveClosePublicStatus>,
+    pub live_close_settlement_deferred_channels: std::collections::BTreeSet<String>,
     pub live_command_result_sequence: u64,
     pub live_command_acceptance_sequence_by_channel: std::collections::BTreeMap<String, u64>,
     pub live_command_kind_by_channel: std::collections::BTreeMap<String, LiveCommandPublicKind>,
@@ -14944,6 +15094,35 @@ pub mod inputs {
         pub retired: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequeueLiveDelegation {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CancelQueuedLiveDelegation {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeLiveDelegationNarration {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub provider_turn_correlation: String,
+        pub kind: LiveDelegationNarrationKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AbandonLiveInteraction {
         pub channel_id: String,
         pub runtime_id: AgentRuntimeId,
@@ -15328,6 +15507,16 @@ pub mod inputs {
         pub session_id: String,
         pub channel_id: String,
         pub close_observation_sequence: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeferLiveCloseSettlement {
+        pub session_id: String,
+        pub channel_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveLiveCloseSettlement {
+        pub session_id: String,
+        pub channel_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordLiveCommandAccepted {
@@ -16116,6 +16305,9 @@ pub enum Input {
     ),
     AuthorizeLiveDelegationWorkerRetirement(inputs::AuthorizeLiveDelegationWorkerRetirement),
     ResolveLiveDelegationWorkerRetirement(inputs::ResolveLiveDelegationWorkerRetirement),
+    RequeueLiveDelegation(inputs::RequeueLiveDelegation),
+    CancelQueuedLiveDelegation(inputs::CancelQueuedLiveDelegation),
+    AuthorizeLiveDelegationNarration(inputs::AuthorizeLiveDelegationNarration),
     AbandonLiveInteraction(inputs::AbandonLiveInteraction),
     CompleteLiveInteraction(inputs::CompleteLiveInteraction),
     AuthorizeLiveConsequentialEffect(inputs::AuthorizeLiveConsequentialEffect),
@@ -16158,6 +16350,8 @@ pub enum Input {
     AbandonLiveOpenAdmission(inputs::AbandonLiveOpenAdmission),
     RecordLiveRefreshQueued(inputs::RecordLiveRefreshQueued),
     RecordLiveCloseClosed(inputs::RecordLiveCloseClosed),
+    DeferLiveCloseSettlement(inputs::DeferLiveCloseSettlement),
+    ResolveLiveCloseSettlement(inputs::ResolveLiveCloseSettlement),
     RecordLiveCommandAccepted(inputs::RecordLiveCommandAccepted),
     RecordLiveCommandRejected(inputs::RecordLiveCommandRejected),
     RecordLiveChannelRequestRejected(inputs::RecordLiveChannelRequestRejected),
@@ -16589,6 +16783,11 @@ impl Input {
             Self::ResolveLiveDelegationWorkerRetirement(_) => {
                 InputKind::ResolveLiveDelegationWorkerRetirement
             }
+            Self::RequeueLiveDelegation(_) => InputKind::RequeueLiveDelegation,
+            Self::CancelQueuedLiveDelegation(_) => InputKind::CancelQueuedLiveDelegation,
+            Self::AuthorizeLiveDelegationNarration(_) => {
+                InputKind::AuthorizeLiveDelegationNarration
+            }
             Self::AbandonLiveInteraction(_) => InputKind::AbandonLiveInteraction,
             Self::CompleteLiveInteraction(_) => InputKind::CompleteLiveInteraction,
             Self::AuthorizeLiveConsequentialEffect(_) => {
@@ -16665,6 +16864,8 @@ impl Input {
             Self::AbandonLiveOpenAdmission(_) => InputKind::AbandonLiveOpenAdmission,
             Self::RecordLiveRefreshQueued(_) => InputKind::RecordLiveRefreshQueued,
             Self::RecordLiveCloseClosed(_) => InputKind::RecordLiveCloseClosed,
+            Self::DeferLiveCloseSettlement(_) => InputKind::DeferLiveCloseSettlement,
+            Self::ResolveLiveCloseSettlement(_) => InputKind::ResolveLiveCloseSettlement,
             Self::RecordLiveCommandAccepted(_) => InputKind::RecordLiveCommandAccepted,
             Self::RecordLiveCommandRejected(_) => InputKind::RecordLiveCommandRejected,
             Self::RecordLiveChannelRequestRejected(_) => {
@@ -17045,6 +17246,9 @@ pub enum InputKind {
     ReconcileRevokedLiveDelegationWorkerAfterRestart,
     AuthorizeLiveDelegationWorkerRetirement,
     ResolveLiveDelegationWorkerRetirement,
+    RequeueLiveDelegation,
+    CancelQueuedLiveDelegation,
+    AuthorizeLiveDelegationNarration,
     AbandonLiveInteraction,
     CompleteLiveInteraction,
     AuthorizeLiveConsequentialEffect,
@@ -17085,6 +17289,8 @@ pub enum InputKind {
     AbandonLiveOpenAdmission,
     RecordLiveRefreshQueued,
     RecordLiveCloseClosed,
+    DeferLiveCloseSettlement,
+    ResolveLiveCloseSettlement,
     RecordLiveCommandAccepted,
     RecordLiveCommandRejected,
     RecordLiveChannelRequestRejected,
@@ -18115,6 +18321,36 @@ pub mod effects {
         pub authority_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveCloseSettlementDeferred {
+        pub session_id: String,
+        pub channel_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveCloseSettlementResolved {
+        pub session_id: String,
+        pub channel_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveDelegationRequeued {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveDelegationQueuedCancelled {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct LiveDelegationNarrationAuthorized {
+        pub channel_id: String,
+        pub interaction_id: String,
+        pub operation_id: OperationId,
+        pub provider_turn_correlation: String,
+        pub kind: LiveDelegationNarrationKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LiveDelegationResultReleaseAuthorized {
         pub channel_id: String,
         pub interaction_id: String,
@@ -18897,6 +19133,11 @@ pub enum Effect {
     LiveAssistantPlaybackSegmentAdvanced(effects::LiveAssistantPlaybackSegmentAdvanced),
     LiveProviderTurnFinished(effects::LiveProviderTurnFinished),
     LiveConsequentialEffectAuthorized(effects::LiveConsequentialEffectAuthorized),
+    LiveCloseSettlementDeferred(effects::LiveCloseSettlementDeferred),
+    LiveCloseSettlementResolved(effects::LiveCloseSettlementResolved),
+    LiveDelegationRequeued(effects::LiveDelegationRequeued),
+    LiveDelegationQueuedCancelled(effects::LiveDelegationQueuedCancelled),
+    LiveDelegationNarrationAuthorized(effects::LiveDelegationNarrationAuthorized),
     LiveDelegationResultReleaseAuthorized(effects::LiveDelegationResultReleaseAuthorized),
     LiveDelegationResultDeliveryAuthorized(effects::LiveDelegationResultDeliveryAuthorized),
     LiveDelegationResultDeliveryResolved(effects::LiveDelegationResultDeliveryResolved),
@@ -19142,6 +19383,11 @@ pub enum EffectKind {
     LiveAssistantPlaybackSegmentAdvanced,
     LiveProviderTurnFinished,
     LiveConsequentialEffectAuthorized,
+    LiveCloseSettlementDeferred,
+    LiveCloseSettlementResolved,
+    LiveDelegationRequeued,
+    LiveDelegationQueuedCancelled,
+    LiveDelegationNarrationAuthorized,
     LiveDelegationResultReleaseAuthorized,
     LiveDelegationResultDeliveryAuthorized,
     LiveDelegationResultDeliveryResolved,
@@ -21013,11 +21259,6 @@ pub enum TransitionId {
     AbandonLiveInteractionRunning,
     AbandonLiveInteractionRetired,
     AbandonLiveInteractionStopped,
-    AbandonLiveInteractionPreservingEarlierDelegationIdle,
-    AbandonLiveInteractionPreservingEarlierDelegationAttached,
-    AbandonLiveInteractionPreservingEarlierDelegationRunning,
-    AbandonLiveInteractionPreservingEarlierDelegationRetired,
-    AbandonLiveInteractionPreservingEarlierDelegationStopped,
     CompleteLiveInteractionIdle,
     CompleteLiveInteractionAttached,
     CompleteLiveInteractionRunning,
@@ -21026,6 +21267,11 @@ pub enum TransitionId {
     ResolveLiveDelegationCancellationRunning,
     ResolveLiveDelegationCancellationRetired,
     ResolveLiveDelegationCancellationStopped,
+    ResolveLiveDelegationCancellationAfterTerminalIdle,
+    ResolveLiveDelegationCancellationAfterTerminalAttached,
+    ResolveLiveDelegationCancellationAfterTerminalRunning,
+    ResolveLiveDelegationCancellationAfterTerminalRetired,
+    ResolveLiveDelegationCancellationAfterTerminalStopped,
     RecordLiveDelegationWorkerTerminalIdle,
     RecordLiveDelegationWorkerTerminalAttached,
     RecordLiveDelegationWorkerTerminalRunning,
@@ -21056,6 +21302,20 @@ pub enum TransitionId {
     ResolveLiveDelegationWorkerRetirementRunning,
     ResolveLiveDelegationWorkerRetirementRetired,
     ResolveLiveDelegationWorkerRetirementStopped,
+    RequeueBlockedLiveDelegationIdle,
+    RequeueBlockedLiveDelegationAttached,
+    RequeueBlockedLiveDelegationRunning,
+    RequeueUnstartedLiveDelegationIdle,
+    RequeueUnstartedLiveDelegationAttached,
+    RequeueUnstartedLiveDelegationRunning,
+    CancelQueuedLiveDelegationIdle,
+    CancelQueuedLiveDelegationAttached,
+    CancelQueuedLiveDelegationRunning,
+    CancelQueuedLiveDelegationRetired,
+    CancelQueuedLiveDelegationStopped,
+    AuthorizeLiveDelegationNarrationIdle,
+    AuthorizeLiveDelegationNarrationAttached,
+    AuthorizeLiveDelegationNarrationRunning,
     AuthorizeLiveConsequentialEffectIdle,
     AuthorizeLiveConsequentialEffectAttached,
     AuthorizeLiveConsequentialEffectRunning,
@@ -21253,6 +21513,16 @@ pub enum TransitionId {
     RecordLiveCloseClosedRunning,
     RecordLiveCloseClosedRetired,
     RecordLiveCloseClosedStopped,
+    DeferLiveCloseSettlementIdle,
+    DeferLiveCloseSettlementAttached,
+    DeferLiveCloseSettlementRunning,
+    DeferLiveCloseSettlementRetired,
+    DeferLiveCloseSettlementStopped,
+    ResolveLiveCloseSettlementIdle,
+    ResolveLiveCloseSettlementAttached,
+    ResolveLiveCloseSettlementRunning,
+    ResolveLiveCloseSettlementRetired,
+    ResolveLiveCloseSettlementStopped,
     RecordLiveCommandAcceptedIdle,
     RecordLiveCommandAcceptedAttached,
     RecordLiveCommandAcceptedRunning,
@@ -22336,9 +22606,12 @@ pub fn initial_state() -> State {
         live_assistant_turn_channel_by_ref: Default::default(),
         live_assistant_playback_segment_by_turn: Default::default(),
         live_abandoned_interactions: Default::default(),
-        live_delegation_interaction_by_channel: Default::default(),
-        live_delegation_operation_by_channel: Default::default(),
-        live_delegation_provider_turn_by_channel: Default::default(),
+        live_delegation_operation_by_interaction: Default::default(),
+        live_delegation_channel_by_operation: Default::default(),
+        live_delegation_schedule_state_by_operation: Default::default(),
+        live_delegation_active_worker_count_by_channel: Default::default(),
+        live_delegation_channel_worker_cap: 4,
+        live_delegation_last_narration_by_operation: Default::default(),
         live_delegation_interaction_by_operation: Default::default(),
         live_delegation_provider_turn_by_operation: Default::default(),
         live_delegation_reconciliation_by_operation: Default::default(),
@@ -22438,6 +22711,7 @@ pub fn initial_state() -> State {
         live_close_result_sequence: 0,
         live_close_observation_sequence_by_channel: Default::default(),
         live_close_status_by_channel: Default::default(),
+        live_close_settlement_deferred_channels: Default::default(),
         live_command_result_sequence: 0,
         live_command_acceptance_sequence_by_channel: Default::default(),
         live_command_kind_by_channel: Default::default(),

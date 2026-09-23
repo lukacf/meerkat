@@ -8383,6 +8383,20 @@ mod tests {
                     ))
                 }
 
+                async fn commit_live_delegation_final_transcript_at_turn_boundary(
+                    &self,
+                    _machine: &meerkat_runtime::MeerkatMachine,
+                    _session_id: &CoreSessionId,
+                    _provisional: meerkat_core::ProvisionalLiveHandoff,
+                    _final_event: meerkat_core::RealtimeTranscriptEvent,
+                    _bound: std::time::Duration,
+                ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError>
+                {
+                    Err(SessionError::Unsupported(
+                        "stub service does not support live delegation canonical projection".into(),
+                    ))
+                }
+
                 async fn create_session_under_runtime_turn_boundary(
                     &self,
                     _req: meerkat_core::service::CreateSessionRequest,
@@ -10489,6 +10503,22 @@ impl MobProvisioner for SessionBackend {
         // receipt can never be detached and dropped without publishing its
         // rollback capability to the owning PendingProvision.
         let backend = self;
+        // Members build in the mob realm, and the factory refuses WorkGraph
+        // tools whose namespace grant names any other realm. The host's
+        // default dispatcher is scoped to the host realm, so every member
+        // build that resolves WorkGraph on receives this mob's scoped
+        // service and its grant instead. A build with WorkGraph off ignores
+        // both.
+        if let (Some(workgraph), Some(build)) = (
+            backend.workgraph_service.as_ref(),
+            req.create_session.build.as_mut(),
+        ) && build.workgraph_tools.is_none()
+        {
+            build.workgraph_namespace_grant = Some(workgraph.namespace_grant().clone());
+            build.workgraph_tools = Some(Arc::new(meerkat::WorkGraphToolSurface::new(
+                workgraph.clone(),
+            )));
+        }
         let mut session_origin = req.session_origin;
         let mut requested_materialization = match session_origin {
             ProvisionSessionOrigin::Fresh => {

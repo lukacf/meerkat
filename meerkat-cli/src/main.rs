@@ -2487,6 +2487,13 @@ enum SessionCommands {
         /// longer-or-equal LivePrefixDiverges, which never needs this.
         #[arg(long, requires = "apply")]
         accept_shorter: bool,
+        /// Open this WholeBlob runtime database directly instead of resolving
+        /// `<state-root>/<realm>/runtime.sqlite3` from the CLI scope. Hosts
+        /// that open one runtime SQLite file themselves (MobKit's default
+        /// persistent layout, `<state_dir>/runtime.sqlite`) name it here; the
+        /// session id must then be a full session UUID.
+        #[arg(long, value_name = "FILE")]
+        runtime_store: Option<PathBuf>,
         /// Print the report as JSON
         #[arg(long)]
         json: bool,
@@ -3776,8 +3783,19 @@ async fn cli_main() -> anyhow::Result<ExitCode> {
                 id,
                 apply,
                 accept_shorter,
+                runtime_store,
                 json,
-            } => repair_wholeblob_session(&id, apply, accept_shorter, json, &cli_scope).await,
+            } => {
+                repair_wholeblob_session(
+                    &id,
+                    apply,
+                    accept_shorter,
+                    runtime_store,
+                    json,
+                    &cli_scope,
+                )
+                .await
+            }
             SessionCommands::ExportAtif { id, output } => {
                 let destination = export_session_atif(&id, output, &cli_scope).await?;
                 println!("Wrote ATIF trajectory to {}", destination.display());
@@ -10365,6 +10383,28 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        bound: std::time::Duration,
+    ) -> Result<
+        meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary,
+        meerkat_core::service::SessionError,
+    > {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_final_transcript_at_turn_boundary(
+            &self.inner,
+            machine,
+            session_id,
+            provisional,
+            final_event,
+            bound,
+        )
+        .await
+    }
+
     async fn observe_session_resume_authority(
         &self,
         session_id: &SessionId,
@@ -13445,6 +13485,28 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        bound: std::time::Duration,
+    ) -> Result<
+        meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary,
+        meerkat_core::service::SessionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_final_transcript_at_turn_boundary(
+            &self.inner,
+            machine,
+            session_id,
+            provisional,
+            final_event,
+            bound,
+        )
+        .await
+    }
+
     async fn observe_session_resume_authority(
         &self,
         session_id: &SessionId,
@@ -14134,17 +14196,17 @@ async fn repair_wholeblob_session(
     id: &str,
     apply: bool,
     accept_shorter: bool,
+    runtime_store: Option<PathBuf>,
     json: bool,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     #[cfg(not(feature = "session-store"))]
     {
-        let _ = (id, apply, accept_shorter, json, scope);
+        let _ = (id, apply, accept_shorter, runtime_store, json, scope);
         anyhow::bail!("session repair requires the session-store feature");
     }
     #[cfg(feature = "session-store")]
     {
-        let session_id = resolve_scoped_session_id(id, scope)?;
         // Open only the runtime database that holds the committed document.
         // The ordinary persistence bundle would ensure a realm manifest and
         // materialize every store in the realm directory; an operator
@@ -14152,18 +14214,48 @@ async fn repair_wholeblob_session(
         // `.mfence` lock sibling and WAL sidecars aside). No actor can own
         // the session in this process, so the store-level repair is the
         // complete procedure here; the operator stops the member first.
-        let realm_paths =
-            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
-        let store = meerkat_runtime::store::SqliteRuntimeStore::open_existing_whole_blob(
-            realm_paths.runtime_sqlite_path.clone(),
-        )
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "cannot open the WholeBlob runtime store for realm '{}' under {}: {error}",
-                scope.locator.realm.as_str(),
-                scope.locator.state_root.display()
-            )
-        })?;
+        //
+        // A host that opened one runtime database itself (MobKit's default
+        // `<state_dir>/runtime.sqlite`) has no realm layout to resolve: it
+        // names the file, and the session id is the full UUID.
+        let (session_id, store) = match runtime_store {
+            Some(path) => {
+                let session_id = SessionId::parse(id).map_err(|error| {
+                    anyhow::anyhow!(
+                        "--runtime-store takes a full session UUID, not a realm-scoped locator: \
+                         '{id}': {error}"
+                    )
+                })?;
+                let store = meerkat_runtime::store::SqliteRuntimeStore::open_existing_whole_blob(
+                    path.clone(),
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "cannot open the WholeBlob runtime store {}: {error}",
+                        path.display()
+                    )
+                })?;
+                (session_id, store)
+            }
+            None => {
+                let session_id = resolve_scoped_session_id(id, scope)?;
+                let realm_paths = meerkat_store::realm_paths_in(
+                    &scope.locator.state_root,
+                    scope.locator.realm.as_str(),
+                );
+                let store = meerkat_runtime::store::SqliteRuntimeStore::open_existing_whole_blob(
+                    realm_paths.runtime_sqlite_path,
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "cannot open the WholeBlob runtime store for realm '{}' under {}: {error}",
+                        scope.locator.realm.as_str(),
+                        scope.locator.state_root.display()
+                    )
+                })?;
+                (session_id, store)
+            }
+        };
         let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&session_id);
         let report = meerkat_runtime::store::whole_blob_repair::repair_whole_blob_audited_endpoint(
             &store,
@@ -21437,6 +21529,19 @@ default_model = "gemma"
             _provisional: meerkat_core::ProvisionalLiveHandoff,
             _final_event: meerkat_core::RealtimeTranscriptEvent,
         ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+            Err(SessionError::Unsupported(
+                "CLI test service does not support live delegation canonical projection".into(),
+            ))
+        }
+
+        async fn commit_live_delegation_final_transcript_at_turn_boundary(
+            &self,
+            _machine: &meerkat_runtime::MeerkatMachine,
+            _session_id: &SessionId,
+            _provisional: meerkat_core::ProvisionalLiveHandoff,
+            _final_event: meerkat_core::RealtimeTranscriptEvent,
+            _bound: std::time::Duration,
+        ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
             Err(SessionError::Unsupported(
                 "CLI test service does not support live delegation canonical projection".into(),
             ))

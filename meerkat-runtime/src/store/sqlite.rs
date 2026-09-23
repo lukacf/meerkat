@@ -9631,6 +9631,27 @@ ORDER BY runtime_id";
         /// returning; an `in_progress` activation is retried, and any
         /// unverifiable source refuses construction rather than leaking an
         /// O(document) migration into the first ordinary service boundary.
+        /// Open an EXISTING WholeBlob runtime database for an operator repair.
+        ///
+        /// Directory-level side effects are limited to what any SQLite open
+        /// does: the `<file>.mfence` lock sibling and the WAL sidecars. No
+        /// realm manifest and no other store is created, and a missing
+        /// database is a typed `NotFound` rather than a fresh empty store. A
+        /// database pinned to the head-canonical profile is refused typed:
+        /// this repair only applies to WholeBlob documents.
+        pub fn open_existing_whole_blob(
+            path: impl Into<PathBuf>,
+        ) -> Result<Self, RuntimeStoreError> {
+            let path = path.into();
+            if !path.is_file() {
+                return Err(RuntimeStoreError::NotFound(format!(
+                    "no runtime database at {}; point --state-root at the realms root and --realm at the realm directory that holds runtime.sqlite3",
+                    path.display()
+                )));
+            }
+            Self::new_whole_blob(path)
+        }
+
         pub fn new_head_canonical(path: impl Into<PathBuf>) -> Result<Self, RuntimeStoreError> {
             let path = path.into();
             let mut conn = open_head_canonical_runtime_connection(&path)?;

@@ -172,6 +172,20 @@ them.
   checkpoint pass is now a byte-identical no-op for those rows. A failed
   externalization skips that compaction attempt with a typed
   `CompactionFailed` reason instead of proceeding.
+- `rkat session repair-wholeblob` opens only the realm's runtime database.
+  It no longer goes through the realm persistence bundle, which ensured a
+  realm manifest (defaulting to the sqlite backend) and materialized the
+  session, jobs and workgraph stores in the realm directory, and then opened a
+  head-canonical runtime store that refused the WholeBlob repair unless
+  `--realm-backend jsonl` was passed on the first invocation. A diagnose now
+  writes nothing to the store and creates no manifest or store; a missing
+  database is a typed refusal naming the path; a head-canonical database is
+  refused typed. The report of a document that decodes carries its real
+  `live_row_count` instead of 0.
+- The invalid-realm-id error names the accepted form (the realm directory name:
+  ASCII letters, digits, `-` or `_`) and that a MobKit gateway's meerkat-level
+  realm is `mobkit` under its state directory, since the `mob.<name>` id in
+  session metadata is a mob scope rather than a store realm.
 
 - WholeBlob persistence refuses to mint a document its own reader would
   refuse. `Session::to_persisted_artifact` and the runtime store's WholeBlob

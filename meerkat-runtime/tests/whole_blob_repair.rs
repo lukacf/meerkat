@@ -363,3 +363,33 @@ async fn sqlite_wedged_body_with_pending_outbox_repairs_and_finalizes_cleanly() 
             .is_empty()
     );
 }
+
+/// A document that decodes reports its real row count, so an operator can
+/// tell "nothing to repair, N rows" from an empty store.
+#[tokio::test]
+async fn healthy_document_reports_its_decoded_row_count() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteRuntimeStore::new_whole_blob(tempdir.path().join("runtime.sqlite3"))
+        .expect("whole-blob sqlite store");
+    let mut session = Session::new();
+    session.append_system_message("system prompt");
+    for turn in 0..3 {
+        session.push(Message::User(UserMessage::text(format!("question {turn}"))));
+    }
+    let session_id = session.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let bytes = serde_json::to_vec(&session).expect("plain serde encodes");
+    store
+        .inject_wedged_whole_blob_for_test(&runtime_id, &session_id, bytes, Vec::new())
+        .await
+        .expect("commit a healthy body");
+    let report = repair_whole_blob_audited_endpoint(&store, &runtime_id, false, false)
+        .await
+        .expect("diagnose");
+    assert!(matches!(
+        report.action,
+        WholeBlobRepairAction::NoRepairNeeded
+    ));
+    assert_eq!(report.decode_error, None);
+    assert_eq!(report.live_row_count, 4);
+}

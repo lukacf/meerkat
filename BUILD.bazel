@@ -423,6 +423,7 @@ test_suite(
         "//meerkat-cli:sqlite_tools_full_reuse_test",
         "//meerkat-cli:storage_doctor_test",
         "//meerkat-cli:storage_migrate_test",
+        "//meerkat-cli:wholeblob_repair_cli_test",
         "//meerkat-client:meerkat_client_unit_test",
         "//meerkat-client:rct_contracts_test",
         "//meerkat-comms:embedded_skill_registration_test",

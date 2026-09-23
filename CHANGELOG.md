@@ -213,18 +213,6 @@ them.
   `meerkat_runtime`'s typed manifest, so `runtime_alphabet_parity_test` and
   `runtime_schema_parity_test` failed. They are registered under
   `LiveExecutionLifecycle` with the other LiveContext inputs.
-- `RealtimeSessionOpenProjectionError` classifies itself
-  (`RealtimeSessionOpenProjectionError::class()` returning
-  `RealtimeSessionOpenProjectionErrorClass::{InvalidRequest, Internal}`), and
-  `meerkat-rpc` maps that class to its wire code. The rpc handler used to match
-  the variants with a `#[cfg(feature = "openai-live")]` arm for `Summary`,
-  which is exhaustive only while the rpc and facade features agree; the
-  min-feature surface build (`meerkat_rpc_surface_min`) links the full-feature
-  facade and failed to compile.
-- The two session-scoped inproc resume tests in `factory_build_agent` bound the
-  same process-global participant name `resume-peer` and ran in parallel, so
-  whichever registered second failed as displacing a live incumbent. The
-  across-roots test now uses its own name.
 - CI budgets now fit the lanes that actually run: the GCP BuildBuddy SLO is
   3000s from control-plane start (was 1200s; the cold `//...` prebuild alone
   needs ~12-13 min and gates the native lanes, and the SDK Web suite's

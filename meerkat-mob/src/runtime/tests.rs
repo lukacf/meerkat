@@ -11935,6 +11935,7 @@ async fn archived_document_without_runtime_record_is_revivable() {
         OverlayProbeSessionAgentBuilder {
             provider_visible_tools: Arc::new(Mutex::new(Vec::new())),
             provider_turn_overlays: Arc::new(Mutex::new(Vec::new())),
+            provider_call_sessions: Arc::new(Mutex::new(Vec::new())),
         },
         16,
         session_store,
@@ -12096,6 +12097,7 @@ struct OverlayProbeSessionAgent {
     session: Session,
     provider_visible_tools: Arc<Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
     provider_turn_overlays: Arc<Mutex<Vec<Option<TurnToolOverlay>>>>,
+    provider_call_sessions: Arc<Mutex<Vec<SessionId>>>,
     turn_tool_overlay: Option<TurnToolOverlay>,
     transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
 }
@@ -12117,6 +12119,10 @@ impl SessionAgent for OverlayProbeSessionAgent {
             .expect("provider_turn_overlays lock poisoned")
             .push(self.turn_tool_overlay.clone());
         let session_id = self.session.id().clone();
+        self.provider_call_sessions
+            .lock()
+            .expect("provider_call_sessions lock poisoned")
+            .push(session_id.clone());
         let result = mock_run_result(session_id.clone(), "{}".to_string());
         let _ = event_tx
             .send(AgentEvent::RunCompleted {
@@ -12233,6 +12239,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
 struct OverlayProbeSessionAgentBuilder {
     provider_visible_tools: Arc<std::sync::Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
     provider_turn_overlays: Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
+    provider_call_sessions: Arc<std::sync::Mutex<Vec<SessionId>>>,
 }
 
 #[async_trait]
@@ -12255,6 +12262,7 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
             session,
             provider_visible_tools: Arc::clone(&self.provider_visible_tools),
             provider_turn_overlays: Arc::clone(&self.provider_turn_overlays),
+            provider_call_sessions: Arc::clone(&self.provider_call_sessions),
             turn_tool_overlay: None,
             transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
         })
@@ -12267,7 +12275,7 @@ async fn create_test_mob_with_overlay_probe_service(
     MobHandle,
     Arc<std::sync::Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
 ) {
-    let (handle, provider_visible_tools, _) =
+    let (handle, provider_visible_tools, _, _) =
         create_test_mob_with_overlay_probe_service_and_workgraph(definition, None).await;
     (handle, provider_visible_tools)
 }
@@ -12279,16 +12287,19 @@ async fn create_test_mob_with_overlay_probe_service_and_workgraph(
     MobHandle,
     Arc<std::sync::Mutex<Vec<Vec<meerkat_core::ToolName>>>>,
     Arc<std::sync::Mutex<Vec<Option<TurnToolOverlay>>>>,
+    Arc<std::sync::Mutex<Vec<SessionId>>>,
 ) {
     let provider_visible_tools = Arc::new(std::sync::Mutex::new(
         Vec::<Vec<meerkat_core::ToolName>>::new(),
     ));
     let provider_turn_overlays =
         Arc::new(std::sync::Mutex::new(Vec::<Option<TurnToolOverlay>>::new()));
+    let provider_call_sessions = Arc::new(std::sync::Mutex::new(Vec::<SessionId>::new()));
     let session_service = Arc::new(meerkat_session::EphemeralSessionService::new(
         OverlayProbeSessionAgentBuilder {
             provider_visible_tools: Arc::clone(&provider_visible_tools),
             provider_turn_overlays: Arc::clone(&provider_turn_overlays),
+            provider_call_sessions: Arc::clone(&provider_call_sessions),
         },
         16,
     ));
@@ -12301,7 +12312,12 @@ async fn create_test_mob_with_overlay_probe_service_and_workgraph(
         .await
         .expect("create mob with overlay probe session service");
 
-    (handle, provider_visible_tools, provider_turn_overlays)
+    (
+        handle,
+        provider_visible_tools,
+        provider_turn_overlays,
+        provider_call_sessions,
+    )
 }
 
 // -----------------------------------------------------------------------
@@ -23798,7 +23814,7 @@ async fn test_member_turn_options_dispatch_context_reaches_session_dispatcher() 
         .expect("worker profile")
         .external_addressable = true;
     let identity = AgentIdentity::from("w-member-turn-dispatch-context");
-    let (handle, _provider_visible_tools, provider_turn_overlays) =
+    let (handle, _provider_visible_tools, provider_turn_overlays, _) =
         create_test_mob_with_overlay_probe_service_and_workgraph(definition, None).await;
     handle
         .spawn_with_options(
@@ -23854,11 +23870,20 @@ async fn test_member_turn_options_dispatch_context_reaches_session_dispatcher() 
 async fn test_workgraph_owner_attention_survives_respawn_and_scopes_member_turn() {
     let definition = sample_definition();
     let identity = AgentIdentity::from("w-attention");
-    let workgraph_service = meerkat::WorkGraphService::with_scope(
+    // The host hands the mob a service scoped to the host realm; members
+    // resolve attention only in the mob realm, so the owner-bound goal is
+    // created through the same rescoping the mob runtime applies
+    // (`mob_scoped_workgraph_service`). Creating it in the host realm is
+    // refused, see `owner_bound_goal_in_a_foreign_realm_is_refused_typed`.
+    let host_workgraph_service = meerkat::WorkGraphService::with_scope(
         Arc::new(meerkat::MemoryWorkGraphStore::new()),
         "mob-attention-realm",
         meerkat::WorkNamespace::new("goals").expect("namespace"),
     );
+    let workgraph_service =
+        crate::mob_scoped_workgraph_service(&host_workgraph_service, &definition.id)
+            .expect("mob realm")
+            .expect("mob-scoped WorkGraph service");
     let goal = workgraph_service
         .create_goal(meerkat::GoalCreateRequest {
             failed_child_join_policy: Default::default(),
@@ -23885,10 +23910,10 @@ async fn test_workgraph_owner_attention_survives_respawn_and_scopes_member_turn(
         .await
         .expect("create owner-bound goal");
 
-    let (handle, provider_visible_tools, provider_turn_overlays) =
+    let (handle, provider_visible_tools, provider_turn_overlays, provider_call_sessions) =
         create_test_mob_with_overlay_probe_service_and_workgraph(
             definition,
-            Some(workgraph_service.clone()),
+            Some(host_workgraph_service),
         )
         .await;
     let original_session = handle
@@ -23929,12 +23954,18 @@ async fn test_workgraph_owner_attention_survives_respawn_and_scopes_member_turn(
         .lock()
         .expect("provider_visible_tools lock poisoned")
         .clone();
+    let call_sessions = provider_call_sessions
+        .lock()
+        .expect("provider_call_sessions lock poisoned")
+        .clone();
     let scoped_tools = seen_tools.last().expect("provider call recorded");
     assert!(
         scoped_tools
             .iter()
             .all(|name| name.starts_with("workgraph_")),
-        "attention turn should replace baseline tools with WorkGraph-scoped tools: {scoped_tools:?}"
+        "attention turn should replace baseline tools with WorkGraph-scoped tools: {scoped_tools:?} \
+         (original session {original_session}, respawned session {respawned_session}, \
+         provider calls by session {call_sessions:?}, all recorded tools {seen_tools:?})"
     );
     for expected in [
         "workgraph_get",
@@ -40165,6 +40196,7 @@ async fn test_fresh_provision_failure_preserves_resumable_document_and_quiesces_
         OverlayProbeSessionAgentBuilder {
             provider_visible_tools: Arc::new(Mutex::new(Vec::new())),
             provider_turn_overlays: Arc::new(Mutex::new(Vec::new())),
+            provider_call_sessions: Arc::new(Mutex::new(Vec::new())),
         },
         16,
         session_store,
@@ -40316,6 +40348,7 @@ async fn test_retired_session_revival_failure_preserves_resumable_document() {
         OverlayProbeSessionAgentBuilder {
             provider_visible_tools,
             provider_turn_overlays,
+            provider_call_sessions: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
         16,
         session_store,
@@ -72667,6 +72700,7 @@ async fn test_ephemeral_session_service_accepts_llm_override_with_installed_host
         OverlayProbeSessionAgentBuilder {
             provider_visible_tools,
             provider_turn_overlays,
+            provider_call_sessions: Arc::new(std::sync::Mutex::new(Vec::new())),
         },
         16,
     ));

@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use meerkat_core::SessionId;
+
 use meerkat_core::service::WorkGraphNamespaceGrant;
 use serde_json::json;
 
@@ -89,6 +92,25 @@ pub struct WorkGraphService {
     default_realm_id: Arc<str>,
     default_namespace: WorkNamespace,
     namespace_grant: WorkGraphNamespaceGrant,
+    attention_realm_resolver: Option<Arc<dyn AttentionTargetRealmResolver>>,
+}
+
+/// Resolves a `Session` attention target to the mob member that owns the
+/// session, so the realm rule that protects `Owner` targets also protects
+/// `Session` targets. The WorkGraph store knows nothing about sessions; a
+/// host that does (it holds the session service) installs a resolver with
+/// [`WorkGraphService::with_attention_realm_resolver`]. Without one, a
+/// `Session` target cannot be checked and is accepted as before.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait AttentionTargetRealmResolver: Send + Sync {
+    /// The [`WorkOwnerKey::mob_agent`] key of the member whose session this
+    /// is, `None` when the session is not a mob member's or is unknown to the
+    /// host (a session that does not exist yet cannot be classified).
+    async fn member_owner_key_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<WorkOwnerKey>, WorkGraphError>;
 }
 
 /// Capability-bearing coordinator for WorkGraph execution observations.
@@ -128,7 +150,25 @@ impl WorkGraphService {
                 realm_id,
                 namespace: default_namespace.as_str().to_string(),
             },
+            attention_realm_resolver: None,
         }
+    }
+
+    /// Install the host's session-to-member resolver so `Session` attention
+    /// targets are held to the same realm rule as `Owner` targets. A rescoped
+    /// copy of this service (see `meerkat_mob::mob_scoped_workgraph_service`)
+    /// should carry the resolver along with
+    /// [`Self::attention_realm_resolver`].
+    pub fn with_attention_realm_resolver(
+        mut self,
+        resolver: Arc<dyn AttentionTargetRealmResolver>,
+    ) -> Self {
+        self.attention_realm_resolver = Some(resolver);
+        self
+    }
+
+    pub fn attention_realm_resolver(&self) -> Option<Arc<dyn AttentionTargetRealmResolver>> {
+        self.attention_realm_resolver.clone()
     }
 
     pub fn with_namespace_grant(
@@ -144,6 +184,7 @@ impl WorkGraphService {
             default_realm_id: Arc::<str>::from(namespace_grant.realm_id.clone()),
             default_namespace,
             namespace_grant,
+            attention_realm_resolver: None,
         })
     }
 
@@ -208,6 +249,8 @@ impl WorkGraphService {
         validate_completion_policy(&request.completion_policy)?;
         let (realm_id, namespace) =
             self.scope(request.realm_id.clone(), request.namespace.clone())?;
+        self.validate_attention_target_realm(&request.target, &realm_id)
+            .await?;
         let create_request = CreateWorkItemRequest {
             realm_id: Some(realm_id.clone()),
             namespace: Some(namespace.clone()),
@@ -267,6 +310,8 @@ impl WorkGraphService {
     ) -> Result<GoalCreateResult, WorkGraphError> {
         let now = self.store.get_store_time_utc().await?;
         let (realm_id, namespace) = self.scope(request.realm_id, request.namespace)?;
+        self.validate_attention_target_realm(&request.target, &realm_id)
+            .await?;
         let item = self
             .store
             .get_item(&realm_id, &namespace, &request.item_id)
@@ -564,6 +609,8 @@ impl WorkGraphService {
         break_glass_audit: Option<serde_json::Value>,
     ) -> Result<AttentionReassignResult, WorkGraphError> {
         let now = self.store.get_store_time_utc().await?;
+        self.validate_attention_target_realm(target, &realm_id)
+            .await?;
         let current = self
             .attention_binding(AttentionBindingRequest {
                 binding_id,
@@ -2047,6 +2094,48 @@ fn reject_reserved_evidence_refs(evidence_refs: &[WorkEvidenceRef]) -> Result<()
         )));
     }
     Ok(())
+}
+
+impl WorkGraphService {
+    /// A binding whose target is a mob member is only ever resolved by that
+    /// member's turns in the mob realm (`mob.<mob_id>`): the mob runtime
+    /// rescopes its WorkGraph service there and the member's attention overlay
+    /// lookup lists bindings in that realm alone. Accepting the binding in any
+    /// other realm would store it where the member never looks, so it is
+    /// refused at the call. `Owner` targets carry the member in the key;
+    /// `Session` targets are resolved through the host's
+    /// [`AttentionTargetRealmResolver`] when one is installed.
+    async fn validate_attention_target_realm(
+        &self,
+        target: &GoalAttentionTarget,
+        realm_id: &str,
+    ) -> Result<(), WorkGraphError> {
+        let owner_key = match target {
+            GoalAttentionTarget::Owner { owner_key } => owner_key.clone(),
+            GoalAttentionTarget::Session { session_id } => {
+                let Some(resolver) = self.attention_realm_resolver.as_ref() else {
+                    return Ok(());
+                };
+                match resolver.member_owner_key_for_session(session_id).await? {
+                    Some(owner_key) => owner_key,
+                    None => return Ok(()),
+                }
+            }
+        };
+        let Some(member) = owner_key.as_mob_agent() else {
+            return Ok(());
+        };
+        let required_realm_id = member.realm_id()?;
+        if required_realm_id != realm_id {
+            return Err(WorkGraphError::AttentionTargetRealmMismatch {
+                owner_key: owner_key.canonical(),
+                mob_id: member.mob_id.to_string(),
+                required_realm_id,
+                realm_id: realm_id.to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 fn validate_completion_policy(policy: &WorkCompletionPolicy) -> Result<(), WorkGraphError> {

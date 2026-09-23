@@ -301,6 +301,30 @@ them.
 
 ### Fixed
 
+- A WorkGraph attention binding that names a mob member is refused, typed, when
+  it is requested in any realm other than that mob's realm. Since members build
+  in and resolve attention from `mob.<mob_id>` (the mob runtime rescopes the
+  host's WorkGraph service there), a member-bound goal created through a
+  host-realm service was accepted and stored where the member never looks: the
+  member's turns ran with its baseline tools and no attention overlay, with no
+  error anywhere. `WorkGraphService::create_goal`, `bind_goal_attention`,
+  `reassign_attention`, and `break_glass_reassign_attention` now return
+  `WorkGraphError::AttentionTargetRealmMismatch` (tool code
+  `invalid_arguments`, public class `InvalidArguments`) for an
+  `Owner { owner_key }` target of the `mob/<mob_id>/agent/<identity>` shape
+  whose realm is not `mob.<mob_id>`, and for a `Session { session_id }` target
+  whose session carries a member's `mob_id` / `agent_identity` labels when the
+  host installed a session-to-member resolver
+  (`WorkGraphService::with_attention_realm_resolver`,
+  `meerkat::surface::SessionServiceAttentionRealmResolver`; the RPC runtime
+  and the mob runtime install it, so the RPC, REST and MCP host paths and
+  every member tool surface are covered). A `Session` target on a service
+  without a resolver, or for a session the host does not know yet, cannot be
+  classified and is accepted as before. Hosts create member-bound goals through
+  `meerkat_mob::mob_scoped_workgraph_service`. The mob runtime test
+  `test_workgraph_owner_attention_survives_respawn_and_scopes_member_turn`
+  created its goal in a host realm and failed on every run since the
+  rescoping landed; it now creates the goal in the mob realm.
 - `meerkat-mob` test scaffolding: the durable-fork boundary tests
   (`durable_fork_delegation_waits_for_a_busy_source_turn_boundary_then_forks`,
   `durable_fork_delegation_reports_source_busy_after_the_bounded_wait`) modelled
@@ -645,6 +669,27 @@ them.
   canonical TLC lane, generated authority, and render contracts are unchanged.
 
 ### Breaking
+- `WorkGraphError` gains the variant `AttentionTargetRealmMismatch { owner_key,
+  mob_id, required_realm_id, realm_id }` (exhaustive matches must add the
+  arm); the generated `WorkGraphErrorKind` gains `AttentionTargetRealmMismatch`
+  (`WorkGraphErrorKind::*` discriminants and `PartialOrd` positions are
+  unchanged for existing variants; exhaustive matches must add the arm). New
+  public items: `WorkOwnerKey::mob_agent`, `WorkOwnerKey::as_mob_agent`,
+  `MobAgentOwner` (with `MobAgentOwner::realm_id`), `mob_agent_owner_id_parts`,
+  the trait `AttentionTargetRealmResolver`,
+  `WorkGraphService::with_attention_realm_resolver` /
+  `attention_realm_resolver`, and
+  `meerkat::surface::SessionServiceAttentionRealmResolver`, re-exported from
+  `meerkat`. Host impact: a
+  goal or reassignment whose target is a mob member must be created through
+  `meerkat_mob::mob_scoped_workgraph_service(&host_service, &mob_id)` (realm
+  `mob.<mob_id>`); the same request on a host-realm service, including the
+  RPC, REST, MCP and MobKit console paths that use the host's service, is
+  refused with `AttentionTargetRealmMismatch` instead of being stored.
+  Member-bound bindings already stored in a host realm by earlier releases
+  are not visible to members after this release: list them with
+  `list_attention` on the host realm, create the goal again in the mob
+  realm, and pause the host-realm binding.
 - `MobError::MemberRestoreFailed` gains the field
   `hold: Option<DurableResumeHold>` (`MobError` struct literals and exhaustive
   struct patterns on `MemberRestoreFailed` must name it or use `..`): meerkat's

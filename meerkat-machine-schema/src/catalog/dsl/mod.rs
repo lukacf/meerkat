@@ -4905,6 +4905,7 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "NamespaceAssignmentRequired",
                     "Store",
                     "UnsupportedBackend",
+                    "AttentionTargetRealmMismatch",
                 ],
             ),
             NamedTypeBinding::string_enum(

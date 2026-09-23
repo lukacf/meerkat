@@ -129,7 +129,8 @@ them.
   `nextest --lib --bins --profile ci-pr` lane (the fast lane minus the two
   `actor_isolation` wall-clock latency bounds, which nightly and release
   keep running unchanged) over the directly changed
-  packages (packed into at most six parallel shards), a `cargo check
+  packages (packed into at most six parallel shards, eight for a
+  whole-workspace plan, balanced by estimated build-and-link cost), a `cargo check
   --all-targets --all-features` lane over their reverse-dependency closure,
   and the gate asserts that those lanes ran; an unmapped Rust path, a missing
   diff base, or a global build-configuration path escalates to the whole

@@ -18,11 +18,20 @@
 //
 // usage:
 //   ci-cargo-lanes.mjs [--base <rev> --head <rev>] [--max-shards N]
-//                      [--format json|github] [--] [changed-path ...]
+//                      [--workspace-shards N] [--format json|github]
+//                      [--] [changed-path ...]
 //   ci-cargo-lanes.mjs --paths-from-stdin [...]
 //
 // Without explicit paths, --base/--head, or stdin, the plan is the whole
 // workspace (no diff base means no evidence of what did not change).
+//
+// Shards are packed by an estimated lane cost, not by crate count: a crate's
+// Rust line count (its lib-test binary compiles every inline test) plus a
+// term per workspace crate in its dependency closure (each top-level crate's
+// test binary links the whole graph; the cold hosted-runner shards that
+// bundled several such crates ran 18-25 minutes while the line-count
+// balanced shards of leaf crates ran 7-9). --max-shards bounds a
+// changed-package plan, --workspace-shards a whole-workspace plan.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -44,6 +53,7 @@ function parseArgs(argv) {
     base: "",
     head: "HEAD",
     maxShards: 6,
+    workspaceShards: 8,
     format: "json",
     pathsFromStdin: false,
     paths: [],
@@ -60,6 +70,11 @@ function parseArgs(argv) {
       if (!Number.isInteger(args.maxShards) || args.maxShards < 1) {
         throw new Error("--max-shards requires a positive integer");
       }
+    } else if (arg === "--workspace-shards") {
+      args.workspaceShards = Number.parseInt(argv[++i] ?? "", 10);
+      if (!Number.isInteger(args.workspaceShards) || args.workspaceShards < 1) {
+        throw new Error("--workspace-shards requires a positive integer");
+      }
     } else if (arg === "--format") {
       args.format = argv[++i] ?? "";
       if (!["json", "github"].includes(args.format)) {
@@ -74,7 +89,7 @@ function parseArgs(argv) {
       break;
     } else if (arg === "--help" || arg === "-h") {
       process.stdout.write(
-        "usage: ci-cargo-lanes.mjs [--base <rev> --head <rev>] [--max-shards N] [--format json|github] [--paths-from-stdin] [--] [changed-path ...]\n",
+        "usage: ci-cargo-lanes.mjs [--base <rev> --head <rev>] [--max-shards N] [--workspace-shards N] [--format json|github] [--paths-from-stdin] [--] [changed-path ...]\n",
       );
       process.exit(0);
     } else if (arg.startsWith("-")) {
@@ -230,10 +245,10 @@ function packShards(pkgs, weights, maxShards) {
         name: label,
         packages: names,
         package_flags: names.map((name) => `-p ${name}`).join(" "),
-        rust_lines: bin.weight,
+        estimated_cost: bin.weight,
       };
     })
-    .sort((a, b) => b.rust_lines - a.rust_lines || a.name.localeCompare(b.name));
+    .sort((a, b) => b.estimated_cost - a.estimated_cost || a.name.localeCompare(b.name));
 }
 
 function plan(args) {
@@ -336,8 +351,31 @@ function plan(args) {
     result.wasm = true;
   }
 
+  // Estimated lane cost per package: Rust lines (the lib-test binary
+  // compiles every inline test) plus a link/dependency-graph term per
+  // workspace crate in the package's dependency closure.
+  const LINK_COST_PER_DEP = 8000;
+  const depClosureSize = (pkg) => {
+    const seen = new Set();
+    const queue = [pkg.id];
+    while (queue.length) {
+      const current = byId.get(queue.pop());
+      for (const dep of current.dependencies) {
+        if (dep.source !== null) continue;
+        const depPkg = byName.get(dep.name);
+        if (depPkg && !seen.has(depPkg.id)) {
+          seen.add(depPkg.id);
+          queue.push(depPkg.id);
+        }
+      }
+    }
+    return seen.size;
+  };
   const weights = new Map(
-    packages.map((pkg) => [pkg.name, rustLineCount(resolve(root, packageDir(pkg)))]),
+    packages.map((pkg) => [
+      pkg.name,
+      rustLineCount(resolve(root, packageDir(pkg))) + LINK_COST_PER_DEP * depClosureSize(pkg),
+    ]),
   );
 
   if (workspaceReason) {
@@ -373,7 +411,11 @@ function plan(args) {
   }
 
   if (result.rust_changed) {
-    result.shards = packShards(result.packages, weights, args.maxShards);
+    result.shards = packShards(
+      result.packages,
+      weights,
+      result.mode === "workspace" ? args.workspaceShards : args.maxShards,
+    );
     if (result.shards.length === 0) {
       throw new Error("internal error: Rust-relevant change produced no lanes");
     }

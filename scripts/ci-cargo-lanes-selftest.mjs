@@ -82,12 +82,18 @@ function assertLanes(plan, label) {
 // the plan is the whole workspace, packed into bounded shards that cover
 // every member.
 {
-  const plan = planFor(["Cargo.lock"], ["--max-shards", "6"]);
+  const plan = planFor(["Cargo.lock"], ["--workspace-shards", "8"]);
   assert.equal(plan.mode, "workspace");
   assertLanes(plan, "Cargo.lock");
   assert.ok(plan.packages.length >= 45, `workspace mode lists every member (${plan.packages.length})`);
   assert.deepEqual(plan.closure, plan.packages);
-  assert.ok(plan.shards.length <= 6 && plan.shards.length >= 2, `bounded shard count (${plan.shards.length})`);
+  assert.ok(plan.shards.length <= 8 && plan.shards.length >= 2, `bounded shard count (${plan.shards.length})`);
+  // Cost-balanced, not count-balanced: no shard carries more than a quarter
+  // of the estimated workspace cost, so the heaviest crates spread out.
+  const total = plan.shards.reduce((sum, shard) => sum + shard.estimated_cost, 0);
+  for (const shard of plan.shards) {
+    assert.ok(shard.estimated_cost <= total / 4, `${shard.name} is not overloaded`);
+  }
   const covered = plan.shards.flatMap((shard) => shard.packages).sort();
   assert.deepEqual(covered, plan.packages, "shards partition the workspace exactly once");
   assert.equal(plan.wasm, true);

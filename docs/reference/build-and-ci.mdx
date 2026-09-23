@@ -221,7 +221,8 @@ The classifier fails closed. Any `.rs`, `Cargo.toml`, `Cargo.lock`,
 `.cargo/`, nextest, toolchain, build-wrapper, or `ci.yml` change yields at
 least one clippy lane and one unit lane; a Rust path that belongs to no
 workspace package, a missing diff base, or any global build-configuration
-path escalates to the whole workspace (packed into at most six shards); a
+path escalates to the whole workspace (packed into at most eight shards by
+estimated build-and-link cost); a
 classifier error fails the `changes` job and therefore the gate. The gate
 asserts that clippy, unit, and closure-check all ran and succeeded for a
 build-relevant change, and it fails when the classifier produced no lanes.

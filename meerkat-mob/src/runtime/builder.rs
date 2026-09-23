@@ -8382,6 +8382,7 @@ impl MobBuilder {
                     super::handle::RestoreFailureDiagnostic {
                         bridge_session_id: Some(bridge_session_id),
                         reason,
+                        hold: None,
                     },
                 );
             };

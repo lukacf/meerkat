@@ -4634,10 +4634,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<meerkat_runtime::recovery::DurableTailRecoveryOutcome, SessionError> {
         meerkat_runtime::recovery::recover_durable_tail(self.runtime_store.as_ref(), id)
             .await
-            .map_err(|error| {
-                SessionError::Agent(AgentError::InternalError(format!(
+            .map_err(|error| match error {
+                // Recovery reads the committed WholeBlob document before it
+                // can judge the tail. A document the current decoder refuses
+                // is the typed "session needs the sanctioned repair" fact,
+                // not an internal recovery fault: every resume runs recovery
+                // first, so laundering it here hid the hold from every host
+                // (HomeCore 2026-09-22 reload storm).
+                meerkat_runtime::recovery::DurableTailRecoveryError::Store(
+                    RuntimeStoreError::AuditedEndpointDivergence { .. },
+                ) => SessionError::WholeBlobAuditedEndpointDivergence { id: id.clone() },
+                error => SessionError::Agent(AgentError::InternalError(format!(
                     "durable-tail recovery for session {id}: {error}"
-                )))
+                ))),
             })
     }
 
@@ -36249,6 +36258,97 @@ mod tests {
                 .expect("retained token"),
             token,
             "NotFound classification must not mutate the physical row"
+        );
+    }
+
+    /// A committed WholeBlob document the current decoder refuses (its live
+    /// transcript no longer preserves the graph-proved audited endpoint) is
+    /// read by recovery before anything else on the resume path. The refusal
+    /// must reach the caller as the typed
+    /// `WholeBlobAuditedEndpointDivergence` on the heal seam AND on the
+    /// operational resume preparation, never as an internal recovery fault,
+    /// or every host classifies the HomeCore 2026-09-22 wedge as retryable.
+    #[tokio::test]
+    async fn recovery_and_resume_report_audited_endpoint_divergence_typed() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            store,
+            Arc::clone(&runtime_store) as Arc<dyn meerkat_runtime::RuntimeStore>,
+            memory_blob_store(),
+        );
+
+        // The HomeCore shape: a compaction retained a rewritten row inside the
+        // audited endpoint, then the document was encoded past the writer
+        // guard.
+        let mut session = Session::new();
+        session.append_system_message("system prompt");
+        for turn in 0..5 {
+            session.push(Message::User(UserMessage::text(format!("question {turn}"))));
+        }
+        let live = session.messages().to_vec();
+        let mut replacement = vec![live[0].clone()];
+        replacement.push(Message::User(UserMessage::compaction_summary(
+            "[Compaction summary] earlier questions",
+        )));
+        replacement.extend(live[4..].iter().cloned());
+        session
+            .stage_validated_compaction_for_test(replacement, 12)
+            .expect("compaction commits");
+        session.push(Message::User(UserMessage::text("after compaction")));
+        let mut tampered = session.messages().to_vec();
+        tampered[1] = Message::User(UserMessage::text("row inside the endpoint, rewritten"));
+        session.replace_messages_unaudited_for_test(tampered);
+        let id = session.id().clone();
+        let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&id);
+        runtime_store
+            .inject_committed_whole_blob_bytes_for_test(
+                &runtime_id,
+                &id,
+                serde_json::to_vec(&session).expect("plain serde encodes"),
+            )
+            .await
+            .expect("inject the refused document");
+
+        for _ in 0..2 {
+            let error = service
+                .recover_committed_boundary(&id)
+                .await
+                .expect_err("a refused document cannot be recovered");
+            assert!(
+                matches!(
+                    error,
+                    SessionError::WholeBlobAuditedEndpointDivergence { id: ref held } if *held == id
+                ),
+                "heal seam must report the typed hold, got {error:?}"
+            );
+            assert_eq!(
+                error.durable_resume_hold(),
+                Some(meerkat_core::service::DurableResumeHold::AuditedEndpointDivergence)
+            );
+        }
+        let error = service
+            .prepare_committed_boundary_resume(&id)
+            .await
+            .expect_err("a refused document cannot be prepared for resume");
+        assert!(
+            matches!(
+                error,
+                SessionError::WholeBlobAuditedEndpointDivergence { id: ref held } if *held == id
+            ),
+            "resume preparation must report the typed hold, got {error:?}"
+        );
+        // Nothing was rewritten: the document is retained for the operator's
+        // sanctioned repair.
+        assert!(
+            runtime_store
+                .session_authority_ops()
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .is_err(),
+            "classification must not mutate or repair the document"
         );
     }
 

@@ -139,7 +139,10 @@ pub async fn repair_whole_blob_audited_endpoint(
         committed_blob_sha256: None,
     };
     let decode_error = match Session::decode_whole_blob_document(bytes.as_ref()) {
-        Ok(_) => return Ok(report),
+        Ok(document) => {
+            report.live_row_count = document.session().messages().len();
+            return Ok(report);
+        }
         Err(error) => error.to_string(),
     };
     report.decode_error = Some(decode_error);

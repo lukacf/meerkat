@@ -9623,6 +9623,81 @@ ORDER BY runtime_id";
             })
         }
 
+        /// Open an EXISTING WholeBlob runtime database for an operator repair.
+        ///
+        /// Directory-level side effects are limited to what any SQLite open
+        /// does: the `<file>.mfence` lock sibling and the WAL sidecars. No
+        /// realm manifest and no other store is created, and a missing
+        /// database is a typed `NotFound` rather than a fresh empty store. A
+        /// database pinned to the head-canonical profile is refused typed:
+        /// this repair only applies to WholeBlob documents. A database whose
+        /// runtime-store schema is older than this binary is refused typed
+        /// through a read-only preflight instead of being migrated in place;
+        /// the ordinary open would have written the migration. The only
+        /// remaining metadata write is the WAL journal-mode conversion for a
+        /// database that is not already in WAL mode.
+        pub fn open_existing_whole_blob(
+            path: impl Into<PathBuf>,
+        ) -> Result<Self, RuntimeStoreError> {
+            let path = path.into();
+            if !path.is_file() {
+                return Err(RuntimeStoreError::NotFound(format!(
+                    "no runtime database at {}; point --state-root at the realms root and --realm at the realm directory that holds runtime.sqlite3",
+                    path.display()
+                )));
+            }
+            Self::preflight_existing_runtime_schema_read_only(&path)?;
+            Self::new_whole_blob(path)
+        }
+
+        /// Read the recorded runtime-store schema version over a read-only
+        /// connection and refuse an older database typed, so an operator
+        /// diagnose never runs a migration.
+        fn preflight_existing_runtime_schema_read_only(
+            path: &Path,
+        ) -> Result<(), RuntimeStoreError> {
+            let conn = Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|error| {
+                RuntimeStoreError::ReadFailed(format!(
+                    "read-only preflight of {} failed: {error}",
+                    path.display()
+                ))
+            })?;
+            let recorded: Option<i64> = conn
+                .query_row(
+                    "SELECT version FROM meerkat_schema WHERE domain = ?1",
+                    [RUNTIME_STORE_DOMAIN.name],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| {
+                    RuntimeStoreError::ReadFailed(format!(
+                        "read-only preflight of {} could not read the schema ledger: {error}",
+                        path.display()
+                    ))
+                })?;
+            let current = i64::try_from(RUNTIME_STORE_DOMAIN.migrations.len()).unwrap_or(i64::MAX);
+            match recorded {
+                Some(version) if version == current => Ok(()),
+                Some(version) if version < current => Err(RuntimeStoreError::Unsupported(format!(
+                    "runtime database {} records schema version {version} but this binary expects {current}; the repair does not migrate a store in place, open it once with the gateway that owns it (or a matching rkat run) before repairing",
+                    path.display()
+                ))),
+                Some(version) => Err(RuntimeStoreError::Unsupported(format!(
+                    "runtime database {} records schema version {version}, newer than this binary's {current}; use a matching or newer rkat",
+                    path.display()
+                ))),
+                None => Err(RuntimeStoreError::Unsupported(format!(
+                    "runtime database {} has no runtime-store schema ledger entry; it is not a meerkat runtime store",
+                    path.display()
+                ))),
+            }
+        }
+
         /// Open a head-canonical runtime authority co-located with the SQLite
         /// session store in the same database file.
         ///

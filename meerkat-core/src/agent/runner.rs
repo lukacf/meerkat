@@ -2677,6 +2677,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
         let post_commit_hooks = Arc::new(crate::hooks::PostCommitHookDispatcher::new(
             snapshot.id().clone(),
         ));
+        let durable_row_floor = snapshot.messages().len();
         let mut operation_agent = Agent {
             config: self.config.clone(),
             client: isolated_client,
@@ -2714,6 +2715,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             // stage a permanent routing handoff nor commit one.
             model_routing_handoff_staging: None,
             latest_run_checkpoint_receipt: None,
+            durable_row_floor,
             blob_store: self.blob_store.clone(),
             terminal_error_detail: None,
             terminal_error_metadata: None,

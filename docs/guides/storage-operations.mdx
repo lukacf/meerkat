@@ -250,30 +250,47 @@ failure. For a session that is already wedged, repair it once:
    that actor's in-memory state, not the committed document, is then the
    authority. Under MobKit, stop the member (or let the identity retire) and
    confirm no `reload_member` retry loop is running against it.
-2. Point `rkat` at the runtime store that holds the session. `rkat` resolves
-   the realm from the context root and `--state-root`; for a MobKit gateway
-   pass the gateway's state root and realm explicitly, for example
-   `rkat --state-root /var/lib/homecore/.rkat/realms --realm <realm-id>
-   sessions repair-wholeblob <session-id>`. The diagnose run prints the
-   runtime id and store revision it read, so a wrong root or realm shows up as
-   "no committed WholeBlob body" before anything is written.
+2. Point `rkat` at the runtime database that holds the session. The realm
+   argument is the realm's directory name under the realms root (ASCII
+   letters, digits, `-` or `_`); for a MobKit gateway the meerkat-level realm
+   is `mobkit` under the gateway's state directory, so the store lives at
+   `<state_dir>/mobkit/runtime.sqlite3`. The `mob.<name>` id recorded in a
+   session's metadata is a mob scope, not a store realm; passing it is
+   refused with a message that says so. The command opens only that runtime
+   database: it never creates a realm manifest or any other store, a missing
+   database is a typed refusal naming the path it looked for, and a database
+   pinned to the head-canonical profile is refused because this repair only
+   applies to WholeBlob documents. A database whose runtime-store schema is
+   older than the `rkat` binary is refused through a read-only preflight
+   rather than migrated in place; open it once with the gateway that owns it
+   (or a matching `rkat`) first. The only writes an open can make are
+   SQLite's own: the `runtime.sqlite3.mfence` lock sibling, the WAL sidecars,
+   and the journal-mode conversion to WAL for a database not already in WAL
+   mode. No `--realm-backend` flag is needed.
 3. Diagnose, then apply:
 
 ```bash
 # Diagnose: prints the refusal, the divergence (row counts, revisions, first
-# divergent row), and what a repair would drop. Writes nothing.
-rkat sessions repair-wholeblob <session-id>
+# divergent row), and what a repair would drop. Writes nothing to the store.
+rkat --state-root <state_dir> --realm mobkit session repair-wholeblob <session-id> --json
 
 # Repair: re-anchor the committed document on its live rows.
-rkat sessions repair-wholeblob <session-id> --apply --json
+rkat --state-root <state_dir> --realm mobkit session repair-wholeblob <session-id> --apply --json
 ```
 
-The expected divergence for the HomeCore report is `LivePrefixDiverges`
-(live rows at least as many as the endpoint, a prefix row differing). A
-`LiveShorterThanEndpoint` divergence is the one shape where re-anchoring on
-the live rows drops content the audited endpoint proves existed; `--apply`
-refuses it unless you pass `--accept-shorter`, and the report then records
-both row counts as the audit trail of that decision.
+A diagnose report for the 2026-09-22 HomeCore shape reads, with counts only:
+`"action": "would_reanchor"`, `"divergence": {"kind": "live_prefix_diverges",
+"endpoint_row_count": 118, "live_row_count": 125, "first_divergent_row": 115}`,
+`"graph_edges_dropped": 8`, one dropped compaction intent, and the base store
+revision and blob digest it read. The apply report repeats those facts with
+`"action": "reanchored"` and the new `committed_store_revision`; a second
+diagnose then reports `"action": "no_repair_needed"` with the decoded
+`live_row_count`. The expected divergence for that report is
+`LivePrefixDiverges` (live rows at least as many as the endpoint, a prefix row
+differing). A `LiveShorterThanEndpoint` divergence is the one shape where
+re-anchoring on the live rows drops content the audited endpoint proves
+existed; `--apply` refuses it unless you pass `--accept-shorter`, and the
+report then records both row counts as the audit trail of that decision.
 
 The repair keeps every message byte for byte. It removes the audited
 transcript graph, its rewrite prefix authority and the pending compaction

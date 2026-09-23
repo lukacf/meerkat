@@ -14145,11 +14145,33 @@ async fn repair_wholeblob_session(
     #[cfg(feature = "session-store")]
     {
         let session_id = resolve_scoped_session_id(id, scope)?;
-        let (config, _) = load_config(scope).await?;
-        let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
-        let report = service
-            .repair_whole_blob_audited_endpoint(&session_id, apply, accept_shorter)
-            .await?;
+        // Open only the runtime database that holds the committed document.
+        // The ordinary persistence bundle would ensure a realm manifest and
+        // materialize every store in the realm directory; an operator
+        // diagnose must leave the directory as it found it (SQLite's own
+        // `.mfence` lock sibling and WAL sidecars aside). No actor can own
+        // the session in this process, so the store-level repair is the
+        // complete procedure here; the operator stops the member first.
+        let realm_paths =
+            meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str());
+        let store = meerkat_runtime::store::SqliteRuntimeStore::open_existing_whole_blob(
+            realm_paths.runtime_sqlite_path.clone(),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "cannot open the WholeBlob runtime store for realm '{}' under {}: {error}",
+                scope.locator.realm.as_str(),
+                scope.locator.state_root.display()
+            )
+        })?;
+        let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&session_id);
+        let report = meerkat_runtime::store::whole_blob_repair::repair_whole_blob_audited_endpoint(
+            &store,
+            &runtime_id,
+            apply,
+            accept_shorter,
+        )
+        .await?;
         if json {
             println!("{}", serde_json::to_string_pretty(&report)?);
             return Ok(());

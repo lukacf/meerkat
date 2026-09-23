@@ -363,3 +363,92 @@ async fn sqlite_wedged_body_with_pending_outbox_repairs_and_finalizes_cleanly() 
             .is_empty()
     );
 }
+
+/// A document that decodes reports its real row count, so an operator can
+/// tell "nothing to repair, N rows" from an empty store.
+#[tokio::test]
+async fn healthy_document_reports_its_decoded_row_count() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let store = SqliteRuntimeStore::new_whole_blob(tempdir.path().join("runtime.sqlite3"))
+        .expect("whole-blob sqlite store");
+    let mut session = Session::new();
+    session.append_system_message("system prompt");
+    for turn in 0..3 {
+        session.push(Message::User(UserMessage::text(format!("question {turn}"))));
+    }
+    let session_id = session.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let bytes = serde_json::to_vec(&session).expect("plain serde encodes");
+    store
+        .inject_wedged_whole_blob_for_test(&runtime_id, &session_id, bytes, Vec::new())
+        .await
+        .expect("commit a healthy body");
+    let report = repair_whole_blob_audited_endpoint(&store, &runtime_id, false, false)
+        .await
+        .expect("diagnose");
+    assert!(matches!(
+        report.action,
+        WholeBlobRepairAction::NoRepairNeeded
+    ));
+    assert_eq!(report.decode_error, None);
+    assert_eq!(report.live_row_count, 4);
+}
+
+/// The operator open refuses an older-schema database over a read-only
+/// preflight instead of migrating it, and a missing database is a typed
+/// refusal; neither writes anything.
+#[test]
+fn open_existing_whole_blob_refuses_older_schema_and_missing_databases_without_writing() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let path = tempdir.path().join("runtime.sqlite3");
+    let missing = SqliteRuntimeStore::open_existing_whole_blob(&path)
+        .err()
+        .expect("missing database refused");
+    assert!(
+        matches!(missing, RuntimeStoreError::NotFound(_)),
+        "{missing:?}"
+    );
+    assert!(
+        !path.exists(),
+        "a refused open must not create the database"
+    );
+
+    drop(SqliteRuntimeStore::new_whole_blob(&path).expect("fresh whole-blob store"));
+    SqliteRuntimeStore::open_existing_whole_blob(&path).expect("current schema opens");
+    let conn = rusqlite::Connection::open(&path).expect("raw connection");
+    let current: i64 = conn
+        .query_row(
+            "SELECT version FROM meerkat_schema WHERE domain = 'runtime-store'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("ledger row");
+    assert!(current >= 1);
+    conn.execute(
+        "UPDATE meerkat_schema SET version = version - 1 WHERE domain = 'runtime-store'",
+        [],
+    )
+    .expect("age the ledger");
+    drop(conn);
+    let older = SqliteRuntimeStore::open_existing_whole_blob(&path)
+        .err()
+        .expect("older schema refused");
+    assert!(
+        matches!(older, RuntimeStoreError::Unsupported(_)),
+        "{older:?}"
+    );
+    assert!(older.to_string().contains("does not migrate"), "{older}");
+    let conn = rusqlite::Connection::open(&path).expect("raw connection");
+    let after: i64 = conn
+        .query_row(
+            "SELECT version FROM meerkat_schema WHERE domain = 'runtime-store'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("ledger row");
+    assert_eq!(
+        after,
+        current - 1,
+        "the refused open must not migrate the ledger"
+    );
+}

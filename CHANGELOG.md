@@ -160,6 +160,45 @@ them.
 
 ### Fixed
 
+- Compaction no longer mints an audit graph edge over inline media. When a
+  session has a blob store, the agent externalizes inline images in the live
+  transcript before the compaction witness binds the exact rows, so the rows a
+  rewrite edge retains verbatim are already in their persisted (blob-backed)
+  form. Previously the edge kept the inline bytes while the next WholeBlob
+  checkpoint externalized only the live rows, so the live transcript no longer
+  preserved the graph-proved audited endpoint (`LivePrefixDiverges` at the
+  image row) and every later read of the document was refused; a session in
+  that state could not be reloaded (HomeCore parent-1, 2026-09-22). The
+  checkpoint pass is now a byte-identical no-op for those rows. The
+  externalization starts at the agent's durable row floor (the document loaded
+  at build, the rows a compaction rewrite installed, or a committed successor
+  the runtime handed over): committed rows keep the persisted form the store's
+  prefix proof pins, so a legacy inline committed row is never mutated on the
+  actor (that would make the next commit disagree with the head row). A
+  failed externalization skips that compaction attempt with a typed
+  `CompactionFailed` reason instead of proceeding.
+- `rkat session repair-wholeblob` opens only the realm's runtime database.
+  It no longer goes through the realm persistence bundle, which ensured a
+  realm manifest (defaulting to the sqlite backend) and materialized the
+  session, jobs and workgraph stores in the realm directory, and then opened a
+  head-canonical runtime store that refused the WholeBlob repair unless
+  `--realm-backend jsonl` was passed on the first invocation. A diagnose now
+  writes nothing to the store and creates no manifest or store; a missing
+  database is a typed refusal naming the path; a head-canonical database is
+  refused typed. A database whose runtime-store schema is older than the
+  binary is refused through a read-only preflight instead of being migrated
+  in place; the only writes an open can still make are SQLite's own (the
+  `.mfence` lock sibling, WAL sidecars, and the journal-mode conversion for a
+  database not yet in WAL mode). The report of a document that decodes
+  carries its real `live_row_count` instead of 0. A compaction whose
+  pre-rewrite media externalization fails now publishes a typed
+  `CompactionFailed` (transcript rewrite failure naming the externalization)
+  instead of only logging the skipped attempt.
+- The invalid-realm-id error names the accepted form (the realm directory name:
+  ASCII letters, digits, `-` or `_`) and that a MobKit gateway's meerkat-level
+  realm is `mobkit` under its state directory, since the `mob.<name>` id in
+  session metadata is a mob scope rather than a store realm.
+
 - WholeBlob persistence refuses to mint a document its own reader would
   refuse. `Session::to_persisted_artifact` and the runtime store's WholeBlob
   encoder now run the audited-endpoint check before serializing, so a live

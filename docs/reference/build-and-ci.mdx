@@ -218,7 +218,7 @@ pushes to `main`, `ci/**`, `feat/**`, and `feature/**`, and manual dispatches:
 - `github-hosted-dense-topology` calls `mob-dense-topology.yml`: it builds a
   Mob unit-test archive and runs the 300-member/150-peer stress on hosted Linux.
 - The top-level `CI gate` requires both component results to be `success`.
-  It also enforces a 3600-second (60-minute) push-to-terminal budget measured
+  It also enforces a 4200-second (70-minute) push-to-terminal budget measured
   from workflow creation, not a ten-minute Cargo-only target.
 
 The final gate emits a schema-3 attestation for successful `main` pushes,

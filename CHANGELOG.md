@@ -226,13 +226,14 @@ them.
   whichever registered second failed as displacing a live incumbent. The
   across-roots test now uses its own name.
 - CI budgets now fit the lanes that actually run: the GCP BuildBuddy SLO is
-  2400s from control-plane start (was 1200s; the cold `//...` prebuild alone
-  needs ~12-13 min and gates the native lanes, and the SDK suites action was
-  still running when the old watchdog fired at 1015s), the Prebuild and Native
-  jobs have 25 and 30 minute timeouts (the cold prebuild was cancelled at 97% by
-  the previous 12), and the top-level push-to-terminal budget is 3600s (was
-  2400s; GitHub queued the control-plane job for 4 minutes on consecutive
-  runs before the 2400s component SLO even started). No lane was narrowed.
+  3000s from control-plane start (was 1200s; the cold `//...` prebuild alone
+  needs ~12-13 min and gates the native lanes, and the SDK Web suite's
+  wasm-pack build plus tests ran 1912s on its own executor), the Prebuild and
+  Native jobs have 25 and 30 minute timeouts (the cold prebuild was cancelled
+  at 97% by the previous 12), and the top-level push-to-terminal budget is
+  4200s (was 2400s; GitHub queued the control-plane job for 4-5 minutes on
+  three consecutive runs before the component SLO even started). No lane was
+  narrowed.
 - The BuildBuddy SDK suites lane runs one remote action per suite
   (`sdk_python_cargo_equivalent_test`, `sdk_typescript_cargo_equivalent_test`,
   `sdk_web_cargo_equivalent_test`, grouped as
@@ -241,6 +242,25 @@ them.
   suites on a single executor; that action was still running at 2138s on
   2026-09-23. Each suite keeps exactly the steps it had; the single-action
   target remains for local use.
+- Bazel unit tests receive the runfiles their whole crate names: the generator
+  scanned only the crate root (plus `#[path]` includes) for workspace data,
+  so `meerkat-store`'s released-corpus test could not find
+  `meerkat-runtime/tests/fixtures/...` in the sandbox. Every `src/**` file is
+  scanned for unit tests, and `MEERKAT_WORKSPACE_ROOT` counts as a
+  workspace-root reference (the tests fall back to a cwd holding the root
+  `Cargo.toml`, which `//:workspace_metadata` provides).
+- The two `meerkat-mcp-server` tests sharing the `insert_mcp_archive_live_member`
+  helper created the same mob (`mcp-session-archive-live-member`) in parallel
+  and collided on its process-global supervisor participant name
+  (`ParticipantNameOccupied`); the helper takes the mob id and each test uses
+  its own.
+- The Bazel clippy lanes apply the root `Cargo.toml` `[workspace.lints]`
+  table (`scripts/bazel-clippy-lint-flags`, appended to every clippy lane by
+  `scripts/buildbuddy-bazel-poc`). rules_rust's clippy aspect never read it,
+  so those lanes ran with `-Dwarnings` alone: no `pedantic`, no
+  `unwrap_used = deny`, and they failed on `large_enum_variant`, which the
+  table allows. The `cargo` lint group (needs `cargo metadata`) and
+  `unexpected_cfgs` (carries `check-cfg`) are the two documented exclusions.
 - The BuildBuddy wasm-check lane runs clippy through the sandbox toolchain's
   own `cargo-clippy`. `cargo clippy` resolves that subcommand from
   `$CARGO_HOME/bin` (the executor image's rustup proxy) before `PATH`, which

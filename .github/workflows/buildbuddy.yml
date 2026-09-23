@@ -84,16 +84,18 @@ env:
   MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB || '1000' }}
   MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_TYPE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_TYPE || 'pd-ssd' }}
   MEERKAT_GCP_BUILDBUDDY_DOWN_MODE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_DOWN_MODE || 'stopped' }}
-  # 40 minutes from control-plane start. Measured on the first full-fresh runs
-  # (2026-09-22): executors up + lane setup ~2 min; the cold `//...` prebuild
-  # was cut at 97% of 3,447 actions after 10.5 min of Bazel time, so it needs
-  # ~12-13 min and it gates the native lanes (all-features clippy, unit,
-  # integration-fast) that run after it; the SDK suites action (cold
-  # `cargo build -p meerkat-rpc`, wasm-pack, three SDK suites) was still
-  # running when the 1200s watchdog fired at 1015s. 1200s never held once the
-  # lanes ran for real; it only looked fine while `changed-paths` skipped them.
-  MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "2400"
-  MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS: "2400"
+  # 50 minutes from control-plane start. Measured on the first full-fresh runs
+  # (2026-09-22/23): executors up + lane setup ~2 min; the cold `//...`
+  # prebuild needs ~12-13 min of Bazel time (cut at 97% of 3,447 actions after
+  # 10.5 min by a 12-minute job timeout) and gates the native lanes
+  # (all-features clippy, unit, integration-fast) that run after it; the SDK
+  # suites, split one action per suite, are bounded by the Web suite, whose
+  # wasm-pack build plus tests ran 1912s on its own executor (the same job
+  # takes 26 min on a 4-core GitHub runner), so the lane finished at 1979s
+  # with ~4 min left under a 2400s watchdog. 1200s never held once the lanes
+  # ran for real; it only looked fine while `changed-paths` skipped them.
+  MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "3000"
+  MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS: "3000"
   MEERKAT_BUILDBUDDY_EXECUTOR_POOL: ${{ vars.MEERKAT_BUILDBUDDY_EXECUTOR_POOL || 'meerkat-ci' }}
   MEERKAT_BUILDBUDDY_CI_IMAGE: ${{ vars.MEERKAT_BUILDBUDDY_CI_IMAGE || 'europe-west1-docker.pkg.dev/king-dnn-training-dev/meerkat-ci/meerkat-ci-rust:1.94.0' }}
   MEERKAT_HOST_CARGO_HOME: /usr/local/cargo
@@ -436,7 +438,7 @@ jobs:
       BUILDBUDDY_HTTP_URL: ${{ needs.control-plane-up.outputs.http_url }}
       BUILDBUDDY_ENDPOINT: ${{ needs.control-plane-up.outputs.grpc_url }}
       CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
-      MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "2400"
+      MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "3000"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -640,7 +642,7 @@ jobs:
         shell: bash
         env:
           CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
-          MAX_SECONDS: "2400"
+          MAX_SECONDS: "3000"
         run: |
           if ! [[ "${CI_STARTED_AT_EPOCH}" =~ ^[0-9]+$ ]]; then
             echo "::error::Missing or invalid GCP BuildBuddy CI start timestamp: '${CI_STARTED_AT_EPOCH}'"

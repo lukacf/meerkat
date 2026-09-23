@@ -354,7 +354,7 @@ are:
 - `github-hosted-dense-topology` — calls `mob-dense-topology.yml` to build a
   Mob unit-test archive and run the 300-member/150-peer stress on hosted Linux.
 - `gate` (`CI gate`) — requires both component results to be `success` and
-  enforces a 3600-second (60-minute) budget from workflow creation. Successful
+  enforces a 4200-second (70-minute) budget from workflow creation. Successful
   `main` pushes emit a schema-3 exact-tree attestation with backend
   `gcp-buildbuddy+github-hosted-dense-mob` and both component results.
 

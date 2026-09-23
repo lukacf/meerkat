@@ -445,13 +445,18 @@ async fn handle_connection(
     let mut reader = BufReader::new(reader);
     let (tx, mut rx) = mpsc::unbounded_channel::<SignedKennelEnvelope>();
 
+    // A failed write is a failed connection. On Linux a peer's RST surfaces on
+    // the next write (the post-ack broadcast here) and the following read then
+    // sees a plain EOF; on macOS the read itself fails with ECONNRESET. Carry
+    // the write failure into the handler result so both paths return Err.
     let writer_task = tokio::spawn(async move {
         while let Some(env) = rx.recv().await {
             if let Err(e) = write_envelope(&mut writer, &env).await {
                 eprintln!("[kennel] write error: {e}");
-                break;
+                return Err(e.context("kennel connection write failed"));
             }
         }
+        Ok::<(), anyhow::Error>(())
     });
 
     let mut session_kind: Option<SessionKind> = None;
@@ -813,7 +818,13 @@ async fn handle_connection(
     }.await;
 
     writer_task.abort();
-    let _ = writer_task.await;
+    let write_result = match writer_task.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(err),
+        Err(join) if join.is_cancelled() => Ok(()),
+        Err(join) => Err(anyhow::anyhow!("kennel writer task failed: {join}")),
+    };
+    let result = result.and(write_result);
 
     let _peer_guard = peer_updates.lock().await;
     if let Some(kind) = session_kind {

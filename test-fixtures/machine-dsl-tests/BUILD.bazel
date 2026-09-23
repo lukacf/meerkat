@@ -88,6 +88,11 @@ rust_test(
     ],
     size = "small",
     data = [
+        "//:test_fixtures",
+        "//meerkat-machine-schema:package_runfiles",
+        "//meerkat-runtime:package_runfiles",
+        "//test-fixtures/mcp-test-server:package_runfiles",
+        "//test-fixtures/surface-build-fixtures:package_runfiles",
         ":package_runfiles",
     ],
     env = {

@@ -284,6 +284,12 @@ rust_test(
     ],
     size = "small",
     data = [
+        "//meerkat-contracts:package_runfiles",
+        "//meerkat-core:package_runfiles",
+        "//meerkat-machine-kernels:package_runfiles",
+        "//meerkat-machine-schema:package_runfiles",
+        "//meerkat-mob:package_runfiles",
+        "//meerkat:package_runfiles",
         ":package_runfiles",
     ],
     env = {

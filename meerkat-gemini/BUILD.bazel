@@ -134,6 +134,7 @@ rust_test(
     ],
     size = "small",
     data = [
+        "//:repo_governance_files",
         ":package_runfiles",
     ],
     env = {

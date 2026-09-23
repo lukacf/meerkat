@@ -236,6 +236,7 @@ rust_test(
     ],
     size = "small",
     data = [
+        "//meerkat-machine-schema:package_runfiles",
         ":package_runfiles",
     ],
     env = {

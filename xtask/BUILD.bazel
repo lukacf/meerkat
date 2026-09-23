@@ -4,6 +4,8 @@ load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_mac
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
+load("//:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
 
 
 filegroup(
@@ -39,6 +41,7 @@ rust_library(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -77,6 +80,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -192,6 +196,7 @@ rust_binary(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -232,6 +237,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -324,6 +330,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -388,6 +395,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -467,6 +475,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -537,6 +546,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -602,6 +612,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -721,6 +732,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -788,6 +800,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -852,6 +865,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -925,6 +939,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -988,6 +1003,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -1050,6 +1066,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],

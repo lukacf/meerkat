@@ -2,6 +2,8 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 
+load("//:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
 
 
 filegroup(
@@ -39,6 +41,7 @@ rust_library(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -73,6 +76,7 @@ rust_library(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -115,6 +119,7 @@ rust_test(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -176,6 +181,7 @@ rust_test(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -231,6 +237,7 @@ rust_test(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -286,6 +293,7 @@ rust_test(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -341,6 +349,7 @@ rust_test(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -396,6 +405,7 @@ rust_test(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -451,6 +461,7 @@ rust_test(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -505,6 +516,7 @@ rust_test(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -560,6 +572,7 @@ rust_test(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -615,6 +628,7 @@ rust_test(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -670,6 +684,7 @@ rust_test(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -725,6 +740,7 @@ rust_test(
         "sqlite",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],

@@ -2,6 +2,8 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 
+load("//:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
 
 
 filegroup(
@@ -35,6 +37,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -64,6 +67,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -101,6 +105,7 @@ rust_test(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -153,6 +158,7 @@ rust_test(
     crate_root = "tests/artifacts_semantic_model.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -209,6 +215,7 @@ rust_test(
     crate_root = "tests/named_type_binding_respected.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -265,6 +272,7 @@ rust_test(
     crate_root = "tests/render_contracts.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -326,6 +334,7 @@ rust_test(
     crate_root = "tests/routed_effect_module_shape.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -384,6 +393,7 @@ rust_test(
     crate_root = "tests/runtime_alphabet_parity.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -444,6 +454,7 @@ rust_test(
     crate_root = "tests/runtime_schema_parity.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [

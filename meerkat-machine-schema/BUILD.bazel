@@ -2,6 +2,8 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 
+load("//:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
 
 
 filegroup(
@@ -35,6 +37,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -65,6 +68,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -103,6 +107,7 @@ rust_test(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -164,6 +169,7 @@ rust_test(
     crate_root = "tests/auth_machine_oauth_flow.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -214,6 +220,7 @@ rust_test(
     crate_root = "tests/auth_machine_release.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -264,6 +271,7 @@ rust_test(
     crate_root = "tests/catalog_typed_round_trip.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -314,6 +322,7 @@ rust_test(
     crate_root = "tests/defer_input_totality.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -364,6 +373,7 @@ rust_test(
     crate_root = "tests/docs_machine_authority_alignment.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -420,6 +430,7 @@ rust_test(
     crate_root = "tests/draining_registration_fence.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -470,6 +481,7 @@ rust_test(
     crate_root = "tests/forked_participant_lifecycle_machine.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -520,6 +532,7 @@ rust_test(
     crate_root = "tests/gpt_live_authority_contract.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -569,6 +582,7 @@ rust_test(
     crate_root = "tests/identity_roundtrip.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -619,6 +633,7 @@ rust_test(
     crate_root = "tests/model_routing_handoff_lifecycle.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -669,6 +684,7 @@ rust_test(
     crate_root = "tests/named_type_binding_covers_catalog.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -719,6 +735,7 @@ rust_test(
     crate_root = "tests/peer_endpoint_structural_equivalence.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -769,6 +786,7 @@ rust_test(
     crate_root = "tests/placed_lifecycle_origin_fence.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -819,6 +837,7 @@ rust_test(
     crate_root = "tests/runtime_authority_reconciliation_totality.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -869,6 +888,7 @@ rust_test(
     crate_root = "tests/schema_construction_cache.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -919,6 +939,7 @@ rust_test(
     crate_root = "tests/schema_contracts.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -973,6 +994,7 @@ rust_test(
     crate_root = "tests/stopped_phase_revival_lattice.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -1023,6 +1045,7 @@ rust_test(
     crate_root = "tests/temporary_council_lifecycle_machine.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],

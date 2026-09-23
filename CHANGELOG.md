@@ -242,13 +242,26 @@ them.
   and collided on its process-global supervisor participant name
   (`ParticipantNameOccupied`); the helper takes the mob id and each test uses
   its own.
-- The Bazel clippy lanes apply the root `Cargo.toml` `[workspace.lints]`
-  table (`scripts/bazel-clippy-lint-flags`, appended to every clippy lane by
-  `scripts/buildbuddy-bazel-poc`). rules_rust's clippy aspect never read it,
-  so those lanes ran with `-Dwarnings` alone: no `pedantic`, no
+- Bazel builds and clippy lanes apply the root `Cargo.toml`
+  `[workspace.lints]` table the way Cargo does: the generator writes it as
+  rustc lint flags to `//:workspace_lints.bzl` and gives every `rust_*` rule of
+  a member that declares `[lints] workspace = true` a `rustc_flags` entry
+  (474 rules; `tests/integration` and `meerkat-live` declare no `[lints]` and
+  stay at default levels, as under Cargo). rules_rust never read the table, so
+  the clippy lanes ran with `-Dwarnings` alone: no `pedantic`, no
   `unwrap_used = deny`, and they failed on `large_enum_variant`, which the
   table allows. The `cargo` lint group (needs `cargo metadata`) and
   `unexpected_cfgs` (carries `check-cfg`) are the two documented exclusions.
+- `meerkat_core::rewrite_record_body_decodes_on_this_thread()` exposes the
+  rewrite-record body decode count scoped to the calling thread. The
+  `transcript_rewrite_commit_reads_the_commit_without_building_the_bodies`
+  test compared the process-wide count around one synchronous read, which any
+  parallel test decoding a record could move (it did, on the Bazel unit lane).
+- The `meerkat-mob-mcp` unit tests each create a uniquely named mob:
+  `flow_enabled_definition` takes the mob id and the seven `test_mob` callers
+  use their own ids. Nine tests sharing `flow-mob`/`test_mob` collided on the
+  process-global supervisor participant name when the binary ran them in
+  parallel.
 - The BuildBuddy wasm-check lane runs clippy through the sandbox toolchain's
   own `cargo-clippy`. `cargo clippy` resolves that subcommand from
   `$CARGO_HOME/bin` (the executor image's rustup proxy) before `PATH`, which

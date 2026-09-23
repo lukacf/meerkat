@@ -731,6 +731,21 @@ them.
   move), the transitions of the same names (`TransitionId::*` discriminants
   move), and the invariant
   `live_close_settlement_deferral_is_for_closed_channels`.
+- Kernel vocabulary for the two items above (`meerkat_machine_kernels`): the
+  kernel `Effect` enum gains `LiveDelegationRequeued`,
+  `LiveDelegationQueuedCancelled`, `LiveDelegationNarrationAuthorized`,
+  `LiveCloseSettlementDeferred`, and `LiveCloseSettlementResolved`
+  (exhaustive matches must add the arms). The per-phase kernel `TransitionId`
+  variants of the removed transition are removed:
+  `AbandonLiveInteractionPreservingEarlierDelegationIdle`, `AbandonLiveInteractionPreservingEarlierDelegationAttached`, `AbandonLiveInteractionPreservingEarlierDelegationRunning`, `AbandonLiveInteractionPreservingEarlierDelegationRetired`, `AbandonLiveInteractionPreservingEarlierDelegationStopped`.
+  The per-phase kernel `TransitionId` variants of the added transitions are
+  added: `RequeueBlockedLiveDelegationIdle`, `RequeueBlockedLiveDelegationAttached`, `RequeueBlockedLiveDelegationRunning`;
+  `RequeueUnstartedLiveDelegationIdle`, `RequeueUnstartedLiveDelegationAttached`, `RequeueUnstartedLiveDelegationRunning`;
+  `CancelQueuedLiveDelegationIdle`, `CancelQueuedLiveDelegationAttached`, `CancelQueuedLiveDelegationRunning`, `CancelQueuedLiveDelegationRetired`, `CancelQueuedLiveDelegationStopped`;
+  `AuthorizeLiveDelegationNarrationIdle`, `AuthorizeLiveDelegationNarrationAttached`, `AuthorizeLiveDelegationNarrationRunning`;
+  `ResolveLiveDelegationCancellationAfterTerminalIdle`, `ResolveLiveDelegationCancellationAfterTerminalAttached`, `ResolveLiveDelegationCancellationAfterTerminalRunning`, `ResolveLiveDelegationCancellationAfterTerminalRetired`, `ResolveLiveDelegationCancellationAfterTerminalStopped`;
+  `DeferLiveCloseSettlementIdle`, `DeferLiveCloseSettlementAttached`, `DeferLiveCloseSettlementRunning`, `DeferLiveCloseSettlementRetired`, `DeferLiveCloseSettlementStopped`;
+  `ResolveLiveCloseSettlementIdle`, `ResolveLiveCloseSettlementAttached`, `ResolveLiveCloseSettlementRunning`, `ResolveLiveCloseSettlementRetired`, `ResolveLiveCloseSettlementStopped`.
 - `ExperimentalLiveBoundChannelActivator::observe_provider_lifecycle` returns
   `Result<(), ExperimentalLiveLifecycleObservationError>` (implementors must
   classify a failure as `Refused` or `CustodyLost`); `LIVE_CLOSE_CONFIRMATION_BOUND`

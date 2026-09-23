@@ -684,13 +684,20 @@ fn activate_bootstrap(authority: &mut mm::MeerkatMachineAuthority) {
 /// this fact (or a client delegation admission) and by nothing else; the
 /// identities are unique per call so a test may speak more than once.
 fn user_speaks(authority: &mut mm::MeerkatMachineAuthority) {
+    user_speaks_on(authority, CHANNEL);
+}
+
+/// The same fact on an exact channel. A recovery replacement is a new channel:
+/// the user's speech on the closing channel releases nothing on it, so the
+/// recovery summary too waits for the user to speak there.
+fn user_speaks_on(authority: &mut mm::MeerkatMachineAuthority, channel: &str) {
     static SPOKEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let ordinal = SPOKEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let turn = format!("bootstrap-user-turn-{ordinal}");
     apply(
         authority,
         mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
-            channel_id: CHANNEL.to_string(),
+            channel_id: channel.to_string(),
             runtime_id: runtime_id(),
             fence_token: fence(),
             generation: generation(),
@@ -702,7 +709,7 @@ fn user_speaks(authority: &mut mm::MeerkatMachineAuthority) {
     apply(
         authority,
         mm::MeerkatMachineInput::CompleteLiveInteraction {
-            channel_id: CHANNEL.to_string(),
+            channel_id: channel.to_string(),
             runtime_id: runtime_id(),
             fence_token: fence(),
             generation: generation(),
@@ -3998,6 +4005,10 @@ fn acknowledge_recovery_bootstrap(
         },
     )
     .expect("generate exact recovery source");
+    // The recovery summary is released like any startup history: by the
+    // user speaking on this channel (guard `user_has_spoken_on_channel`),
+    // never into the replacement's silence.
+    user_speaks_on(authority, channel);
     apply(
         authority,
         mm::MeerkatMachineInput::AuthorizeLiveContextBootstrapAppend {

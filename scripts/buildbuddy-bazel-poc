@@ -117,6 +117,13 @@ requested_command="${command}"
 extra_args=()
 enforced_args=()
 fast_test_tag_filters="-local,-e2e,-system,-live,-integration,-slow,-required-feature,-trybuild,-snapshot,-fixture"
+# The workspace `[lints]` table as clippy flags, so the Bazel clippy lanes
+# judge the same lints as `make lint` (see scripts/bazel-clippy-lint-flags).
+mapfile -t workspace_clippy_lint_flags < <("${workspace_root}/scripts/bazel-clippy-lint-flags")
+if [[ "${#workspace_clippy_lint_flags[@]}" -eq 0 ]]; then
+  echo "error: scripts/bazel-clippy-lint-flags produced no workspace lint flags" >&2
+  exit 2
+fi
 e2e_test_env=(
   --test_env=ANTHROPIC_API_KEY
   --test_env=RKAT_ANTHROPIC_API_KEY
@@ -239,6 +246,7 @@ case "${command}" in
       --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
       --output_groups="+clippy_checks"
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+      "${workspace_clippy_lint_flags[@]}"
     )
     ;;
   workspace-fast-clippy-rbe)
@@ -255,6 +263,7 @@ case "${command}" in
       --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
       --output_groups="+clippy_checks"
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+      "${workspace_clippy_lint_flags[@]}"
     )
     ;;
   ci-prebuild-rbe)
@@ -422,6 +431,7 @@ case "${command}" in
       --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
       --output_groups="+clippy_checks"
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+      "${workspace_clippy_lint_flags[@]}"
       --color=no
       --curses=no
     )
@@ -669,6 +679,7 @@ case "${command}" in
       --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
       --output_groups="+clippy_checks"
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+      "${workspace_clippy_lint_flags[@]}"
     )
     ;;
   clippy-rbe)
@@ -680,6 +691,7 @@ case "${command}" in
       --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
       --output_groups="+clippy_checks"
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+      "${workspace_clippy_lint_flags[@]}"
     )
     ;;
   affected-clippy | owned-clippy)
@@ -690,6 +702,7 @@ case "${command}" in
       --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
       --output_groups="+clippy_checks"
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+      "${workspace_clippy_lint_flags[@]}"
     )
     ;;
   affected-clippy-rbe | owned-clippy-rbe)
@@ -700,6 +713,7 @@ case "${command}" in
       --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
       --output_groups="+clippy_checks"
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+      "${workspace_clippy_lint_flags[@]}"
     )
     ;;
   workspace-build-clippy-rbe)
@@ -710,6 +724,7 @@ case "${command}" in
       --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
       --output_groups="+clippy_checks"
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+      "${workspace_clippy_lint_flags[@]}"
     )
     ;;
   owned-build)

@@ -120,6 +120,35 @@ them.
 
 ### Changed
 
+- Pull-request CI is Cargo-only on GitHub-hosted runners and sized to a
+  20-minute push-to-terminal budget (`CI gate`, 1200 seconds from run
+  creation). `scripts/ci-cargo-lanes.mjs` selects the lanes from the changed
+  paths and fails closed: any `.rs`, `Cargo.toml`, `Cargo.lock`, `.cargo/`,
+  nextest, toolchain, build-wrapper, or `ci.yml` change yields at least one
+  `clippy --no-deps --all-targets --all-features` lane and one
+  `nextest --lib --bins --profile fast` lane over the directly changed
+  packages (packed into at most six parallel shards), a `cargo check
+  --all-targets --all-features` lane over their reverse-dependency closure,
+  and the gate asserts that those lanes ran; an unmapped Rust path, a missing
+  diff base, or a global build-configuration path escalates to the whole
+  workspace. `make ci-lanes-selftest` pins the classifier with fixtures.
+  Format, docs, semver self-test, version parity, and lock consistency run
+  always; generated-contract freshness and machine/protocol drift run when
+  their paths change; wasm-check and the Python/TypeScript SDK suites run
+  when their inputs change. The gate runs under `!cancelled()` so a
+  superseded run no longer leaves a failed `CI gate` on the head. Successful
+  `main` pushes emit a schema-4 attestation (backend `github-hosted-cargo`),
+  which the release workflow accepts alongside the legacy schemas.
+- Everything else moved off the pull-request path: nightly now runs the full
+  workspace unit and integration-fast lanes, `e2e-fast`, the dense Mob
+  topology stress, bounded TLC, the SDK host suites, and the whole
+  BuildBuddy/Bazel graph in `full-fresh` mode; the release tag path runs
+  that graph (`release_validate_buildbuddy_full`) as its validation gate,
+  with Cargo validation remaining the manual-dispatch fallback. The
+  BuildBuddy graph's own SLO is 3000 seconds from control-plane start (1200
+  only ever held while the skipped `changed-paths` mode reported unrun lanes
+  as passed). Branch protection is unchanged: `CI gate` stays the only
+  required context.
 - GPT Live (gpt-live-1) history carrier. A context summary that is ready
   when the provider session is created (`LiveContextBootstrapMode::BeforeOpen`,
   and every reopen whose summary is ready before the provider session is

@@ -167,6 +167,7 @@ RUN_ACTION="$ROOT/.github/actions/run-nextest-archive/action.yml"
 WORKFLOW="$ROOT/.github/workflows/cargo.yml"
 TOP_LEVEL_WORKFLOW="$ROOT/.github/workflows/ci.yml"
 DENSE_WORKFLOW="$ROOT/.github/workflows/mob-dense-topology.yml"
+NIGHTLY_WORKFLOW="$ROOT/.github/workflows/nightly.yml"
 RELEASE_WORKFLOW="$ROOT/.github/workflows/release.yml"
 NEXTEST_CONFIG="$ROOT/.config/nextest.toml"
 
@@ -240,11 +241,18 @@ assert_file_contains "$DENSE_WORKFLOW" '          cache-on-failure: true'
 assert_file_contains "$DENSE_WORKFLOW" '          cache-workspace-crates: true'
 assert_file_contains "$DENSE_WORKFLOW" '          profile: mob-dense-topology'
 assert_file_contains "$DENSE_WORKFLOW" '          run_ignored: all'
-assert_file_contains "$TOP_LEVEL_WORKFLOW" '  github-hosted-dense-topology:'
-assert_file_contains "$TOP_LEVEL_WORKFLOW" '    uses: ./.github/workflows/mob-dense-topology.yml'
-assert_file_contains "$TOP_LEVEL_WORKFLOW" '      - github-hosted-dense-topology'
-assert_file_contains "$TOP_LEVEL_WORKFLOW" '${{ needs.github-hosted-dense-topology.result }}'
-assert_file_contains "$TOP_LEVEL_WORKFLOW" 'schema_version: 3'
+# The dense topology stress moved off the PR hot path: nightly calls the
+# reusable workflow, PR CI does not.
+assert_file_contains "$NIGHTLY_WORKFLOW" '  dense-topology:'
+assert_file_contains "$NIGHTLY_WORKFLOW" '    uses: ./.github/workflows/mob-dense-topology.yml'
+if grep -F 'mob-dense-topology.yml' "$TOP_LEVEL_WORKFLOW" | grep -Fq 'uses:'; then
+  echo "PR CI must not run the dense Mob topology stress" >&2
+  exit 1
+fi
+assert_file_contains "$TOP_LEVEL_WORKFLOW" 'schema_version: 4'
+assert_file_contains "$TOP_LEVEL_WORKFLOW" 'validation_backend: "github-hosted-cargo"'
+assert_file_contains "$RELEASE_WORKFLOW" '.schema_version == 4'
+assert_file_contains "$RELEASE_WORKFLOW" '.validation_backend == "github-hosted-cargo"'
 assert_file_contains "$RELEASE_WORKFLOW" '.schema_version == 3'
 assert_file_contains "$RELEASE_WORKFLOW" '.validation_backend == "gcp-buildbuddy+github-hosted-dense-mob"'
 assert_file_contains "$RELEASE_WORKFLOW" '.component_results.gcp_buildbuddy == "success"'

@@ -1,14 +1,14 @@
 ---
 title: "Build And CI"
-description: "The Make, Cargo, BuildBuddy, and release validation surfaces used by Meerkat contributors."
+description: "The Make, Cargo, GitHub-hosted PR CI, nightly, BuildBuddy, and release validation surfaces used by Meerkat contributors."
 icon: "helmet-safety"
 ---
 
 Make is the developer-facing command surface. Cargo is the default backend.
-BuildBuddy/Bazel is an opt-in acceleration backend for developers with
-BuildBuddy access and for owner-selected release validation and Linux/macOS
-binary packaging. Separately, the active GitHub Actions CI requires both the
-broad GCP BuildBuddy workflow and the GitHub-hosted dense-Mob topology workflow.
+Pull-request CI is Cargo-only on GitHub-hosted runners and selects its lanes
+from the changed paths. BuildBuddy/Bazel is an opt-in acceleration backend for
+developers with BuildBuddy access, and the whole BuildBuddy graph runs nightly
+and as the release-tag validation gate; it never runs in pull-request CI.
 Local Cargo-default behavior does not select the CI backend.
 
 ## Local Commands
@@ -168,10 +168,10 @@ that this paid scenario has passed; native-provider qualification requires
 explicit execution of the selector above.
 
 The dense Mob topology stress has a dedicated GitHub-hosted Linux workflow,
-`.github/workflows/mob-dense-topology.yml`. The active top-level CI calls it
-and requires its result alongside BuildBuddy, while the full Cargo workflow
-also runs it from the existing unit-test archive and includes it in the Cargo
-gate. The test owns a five-minute wire-materialization budget; its nextest
+`.github/workflows/mob-dense-topology.yml`. Nightly calls it (its archive
+build alone takes 13-17 minutes on a hosted runner, so it does not fit the
+pull-request budget), and the diagnostic Cargo workflow also runs it from the
+existing unit-test archive. The test owns a five-minute wire-materialization budget; its nextest
 profile reports the named test every minute and terminates a whole-test stall
 after eight minutes. The result is bounded to the hosted runner environment:
 local macOS
@@ -200,44 +200,63 @@ need the unbounded verification set.
 
 ## CI Shape
 
-The active `.github/workflows/ci.yml` calls two reusable workflows for PRs,
-pushes to `main`, `ci/**`, `feat/**`, and `feature/**`, and manual dispatches:
+Pull-request CI is `.github/workflows/ci.yml`. It runs on pull requests,
+pushes to `main`, `ci/**`, `feat/**`, and `feature/**`, and manual
+dispatches, entirely with Cargo on GitHub-hosted `ubuntu-latest` runners
+(4 vCPU), and it is sized to a 20-minute push-to-terminal budget:
 
-- `gcp-buildbuddy` calls `buildbuddy.yml` in `changed-paths` mode. It starts the
-  GCP control plane/executors and runs static and native checks, unit and
-  integration-fast tests, and authority governance. SDK, WASM, minimal-feature,
-  feature-matrix, and audit work are selected by their change classifiers.
-  Machine-authority classification fails closed when the diff cannot be
-  established. The reusable workflow has its own `GCP BuildBuddy gate`.
-- `github-hosted-dense-topology` calls `mob-dense-topology.yml`: it builds a
-  Mob unit-test archive and runs the 300-member/150-peer stress on hosted Linux.
-- The top-level `CI gate` requires both component results to be `success`.
-  It also enforces a 2400-second (40-minute) push-to-terminal budget measured
-  from workflow creation, not a ten-minute Cargo-only target.
+| Job | Runs | Command |
+| --- | --- | --- |
+| `changes` | always | `scripts/ci-cargo-lanes.mjs`: classifies the changed paths into directly changed packages, bounded shards, the reverse-dependency closure, and conditional-lane flags |
+| `fmt-governance` | always | `make fmt-check docs-check semver-breaks-selftest verify-version-parity verify-lock-consistency verify-bazel-module-lock-inputs check-rust-release-config ci-lanes-selftest` plus the release doctor contract test |
+| `ratchets` | always (steps conditional) | schema, SDK codegen, event inventory, RPC/REST surface, and SDK wrapper freshness when generated-contract paths changed; `machine-check-drift` and `protocol-check-drift` when machine-authority paths changed |
+| `clippy` (one lane per shard) | Rust-relevant change | `repo-cargo clippy -p <changed packages> --no-deps --all-targets --all-features -- -D warnings` |
+| `unit` (one lane per shard) | Rust-relevant change | `repo-cargo nextest run -p <changed packages> --lib --bins --profile fast` |
+| `closure-check` | Rust-relevant change | `repo-cargo check -p <reverse-dependency closure> --all-targets --all-features` (catches downstream compile breaks the direct lanes miss) |
+| `wasm-check` | web-runtime, contracts, or workspace-wide change | `make wasm-check` |
+| `sdk-host` | `sdks/python`, `sdks/typescript`, or SDK tooling change | `make test-sdk-python test-sdk-typescript` |
+| `gate` (`CI gate`) | `!cancelled()` | fail-closed aggregate, 1200-second budget from run creation, schema-4 attestation on `main` pushes |
 
-The final gate emits a schema-3 attestation for successful `main` pushes,
-binding the repository, exact commit SHA, Git tree SHA, workflow run and
-attempt, event, and ref. Its backend is
-`gcp-buildbuddy+github-hosted-dense-mob`; `component_results` records
-`gcp_buildbuddy` and `github_hosted_dense_mob`, and the aggregate
-`validation_result` requires both to succeed. PRs and failed runs emit no such
-attestation.
+The classifier fails closed. Any `.rs`, `Cargo.toml`, `Cargo.lock`,
+`.cargo/`, nextest, toolchain, build-wrapper, or `ci.yml` change yields at
+least one clippy lane and one unit lane; a Rust path that belongs to no
+workspace package, a missing diff base, or any global build-configuration
+path escalates to the whole workspace (packed into at most six shards); a
+classifier error fails the `changes` job and therefore the gate. The gate
+asserts that clippy, unit, and closure-check all ran and succeeded for a
+build-relevant change, and it fails when the classifier produced no lanes.
+`make ci-lanes-selftest` (`scripts/ci-cargo-lanes-selftest.mjs`) pins these
+properties with fixtures for a core touch, docs-only, `Cargo.lock`-only,
+machine-authority-only, an unmapped `.rs`, and a missing base.
+
+PR CI runs the directly changed packages, not their dependents: measured on
+a 4-vCPU runner, compiling the reverse-dependency closure of `meerkat-core`
+(44 of 50 crates) takes 15-18 minutes even when fanned out, which does not
+fit the budget together with the local pre-push hook. Dependents are covered
+by `closure-check` (compile only) in PR CI and by the full workspace lanes in
+nightly and on the release tag.
+
+The gate emits a schema-4 attestation for successful `main` pushes, binding
+the repository, exact commit SHA, Git tree SHA, workflow run and attempt,
+event, and ref. Its backend is `github-hosted-cargo`; `plan` records the
+selected mode and counts, and `component_results` records every lane result.
+PRs and failed runs emit no such attestation.
 
 `.github/workflows/cargo.yml` remains a separate reusable/manual workflow with
-its own `Cargo lane gate`; it is not called by the active top-level CI.
-Its Cargo test archives/shards, generation ratchets, deterministic e2e, SDK,
-WASM, and audit jobs are an alternative workflow, not the current per-push job
-graph. Its docs-only code-build skip does not describe the active CI graph.
+its own `Cargo lane gate`; it is a diagnostic fallback, not the per-push job
+graph.
 
 ## CI Retry And Concurrency
 
-Pull request CI uses one concurrency group per PR with
-`cancel-in-progress: true`. Starting another PR-associated attempt in that
-group automatically cancels the older in-progress attempt, even when nobody
-issues an explicit cancel command. The reusable BuildBuddy and top-level CI
-gates run with `always()`, so cancellation can leave failed gate contexts
-during teardown. BuildBuddy also serializes its shared executor workflow with
-its own concurrency group; that group's `cancel-in-progress` is `false`.
+Pull request CI uses one concurrency group per PR (`pr-<number>`, or
+`pr-<ref>` for pushes) with `cancel-in-progress: true`. Starting another
+PR-associated attempt in that group automatically cancels the older
+in-progress attempt, even when nobody issues an explicit cancel command. The
+`CI gate` job runs under `!cancelled()`, so a superseded run surfaces as
+cancelled rather than leaving a failed `CI gate` context on the head. The
+reusable BuildBuddy workflow (nightly and release) serializes its shared
+executor lifecycle with its own concurrency group; that group's
+`cancel-in-progress` is `false`.
 
 Treat check-context precedence as part of retry recovery:
 
@@ -246,13 +265,14 @@ Treat check-context precedence as part of retry recovery:
 2. Compare the active step and elapsed time with a successful exact-head run
    before classifying a slow job as hung.
 3. When a new PR-associated attempt is necessary, expect the automatic
-   cancellation residue. The recovery attempt must complete the BuildBuddy
-   and hosted dense-topology components and reach the top-level `CI gate`.
-4. Inspect every check suite on the reviewed head, including `CI gate` and
-   the reusable workflow's `GCP BuildBuddy gate`. Check the repository's
-   actual required-check settings rather than inferring them from workflow
-   names. A green shard or successful manual Cargo workflow is not proof that
-   the active CI graph or a required context in another suite is green.
+   cancellation. The recovery attempt must complete every selected lane and
+   reach the top-level `CI gate`.
+4. Inspect every check suite on the reviewed head, including `CI gate`.
+   Check the repository's actual required-check settings rather than
+   inferring them from workflow names (`CI gate` is the only required
+   context today). A green shard or successful manual Cargo workflow is not
+   proof that the active CI graph or a required context in another suite is
+   green.
 
 Do not infer mergeability from a workflow's overall conclusion alone, and do not
 apply a creation-time or completion-time recency rule to suites on the same
@@ -280,37 +300,48 @@ gh api "repos/OWNER/REPO/check-suites/SUITE_ID/check-runs?per_page=100" \
 
 ## Nightly Lanes
 
-Expensive or low-churn coverage runs daily and on demand on GitHub-hosted
-runners:
+Everything pull-request CI deliberately does not run executes daily and on
+demand (`.github/workflows/nightly.yml`) on GitHub-hosted runners:
 
-- clippy across all targets and all features
-- feature-matrix lint and tests
-- minimal-feature and surface-modularity tests
-- `e2e-system`
-- the full Web SDK and WASM browser contract suites
-- release packaging dry-runs
-- security audit
+- the full workspace unit lane (`make test-unit`) and integration-fast lane
+  (`make test-int`), covering every crate rather than the changed packages
+- the deterministic `e2e-fast` lane
+- the 300-member/150-peer dense Mob topology stress
+  (`mob-dense-topology.yml`)
+- bounded TLC machine verification (`make machine-verify`)
+- the Python + TypeScript SDK suites, unconditionally
+- clippy across all targets and all features for the whole workspace
+- feature-matrix lint and tests, minimal-feature and surface-modularity tests
+- `e2e-system`, the full Web SDK and WASM browser contract suites, release
+  packaging dry-runs, the security audit, and the MobKit docs mirror lag
+- the whole BuildBuddy/Bazel graph (`buildbuddy.yml` in `full-fresh` mode):
+  prebuild, fmt/static, the native nextest lanes, governance
+  (seam-inventory, rmat-audit, machine authority), SDK suites, wasm-check,
+  minimal-feature, feature matrix, and audit
 
-The tag release workflow consumes that exact-tree attestation instead of
-re-running the same validation suite. It still builds and publishes the
-platform-specific release artifacts from the attested source. Manual recovery
-dispatches retain the explicit release-validation lanes because old release
-commits may predate attestation artifacts.
+## Release Validation
+
+The tag release workflow requires successful exact-`main` CI for the release
+commit and downloads that run's schema-4 attestation (legacy schema 1-3
+attestations are still accepted for older commits). It then runs the whole
+BuildBuddy/Bazel graph in `full-fresh` mode (`release_validate_buildbuddy_full`)
+as the release validation gate; the Cargo validation lane remains the
+fallback for manual dispatches on the GitHub-hosted backend. It still builds
+and publishes the platform-specific release artifacts from the attested
+source; Windows binaries are cross-compiled and packaged with cargo-xwin
+(clang-cl, lld-link, the Windows SDK) on a hosted Ubuntu runner, then
+executed for verification on a windows-latest runner. Registry publication
+remains GitHub-hosted.
 
 The repository pre-push dispatcher follows the same identity rule. A complete
 successful hook run writes a local Git-tree-keyed evidence stamp. A later push
 of the identical tree, including its release tag, validates the pushed object
 and checked-out `HEAD` identity and then reuses the complete gate result.
 
-BuildBuddy remains an opt-in developer and owner-selected release validation or
-binary packaging backend, independently of its required role in current CI.
-`.github/workflows/buildbuddy.yml` is `workflow_call`-only, but the active
-`ci.yml` calls it and starts its control plane/executor lifecycle. Release
-validation and packaging use separate BuildBuddy actions when selected by the
-owner; Windows binaries are cross-compiled and packaged with cargo-xwin
-(clang-cl, lld-link, the Windows SDK) on a hosted Ubuntu runner, then executed
-for verification on a windows-latest runner. Registry publication remains
-GitHub-hosted.
+BuildBuddy remains an opt-in developer backend, the nightly full graph, and
+the release-tag validation and Linux/macOS packaging backend.
+`.github/workflows/buildbuddy.yml` is `workflow_call`-only; `nightly.yml` and
+`release.yml` call it, `ci.yml` never does.
 
 ## Doctor
 

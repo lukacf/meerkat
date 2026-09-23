@@ -1,8 +1,34 @@
 name: CI
 
-# BuildBuddy RBE is the broad CI lane. The exact dense Mob topology stress runs
-# from a prebuilt unit archive on GitHub-hosted Linux, so release evidence does
-# not mistake BuildBuddy/macOS timing for the hosted scalability signal.
+# Pull-request CI: Cargo only, on GitHub-hosted runners, sized to a
+# 20-minute push-to-terminal budget. The lanes are selected from the changed
+# paths by scripts/ci-cargo-lanes.mjs, which fails closed: any change that can
+# alter what Cargo compiles yields at least one clippy lane and one unit lane,
+# and the aggregate gate asserts that those lanes ran.
+#
+# Jobs:
+#   changes         - changed-path classification (packages, shards, closure,
+#                     conditional-lane flags)
+#   fmt-governance  - always: fmt, docs, semver self-test, version parity,
+#                     lock consistency, classifier self-test
+#   ratchets        - generated-contract freshness when contract paths
+#                     changed; machine/protocol drift when machine authority
+#                     changed
+#   clippy (xN)     - one lane per shard of directly changed packages:
+#                     clippy --no-deps --all-targets --all-features
+#   unit (xN)       - one lane per shard: nextest --lib --bins --profile fast
+#   closure-check   - cargo check over the reverse-dependency closure of the
+#                     changed packages (downstream compile breaks)
+#   wasm-check      - wasm32 check of meerkat-web-runtime when its inputs
+#                     changed
+#   sdk-host        - Python + TypeScript SDK suites when SDK paths changed
+#   gate            - "CI gate": fail-closed aggregate, 1200-second budget,
+#                     schema-4 exact-tree attestation on main pushes
+#
+# Everything else (integration-fast, e2e-fast, the dense Mob topology
+# stress, bounded TLC, feature matrices, minimal builds, audit, the Web SDK
+# and browser contract suites, and the whole Bazel graph) runs in nightly.yml
+# and in the release workflow; PR CI never starts the remote Bazel fleet.
 
 on:
   push:
@@ -20,66 +46,561 @@ on:
   workflow_dispatch: {}
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
   actions: read
   contents: read
-  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Stable per-VM Cargo home: hosted runners are fresh per job, and cache
+  # reuse (rust-cache + sccache) requires registry source paths that do not
+  # change between runs.
+  CARGO_HOME: /home/runner/.cargo
+  RUSTUP_TOOLCHAIN: 1.94.1
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  # Push-to-terminal budget in seconds, measured from workflow creation.
+  CI_MAX_SECONDS: "1200"
+  # Target set for the closure-check lane: "all" checks every target of the
+  # closure (--all-targets); "lib" checks lib and bin targets only. Measured
+  # on hosted runners and degraded only if "all" misses the budget.
+  CLOSURE_CHECK_TARGETS: all
 
 jobs:
-  gcp-buildbuddy:
-    name: GCP BuildBuddy
-    uses: ./.github/workflows/buildbuddy.yml
-    with:
-      mode: changed-paths
-      machine_authority_base_sha: >-
-        ${{
-          github.event_name == 'pull_request' && github.event.pull_request.base.sha ||
-          github.event_name == 'push' && github.event.before ||
-          ''
-        }}
-      machine_authority_head_sha: ${{ github.sha }}
-    secrets: inherit
+  changes:
+    name: Change classification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      rust_changed: ${{ steps.plan.outputs.rust_changed }}
+      mode: ${{ steps.plan.outputs.mode }}
+      reason: ${{ steps.plan.outputs.reason }}
+      generated_contract: ${{ steps.plan.outputs.generated_contract }}
+      machine_authority: ${{ steps.plan.outputs.machine_authority }}
+      wasm: ${{ steps.plan.outputs.wasm }}
+      sdk_host: ${{ steps.plan.outputs.sdk_host }}
+      package_count: ${{ steps.plan.outputs.package_count }}
+      closure_count: ${{ steps.plan.outputs.closure_count }}
+      closure_flags: ${{ steps.plan.outputs.closure_flags }}
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+      shard_matrix: ${{ steps.plan.outputs.shard_matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-  github-hosted-dense-topology:
-    name: GitHub-hosted dense Mob topology
-    uses: ./.github/workflows/mob-dense-topology.yml
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Classify changed paths
+        id: plan
+        shell: bash
+        env:
+          BASE_SHA: >-
+            ${{
+              github.event_name == 'pull_request' && github.event.pull_request.base.sha ||
+              github.event_name == 'push' && github.event.before ||
+              ''
+            }}
+        run: |
+          set -euo pipefail
+          # The classifier exits non-zero rather than emit an empty plan for a
+          # build-relevant change; a failure here fails the CI gate.
+          node scripts/ci-cargo-lanes.mjs --format github --base "${BASE_SHA}" --head HEAD \
+            | tee "${RUNNER_TEMP}/ci-cargo-lanes.txt" >> "${GITHUB_OUTPUT}"
+          grep -vE '^(closure_flags|shard_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
+
+  fmt-governance:
+    name: Format + governance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      # Depth 2, not 1: a depth-1 clone grafts HEAD to have no parents, which
+      # hides the merge topology the lock-consistency gate reports on.
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-governance
+          cache-on-failure: true
+
+      - name: Format check
+        run: make fmt-check
+
+      - name: Docs validation
+        run: make docs-check
+
+      # The release-time semver-breaks gate needs cargo-semver-checks; its
+      # analyser does not. Run the analyser's unit tests on every PR so parser
+      # drift is caught here rather than at the tag.
+      - name: Semver-breaks analyser self-test
+        run: make semver-breaks-selftest
+
+      - name: Verify version parity
+        run: make verify-version-parity
+
+      # The pull_request checkout is refs/pull/N/merge, and that merge preview
+      # is the only place a merge-manufactured dangling lock reference exists.
+      - name: Cargo.lock resolves under --locked
+        run: make verify-lock-consistency
+
+      - name: MODULE.bazel.lock recorded inputs
+        run: make verify-bazel-module-lock-inputs
+
+      - name: Verify Rust release configuration
+        run: make check-rust-release-config
+
+      - name: CI lane classifier fails closed
+        run: make ci-lanes-selftest
+
+      - name: Release doctor workflow assertions still bind
+        run: scripts/test-release-doctor-workflow-contract.sh
+
+  ratchets:
+    name: Generation ratchets
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-ratchets
+          cache-on-failure: true
+
+      - name: Report selected ratchets
+        shell: bash
+        env:
+          GENERATED_CONTRACT: ${{ needs.changes.outputs.generated_contract }}
+          MACHINE_AUTHORITY: ${{ needs.changes.outputs.machine_authority }}
+        run: |
+          echo "generated contract paths changed: ${GENERATED_CONTRACT}"
+          echo "machine authority paths changed: ${MACHINE_AUTHORITY}"
+
+      - name: Verify schema freshness
+        if: ${{ needs.changes.outputs.generated_contract == 'true' }}
+        run: make verify-schema-freshness
+        env:
+          MEERKAT_SCHEMA_DIAGNOSTIC_DIR: ${{ github.workspace }}/schema-freshness-output
+
+      - name: Upload fresh schemas after freshness failure
+        if: ${{ failure() && needs.changes.outputs.generated_contract == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: fresh-contract-schemas
+          path: schema-freshness-output
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Verify SDK codegen freshness
+        if: ${{ needs.changes.outputs.generated_contract == 'true' }}
+        run: make verify-sdk-codegen-freshness
+
+      - name: Verify SDK event inventory
+        if: ${{ needs.changes.outputs.generated_contract == 'true' }}
+        run: make verify-sdk-event-inventory
+
+      - name: Verify RPC surface alignment
+        if: ${{ needs.changes.outputs.generated_contract == 'true' }}
+        run: make verify-rpc-surface-alignment
+
+      - name: Verify REST surface alignment
+        if: ${{ needs.changes.outputs.generated_contract == 'true' }}
+        run: make verify-rest-surface-alignment
+
+      - name: Verify SDK wrapper freshness
+        if: ${{ needs.changes.outputs.generated_contract == 'true' }}
+        run: make verify-sdk-wrapper-freshness
+
+      - name: Verify generated machine kernels are not stale
+        if: ${{ needs.changes.outputs.machine_authority == 'true' }}
+        id: machine_drift
+        shell: bash
+        run: |
+          if make machine-check-drift; then
+            exit 0
+          fi
+          # Preserve the exact generated side of the failed comparison so the
+          # drift can be repaired without a second local Rust build.
+          make machine-codegen
+          exit 1
+
+      - name: Upload fresh machine artifacts after drift failure
+        if: ${{ failure() && steps.machine_drift.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: fresh-machine-artifacts
+          path: |
+            specs/machines
+            specs/compositions
+            meerkat-machine-kernels/src/generated
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Verify generated protocol artifacts are not stale
+        if: ${{ needs.changes.outputs.machine_authority == 'true' }}
+        id: protocol_drift
+        shell: bash
+        run: |
+          if make protocol-check-drift; then
+            exit 0
+          fi
+          make protocol-codegen
+          exit 1
+
+      - name: Upload fresh protocol artifacts after drift failure
+        if: ${{ failure() && steps.protocol_drift.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: fresh-protocol-artifacts
+          path: |
+            meerkat-core/src/generated
+            meerkat-session/src/generated
+            meerkat-mob/src/generated
+            meerkat-mcp/src/generated
+            meerkat-runtime/src/generated
+            meerkat-workgraph/src/generated
+          if-no-files-found: error
+          retention-days: 1
+
+  clippy:
+    name: Clippy (${{ matrix.name }})
+    needs: changes
+    if: ${{ needs.changes.outputs.rust_changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.shard_matrix) }}
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-clippy-${{ matrix.name }}
+          cache-on-failure: true
+
+      - name: Clippy (changed packages, all targets, all features)
+        shell: bash
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          set -euo pipefail
+          [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a clippy lane"; exit 1; }
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo clippy ${PACKAGES} --no-deps --all-targets --all-features -- -D warnings
+
+  unit:
+    name: Unit tests (${{ matrix.name }})
+    needs: changes
+    if: ${{ needs.changes.outputs.rust_changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.shard_matrix) }}
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-unit-${{ matrix.name }}
+          cache-on-failure: true
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      - name: Unit tests (changed packages, lib and bin targets)
+        shell: bash
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          set -euo pipefail
+          [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a unit lane"; exit 1; }
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo nextest run ${PACKAGES} --lib --bins --profile fast \
+            --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
+
+  closure-check:
+    name: Closure check (${{ needs.changes.outputs.closure_count }} crates)
+    needs: changes
+    if: ${{ needs.changes.outputs.rust_changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-closure-check
+          cache-on-failure: true
+
+      - name: Check the reverse-dependency closure
+        shell: bash
+        env:
+          CLOSURE: ${{ needs.changes.outputs.closure_flags }}
+        run: |
+          set -euo pipefail
+          [[ -n "${CLOSURE}" ]] || { echo "::error::empty closure in the closure-check lane"; exit 1; }
+          targets=()
+          if [[ "${CLOSURE_CHECK_TARGETS}" == "all" ]]; then
+            targets+=(--all-targets)
+          fi
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo check ${CLOSURE} "${targets[@]}" --all-features
+
+  wasm-check:
+    name: wasm32 check
+    needs: changes
+    if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.wasm == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-wasm-check
+          cache-on-failure: true
+
+      - name: WASM runtime check
+        run: make wasm-check
+
+  sdk-host:
+    name: Python + TypeScript SDK suites
+    needs: changes
+    if: ${{ needs.changes.outputs.sdk_host == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-sdk-host
+          cache-on-failure: true
+
+      - name: Build RPC binary for SDK smoke tests
+        run: ./scripts/repo-cargo build -p meerkat-rpc
+
+      - name: Python + TypeScript SDK tests
+        run: make -j2 test-sdk-python test-sdk-typescript
 
   gate:
     name: CI gate
-    if: ${{ always() }}
+    # Not `always()`: a superseded run (cancel-in-progress) must surface as
+    # cancelled, not leave a FAILURE "CI gate" check on the head.
+    if: ${{ !cancelled() }}
     needs:
-      - gcp-buildbuddy
-      - github-hosted-dense-topology
+      - changes
+      - fmt-governance
+      - ratchets
+      - clippy
+      - unit
+      - closure-check
+      - wasm-check
+      - sdk-host
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Check CI result
+      - name: Check lane results
         shell: bash
         env:
-          BUILDBUDDY_RESULT: ${{ needs.gcp-buildbuddy.result }}
-          DENSE_TOPOLOGY_RESULT: ${{ needs.github-hosted-dense-topology.result }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          FMT_GOVERNANCE_RESULT: ${{ needs.fmt-governance.result }}
+          RATCHETS_RESULT: ${{ needs.ratchets.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          CLOSURE_CHECK_RESULT: ${{ needs.closure-check.result }}
+          WASM_CHECK_RESULT: ${{ needs.wasm-check.result }}
+          SDK_HOST_RESULT: ${{ needs.sdk-host.result }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust_changed }}
+          WASM: ${{ needs.changes.outputs.wasm }}
+          SDK_HOST: ${{ needs.changes.outputs.sdk_host }}
+          MODE: ${{ needs.changes.outputs.mode }}
+          REASON: ${{ needs.changes.outputs.reason }}
+          SHARD_COUNT: ${{ needs.changes.outputs.shard_count }}
+          PACKAGE_COUNT: ${{ needs.changes.outputs.package_count }}
+          CLOSURE_COUNT: ${{ needs.changes.outputs.closure_count }}
         run: |
-          echo "GCP BuildBuddy result: ${BUILDBUDDY_RESULT}"
-          echo "GitHub-hosted dense Mob topology result: ${DENSE_TOPOLOGY_RESULT}"
-          if [[ "${BUILDBUDDY_RESULT}" != "success" ]]; then
-            echo "::error::BuildBuddy CI did not complete successfully."
+          set -euo pipefail
+          echo "plan: mode=${MODE} packages=${PACKAGE_COUNT} closure=${CLOSURE_COUNT} shards=${SHARD_COUNT} (${REASON})"
+          echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ratchets=${RATCHETS_RESULT}"
+          echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT}"
+          failed=0
+          require_success() {
+            local lane="$1" result="$2"
+            if [[ "${result}" != "success" ]]; then
+              echo "::error::${lane} must succeed on every run (result: ${result})."
+              failed=1
+            fi
+          }
+          require_ran() {
+            local lane="$1" result="$2"
+            if [[ "${result}" != "success" ]]; then
+              echo "::error::${lane} must run and succeed for a build-relevant change (result: ${result})."
+              failed=1
+            fi
+          }
+          forbid_failure() {
+            local lane="$1" result="$2"
+            case "${result}" in
+              success|skipped) ;;
+              *)
+                echo "::error::${lane} did not complete successfully (result: ${result})."
+                failed=1
+                ;;
+            esac
+          }
+          # The classifier is the fail-closed authority: if it did not
+          # produce a plan, nothing below can be trusted.
+          require_success "Change classification" "${CHANGES_RESULT}"
+          require_success "Format + governance" "${FMT_GOVERNANCE_RESULT}"
+          require_success "Generation ratchets" "${RATCHETS_RESULT}"
+          if [[ "${RUST_CHANGED}" == "true" ]]; then
+            if ! [[ "${SHARD_COUNT}" =~ ^[0-9]+$ ]] || (( SHARD_COUNT < 1 )); then
+              echo "::error::a build-relevant change produced no lanes (shard_count='${SHARD_COUNT}')."
+              failed=1
+            fi
+            require_ran "Clippy" "${CLIPPY_RESULT}"
+            require_ran "Unit tests" "${UNIT_RESULT}"
+            require_ran "Closure check" "${CLOSURE_CHECK_RESULT}"
+            if [[ "${WASM}" == "true" ]]; then
+              require_ran "wasm32 check" "${WASM_CHECK_RESULT}"
+            else
+              forbid_failure "wasm32 check" "${WASM_CHECK_RESULT}"
+            fi
+          elif [[ "${CHANGES_RESULT}" == "success" ]]; then
+            for lane in Clippy:"${CLIPPY_RESULT}" "Unit tests":"${UNIT_RESULT}" "Closure check":"${CLOSURE_CHECK_RESULT}" "wasm32 check":"${WASM_CHECK_RESULT}"; do
+              forbid_failure "${lane%%:*}" "${lane##*:}"
+            done
+          fi
+          if [[ "${SDK_HOST}" == "true" ]]; then
+            require_ran "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+          else
+            forbid_failure "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+          fi
+          if (( failed )); then
             exit 1
           fi
-          if [[ "${DENSE_TOPOLOGY_RESULT}" != "success" ]]; then
-            echo "::error::GitHub-hosted dense Mob topology did not complete successfully."
-            exit 1
-          fi
+          echo "All selected lanes succeeded."
 
       - name: Enforce push-to-terminal budget
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          # 40 minutes: the GitHub-hosted Mob archive lane builds cold after a
-          # release commit (see mob-dense-topology.yml) and must still finish
-          # inside this budget on its first attempt.
-          MAX_SECONDS: "2400"
+          MAX_SECONDS: ${{ env.CI_MAX_SECONDS }}
         run: |
           set -euo pipefail
           created_at="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at)"
@@ -92,13 +613,15 @@ jobs:
           print(int((now - started).total_seconds()))
           PY
           )"
-          echo "Push-to-full-CI terminal budget: ${elapsed}/${MAX_SECONDS} seconds"
+          echo "Push-to-terminal budget: ${elapsed}/${MAX_SECONDS} seconds"
+          echo "elapsed_seconds=${elapsed}" >> "${GITHUB_OUTPUT}"
           if ((elapsed > MAX_SECONDS)); then
-            echo "::error::Full CI exceeded the 40-minute push-to-terminal SLO (${elapsed}s)."
+            echo "::error::CI exceeded the ${MAX_SECONDS}-second push-to-terminal budget (${elapsed}s)."
             exit 1
           fi
 
       - name: Checkout attested source tree
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/checkout@v6
 
       - name: Build exact-tree CI attestation
@@ -106,8 +629,18 @@ jobs:
         id: attestation
         shell: bash
         env:
-          BUILDBUDDY_RESULT: ${{ needs.gcp-buildbuddy.result }}
-          DENSE_TOPOLOGY_RESULT: ${{ needs.github-hosted-dense-topology.result }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          FMT_GOVERNANCE_RESULT: ${{ needs.fmt-governance.result }}
+          RATCHETS_RESULT: ${{ needs.ratchets.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          CLOSURE_CHECK_RESULT: ${{ needs.closure-check.result }}
+          WASM_CHECK_RESULT: ${{ needs.wasm-check.result }}
+          SDK_HOST_RESULT: ${{ needs.sdk-host.result }}
+          MODE: ${{ needs.changes.outputs.mode }}
+          PACKAGE_COUNT: ${{ needs.changes.outputs.package_count }}
+          CLOSURE_COUNT: ${{ needs.changes.outputs.closure_count }}
+          SHARD_COUNT: ${{ needs.changes.outputs.shard_count }}
         run: |
           set -euo pipefail
           destination="${RUNNER_TEMP}/meerkat-ci-attestation"
@@ -122,10 +655,20 @@ jobs:
             --arg workflow_run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg event "${GITHUB_EVENT_NAME}" \
             --arg ref "${GITHUB_REF}" \
-            --arg validation_result "${BUILDBUDDY_RESULT}" \
-            --arg dense_topology_result "${DENSE_TOPOLOGY_RESULT}" \
+            --arg changes "${CHANGES_RESULT}" \
+            --arg fmt_governance "${FMT_GOVERNANCE_RESULT}" \
+            --arg ratchets "${RATCHETS_RESULT}" \
+            --arg clippy "${CLIPPY_RESULT}" \
+            --arg unit "${UNIT_RESULT}" \
+            --arg closure_check "${CLOSURE_CHECK_RESULT}" \
+            --arg wasm_check "${WASM_CHECK_RESULT}" \
+            --arg sdk_host "${SDK_HOST_RESULT}" \
+            --arg mode "${MODE}" \
+            --argjson package_count "${PACKAGE_COUNT:-0}" \
+            --argjson closure_count "${CLOSURE_COUNT:-0}" \
+            --argjson shard_count "${SHARD_COUNT:-0}" \
             '{
-              schema_version: 3,
+              schema_version: 4,
               repository: $repository,
               commit_sha: $commit_sha,
               tree_sha: $tree_sha,
@@ -134,16 +677,23 @@ jobs:
               workflow_run_attempt: $workflow_run_attempt,
               event: $event,
               ref: $ref,
-              validation_backend: "gcp-buildbuddy+github-hosted-dense-mob",
-              validation_result: (
-                if $validation_result == "success" and $dense_topology_result == "success"
-                then "success"
-                else "failure"
-                end
-              ),
+              validation_backend: "github-hosted-cargo",
+              validation_result: "success",
+              plan: {
+                mode: $mode,
+                package_count: $package_count,
+                closure_count: $closure_count,
+                shard_count: $shard_count
+              },
               component_results: {
-                gcp_buildbuddy: $validation_result,
-                github_hosted_dense_mob: $dense_topology_result
+                changes: $changes,
+                fmt_governance: $fmt_governance,
+                ratchets: $ratchets,
+                clippy: $clippy,
+                unit: $unit,
+                closure_check: $closure_check,
+                wasm_check: $wasm_check,
+                sdk_host: $sdk_host
               }
             }' > "${destination}/attestation.json"
           echo "tree_sha=${tree_sha}"

@@ -225,6 +225,41 @@ them.
 
 ### Fixed
 
+- Nightly and release BuildBuddy lanes (the whole Bazel graph in `full-fresh`
+  mode) run for real and green; the fixes below were surfaced by running the
+  lanes that `changed-paths` had skipped since 2026-08-28 (PR #1118):
+  `scripts/buildbuddy-ci-lane` fails a lane whose mode it does not implement
+  (exit 2) instead of skipping it and letting the gate read the skip as a
+  pass; the Bazel BUILD generator exports cross-crate include files and
+  root-package files that crates embed through include macros, compiles
+  `#[path]`-included fixtures into unit tests, gives unit tests the runfiles
+  their whole crate names (scanning `src/**`, with `MEERKAT_WORKSPACE_ROOT`
+  counted as a workspace-root reference), applies the root `[workspace.lints]`
+  table per member as Cargo does (`//:workspace_lints.bzl`), runs Bazel-native
+  test binaries single-threaded and sized for it with WebRTC units granted
+  network, and sizes `render_contracts_test` `medium`; the CI unit and
+  integration-fast lanes run the pre-push hook's nextest invocations as
+  cargo-equivalent remote actions (one process per test, cargo-nextest 0.9.143
+  pinned in `MODULE.bazel`) with a git workspace, a writable Cargo cache root,
+  `MEERKAT_WORKSPACE_ROOT` exported, the sandbox toolchain's own `cargo-clippy`
+  and a working `rustfmt` for nested children, one executor per nextest or
+  SDK action (`EstimatedCPU: 20`, `EstimatedMemory: 60GB`), and failing log
+  tails printed; the SDK suites run as one remote action per suite; `xtask
+  machine-verify` and the bounded adaptive TLC witness size the JVM launcher's
+  main thread through `JDK_JAVA_OPTIONS` (an explicit `-Xss` governs both
+  layers) and `collect_drift_mismatches` reports the drift child's exit
+  status; the Python SDK returns the read loop's typed `CONNECTION_CLOSED`
+  when a request write loses the exit race with `rkat-rpc`; the
+  `meerkat-mcp-server` archive-mob tests and the `meerkat-mob-mcp` unit tests
+  each create a uniquely named mob instead of colliding on a process-global
+  participant name; `meerkat_core::rewrite_record_body_decodes_on_this_thread()`
+  scopes the rewrite-record decode count to the calling thread so the commit
+  read test cannot be moved by a parallel test; the
+  `agent_builder_policy_canary` build-script compiles pass the explicit
+  `-Clinker=cc -Clink-self-contained=no` linker policy; and nextest reserves
+  threads for the peer-admission latency and turn-boundary fork tests whose
+  bounds are unchanged.
+
 - Compaction no longer mints an audit graph edge over inline media. When a
   session has a blob store, the agent externalizes inline images in the live
   transcript before the compaction witness binds the exact rows, so the rows a

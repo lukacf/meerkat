@@ -6878,7 +6878,8 @@ impl MobBuilder {
             let workgraph_service = workgraph_service
                 .as_ref()
                 .map(|service| super::mob_scoped_workgraph_service(service, &definition.id))
-                .transpose()?;
+                .transpose()?
+                .flatten();
             let session_service = session_service
                 .ok_or_else(|| MobError::Internal("session_service is required".into()))?;
             if !allow_ephemeral_sessions && !session_service.supports_persistent_sessions() {
@@ -7155,7 +7156,8 @@ impl MobBuilder {
         let workgraph_service = workgraph_service
             .as_ref()
             .map(|service| super::mob_scoped_workgraph_service(service, &definition.id))
-            .transpose()?;
+            .transpose()?
+            .flatten();
         let mut diagnostics = crate::validate::validate_definition(&definition);
         diagnostics.extend(crate::spec::SpecValidator::validate(definition.as_ref()));
         let (errors, warnings) = crate::validate::partition_diagnostics(diagnostics);

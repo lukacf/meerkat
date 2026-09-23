@@ -333,20 +333,28 @@ use provisioner::MultiBackendProvisioner;
 /// `default`); this rescopes that service's store to the mob realm, keeping
 /// the host's default namespace, so member tools, voice delegation items, and
 /// attention overlays all address the same per-mob namespace.
+///
+/// A host whose WorkGraph backend is disabled (`WorkGraphStoreKind::Disabled`)
+/// yields `None`: no member receives WorkGraph tools or a grant, and live
+/// delegation takes its serial path, instead of every operation failing
+/// against a store that supports nothing.
 pub fn mob_scoped_workgraph_service(
     host_service: &meerkat::WorkGraphService,
     mob_id: &crate::ids::MobId,
-) -> Result<meerkat::WorkGraphService, MobError> {
+) -> Result<Option<meerkat::WorkGraphService>, MobError> {
+    if host_service.store().kind() == meerkat::WorkGraphStoreKind::Disabled {
+        return Ok(None);
+    }
     let realm = meerkat_core::mob_realm_id(mob_id.as_str()).map_err(|error| {
         MobError::WiringError(format!(
             "mob '{mob_id}' has no valid WorkGraph realm: {error}"
         ))
     })?;
-    Ok(meerkat::WorkGraphService::with_scope(
+    Ok(Some(meerkat::WorkGraphService::with_scope(
         Arc::clone(host_service.store()),
         realm.as_str(),
         host_service.default_namespace().clone(),
-    ))
+    )))
 }
 use provisioner::{MobProvisioner, ProvisionMemberRequest};
 use state::MobCommand;

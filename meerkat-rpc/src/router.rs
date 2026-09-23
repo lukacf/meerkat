@@ -180,12 +180,17 @@ pub fn compose_rpc_mob_state(
     )
     .with_persistent_storage_root(persistent_mob_root)
     // Mobs rescope this service's store to their own realm, so the host
-    // service is supplied even when no runtime realm identity is active.
-    .with_workgraph_service(Some(
-        runtime
-            .workgraph_service()
-            .unwrap_or_else(|_| meerkat::WorkGraphService::new(runtime.workgraph_store())),
-    ))
+    // service is supplied even when no runtime realm identity is active. A
+    // disabled WorkGraph backend supplies nothing: members then build without
+    // WorkGraph tools and live delegation takes its serial path, instead of
+    // every mob operation failing against a store that supports no operation.
+    .with_workgraph_service(
+        (runtime.workgraph_store().kind() != meerkat::WorkGraphStoreKind::Disabled).then(|| {
+            runtime
+                .workgraph_service()
+                .unwrap_or_else(|_| meerkat::WorkGraphService::new(runtime.workgraph_store()))
+        }),
+    )
     .with_default_llm_client_provider(Some(llm_provider))
     .with_external_tools_provider(Some(tools_provider));
     if let Some(acceptor) = controlling_acceptor {
@@ -6338,11 +6343,18 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = anthropic_test_config();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let persistence = meerkat::PersistenceBundle::new_with_subsystem_stores(
+            store,
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+            Arc::new(meerkat::MemoryScheduleStore::default()),
+            Arc::new(meerkat::MemoryWorkGraphStore::new()),
+        );
         let runtime = SessionRuntime::new(
             factory,
             config.clone(),
             10,
-            runtime_backed_persistence(store),
+            persistence,
             NotificationSink::noop(),
         );
         let config_store: Arc<dyn ConfigStore> =
@@ -6378,6 +6390,62 @@ mod tests {
         );
         assert_ne!(scoped.default_realm_id(), host.default_realm_id());
         assert!(Arc::ptr_eq(scoped.store(), host.store()));
+    }
+
+    /// The default runtime carries a disabled WorkGraph backend. The RPC mob
+    /// state then supplies no WorkGraph service at all: mob create and
+    /// destroy work, members build without WorkGraph tools, and live
+    /// delegation takes its serial path, instead of every mob operation
+    /// failing against a store that supports nothing.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn rpc_mob_state_without_a_workgraph_backend_creates_and_destroys_mobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = anthropic_test_config();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime = SessionRuntime::new(
+            factory,
+            config.clone(),
+            10,
+            runtime_backed_persistence(store),
+            NotificationSink::noop(),
+        );
+        assert_eq!(
+            runtime.workgraph_store().kind(),
+            meerkat::WorkGraphStoreKind::Disabled
+        );
+        let config_store: Arc<dyn ConfigStore> =
+            Arc::new(MemoryConfigStore::new(config, meerkat_models::canonical()));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient::anthropic())));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let runtime = Arc::new(runtime);
+        let state = compose_rpc_mob_state(&runtime, &config_store, None);
+        assert!(
+            state.workgraph_service().is_none(),
+            "a disabled backend supplies no host WorkGraph service"
+        );
+        let mob_id = state
+            .mob_create_definition(meerkat_mob::MobDefinition::implicit(
+                "rpc-workgraph-disabled",
+                "claude-sonnet-4-5",
+            ))
+            .await
+            .expect("mob creates without a WorkGraph backend");
+        assert!(
+            state
+                .workgraph_service_for_mob(&mob_id)
+                .expect("mob scope")
+                .is_none(),
+            "no mob-scoped service is derived from a disabled backend"
+        );
+        state
+            .mob_destroy(&mob_id)
+            .await
+            .expect("mob destroys without a WorkGraph backend");
     }
 
     #[cfg(feature = "mob")]

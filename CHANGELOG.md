@@ -242,7 +242,9 @@ them.
   `MobMcpState::workgraph_service_for_mob`) so voice items and the forks'
   `workgraph_*` tools address one namespace under any host realm; the RPC mob
   state supplies the host store (`SessionRuntime::workgraph_store`) even when
-  no runtime realm identity is active. `MeerkatMachine` gains
+  no runtime realm identity is active, and supplies nothing when the backend
+  is disabled (`WorkGraphStoreKind::Disabled`), so mob create and destroy keep
+  working there and members build without WorkGraph tools. `MeerkatMachine` gains
   `live_delegation_schedule_state`, `requeue_live_delegation`,
   `cancel_queued_live_delegation`, and `authorize_live_delegation_narration`;
   `MobMcpState::workgraph_service` exposes the host WorkGraph service as the
@@ -595,8 +597,8 @@ them.
   LiveFinalTranscriptCommitAtTurnBoundary`, `PersistentSessionService::
   commit_live_user_transcript_final_with_machine_at_turn_boundary`,
   `meerkat_mob::mob_scoped_workgraph_service`,
-  `MobMcpState::workgraph_service_for_mob`, and (meerkat-rpc)
-  `SessionRuntime::workgraph_store`.
+  `MobMcpState::workgraph_service_for_mob` (both return `None` for a disabled
+  backend), and (meerkat-rpc) `SessionRuntime::workgraph_store`.
 - `GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS` is reworded: it now tells
   the voice model that several delegated requests run at once and that the
   executor reports each one's state (consumers matching the old text must

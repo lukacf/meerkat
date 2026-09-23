@@ -1008,7 +1008,8 @@ impl MobMcpState {
     /// The shared WorkGraph as `mob_id`'s members see it: the host service's
     /// store rescoped to the realm `mob.<id>`. Live delegation schedules its
     /// voice work items through this so the forks' `workgraph_*` tools, which
-    /// build in that realm, address the same items.
+    /// build in that realm, address the same items. `None` when the host has
+    /// no WorkGraph service or its backend is disabled.
     pub fn workgraph_service_for_mob(
         &self,
         mob_id: &MobId,
@@ -1017,6 +1018,7 @@ impl MobMcpState {
             .as_ref()
             .map(|service| meerkat_mob::mob_scoped_workgraph_service(service, mob_id))
             .transpose()
+            .map(Option::flatten)
     }
 
     pub fn with_default_llm_client(mut self, client: Option<Arc<dyn LlmClient>>) -> Self {

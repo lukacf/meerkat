@@ -3508,3 +3508,86 @@ fn mob_agent_owner_keys_round_trip_and_reject_other_shapes() {
             .is_none()
     );
 }
+
+struct FixedMemberResolver {
+    session_id: SessionId,
+    owner_key: WorkOwnerKey,
+}
+
+#[async_trait::async_trait]
+impl meerkat_workgraph::AttentionTargetRealmResolver for FixedMemberResolver {
+    async fn member_owner_key_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<WorkOwnerKey>, WorkGraphError> {
+        Ok((session_id == &self.session_id).then(|| self.owner_key.clone()))
+    }
+}
+
+/// The `Session` spelling of a member-bound target is held to the same realm
+/// rule when the host installed a session-to-member resolver; unknown
+/// sessions and services without a resolver are accepted as before.
+#[tokio::test]
+async fn session_spelled_member_target_in_a_foreign_realm_is_refused_typed() {
+    let member_session =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000000aa").expect("valid session id");
+    let other_session =
+        SessionId::parse("019e63c2-0000-7000-8000-0000000000ab").expect("valid session id");
+    let member = WorkOwnerKey::mob_agent("match3-mob", "reviewer").expect("member owner key");
+    let resolver: std::sync::Arc<dyn meerkat_workgraph::AttentionTargetRealmResolver> =
+        std::sync::Arc::new(FixedMemberResolver {
+            session_id: member_session.clone(),
+            owner_key: member.clone(),
+        });
+    let request = |realm: &str, session_id: &SessionId| GoalCreateRequest {
+        target: GoalAttentionTarget::Session {
+            session_id: session_id.clone(),
+        },
+        ..owner_bound_goal_request(realm, member.clone())
+    };
+    let store: std::sync::Arc<dyn meerkat_workgraph::WorkGraphStore> =
+        std::sync::Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new());
+
+    let host = WorkGraphService::with_scope(
+        std::sync::Arc::clone(&store),
+        "host-realm",
+        WorkNamespace::new("goals").expect("namespace"),
+    )
+    .with_attention_realm_resolver(std::sync::Arc::clone(&resolver));
+    let refused = host
+        .create_goal(request("host-realm", &member_session))
+        .await
+        .expect_err("a member session spelled as a Session target is refused in the host realm");
+    assert!(
+        matches!(
+            refused,
+            WorkGraphError::AttentionTargetRealmMismatch { ref mob_id, ref realm_id, .. }
+                if mob_id == "match3-mob" && realm_id == "host-realm"
+        ),
+        "unexpected error: {refused:?}"
+    );
+    host.create_goal(request("host-realm", &other_session))
+        .await
+        .expect("a session the resolver does not know binds in any realm");
+
+    let mob_realm = meerkat_core::mob_realm_id("match3-mob").expect("mob realm");
+    let mob = WorkGraphService::with_scope(
+        std::sync::Arc::clone(&store),
+        mob_realm.as_str(),
+        WorkNamespace::new("goals").expect("namespace"),
+    )
+    .with_attention_realm_resolver(resolver);
+    mob.create_goal(request(mob_realm.as_str(), &member_session))
+        .await
+        .expect("the member session binds in the mob realm");
+
+    let unresolved = WorkGraphService::with_scope(
+        std::sync::Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new()),
+        "host-realm",
+        WorkNamespace::new("goals").expect("namespace"),
+    );
+    unresolved
+        .create_goal(request("host-realm", &member_session))
+        .await
+        .expect("without a resolver a Session target cannot be classified and is accepted");
+}

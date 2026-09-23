@@ -350,11 +350,17 @@ pub fn mob_scoped_workgraph_service(
             "mob '{mob_id}' has no valid WorkGraph realm: {error}"
         ))
     })?;
-    Ok(Some(meerkat::WorkGraphService::with_scope(
+    let scoped = meerkat::WorkGraphService::with_scope(
         Arc::clone(host_service.store()),
         realm.as_str(),
         host_service.default_namespace().clone(),
-    )))
+    );
+    // The host's session-to-member resolver (if any) keeps `Session` attention
+    // targets under the same realm rule as `Owner` targets on the rescoped copy.
+    Ok(Some(match host_service.attention_realm_resolver() {
+        Some(resolver) => scoped.with_attention_realm_resolver(resolver),
+        None => scoped,
+    }))
 }
 use provisioner::{MobProvisioner, ProvisionMemberRequest};
 use state::MobCommand;

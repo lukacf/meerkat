@@ -442,9 +442,8 @@ pub enum RealtimeSessionOpenProjectionError {
     Seed(#[from] LiveSeedProjectionError),
     #[error(transparent)]
     Llm(#[from] meerkat_llm_core::LlmError),
-    #[cfg(feature = "openai-live")]
     #[error(transparent)]
-    Summary(#[from] super::live_summary::LiveContextSummaryError),
+    Summary(#[from] super::errors::LiveContextSummaryError),
     #[error(
         "live open projection belongs to session {projection_session_id}, not requested session {requested_session_id}"
     )]

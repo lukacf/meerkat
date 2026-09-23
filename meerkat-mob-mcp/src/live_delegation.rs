@@ -47,6 +47,35 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+/// Provider window behind one client delegation: the executor request and
+/// what the assistant said natively in the same window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LiveDelegationExecutorInput {
+    /// Every user transcript delta since the previous
+    /// `session.delegation.created` on the channel (or since open).
+    pub(crate) request_transcript: String,
+    /// Assistant transcript received in that window; empty when none.
+    pub(crate) assistant_context: String,
+}
+
+/// Heading of the labelled context section in the executor task text.
+pub(crate) const LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING: &str = "Assistant already said on the call meanwhile (context only, not part of the request; \
+     do not repeat it, and treat anything it already answered as answered):";
+
+/// The one seam that turns a delegation's provider window into the worker's
+/// task text. The request is the user transcript of the whole window; the
+/// assistant's native speech in that window is appended as a separately
+/// labelled section so the worker can see what was already answered, and is
+/// never merged into the request itself.
+pub(crate) fn delegation_request_text(input: &LiveDelegationExecutorInput) -> String {
+    let request = input.request_transcript.trim();
+    let context = input.assistant_context.trim();
+    if context.is_empty() {
+        return request.to_string();
+    }
+    format!("{request}\n\n{LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING}\n{context}")
+}
+
 const LIVE_DELEGATION_RESULT_BYTES: usize = 16 * 1024;
 const LIVE_DELEGATION_CLEANUP_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_millis(25);
@@ -2581,6 +2610,8 @@ impl ExperimentalLiveDelegationCoordinator {
                         turn,
                         delegation,
                         final_transcript,
+                        request_transcript,
+                        assistant_context,
                     } = observation.kind()
                         && let Err(error) = self
                             .start_client_context_delegation(
@@ -2589,6 +2620,10 @@ impl ExperimentalLiveDelegationCoordinator {
                                 turn.clone(),
                                 delegation.clone(),
                                 final_transcript.clone(),
+                                LiveDelegationExecutorInput {
+                                    request_transcript: request_transcript.clone(),
+                                    assistant_context: assistant_context.clone(),
+                                },
                             )
                             .await
                     {
@@ -2988,6 +3023,7 @@ impl ExperimentalLiveDelegationCoordinator {
         turn: LiveSidebandTurnRef,
         delegation: LiveSidebandDelegationRef,
         final_transcript: String,
+        executor_input: LiveDelegationExecutorInput,
     ) -> Result<(), String> {
         tracing::debug!("client-context control received an exact delegation join");
         let session_id = provider_binding.session_id();
@@ -3101,6 +3137,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 delegation,
                 final_evidence,
                 reconciliation,
+                executor_input,
             )
             .await;
         if started.is_ok() {
@@ -3129,6 +3166,7 @@ impl ExperimentalLiveDelegationCoordinator {
         delegation: LiveSidebandDelegationRef,
         final_evidence: FinalLiveUserTranscriptCommitEvidence,
         reconciliation: LiveHandoffReconciliationReceipt,
+        executor_input: LiveDelegationExecutorInput,
     ) -> Result<(), String> {
         let session_id = provider_binding.session_id();
 
@@ -3190,9 +3228,12 @@ impl ExperimentalLiveDelegationCoordinator {
             BoundedResultSpec::new("gpt_live_delegation", LIVE_DELEGATION_RESULT_BYTES)
                 .map_err(|error| error.to_string())?;
         let service = DelegationExecutionService::new(mob_handle);
+        // The canonical row (`provisional.executor_input()`) confirmed the
+        // digest chain above; the task the worker acts on is the provider
+        // window since the previous delegation, composed through one seam.
         let request = DelegationExecutionRequest::new_live(
             worker_identity.clone(),
-            provisional.executor_input(),
+            delegation_request_text(&executor_input),
             result_spec,
             admission.clone(),
         );
@@ -4254,6 +4295,40 @@ mod tests {
         not(target_arch = "wasm32")
     ))]
     mod supersession;
+
+    #[test]
+    fn delegation_request_text_keeps_assistant_speech_as_a_labelled_section() {
+        // Interjection mid-request (S100): the whole request is the task and
+        // the backchannel is context under its own heading, never merged.
+        let split = LiveDelegationExecutorInput {
+            request_transcript: "please write the standup notes with two headings".into(),
+            assistant_context: "mm-hm".into(),
+        };
+        let text = delegation_request_text(&split);
+        let (request, context) = text
+            .split_once(&format!(
+                "\n\n{LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING}\n"
+            ))
+            .expect("labelled context section");
+        assert_eq!(request, "please write the standup notes with two headings");
+        assert_eq!(context, "mm-hm");
+        // Nothing spoken in the window: the task is the request alone.
+        let quiet = LiveDelegationExecutorInput {
+            request_transcript: " second task ".into(),
+            assistant_context: String::new(),
+        };
+        assert_eq!(delegation_request_text(&quiet), "second task");
+        // A native answer between two requests (S103) lands in the context
+        // section; the request text carries only user transcript.
+        let answered = LiveDelegationExecutorInput {
+            request_transcript: "what day is it also add a summary".into(),
+            assistant_context: "on it it is Tuesday".into(),
+        };
+        let text = delegation_request_text(&answered);
+        assert!(text.starts_with("what day is it also add a summary\n\n"));
+        assert!(text.ends_with("\non it it is Tuesday"));
+        assert_eq!(text.matches("Tuesday").count(), 1);
+    }
 
     #[test]
     fn live_and_recovered_cancelled_terminals_keep_the_same_typed_class() {

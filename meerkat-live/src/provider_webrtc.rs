@@ -995,6 +995,17 @@ pub enum LiveSidebandObservationKind {
         /// delegation. This remains provider evidence until the canonical
         /// session owner commits it and returns sealed final-input evidence.
         final_transcript: String,
+        /// Executor input: every user transcript delta received since the
+        /// previous `session.delegation.created` on this channel (or since
+        /// open), regardless of assistant output in between. Canonical rows
+        /// keep their own segmentation; this is the request the executor
+        /// acts on.
+        request_transcript: String,
+        /// Assistant transcript received in that same window, passed to the
+        /// executor as labelled context (what was already answered
+        /// natively), never merged into the request. Empty when the
+        /// assistant said nothing in the window.
+        assistant_context: String,
     },
     /// A client-context delegation whose provider payload cannot establish a
     /// normalized prose handoff. This is not a Responses function call and

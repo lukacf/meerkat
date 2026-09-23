@@ -213,6 +213,10 @@ async fn existing_voice_supersession_precedes_source_commit_and_preserves_text()
             first_turn,
             first_delegation,
             "old voice work that remains blocked".to_string(),
+            LiveDelegationExecutorInput {
+                request_transcript: "old voice work that remains blocked".to_string(),
+                assistant_context: String::new(),
+            },
         )
         .await
         .expect("first existing voice started");
@@ -297,6 +301,10 @@ async fn existing_voice_supersession_precedes_source_commit_and_preserves_text()
                 second_turn,
                 second_delegation,
                 "replacement voice request".to_string(),
+                LiveDelegationExecutorInput {
+                    request_transcript: "replacement voice request".to_string(),
+                    assistant_context: String::new(),
+                },
             )
             .await
     });

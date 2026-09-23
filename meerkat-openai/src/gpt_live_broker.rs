@@ -176,11 +176,23 @@ pub enum GptLiveBrokerObservation {
     /// This is provider evidence only. It does not itself authorize executor
     /// work or establish canonical transcript commitment. Public sessions
     /// join the delegation to a locally synthesized user turn.
+    ///
+    /// `transcript` is the terminated user turn (the canonical row).
+    /// `request_transcript` is the executor input: every user transcript
+    /// delta received since the previous `session.delegation.created` on
+    /// this session (or since open), regardless of assistant output in
+    /// between, because the provider's backchannels are designed behaviour
+    /// and never end the user's request. `assistant_context` is the
+    /// assistant transcript received in that same window, so the executor
+    /// can see what was already answered natively; it is never merged into
+    /// the request.
     ClientDelegationFinal {
         delegation: GptLiveDelegationRef,
         target: GptLiveDelegationTarget,
         turn: GptLiveTurnRef,
         transcript: String,
+        request_transcript: String,
+        assistant_context: String,
     },
     DelegationActionableInputUnsupported {
         delegation: GptLiveDelegationRef,

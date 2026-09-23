@@ -1952,7 +1952,6 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         let (mut projection, boundary) = match &self.context_summary_policy {
             Some(policy) if policy.bootstrap_mode()
                 == crate::session_runtime::live_summary::LiveContextBootstrapMode::Concurrent => {
-                pending.enable_concurrent_context()?;
                 let (projection, boundary) = self.orchestrator()
                     .live_open_concurrent_summary_projection_for_session(
                         session, RealtimeTurningMode::ProviderManaged, policy,
@@ -1978,6 +1977,38 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         }
         pending.apply_execution_identity(&mut projection);
         Ok((projection, boundary))
+    }
+
+    /// Bounded pre-open summary for a replacement open: same rule as the
+    /// ordinary pipeline (see `pre_open_concurrent_summary`). Returns the
+    /// outcome and the boundary cursor when a concurrent boundary exists.
+    #[cfg(feature = "openai-live")]
+    async fn resolve_replacement_pre_open_summary(
+        &self,
+        session: &SessionId,
+        pending: &mut dyn crate::experimental_gpt_live::ExperimentalLivePendingOpen,
+        projection: &mut RealtimeSessionOpenProjection,
+        boundary: Option<crate::session_runtime::live_summary::LiveContextSummaryBoundary>,
+    ) -> Result<
+        (
+            Option<crate::session_runtime::live_summary::LivePreOpenSummary>,
+            Option<u64>,
+        ),
+        ExperimentalLiveContextRecoveryError,
+    > {
+        let Some(policy) = &self.context_summary_policy else {
+            return Ok((None, None));
+        };
+        pending.set_late_summary_lane(policy.late_summary_lane());
+        let Some(boundary) = boundary else {
+            return Ok((None, None));
+        };
+        let cursor = boundary.canonical_message_cursor();
+        let outcome = self
+            .orchestrator()
+            .pre_open_concurrent_summary(session, policy, pending, projection, boundary)
+            .await?;
+        Ok((Some(outcome), Some(cursor)))
     }
 
     #[cfg(all(feature = "live-webrtc", feature = "openai-live"))]
@@ -2067,13 +2098,19 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         let mut pending = authority
             .prepare_open(recovery.session_id(), &execution_identity)
             .await?;
-        let (projection, boundary) = self
+        let (mut projection, boundary) = self
             .prepare_strict_replacement_projection(recovery.session_id(), pending.as_mut())
             .await?;
+        let (pre_open, boundary_cursor) = self
+            .resolve_replacement_pre_open_summary(
+                recovery.session_id(),
+                pending.as_mut(),
+                &mut projection,
+                boundary,
+            )
+            .await?;
         let provider_seed_cursor = projection.open_config.canonical_message_cursor();
-        let reserved_cursor = boundary.as_ref().map_or(provider_seed_cursor, |boundary| {
-            boundary.canonical_message_cursor()
-        });
+        let reserved_cursor = boundary_cursor.unwrap_or(provider_seed_cursor);
         if reserved_cursor != recovery.canonical_seed_cursor() {
             return Err(ExperimentalLiveContextRecoveryError::SeedCursorMismatch);
         }
@@ -2096,10 +2133,22 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 recovery.session_id(),
                 &replacement_channel_id,
                 pending.execution_profile().clone(),
-                provider_seed_cursor,
-                boundary
-                    .as_ref()
-                    .map(|boundary| boundary.canonical_message_cursor()),
+                // Seeded at open covers the boundary's rows like a
+                // before-open summary; a late summary keeps its lease.
+                if matches!(
+                    pre_open,
+                    Some(crate::session_runtime::live_summary::LivePreOpenSummary::Seeded)
+                ) {
+                    reserved_cursor
+                } else {
+                    provider_seed_cursor
+                },
+                match pre_open {
+                    Some(crate::session_runtime::live_summary::LivePreOpenSummary::Late(_)) => {
+                        boundary_cursor
+                    }
+                    _ => None,
+                },
             )
             .await
         {
@@ -2128,10 +2177,19 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             }
         };
 
-        if let (Some(boundary), Some(lease)) = (boundary, preparation_lease)
+        if let (
+            Some(crate::session_runtime::live_summary::LivePreOpenSummary::Late(pregeneration)),
+            Some(lease),
+            Some(reserved),
+        ) = (pre_open, preparation_lease, boundary_cursor)
             && let Err(error) = self
                 .orchestrator()
-                .start_live_context_preparation(pending.as_mut(), lease, boundary)
+                .start_live_context_preparation_from_pregeneration(
+                    pending.as_mut(),
+                    lease,
+                    pregeneration,
+                    reserved,
+                )
                 .await
         {
             self.orchestrator()
@@ -2219,13 +2277,19 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         let mut pending = authority
             .prepare_open(recovery.session_id(), &execution_identity)
             .await?;
-        let (projection, boundary) = self
+        let (mut projection, boundary) = self
             .prepare_strict_replacement_projection(recovery.session_id(), pending.as_mut())
             .await?;
+        let (pre_open, boundary_cursor) = self
+            .resolve_replacement_pre_open_summary(
+                recovery.session_id(),
+                pending.as_mut(),
+                &mut projection,
+                boundary,
+            )
+            .await?;
         let provider_seed_cursor = projection.open_config.canonical_message_cursor();
-        let reserved_cursor = boundary.as_ref().map_or(provider_seed_cursor, |boundary| {
-            boundary.canonical_message_cursor()
-        });
+        let reserved_cursor = boundary_cursor.unwrap_or(provider_seed_cursor);
         if reserved_cursor != recovery.canonical_seed_cursor() {
             return Err(ExperimentalLiveContextRecoveryError::SeedCursorMismatch);
         }
@@ -2248,10 +2312,22 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                 recovery.session_id(),
                 &replacement_channel_id,
                 pending.execution_profile().clone(),
-                provider_seed_cursor,
-                boundary
-                    .as_ref()
-                    .map(|boundary| boundary.canonical_message_cursor()),
+                // Seeded at open covers the boundary's rows like a
+                // before-open summary; a late summary keeps its lease.
+                if matches!(
+                    pre_open,
+                    Some(crate::session_runtime::live_summary::LivePreOpenSummary::Seeded)
+                ) {
+                    reserved_cursor
+                } else {
+                    provider_seed_cursor
+                },
+                match pre_open {
+                    Some(crate::session_runtime::live_summary::LivePreOpenSummary::Late(_)) => {
+                        boundary_cursor
+                    }
+                    _ => None,
+                },
             )
             .await
         {
@@ -2280,10 +2356,19 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             }
         };
 
-        if let (Some(boundary), Some(lease)) = (boundary, preparation_lease)
+        if let (
+            Some(crate::session_runtime::live_summary::LivePreOpenSummary::Late(pregeneration)),
+            Some(lease),
+            Some(reserved),
+        ) = (pre_open, preparation_lease, boundary_cursor)
             && let Err(error) = self
                 .orchestrator()
-                .start_live_context_preparation(pending.as_mut(), lease, boundary)
+                .start_live_context_preparation_from_pregeneration(
+                    pending.as_mut(),
+                    lease,
+                    pregeneration,
+                    reserved,
+                )
                 .await
         {
             self.orchestrator()

@@ -63,6 +63,37 @@ pub enum LiveContextBootstrapMode {
     Concurrent,
 }
 
+/// Longest a concurrent open waits for its summary before opening without it.
+///
+/// The summary job starts before the provider session is created; if the
+/// summary is ready and still current within this bound it rides the startup
+/// `session.input` as a developer item (the documented history carrier, not a
+/// speech trigger). Measured against gpt-live-1 on 2026-09-23: small real
+/// summaries took 1.7 to 2.2 s to generate cold, a cached reopen is instant,
+/// and open-to-connected was 1.8 to 2.2 s, so this bound keeps a cold first
+/// open under the 5 s time-to-talk budget while still catching most cold
+/// generations. Configurable per policy with
+/// [`LiveContextSummaryPolicy::with_pre_open_bound`].
+pub const LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND: Duration = Duration::from_millis(2500);
+
+/// Native lane that carries a summary which was not ready at open, once the
+/// user has spoken on the channel (first `session.input_transcript.delta` or
+/// `session.delegation.created`). Never sent while the model is idle after
+/// open: measured, a bare summary appended into silence was spoken aloud 3/3
+/// on the thinking lane and 2/9 on the instructions lane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LiveLateSummaryLane {
+    /// `session.thinking.append`: the lane the provider documents for context
+    /// the model can use but does not say on append. Default: recall of a
+    /// planted fact 2/2 against 4/10 for the framed instructions append, and
+    /// the instructions lane is the provider's documented speak-first cue.
+    #[default]
+    Thinking,
+    /// `session.instructions.append` with the history framing: the previous
+    /// carrier, kept selectable so hosts and the e2e harness can measure it.
+    Instructions,
+}
+
 /// Host opt-in policy. Both sizes are UTF-8 bytes (input is serialized JSON);
 /// overflow refuses rather than selecting an unannounced partial window.
 #[derive(Clone)]
@@ -72,6 +103,8 @@ pub struct LiveContextSummaryPolicy {
     max_output_bytes: usize,
     timeout: Duration,
     bootstrap_mode: LiveContextBootstrapMode,
+    pre_open_bound: Duration,
+    late_summary_lane: LiveLateSummaryLane,
 }
 
 impl LiveContextSummaryPolicy {
@@ -90,6 +123,8 @@ impl LiveContextSummaryPolicy {
             max_output_bytes,
             timeout,
             bootstrap_mode: LiveContextBootstrapMode::BeforeOpen,
+            pre_open_bound: LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND,
+            late_summary_lane: LiveLateSummaryLane::default(),
         })
     }
 
@@ -102,6 +137,33 @@ impl LiveContextSummaryPolicy {
     #[must_use]
     pub const fn bootstrap_mode(&self) -> LiveContextBootstrapMode {
         self.bootstrap_mode
+    }
+
+    /// How long a concurrent open waits for the summary before opening
+    /// without it (see [`LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND`]). Zero means
+    /// never wait: the summary is always delivered after the user speaks.
+    #[must_use]
+    pub const fn with_pre_open_bound(mut self, bound: Duration) -> Self {
+        self.pre_open_bound = bound;
+        self
+    }
+
+    #[must_use]
+    pub const fn pre_open_bound(&self) -> Duration {
+        self.pre_open_bound
+    }
+
+    /// Lane for a summary that misses the pre-open bound (see
+    /// [`LiveLateSummaryLane`]).
+    #[must_use]
+    pub const fn with_late_summary_lane(mut self, lane: LiveLateSummaryLane) -> Self {
+        self.late_summary_lane = lane;
+        self
+    }
+
+    #[must_use]
+    pub const fn late_summary_lane(&self) -> LiveLateSummaryLane {
+        self.late_summary_lane
     }
 
     pub(crate) fn capture(
@@ -359,17 +421,152 @@ impl Drop for LiveContextSummaryJob {
     }
 }
 
+/// Outcome of the bounded pre-open summary wait for one concurrent boundary.
+pub(crate) enum LivePreOpenSummary {
+    /// The summary was ready and exactly current: it rides the startup
+    /// `session.input` and no preparation lease is needed.
+    Seeded,
+    /// The open proceeds without it; the running generation is adopted by
+    /// the preparation job and delivered after the first user turn.
+    Late(LiveContextSummaryPregeneration),
+}
+
+/// Why a pre-open summary generation produced no summary.
+#[derive(Debug, Clone)]
+pub(crate) enum LiveContextPregenerationFailure {
+    Summary(Arc<LiveContextSummaryError>),
+    Panicked,
+}
+
+/// The O(document) capture and the summarizer call for one admitted boundary,
+/// started before the provider session exists so a ready summary can ride the
+/// startup `session.input`. It holds no machine lease: `Capturing` and
+/// `Generating` are advanced by the [`LiveContextSummaryJob`] that adopts it
+/// when the summary misses the pre-open bound. Dropping it aborts the task.
+pub(crate) struct LiveContextSummaryPregeneration {
+    task: tokio::task::JoinHandle<()>,
+    /// Set once the committed prefix is sealed (or capture failed); the
+    /// adopting job advances `Capturing` to `Generating` on it.
+    captured: Arc<std::sync::Mutex<Option<Result<(), LiveContextPregenerationFailure>>>>,
+    captured_notify: Arc<tokio::sync::Notify>,
+    result:
+        Arc<std::sync::Mutex<Option<Result<LiveContextSummary, LiveContextPregenerationFailure>>>>,
+    ready: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for LiveContextSummaryPregeneration {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl LiveContextSummaryPregeneration {
+    pub(crate) fn spawn(boundary: LiveContextSummaryBoundary) -> Self {
+        use futures::FutureExt;
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let captured_notify = Arc::new(tokio::sync::Notify::new());
+        let result = Arc::new(std::sync::Mutex::new(None));
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let sealed = Arc::clone(&captured);
+        let sealed_notify = Arc::clone(&captured_notify);
+        let produced = Arc::clone(&result);
+        let notify = Arc::clone(&ready);
+        let task = tokio::spawn(async move {
+            let capturing = std::panic::AssertUnwindSafe(boundary.capture()).catch_unwind();
+            let capture = match capturing.await {
+                Ok(Ok(capture)) => Ok(capture),
+                Ok(Err(error)) => Err(LiveContextPregenerationFailure::Summary(Arc::new(error))),
+                Err(_) => Err(LiveContextPregenerationFailure::Panicked),
+            };
+            *sealed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(capture.as_ref().map(|_| ()).map_err(Clone::clone));
+            sealed_notify.notify_waiters();
+            let outcome = match capture {
+                Ok(capture) => {
+                    match std::panic::AssertUnwindSafe(capture.generate())
+                        .catch_unwind()
+                        .await
+                    {
+                        Ok(Ok(summary)) => Ok(summary),
+                        Ok(Err(error)) => {
+                            Err(LiveContextPregenerationFailure::Summary(Arc::new(error)))
+                        }
+                        Err(_) => Err(LiveContextPregenerationFailure::Panicked),
+                    }
+                }
+                Err(failure) => Err(failure),
+            };
+            *produced
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
+            notify.notify_waiters();
+        });
+        Self {
+            task,
+            captured,
+            captured_notify,
+            result,
+            ready,
+        }
+    }
+
+    /// Wait for the committed prefix to be sealed (the capture), before the
+    /// summarizer runs.
+    pub(crate) async fn wait_captured(&self) -> Result<(), LiveContextPregenerationFailure> {
+        loop {
+            let notified = self.captured_notify.notified();
+            if let Some(outcome) = self
+                .captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                return outcome;
+            }
+            notified.await;
+        }
+    }
+
+    /// Wait for the generation to settle. Callers bound this wait themselves;
+    /// the generation keeps running when a bounded wait gives up.
+    pub(crate) async fn wait_ready(
+        &self,
+    ) -> Result<LiveContextSummary, LiveContextPregenerationFailure> {
+        loop {
+            let notified = self.ready.notified();
+            if let Some(outcome) = self
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                return outcome;
+            }
+            notified.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_settled(&self) -> bool {
+        self.result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+}
+
 impl LiveContextSummaryJob {
-    /// Spawn the capture/generation job for one admitted boundary. The job
-    /// owns the O(document) source read: it captures the admitted prefix,
-    /// advances generated authority from `Capturing` to `Generating`, produces
-    /// the summary, and delivers it behind exact media activation.
-    pub(crate) fn spawn(
-        boundary: LiveContextSummaryBoundary,
+    /// Adopt a generation that started before the provider open and missed
+    /// the pre-open bound. The job waits for the summary, advances generated
+    /// authority from `Capturing` to `Generating`, and delivers it behind
+    /// exact media activation and the first user turn on the channel.
+    pub(crate) fn spawn_from_pregeneration(
+        pregeneration: LiveContextSummaryPregeneration,
         lease: meerkat_runtime::live_execution::LiveContextPreparationLease,
         runtime: Arc<meerkat_runtime::MeerkatMachine>,
     ) -> Self {
-        use futures::FutureExt;
         use meerkat_runtime::live_execution::LiveContextPreparationFailure;
 
         let provenance = Arc::new(std::sync::Mutex::new(None));
@@ -380,19 +577,18 @@ impl LiveContextSummaryJob {
         });
         let task = tokio::spawn(async move {
             let cancellation = lease.cancellation_token();
-            let capturing = std::panic::AssertUnwindSafe(boundary.capture()).catch_unwind();
             let captured = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return,
-                result = capturing => result,
+                result = pregeneration.wait_captured() => result,
             };
-            let capture = match captured {
-                Ok(Ok(capture)) => capture,
-                Ok(Err(error)) => {
+            match captured {
+                Ok(()) => {}
+                Err(LiveContextPregenerationFailure::Summary(error)) => {
                     record_preparation_failure(&runtime, &lease, preparation_failure(&error)).await;
                     return;
                 }
-                Err(_) => {
+                Err(LiveContextPregenerationFailure::Panicked) => {
                     record_preparation_failure(
                         &runtime,
                         &lease,
@@ -401,15 +597,15 @@ impl LiveContextSummaryJob {
                     .await;
                     return;
                 }
-            };
+            }
             if let Err(error) = runtime
                 .mark_live_context_preparation_generating(&lease)
                 .await
             {
-                // The capture itself succeeded; generated runtime authority
-                // refused to move this lease from `Capturing` to `Generating`
-                // (the lease no longer names the exact current preparation on
-                // the session's active channel). Record the authority verdict,
+                // The capture succeeded; generated runtime authority refused
+                // to move this lease from `Capturing` to `Generating` (the
+                // lease no longer names the exact current preparation on the
+                // session's active channel). Record the authority verdict,
                 // not a capture failure.
                 if !cancellation.is_cancelled() {
                     tracing::error!(%error, "live context preparation could not enter generation");
@@ -422,19 +618,18 @@ impl LiveContextSummaryJob {
                 }
                 return;
             }
-            let generation = std::panic::AssertUnwindSafe(capture.generate()).catch_unwind();
             let generated = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return,
-                result = generation => result,
+                result = pregeneration.wait_ready() => result,
             };
             let summary = match generated {
-                Ok(Ok(summary)) => summary,
-                Ok(Err(error)) => {
+                Ok(summary) => summary,
+                Err(LiveContextPregenerationFailure::Summary(error)) => {
                     record_preparation_failure(&runtime, &lease, preparation_failure(&error)).await;
                     return;
                 }
-                Err(_) => {
+                Err(LiveContextPregenerationFailure::Panicked) => {
                     record_preparation_failure(
                         &runtime,
                         &lease,
@@ -1367,5 +1562,124 @@ mod tests {
                 Err(LiveContextSummaryError::InvalidBounds)
             ));
         }
+    }
+
+    fn pregeneration_boundary_for(
+        session: &Session,
+        config: &RealtimeSessionOpenConfig,
+        policy: &LiveContextSummaryPolicy,
+    ) -> LiveContextSummaryBoundary {
+        let cursor = session.messages().len();
+        LiveContextSummaryBoundary {
+            session_id: session.id().clone(),
+            canonical_message_cursor: cursor as u64,
+            transcript_revision: session.transcript_prefix_digest(cursor).unwrap(),
+            rewrite_generation: session.transcript_rewrite_generation().unwrap(),
+            llm_identity: config.llm_identity.clone(),
+            source_reader: Arc::new(Source(session.clone(), config.llm_identity.clone())),
+            policy: policy.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn pregeneration_ready_within_the_bound_is_the_summary() {
+        let (session, config) = source("remember the vault phrase");
+        let producer = Arc::new(Producer {
+            calls: AtomicUsize::new(0),
+            text: "ready summary".into(),
+            delay: Duration::from_millis(10),
+            fail: false,
+        });
+        let policy =
+            LiveContextSummaryPolicy::new(producer.clone(), 4096, 100, Duration::from_secs(1))
+                .unwrap()
+                .with_bootstrap_mode(LiveContextBootstrapMode::Concurrent);
+        assert_eq!(policy.pre_open_bound(), LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND);
+        assert_eq!(policy.late_summary_lane(), LiveLateSummaryLane::Thinking);
+        let pregeneration = LiveContextSummaryPregeneration::spawn(pregeneration_boundary_for(
+            &session, &config, &policy,
+        ));
+        let ready = tokio::time::timeout(Duration::from_secs(2), pregeneration.wait_ready())
+            .await
+            .expect("within the bound")
+            .expect("summary");
+        assert_eq!(ready.text(), "ready summary");
+        assert_eq!(producer.calls.load(Ordering::SeqCst), 1);
+        // A second wait returns the same settled summary without regenerating.
+        let again = pregeneration.wait_ready().await.unwrap();
+        assert_eq!(again.text(), "ready summary");
+        assert_eq!(producer.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn pregeneration_that_misses_the_bound_keeps_running_and_settles_later() {
+        let (session, config) = source("late");
+        let producer = Arc::new(Producer {
+            calls: AtomicUsize::new(0),
+            text: "late summary".into(),
+            delay: Duration::from_millis(200),
+            fail: false,
+        });
+        let policy = LiveContextSummaryPolicy::new(producer, 4096, 100, Duration::from_secs(1))
+            .unwrap()
+            .with_pre_open_bound(Duration::from_millis(20));
+        let pregeneration = LiveContextSummaryPregeneration::spawn(pregeneration_boundary_for(
+            &session, &config, &policy,
+        ));
+        assert!(
+            tokio::time::timeout(policy.pre_open_bound(), pregeneration.wait_ready())
+                .await
+                .is_err(),
+            "the bound elapses first"
+        );
+        assert!(!pregeneration.is_settled());
+        let late = pregeneration.wait_ready().await.expect("adopted later");
+        assert_eq!(late.text(), "late summary");
+        assert!(pregeneration.is_settled());
+    }
+
+    #[tokio::test]
+    async fn pregeneration_failure_is_typed_and_does_not_block() {
+        let (session, config) = source("fail");
+        let producer = Arc::new(Producer {
+            calls: AtomicUsize::new(0),
+            text: String::new(),
+            delay: Duration::from_millis(1),
+            fail: true,
+        });
+        let policy =
+            LiveContextSummaryPolicy::new(producer, 4096, 100, Duration::from_secs(1)).unwrap();
+        let pregeneration = LiveContextSummaryPregeneration::spawn(pregeneration_boundary_for(
+            &session, &config, &policy,
+        ));
+        let failure = tokio::time::timeout(Duration::from_secs(2), pregeneration.wait_ready())
+            .await
+            .expect("settles")
+            .expect_err("typed failure");
+        assert!(matches!(
+            failure,
+            LiveContextPregenerationFailure::Summary(ref error)
+                if matches!(**error, LiveContextSummaryError::Producer(_))
+        ));
+    }
+
+    #[test]
+    fn late_summary_lane_is_a_typed_policy_choice() {
+        let (_, _) = source("lane");
+        let producer = Arc::new(Producer {
+            calls: AtomicUsize::new(0),
+            text: String::new(),
+            delay: Duration::ZERO,
+            fail: false,
+        });
+        let policy = LiveContextSummaryPolicy::new(producer, 4096, 100, Duration::from_secs(1))
+            .unwrap()
+            .with_late_summary_lane(LiveLateSummaryLane::Instructions)
+            .with_pre_open_bound(Duration::ZERO);
+        assert_eq!(
+            policy.late_summary_lane(),
+            LiveLateSummaryLane::Instructions
+        );
+        assert!(policy.pre_open_bound().is_zero());
     }
 }

@@ -192,6 +192,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_execution_generation_by_channel`: `Map<String, Generation>`
 - `live_execution_phase_by_channel`: `Map<String, LiveExecutionChannelPhase>`
 - `live_revoked_execution_channels`: `Set<String>`
+- `live_conversation_started_channels`: `Set<String>`
 - `live_cancelled_recovery_channels`: `Set<String>`
 - `live_execution_profile_by_channel`: `Map<String, String>`
 - `live_execution_mode_by_channel`: `Map<String, LiveExecutionMode>`
@@ -17159,6 +17160,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveContextBootstrapAppend`(session_id, channel_id, lease_id, append_id, content_digest, reserved_cursor)
 - Guards:
   - `exact_preparation_delivery`
+  - `user_has_spoken_on_channel`
 - Emits: `LiveContextBootstrapAppendAuthorized`
 - To: `Idle`
 
@@ -17167,6 +17169,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveContextBootstrapAppend`(session_id, channel_id, lease_id, append_id, content_digest, reserved_cursor)
 - Guards:
   - `exact_preparation_delivery`
+  - `user_has_spoken_on_channel`
 - Emits: `LiveContextBootstrapAppendAuthorized`
 - To: `Attached`
 
@@ -17175,6 +17178,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeLiveContextBootstrapAppend`(session_id, channel_id, lease_id, append_id, content_digest, reserved_cursor)
 - Guards:
   - `exact_preparation_delivery`
+  - `user_has_spoken_on_channel`
 - Emits: `LiveContextBootstrapAppendAuthorized`
 - To: `Running`
 

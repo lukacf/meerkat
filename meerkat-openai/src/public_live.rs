@@ -50,6 +50,17 @@ pub mod thinking_capture {
     #[serde(tag = "kind", rename_all = "snake_case")]
     pub enum EventKind {
         SessionAttached,
+        /// The startup `session.input` and `instructions` shape of the
+        /// create request: how many history items rode the documented
+        /// history carrier, how many were developer-role (a seeded
+        /// summary), and whether the startup instructions carry the
+        /// history framing. Host-side only; the browser never sees the
+        /// create body.
+        SessionInputSeeded {
+            input_items: usize,
+            developer_items: usize,
+            frames_history: bool,
+        },
         ThinkingAppendAttempt {
             client_event_id: String,
             text: String,
@@ -164,7 +175,7 @@ pub mod thinking_capture {
                 return;
             }
             let valid = match &event {
-                EventKind::SessionAttached => true,
+                EventKind::SessionAttached | EventKind::SessionInputSeeded { .. } => true,
                 EventKind::ThinkingAppendAttempt {
                     client_event_id,
                     text,
@@ -268,8 +279,66 @@ pub struct PublicLiveOpenConfig {
 enum PublicLiveContextSeed {
     Absent,
     History(Vec<InitialItem>),
-    FactualSummary(String),
+    /// A summary as one developer item, plus the most recent canonical turns
+    /// it also covers, seeded verbatim within the startup input budget.
+    FactualSummary {
+        summary: String,
+        recent: Vec<InitialItem>,
+    },
     HistoricalContextPending,
+}
+
+/// Provider limits on startup history: 128 messages and 8,192 rendered
+/// tokens. Tokens are estimated conservatively at three bytes each; the
+/// provider's own tokenizer verdict stays visible as a startup error.
+pub const LIVE_STARTUP_INPUT_MAX_ITEMS: usize = 128;
+pub const LIVE_STARTUP_INPUT_TOKEN_BUDGET: usize = 8192;
+const LIVE_STARTUP_INPUT_BYTES_PER_TOKEN: usize = 3;
+
+/// What the startup input budget dropped to fit the provider limits. Recent
+/// turns are dropped oldest first; the summary is never dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LiveStartupInputTruncation {
+    pub dropped_items: usize,
+    pub dropped_bytes: usize,
+}
+
+fn estimated_startup_tokens(item: &InitialItem) -> usize {
+    let bytes: usize = item.content.iter().map(|part| part.text.len()).sum();
+    bytes.div_ceil(LIVE_STARTUP_INPUT_BYTES_PER_TOKEN)
+}
+
+/// Compose the startup input from a leading item that is always kept and a
+/// tail of recent items, dropping the oldest tail items until both limits
+/// hold. The truncation is typed and reported by the caller.
+fn budget_startup_input(
+    keep: InitialItem,
+    recent: &[InitialItem],
+) -> (Vec<InitialItem>, LiveStartupInputTruncation) {
+    let mut truncation = LiveStartupInputTruncation::default();
+    let mut items = Vec::with_capacity(recent.len() + 1);
+    let mut tokens = estimated_startup_tokens(&keep);
+    // Newest first so the oldest are the ones left out.
+    let mut kept_recent = Vec::new();
+    for item in recent.iter().rev() {
+        let item_tokens = estimated_startup_tokens(item);
+        if kept_recent.len() + 1 < LIVE_STARTUP_INPUT_MAX_ITEMS
+            && tokens + item_tokens <= LIVE_STARTUP_INPUT_TOKEN_BUDGET
+        {
+            tokens += item_tokens;
+            kept_recent.push(item.clone());
+        } else {
+            truncation.dropped_items += 1;
+            truncation.dropped_bytes += item
+                .content
+                .iter()
+                .map(|part| part.text.len())
+                .sum::<usize>();
+        }
+    }
+    items.push(keep);
+    items.extend(kept_recent.into_iter().rev());
+    (items, truncation)
 }
 
 impl PublicLiveContextSeed {
@@ -287,17 +356,39 @@ impl PublicLiveContextSeed {
     fn initial_input(&self) -> Option<Vec<InitialItem>> {
         match self {
             Self::History(items) => (!items.is_empty()).then(|| items.clone()),
-            Self::FactualSummary(summary) => Some(vec![InitialItem {
-                role: InitialRole::Developer,
-                content: vec![InitialText {
-                    text: format!("{}\n{summary}", Self::SUMMARY_ITEM_PREFIX),
-                    text_type: Some(InitialTextType::InputText),
-                }],
-                id: Field::Absent,
-                status: Field::Absent,
-                item_type: Some(MessageType::Message),
-            }]),
+            Self::FactualSummary { .. } => Some(self.startup_input_plan().0),
             Self::Absent | Self::HistoricalContextPending => None,
+        }
+    }
+
+    /// The budgeted startup input for a summary seed and what the budget
+    /// dropped. Only meaningful for [`Self::FactualSummary`].
+    fn startup_input_plan(&self) -> (Vec<InitialItem>, LiveStartupInputTruncation) {
+        match self {
+            Self::FactualSummary { summary, recent } => {
+                let developer = InitialItem {
+                    role: InitialRole::Developer,
+                    content: vec![InitialText {
+                        text: format!("{}\n{summary}", Self::SUMMARY_ITEM_PREFIX),
+                        text_type: Some(InitialTextType::InputText),
+                    }],
+                    id: Field::Absent,
+                    status: Field::Absent,
+                    item_type: Some(MessageType::Message),
+                };
+                let (items, truncation) = budget_startup_input(developer, recent);
+                if truncation != LiveStartupInputTruncation::default() {
+                    tracing::warn!(
+                        dropped_items = truncation.dropped_items,
+                        dropped_bytes = truncation.dropped_bytes,
+                        max_items = LIVE_STARTUP_INPUT_MAX_ITEMS,
+                        token_budget = LIVE_STARTUP_INPUT_TOKEN_BUDGET,
+                        "public Live startup input dropped the oldest recent turns to fit the provider limits"
+                    );
+                }
+                (items, truncation)
+            }
+            _ => (Vec::new(), LiveStartupInputTruncation::default()),
         }
     }
 
@@ -305,7 +396,7 @@ impl PublicLiveContextSeed {
     /// own instructions.
     fn instructions_context(&self) -> Option<String> {
         match self {
-            Self::Absent | Self::History(_) | Self::FactualSummary(_) => None,
+            Self::Absent | Self::History(_) | Self::FactualSummary { .. } => None,
             Self::HistoricalContextPending => Some(
                 "Voice-channel context availability (factual state, not a new user request):\nHistorical session context is being prepared and is not yet available."
                     .to_string(),
@@ -322,7 +413,11 @@ impl std::fmt::Debug for PublicLiveContextSeed {
                 .debug_struct("History")
                 .field("messages", &items.len())
                 .finish(),
-            Self::FactualSummary(_) => formatter.write_str("FactualSummary(<redacted>)"),
+            Self::FactualSummary { recent, .. } => formatter
+                .debug_struct("FactualSummary")
+                .field("summary", &"<redacted>")
+                .field("recent", &recent.len())
+                .finish(),
             Self::HistoricalContextPending => formatter.write_str("HistoricalContextPending"),
         }
     }
@@ -430,13 +525,33 @@ impl PublicLiveOpenConfig {
     }
 
     /// Lower an owner-generated factual summary as unprivileged startup
-    /// history: one `developer`-role item in the session's startup `input`.
+    /// history: one `developer`-role item in the session's startup `input`,
+    /// followed by any history items already selected with
+    /// [`Self::with_history`] (the recent turns the summary also covers),
+    /// budgeted to the provider limits with the oldest turns dropped first.
     /// This never changes the catalog-owned behavior instructions and asks
     /// for no speech.
     #[must_use]
     pub fn with_context_summary(mut self, summary: &str) -> Self {
-        self.context_seed = PublicLiveContextSeed::FactualSummary(summary.to_owned());
+        let recent = match std::mem::replace(&mut self.context_seed, PublicLiveContextSeed::Absent)
+        {
+            PublicLiveContextSeed::History(items) => items,
+            PublicLiveContextSeed::FactualSummary { recent, .. } => recent,
+            PublicLiveContextSeed::Absent | PublicLiveContextSeed::HistoricalContextPending => {
+                Vec::new()
+            }
+        };
+        self.context_seed = PublicLiveContextSeed::FactualSummary {
+            summary: summary.to_owned(),
+            recent,
+        };
         self
+    }
+
+    /// What the startup input budget would drop for this configuration.
+    #[must_use]
+    pub fn startup_input_truncation(&self) -> LiveStartupInputTruncation {
+        self.context_seed.startup_input_plan().1
     }
 
     /// Declare that historical context is not yet available when media opens.
@@ -594,8 +709,24 @@ impl PublicLiveBrokerFactory {
         &self,
         config: PublicLiveOpenConfig,
     ) -> Result<PublicLiveBootstrap, GptLiveBrokerError> {
+        let session = self.session_config(&config);
+        #[cfg(feature = "test-realtime-fixtures")]
+        if let Some(capture) = &self.thinking_capture {
+            let items = session.input.as_deref().unwrap_or(&[]);
+            capture.record(thinking_capture::EventKind::SessionInputSeeded {
+                input_items: items.len(),
+                developer_items: items
+                    .iter()
+                    .filter(|item| item.role == InitialRole::Developer)
+                    .count(),
+                frames_history: matches!(
+                    &session.instructions,
+                    Field::Value(text) if text.contains("Conversation history:")
+                ),
+            });
+        }
         let request = CreateRequest {
-            session: self.session_config(&config),
+            session,
             transport: WebRtcTransport::WebRtc {
                 sdp: config.offer_sdp,
             },
@@ -2173,6 +2304,109 @@ mod tests {
     }
 
     #[test]
+    fn startup_summary_seeds_the_developer_item_then_the_recent_turns_in_order() {
+        use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason, UserMessage};
+        let recent = vec![
+            Message::User(UserMessage::text("earlier question")),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "earlier answer".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            )),
+        ];
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_instructions("Speak briefly.")
+            .with_history(&recent)
+            .with_context_summary("The agent compared two tables.");
+        let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
+            "gpt-live-1",
+            OpenAiBackendKind::OpenAiApi,
+        ))
+        .unwrap();
+        let session = factory.session_config(&config);
+        session
+            .validate()
+            .expect("developer item plus recent turns");
+        let encoded = serde_json::to_value(session).unwrap();
+        let input = encoded["input"].as_array().unwrap();
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["role"], "developer");
+        assert!(
+            input[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("The agent compared two tables.")
+        );
+        assert_eq!(input[1]["role"], "user");
+        assert_eq!(input[1]["content"][0]["text"], "earlier question");
+        assert_eq!(input[2]["role"], "assistant");
+        assert_eq!(input[2]["content"][0]["text"], "earlier answer");
+        assert_eq!(encoded["instructions"], "Speak briefly.");
+        assert_eq!(
+            config.startup_input_truncation(),
+            LiveStartupInputTruncation::default()
+        );
+    }
+
+    #[test]
+    fn startup_input_budget_drops_the_oldest_recent_turns_first_and_reports_it() {
+        use meerkat_core::types::UserMessage;
+        // Three 9,000-byte turns estimate to 3,000 tokens each; with the
+        // summary the budget of 8,192 tokens holds the two newest.
+        let recent: Vec<Message> = (1..=3)
+            .map(|index| {
+                Message::User(UserMessage::text(format!(
+                    "turn {index} {}",
+                    "x".repeat(9_000)
+                )))
+            })
+            .collect();
+        let config = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_history(&recent)
+            .with_context_summary("summary");
+        let truncation = config.startup_input_truncation();
+        assert_eq!(truncation.dropped_items, 1, "{truncation:?}");
+        assert!(truncation.dropped_bytes >= 9_000);
+        let items = config.context_seed.initial_input().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].role, InitialRole::Developer);
+        assert!(
+            items[1].content[0].text.starts_with("turn 2 "),
+            "oldest dropped"
+        );
+        assert!(items[2].content[0].text.starts_with("turn 3 "));
+        // The item cap holds too: 130 tiny turns keep the developer item and
+        // the 127 newest turns.
+        let many: Vec<Message> = (0..130)
+            .map(|index| Message::User(UserMessage::text(format!("t{index}"))))
+            .collect();
+        let capped = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_history(&many)
+            .with_context_summary("summary");
+        let items = capped.context_seed.initial_input().unwrap();
+        assert_eq!(items.len(), LIVE_STARTUP_INPUT_MAX_ITEMS);
+        assert_eq!(capped.startup_input_truncation().dropped_items, 3);
+        assert_eq!(
+            items[1].content[0].text, "t3",
+            "the three oldest were dropped"
+        );
+        assert_eq!(items[127].content[0].text, "t129");
+        // The summary is never dropped, even alone over budget.
+        let huge = PublicLiveOpenConfig::new("v=0", "marin")
+            .unwrap()
+            .with_history(&recent)
+            .with_context_summary(&"s".repeat(30_000));
+        let items = huge.context_seed.initial_input().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(huge.startup_input_truncation().dropped_items, 3);
+    }
+
+    #[test]
     fn pending_context_is_instructions_context_distinct_from_the_summary() {
         let factory = PublicLiveBrokerFactory::try_from_target(realtime_target(
             "gpt-live-1",
@@ -2207,7 +2441,7 @@ mod tests {
         let summarized = config.with_context_summary("Prepared facts.");
         assert!(matches!(
             summarized.context_seed,
-            PublicLiveContextSeed::FactualSummary(_)
+            PublicLiveContextSeed::FactualSummary { .. }
         ));
         let summary = serde_json::to_value(factory.session_config(&summarized)).unwrap();
         assert_eq!(

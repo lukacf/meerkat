@@ -325,6 +325,17 @@ them.
   `test_workgraph_owner_attention_survives_respawn_and_scopes_member_turn`
   created its goal in a host realm and failed on every run since the
   rescoping landed; it now creates the goal in the mob realm.
+- `meerkat-mob` actor isolation tests no longer fail under CPU starvation
+  (observed on 4 vCPU GitHub-hosted runners). The mock comms trust gate can
+  be narrowed to exact generated trust authority sources, and the
+  reconstructed-resume topology tests park only the resume topology worker's
+  `MobMachineMemberTrustWiring` install and assert the machine's
+  `explicit_resume_topology_pending` before issuing Stop or Retire: the old
+  source-agnostic gate also caught the member's own supervisor trust publish,
+  so a starved actor had not yet begun the topology phase when the control
+  arrived and the control legitimately finished early. The wedged-member load
+  test derives its admission budget from an unwedged baseline run on the same
+  host (3 s floor) instead of a fixed 3 s.
 - The WholeBlob audited-endpoint divergence now reaches hosts typed on the
   resume and reload paths, not only on a direct document read. Every resume
   runs durable-tail recovery first, and recovery reads the committed document

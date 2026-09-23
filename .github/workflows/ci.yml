@@ -70,8 +70,13 @@ env:
   # The server's own log; every compile lane uploads it, because with the
   # IO-error fallback above a dead server means silent cold compiles (the
   # mob unit lane of run 35864652602 compiled 15 minutes with 0 requests).
-  SCCACHE_ERROR_LOG: ${{ github.workspace }}/../sccache.log
+  # Literal runner temp path: the `runner` context is not available in
+  # workflow-level env, and upload-artifact rejects paths containing `..`.
+  SCCACHE_ERROR_LOG: /home/runner/work/_temp/sccache.log
   SCCACHE_LOG: info
+  # One stable repo-cargo lane key on every runner, so the generated
+  # toolchain wrapper path is identical across runs and lanes.
+  RUST_LANE_ID: ci
   # sccache objects are keyed by content, so one entry serves every lane and
   # branch; the GitHub cache scope lets pull requests read what main pushes
   # wrote. Debuginfo is off (above) so the objects stay small.
@@ -379,10 +384,12 @@ jobs:
 
       - name: Upload sccache server log
         if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: sccache-log-clippy-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/../sccache.log
+          path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
 
@@ -449,10 +456,12 @@ jobs:
 
       - name: Upload sccache server log
         if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: sccache-log-unit-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/../sccache.log
+          path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
 
@@ -514,10 +523,12 @@ jobs:
 
       - name: Upload sccache server log
         if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: sccache-log-closure-check-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/../sccache.log
+          path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
 

@@ -53,6 +53,9 @@ concurrency:
 permissions:
   actions: read
   contents: read
+  # Workload identity for the GCS object cache; forks do not get it and
+  # run with a local disk cache only.
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -65,10 +68,8 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
-  SCCACHE_GHA_ENABLED: "true"
-  SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
   # The server's own log; every compile lane uploads it, because with the
-  # IO-error fallback above a dead server means silent cold compiles (the
+  # IO-error fallback a dead server means silent cold compiles (the
   # mob unit lane of run 35864652602 compiled 15 minutes with 0 requests).
   # Literal runner temp path: the `runner` context is not available in
   # workflow-level env, and upload-artifact rejects paths containing `..`.
@@ -77,9 +78,15 @@ env:
   # One stable repo-cargo lane key on every runner, so the generated
   # toolchain wrapper path is identical across runs and lanes.
   RUST_LANE_ID: ci
-  # sccache objects are keyed by content, so one entry serves every lane and
-  # branch; the GitHub cache scope lets pull requests read what main pushes
-  # wrote. Debuginfo is off (above) so the objects stay small.
+  # Compiled objects live in the GCS bucket named by the repository variable
+  # MEERKAT_SCCACHE_GCS_BUCKET (default: the project bucket below), selected
+  # per job by .github/actions/setup-sccache-ci; with the GCP identity
+  # unavailable (fork pull requests) a lane runs with a local disk cache
+  # only. The GitHub Actions cache is 10 GB per repository and one
+  # workspace-mode run exceeds it, so writes failed at the quota and every run
+  # stayed cold; it now keeps only the cargo registry. Debuginfo is off
+  # (above) so the objects stay small.
+  SCCACHE_GCS_BUCKET_NAME: ${{ vars.MEERKAT_SCCACHE_GCS_BUCKET || 'meerkat-sccache-king-dnn-training-dev' }}
   # Push-to-terminal budget in seconds, measured from workflow creation.
   CI_MAX_SECONDS: "1200"
   # Target set for the closure-check lane: "all" checks every target of the
@@ -150,7 +157,13 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -213,7 +226,13 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -346,7 +365,13 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -412,7 +437,13 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -481,7 +512,13 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
@@ -551,7 +588,13 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -596,7 +639,13 @@ jobs:
           node-version: "22"
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
         uses: rui314/setup-mold@v1

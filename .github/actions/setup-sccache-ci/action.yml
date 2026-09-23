@@ -1,0 +1,84 @@
+name: Setup sccache for CI
+description: >-
+  Install sccache and point it at the GCS object cache through the repository's
+  GCP workload identity. When that identity is unavailable (pull requests from
+  forks have no id-token, or the variables are unset) run with a local disk
+  cache only, with no remote cache, instead of failing the lane.
+
+inputs:
+  bucket:
+    description: GCS bucket for sccache objects (empty disables the GCS backend).
+    required: false
+    default: ""
+  workload_identity_provider:
+    description: GCP workload identity provider resource name.
+    required: false
+    default: ""
+  service_account:
+    description: GCP service account to impersonate.
+    required: false
+    default: ""
+  project_id:
+    description: GCP project of the bucket.
+    required: false
+    default: ""
+  key_prefix:
+    description: Object key prefix; keep it per toolchain so a compiler bump starts a fresh namespace.
+    required: false
+    default: sccache/unpinned
+
+outputs:
+  backend:
+    description: Selected backend, gcs or local.
+    value: ${{ steps.select.outputs.backend }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install sccache
+      # Installs the binary, exports SCCACHE_PATH and the Actions cache
+      # endpoint variables the GHA fallback needs, and prints the hit
+      # statistics in its post step. The backend is selected below.
+      uses: mozilla-actions/sccache-action@v0.0.11
+
+    - name: Authenticate to GCP with workload identity
+      id: gcp
+      if: ${{ inputs.bucket != '' && inputs.workload_identity_provider != '' && inputs.service_account != '' }}
+      # A fork's pull request has no id-token permission; a failed
+      # authentication selects the local fallback below, it never fails the
+      # lane (and the gate grants no budget exemption for it).
+      continue-on-error: true
+      uses: google-github-actions/auth@v3
+      with:
+        workload_identity_provider: ${{ inputs.workload_identity_provider }}
+        service_account: ${{ inputs.service_account }}
+        project_id: ${{ inputs.project_id }}
+        create_credentials_file: true
+        export_environment_variables: false
+
+    - name: Select the sccache backend
+      id: select
+      shell: bash
+      env:
+        BUCKET: ${{ inputs.bucket }}
+        KEY_PREFIX: ${{ inputs.key_prefix }}
+        GCP_OUTCOME: ${{ steps.gcp.outcome }}
+        CREDENTIALS_FILE: ${{ steps.gcp.outputs.credentials_file_path }}
+      run: |
+        set -euo pipefail
+        if [[ -n "${BUCKET}" && "${GCP_OUTCOME}" == "success" && -n "${CREDENTIALS_FILE}" && -s "${CREDENTIALS_FILE}" ]]; then
+          {
+            echo "SCCACHE_GCS_BUCKET=${BUCKET}"
+            echo "SCCACHE_GCS_RW_MODE=READ_WRITE"
+            echo "SCCACHE_GCS_KEY_PREFIX=${KEY_PREFIX}"
+            echo "SCCACHE_GCS_KEY_PATH=${CREDENTIALS_FILE}"
+          } >> "${GITHUB_ENV}"
+          echo "backend=gcs" >> "${GITHUB_OUTPUT}"
+          echo "sccache backend: gcs://${BUCKET}/${KEY_PREFIX} (read-write)"
+        else
+          # No remote cache: a fresh runner's local disk cache, so the lane
+          # compiles cold and still counts against the same budget.
+          echo "SCCACHE_DIR=${RUNNER_TEMP}/sccache-local" >> "${GITHUB_ENV}"
+          echo "backend=local" >> "${GITHUB_OUTPUT}"
+          echo "sccache backend: local disk only (GCS identity unavailable: bucket='${BUCKET}', auth outcome='${GCP_OUTCOME}')"
+        fi

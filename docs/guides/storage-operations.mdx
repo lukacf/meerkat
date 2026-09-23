@@ -250,14 +250,21 @@ failure. For a session that is already wedged, repair it once:
    that actor's in-memory state, not the committed document, is then the
    authority. Under MobKit, stop the member (or let the identity retire) and
    confirm no `reload_member` retry loop is running against it.
-2. Point `rkat` at the runtime database that holds the session. The realm
-   argument is the realm's directory name under the realms root (ASCII
-   letters, digits, `-` or `_`); for a MobKit gateway the meerkat-level realm
-   is `mobkit` under the gateway's state directory, so the store lives at
-   `<state_dir>/mobkit/runtime.sqlite3`. The `mob.<name>` id recorded in a
-   session's metadata is a mob scope, not a store realm; passing it is
-   refused with a message that says so. The command opens only that runtime
-   database: it never creates a realm manifest or any other store, a missing
+2. Point `rkat` at the runtime database that holds the session. A MobKit
+   gateway on the default disk layout opens one runtime database directly,
+   `<state_dir>/runtime.sqlite` (flat under the state directory; the
+   `<state_dir>/mobkit/` realm directory next to it holds only the
+   meerkat-level jobs store and manifest pin), so name that file with
+   `--runtime-store` and pass the full session UUID. A store that lives in a
+   realm layout (`<state_root>/<realm>/runtime.sqlite3`, the shape a
+   composite storage provider's meerkat-level realm `mobkit` uses) is
+   addressed with `--state-root` and `--realm` instead; the realm argument is
+   the realm's directory name under the realms root (ASCII letters, digits,
+   `-` or `_`). The `mob.<name>` id recorded in a session's metadata is a mob
+   scope, not a store realm; passing it is refused with a message that says
+   so. A MobKit member parked with a `session_repair_required` hold carries
+   the exact form for its own store in `diagnose_command` and
+   `apply_command`. The command opens only that runtime database: it never creates a realm manifest or any other store, a missing
    database is a typed refusal naming the path it looked for, and a database
    pinned to the head-canonical profile is refused because this repair only
    applies to WholeBlob documents. A database whose runtime-store schema is
@@ -270,12 +277,17 @@ failure. For a session that is already wedged, repair it once:
 3. Diagnose, then apply:
 
 ```bash
+# MobKit gateway, default disk layout: name the runtime database directly.
 # Diagnose: prints the refusal, the divergence (row counts, revisions, first
 # divergent row), and what a repair would drop. Writes nothing to the store.
-rkat --state-root <state_dir> --realm mobkit session repair-wholeblob <session-id> --json
+rkat session repair-wholeblob <session-uuid> --runtime-store <state_dir>/runtime.sqlite --json
 
 # Repair: re-anchor the committed document on its live rows.
-rkat --state-root <state_dir> --realm mobkit session repair-wholeblob <session-id> --apply --json
+rkat session repair-wholeblob <session-uuid> --runtime-store <state_dir>/runtime.sqlite --apply --json
+
+# Realm layout (<state_root>/<realm>/runtime.sqlite3): scope by root and realm.
+rkat --state-root <state_root> --realm <realm> session repair-wholeblob <session-id> --json
+rkat --state-root <state_root> --realm <realm> session repair-wholeblob <session-id> --apply --json
 ```
 
 A diagnose report for the 2026-09-22 HomeCore shape reads, with counts only:

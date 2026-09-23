@@ -4540,6 +4540,12 @@ impl MobHandle {
 pub(crate) struct RestoreFailureDiagnostic {
     pub(crate) bridge_session_id: Option<SessionId>,
     pub(crate) reason: String,
+    /// meerkat's typed durable resume hold when the restore failure WAS a
+    /// hold (a WholeBlob document that needs the sanctioned audited-endpoint
+    /// repair): every later `MemberRestoreFailed` minted from this record
+    /// carries it, so a host classifies the Broken member typed instead of
+    /// parsing `reason`.
+    pub(crate) hold: Option<meerkat_core::service::DurableResumeHold>,
 }
 
 /// The machine's per-member subscribe verdict (phase 6): a local
@@ -5340,6 +5346,7 @@ impl MobHandle {
             member_id: agent_identity.clone(),
             session_id: diag.bridge_session_id,
             reason: diag.reason,
+            hold: diag.hold,
         }
     }
 

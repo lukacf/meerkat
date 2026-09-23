@@ -37,6 +37,19 @@ them.
 
 ### Added
 
+- `MobError::durable_resume_hold` reads meerkat's typed `DurableResumeHold`
+  off a mob error without display text: the in-process `SessionError`
+  carrier, the same carrier under `SharedRetirementFailure` /
+  `SharedLifecycleFailure`, or the structured `durable_resume_hold` wire
+  token. Hosts classify a withheld-but-intact session (a WholeBlob document
+  that needs the sanctioned audited-endpoint repair, a held tail, a refused
+  recovery, quarantined evidence) on it instead of parsing prose.
+- `rkat session repair-wholeblob <session-uuid> --runtime-store <file>` opens
+  one WholeBlob runtime database directly instead of resolving
+  `<state-root>/<realm>/runtime.sqlite3` from the CLI scope: the form for a
+  host that opened a single runtime SQLite file itself (MobKit's default
+  persistent layout, `<state_dir>/runtime.sqlite`). The realm-scoped form is
+  unchanged.
 - `Session::audited_endpoint_divergence` and the free function
   `audited_endpoint_divergence(state, live_rows)` report, as a typed
   `AuditedEndpointDivergence` (kind, endpoint and live row counts, first
@@ -196,6 +209,28 @@ them.
 
 ### Fixed
 
+- The WholeBlob audited-endpoint divergence now reaches hosts typed on the
+  resume and reload paths, not only on a direct document read. Every resume
+  runs durable-tail recovery first, and recovery reads the committed document
+  before it can judge the tail; a refused document surfaced there as
+  `SessionError::Agent(InternalError("durable-tail recovery ... "))`, so
+  `PersistentSessionService::recover_committed_boundary`,
+  `prepare_committed_boundary_resume` and every `MobSessionService` resume
+  verdict built on them reported the HomeCore 2026-09-22 wedge as an internal
+  fault a host could only retry. They now report
+  `SessionError::WholeBlobAuditedEndpointDivergence { id }` (resume hold
+  `audited_endpoint_divergence`). On the mob reload path
+  (`MobHandle::reload_member_registration`), a typed resume hold is no longer
+  rewritten into `MemberRestoreFailed { reason }` text when the machine
+  records the revival failure: the restore diagnostic is still recorded, and
+  the caller receives meerkat's typed refusal itself, so
+  `MobError::durable_resume_hold()` and the structured `durable_resume_hold`
+  token classify it identically to the resume path; the recorded restore
+  failure keeps the hold too, so every later `MemberRestoreFailed` minted for
+  that Broken member (a repeated reload, a send) carries it and projects it
+  under the same key. A registration for the session is retained; reviving
+  the Broken member after the operator's repair is the host's retire + resume
+  path (MobKit's `reload_member` on a held identity).
 - Compaction no longer mints an audit graph edge over inline media. When a
   session has a blob store, the agent externalizes inline images in the live
   transcript before the compaction witness binds the exact rows, so the rows a
@@ -373,6 +408,12 @@ them.
   canonical TLC lane, generated authority, and render contracts are unchanged.
 
 ### Breaking
+- `MobError::MemberRestoreFailed` gains the field
+  `hold: Option<DurableResumeHold>` (`MobError` struct literals and exhaustive
+  struct patterns on `MemberRestoreFailed` must name it or use `..`): meerkat's
+  typed durable resume hold when the recorded restore failure was one, so a
+  Broken member's refusals classify typed. New inherent method
+  `MobError::durable_resume_hold`.
 - `SessionError` gains the variant `WholeBlobAuditedEndpointDivergence { id }`
   (`SessionError::*` exhaustive matches must add the arm) and
   `DurableResumeHold` gains `AuditedEndpointDivergence` (`DurableResumeHold::*`);

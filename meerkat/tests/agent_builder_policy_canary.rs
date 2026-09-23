@@ -1432,12 +1432,22 @@ fn rustc_path() -> OsString {
 fn compile_build_script(relative: &str, scratch: &Path) -> PathBuf {
     let source = repo_root().join(relative);
     let binary = scratch.join(relative.replace('/', "_").replace(".rs", ""));
-    let output = Command::new(rustc_path())
+    let mut rustc = Command::new(rustc_path());
+    rustc
         .arg("--edition=2024")
         .arg("--crate-type=bin")
         .arg("-o")
         .arg(&binary)
-        .arg(&source)
+        .arg(&source);
+    if cfg!(target_os = "linux") {
+        // Same linker policy as the Cargo runs above: the rules_rust rustc in
+        // the Bazel runfiles has no bundled `gcc-ld`, and 1.90+ defaults to
+        // the self-contained linker on x86_64-unknown-linux-gnu, so the bare
+        // invocation fails with "the self-contained linker was requested, but
+        // it wasn't found in the target's sysroot" (2026-09-23 unit lane).
+        rustc.arg("-Clinker=cc").arg("-Clink-self-contained=no");
+    }
+    let output = rustc
         .output()
         .unwrap_or_else(|err| panic!("failed to spawn rustc for {relative}: {err}"));
     assert!(

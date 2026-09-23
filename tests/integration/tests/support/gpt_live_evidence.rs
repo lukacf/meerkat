@@ -64,6 +64,10 @@ pub enum Stage {
     // S105 fork and merge.
     ForkRequests,
     ForkCorrection,
+    // S106 long haul.
+    HaulExchanges,
+    HaulHold,
+    HaulReopen,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -403,6 +407,22 @@ pub enum Record {
         expected_delegations: usize,
         mode: String,
         titles: Vec<String>,
+    },
+    /// One close/reopen-with-summary cycle: close convergence, reopen
+    /// connect time, summary delivery time (reopen -> fragments acknowledged),
+    /// and the instructions-lane fragment accounting for the cycle.
+    ReopenCycle {
+        channel: u32,
+        close_ms: Option<u64>,
+        reopen_ms: u64,
+        summary_delivery_ms: u64,
+        framed_before: usize,
+        framed_after: usize,
+        fragments: usize,
+        expected_fragments: usize,
+        fragment_bytes: usize,
+        acknowledged: usize,
+        greeted: bool,
     },
     /// A tolerant (model-dependent) check: recorded with its outcome, never
     /// a gate on its own. The deterministic checks assert.

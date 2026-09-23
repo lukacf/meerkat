@@ -331,6 +331,116 @@
       "sample_rate_hz": 24000,
       "trailing_silence_ms": 1580,
       "notes": "S105 voice recall after the typed correction; the answer window should reflect the corrected numbers. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, echo), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "haul_e1",
+      "file": "haul-e1.wav",
+      "voice": "shimmer",
+      "text": "Quick note for today: the project codename is Saffron. Just say okay.",
+      "sha256": "b958787305ab64643d66933fca6cddb2a7a74ba9b4b3225aa4a661c853d16b30",
+      "duration_ms": 6015,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1525,
+      "notes": "S106 exchange 1 (native, plants Saffron). Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "haul_e2",
+      "file": "haul-e2.wav",
+      "voice": "shimmer",
+      "text": "And the venue for the launch is Lisbon. Got it?",
+      "sha256": "a4ba605b0a24c186128fb7fa8543ff4a3f4746283ad75a8c2ef836bb072d59a7",
+      "duration_ms": 4544,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1626,
+      "notes": "S106 exchange 2 (native, plants Lisbon; Tallinn was heard as Talon); a 20 s silence hold follows. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "haul_e3",
+      "file": "haul-e3.wav",
+      "voice": "shimmer",
+      "text": "Ask the executor to write a note of at least two hundred words about lighthouses into a file called notes.md, and just tell me the word count once it's saved.",
+      "sha256": "42d3774c4908bc6cf8003063e0c15d6141e9dea843654906ece5741d28d6cf97",
+      "duration_ms": 11055,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S106 exchange 3 (delegated): the executor writes an artifact over 1500 bytes; the spoken result stays short so the session settles before the reopen cycles. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "haul_e4",
+      "file": "haul-e4.wav",
+      "voice": "shimmer",
+      "text": "Remind me, which venue did I mention earlier?",
+      "sha256": "f5f8f109d1d2ff528d80a7ae9cbc5da95d022d2bf76b5ae484019a28f1ef93a9",
+      "duration_ms": 3880,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S106 exchange 4 (native recall of Lisbon); the first close and reopen follow, with a typed note during the closure. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "haul_e5",
+      "file": "haul-e5.wav",
+      "voice": "shimmer",
+      "text": "I typed a budget code while the call was down. What was it?",
+      "sha256": "b9e2ccbba46201d08586b4d6fc87b72fd53401cc94436827ef3ece293b26c034",
+      "duration_ms": 5928,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1680,
+      "notes": "S106 exchange 5 (native recall of the typed Kestrel) on the reopened channel. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "haul_e6",
+      "file": "haul-e6.wav",
+      "voice": "shimmer",
+      "text": "Have the executor count how many words are in that notes file and tell me the number.",
+      "sha256": "674de4ca81a1bbe5ade0414b6d9b5ca3c7ca27aadb914251803a5b28c02528a5",
+      "duration_ms": 6759,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S106 exchange 6 (delegated); the second close and reopen follow. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "haul_e7",
+      "file": "haul-e7.wav",
+      "voice": "shimmer",
+      "text": "What's the project codename again?",
+      "sha256": "72da6e5ff476ce4f102ebcfeb3c3afe4fce232c1cd9fc577221eb5088a9c732a",
+      "duration_ms": 3555,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S106 exchange 7 (native recall of Saffron) on the second reopened channel. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "haul_e8",
+      "file": "haul-e8.wav",
+      "voice": "shimmer",
+      "text": "And how many words did the note end up with?",
+      "sha256": "0fa2afc86449d920cac7a3516db26839983d61865e2be36ebaccafdcad8aa64d",
+      "duration_ms": 4260,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S106 exchange 8 (native recall of the word count). Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "haul_e9",
+      "file": "haul-e9.wav",
+      "voice": "shimmer",
+      "text": "Okay, summarise everything we did today in a few sentences.",
+      "sha256": "8ec67ef19aa742630d033f084261053506b3c566e24197c71b6a2db5b9fc2242",
+      "duration_ms": 5065,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S106 exchange 9: the answer window is checked for the three planted tokens. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "haul_e10",
+      "file": "haul-e10.wav",
+      "voice": "shimmer",
+      "text": "Thanks, that's all for today. Close the call.",
+      "sha256": "a8228173b2164fd0036b75c8d8c7c474da5eeaad8cede2979d38da97edbedfc1",
+      "duration_ms": 4379,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1632,
+      "notes": "S106 exchange 10: goodbye before the final graceful close. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, shimmer), VAD-normalised, 1500 ms trailing-silence floor."
     }
   ]
 }

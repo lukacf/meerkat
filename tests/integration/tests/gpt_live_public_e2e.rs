@@ -4989,13 +4989,16 @@ const S104_SILENCE_HOLD_MS: u64 = 4000;
 /// the owner-append counters either way.
 async fn wait_for_summary_appends(
     evidence: &Journal,
+    framed_before: usize,
     bound: Duration,
 ) -> Result<evidence::OwnerAppends, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + bound;
     loop {
         let owner = evidence.owner_appends()?;
-        if (owner.framed_summaries > 0
-            && owner.instructions_attempts > 0
+        // A new framed summary beyond `framed_before` (earlier channels'
+        // appends must not satisfy a later cycle) with every owned fragment
+        // acknowledged.
+        if (owner.framed_summaries > framed_before
             && owner.instructions_acknowledged >= owner.instructions_attempts)
             || Instant::now() >= deadline
         {
@@ -5102,7 +5105,7 @@ async fn run_s104_handoff_voice_typed_voice(
                 "the assistant greeted on its own after the open with summary".to_owned(),
             );
         }
-        let appends = wait_for_summary_appends(&evidence, Duration::from_secs(30)).await?;
+        let appends = wait_for_summary_appends(&evidence, 0, Duration::from_secs(30)).await?;
         println!(
             "GPT_LIVE_S104_OPEN_APPENDS framed_summaries={} instructions_attempts={} instructions_acknowledged={} thinking_attempts={}",
             appends.framed_summaries, appends.instructions_attempts, appends.instructions_acknowledged, appends.thinking_attempts
@@ -5248,7 +5251,7 @@ async fn run_s104_handoff_voice_typed_voice(
                 "the assistant greeted on its own after the reopen with summary".to_owned(),
             );
         }
-        let owner = wait_for_summary_appends(&evidence, Duration::from_secs(30)).await?;
+        let owner = wait_for_summary_appends(&evidence, 1, Duration::from_secs(30)).await?;
         println!(
             "GPT_LIVE_S104_REOPEN_APPENDS framed_summaries={} instructions_attempts={} instructions_acknowledged={} thinking_attempts={}",
             owner.framed_summaries, owner.instructions_attempts, owner.instructions_acknowledged, owner.thinking_attempts
@@ -5351,25 +5354,493 @@ async fn run_s104_handoff_voice_typed_voice(
 }
 
 // ===========================================================================
-// Scenario 106: scaffolding, blocked on runtime fixes
+// Scenario 106: long haul (ten exchanges, holds, two reopen cycles)
 // ===========================================================================
 
-/// Scenario 106 (long haul, voice shimmer, ~8 min): ten exchanges with a 20 s
-/// silence hold after exchange 2 (zero inbound speech during the hold), an
-/// executor result over 1500 bytes so the append fragments at 500 B
-/// (fragment count matches, every fragment acked), two reopen cycles with
-/// summary (each followed by a 4 s silence hold asserting no greeting, as in
-/// S104), and a final "summarise everything we did" checked for three
-/// planted tokens (tolerant). session/history row count equals exchanges
-/// plus typed turns.
+/// Planted tokens: two spoken (Saffron, Lisbon; Tallinn was heard as
+/// "Talon") and one typed during the first closure (Kestrel).
+const S106_TOKENS: [&str; 3] = ["saffron", "lisbon", "kestrel"];
+const S106_SEED_TOKEN: &str = "Marlow";
+const S106_TYPED_PROMPT: &str = "Typed while the voice call is down: the budget code is Kestrel. Reply with one short sentence.";
+const S106_LONG_HOLD_MS: u64 = 20_000;
+const S106_REOPEN_HOLD_MS: u64 = 4000;
+/// Wire fragment size of an owned instructions append.
+const S106_FRAGMENT_BYTES: usize = 500;
+/// The executor result of exchange 3 must exceed this.
+const S106_LONG_RESULT_BYTES: usize = 1500;
+
+/// Fixture schedule for an S106 native exchange: the first exchange on a
+/// channel plays at once, later ones 300 ms after the assistant goes quiet.
+fn s106_spec(name: &str, first: bool) -> PlayAt {
+    if first {
+        PlayAt::new(name, Anchor::Now, 0).overlap_bound_ms(60_000)
+    } else {
+        PlayAt::new(name, Anchor::AssistantQuiet, 300)
+            .quiet_ms(1200)
+            .require_speech(false)
+            .overlap_bound_ms(60_000)
+    }
+}
+
+/// One reopen cycle's timings and instructions-lane facts.
+#[derive(Debug)]
+struct S106Cycle {
+    close_ms: Option<u64>,
+    reopen_ms: u128,
+    summary_delivery_ms: u128,
+    framed_before: usize,
+    framed_after: usize,
+    fragments: usize,
+    acknowledged: usize,
+    fragment_bytes: usize,
+    expected_fragments: usize,
+    greeted: bool,
+}
+
+/// Close the current channel, optionally run a typed turn during the
+/// closure, reopen with a fresh summary, hold 4 s of silence, and account
+/// for the cycle's instructions fragments (count = ceil(bytes / 500), all
+/// acknowledged) on the journal's capture.
+async fn s106_reopen_cycle(
+    live: &mut PublicLiveHarness,
+    evidence: &Journal,
+    channel: u32,
+    typed_prompt: Option<&str>,
+    deterministic_failures: &mut Vec<String>,
+    tolerant_failures: &mut Vec<String>,
+) -> Result<(S106Cycle, u32), Box<dyn std::error::Error>> {
+    let before = evidence.owner_appends()?;
+    let texts_before = evidence.instructions_append_attempt_texts()?.len();
+    evidence.stage(EvidenceStage::HaulReopen)?;
+    // Let every executor turn and its result delivery settle before the
+    // close: a result still in flight at close hits the runtime's
+    // exact-once delivery invariant (finding A on the WorkGraph branch).
+    wait_for_settled(live, Duration::from_secs(3), Duration::from_secs(60)).await?;
+    live.record_uplink("S106").await?;
+    let close = close_or_record(live, evidence, channel, "S106", deterministic_failures).await?;
+    if let Some(prompt) = typed_prompt {
+        let typed = live
+            .rpc
+            .call_raw(
+                "turn/start",
+                json!({"session_id":live.session_id,"prompt":prompt}),
+                180,
+            )
+            .await?;
+        println!(
+            "GPT_LIVE_S106_TYPED ok={} error={}",
+            typed["error"].is_null(),
+            typed["error"]
+        );
+        if !typed["error"].is_null() {
+            deterministic_failures.push(format!(
+                "typed turn during the closure failed: {}",
+                typed["error"]
+            ));
+        }
+    }
+    let reopen_started = Instant::now();
+    live.reopen().await?;
+    let reopen_ms = reopen_started.elapsed().as_millis();
+    let new_channel = evidence.current_channel()?;
+    let delivery_started = Instant::now();
+    let greeted =
+        silence_hold_greeting(live, evidence, new_channel, "S106", S106_REOPEN_HOLD_MS).await?;
+    let after =
+        wait_for_summary_appends(evidence, before.framed_summaries, Duration::from_secs(45))
+            .await?;
+    let summary_delivery_ms = delivery_started.elapsed().as_millis();
+    let texts = evidence.instructions_append_attempt_texts()?;
+    let cycle_fragments: Vec<&String> = texts.iter().skip(texts_before).collect();
+    let fragment_bytes: usize = cycle_fragments.iter().map(|t| t.len()).sum();
+    let expected_fragments = fragment_bytes.div_ceil(S106_FRAGMENT_BYTES);
+    let cycle = S106Cycle {
+        close_ms: close.map(|c| c.ms),
+        reopen_ms,
+        summary_delivery_ms,
+        framed_before: before.framed_summaries,
+        framed_after: after.framed_summaries,
+        fragments: cycle_fragments.len(),
+        acknowledged: after
+            .instructions_acknowledged
+            .saturating_sub(before.instructions_acknowledged),
+        fragment_bytes,
+        expected_fragments,
+        greeted,
+    };
+    println!("GPT_LIVE_S106_CYCLE channel={new_channel} {cycle:?}");
+    evidence.record(EvidenceRecord::ReopenCycle {
+        channel: new_channel,
+        close_ms: cycle.close_ms,
+        reopen_ms: u64::try_from(cycle.reopen_ms).unwrap_or(u64::MAX),
+        summary_delivery_ms: u64::try_from(cycle.summary_delivery_ms).unwrap_or(u64::MAX),
+        framed_before: cycle.framed_before,
+        framed_after: cycle.framed_after,
+        fragments: cycle.fragments,
+        expected_fragments: cycle.expected_fragments,
+        fragment_bytes: cycle.fragment_bytes,
+        acknowledged: cycle.acknowledged,
+        greeted: cycle.greeted,
+    })?;
+    live.record_time_to_talk("S106", tolerant_failures).await?;
+    if greeted {
+        deterministic_failures.push(format!(
+            "the assistant greeted on its own after the reopen (channel {new_channel})"
+        ));
+    }
+    if cycle.framed_after <= cycle.framed_before {
+        deterministic_failures.push(format!(
+            "no new framed summary landed on the reopen (channel {new_channel})"
+        ));
+    }
+    if cycle.fragments != cycle.expected_fragments
+        && cycle.fragments > 0
+        && fragment_bytes > S106_FRAGMENT_BYTES
+    {
+        deterministic_failures.push(format!(
+            "instructions fragment count {} does not match ceil({}/{}) = {} (channel {new_channel})",
+            cycle.fragments, fragment_bytes, S106_FRAGMENT_BYTES, cycle.expected_fragments
+        ));
+    }
+    if cycle.acknowledged < cycle.fragments {
+        deterministic_failures.push(format!(
+            "not every instructions fragment was acknowledged on the reopen: fragments={} acknowledged={} (channel {new_channel})",
+            cycle.fragments, cycle.acknowledged
+        ));
+    }
+    Ok((cycle, new_channel))
+}
+
+/// Scenario 106: an ~8 minute voice session with ten exchanges, a 20 s
+/// silence hold after exchange 2, a delegated request whose artifact
+/// exceeds 1500 bytes, two close/reopen-with-summary cycles (a typed turn
+/// during the first closure), and a closing "summarise everything we did".
 ///
-/// Blocked: the reopen cycles need the close path to converge while
-/// delegations may be in flight (S103/S104/S107 finding 1). Not registered
-/// in e2e_lanes or the Turbo S list.
+/// Deterministic: no greeting after the open with summary and after each
+/// reopen (4 s holds); zero inbound speech during the 20 s hold; the long
+/// executor result artifact exceeds 1500 bytes; per reopen cycle a new
+/// framed summary landed, the instructions fragments number ceil(bytes/500)
+/// and are all acknowledged; exactly one delegation per delegated exchange
+/// and none for the native ones; canonical user rows equal the typed turns
+/// plus the user utterances closed by arrival across all channels; every
+/// close converges; WorkGraph parallel mode. Tolerant: the final summary
+/// window carries the three planted tokens; median input_final -> first
+/// audio under 3 s; open -> connected under 5 s per channel.
 #[tokio::test]
-#[ignore = "blocked: live close convergence with a delegation in flight (S107); scaffolding only"]
+#[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_106_gpt_live_public_long_haul() -> Result<(), Box<dyn std::error::Error>> {
-    Err("S106 is scaffolding: implement after the close convergence fix lands".into())
+    let evidence = Journal::create_for("S106", "Saffron".to_owned())?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = timeout(
+        Duration::from_secs(1500),
+        run_s106_long_haul(evidence.clone()),
+    )
+    .await;
+    let finished = evidence.finish(match &result {
+        Ok(Ok(())) => evidence::Outcome::Passed,
+        Ok(Err(_)) => evidence::Outcome::Failed,
+        Err(_) => evidence::Outcome::TimedOut,
+    });
+    result.map_err(|_| "S106 overall deadline expired")??;
+    finished?;
+    Ok(())
+}
+
+async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+        )
+        .with_test_writer()
+        .try_init();
+    require_api_key()?;
+    let started = Instant::now();
+    evidence.stage(EvidenceStage::Opening)?;
+    let mut live = open_public_live_with(PublicLiveOpen {
+        temp_prefix: "gpt-live-public-longhaul-e2e-",
+        operator_principal: "scenario-106-operator",
+        execution_policy: LiveDelegationExecutionPolicy::ExistingMember,
+        bootstrap: None,
+        seed_prompt: Some(format!(
+            "For the record: the sponsor's name is {S106_SEED_TOKEN}. Just acknowledge in one short sentence."
+        )),
+        evidence: Some(evidence.clone()),
+        unmeasured_playback: true,
+        executor_instructions: Some(vec![
+            "You are the executor behind a voice assistant. Your current working directory is the \
+             scratch workspace; do every file operation there with the shell tool. When asked for a \
+             note of at least two hundred words, write at least two hundred words into the requested \
+             file, then answer with the word count in one short sentence. When asked to count words, \
+             run `wc -w` on the file and answer with the number in one short sentence."
+                .to_owned(),
+        ]),
+        extra_members: Vec::new(),
+        instructions_preface: None,
+        summary_bootstrap: true,
+        shared_host: false,
+    })
+    .await?;
+    let connected_ms = started.elapsed().as_millis();
+    let workspace = live._temp.path().join("project");
+    let _server_guard = AbortScenarioServer(live.server_task.clone());
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let mut channel = evidence.current_channel()?;
+    let mut tolerant_failures = Vec::new();
+    let mut deterministic_failures: Vec<String> = Vec::new();
+    let mut seen_executor_turns = std::collections::BTreeSet::new();
+    let mut latencies: Vec<i64> = Vec::new();
+    let mut utterances = 0usize;
+    let mut delegation_windows: Vec<(String, usize)> = Vec::new();
+    let mut stage_ms: Vec<(String, u128)> = vec![("connected".to_owned(), connected_ms)];
+    let result = async {
+        evidence.stage(EvidenceStage::Connected)?;
+        live.assert_existing_text_identity().await?;
+        if silence_hold_greeting(&mut live, &evidence, channel, "S106", S106_REOPEN_HOLD_MS).await? {
+            deterministic_failures.push("the assistant greeted on its own after the open with summary".to_owned());
+        }
+        let opening = wait_for_summary_appends(&evidence, 0, Duration::from_secs(45)).await?;
+        println!(
+            "GPT_LIVE_S106_OPEN_APPENDS framed_summaries={} instructions_attempts={} instructions_acknowledged={}",
+            opening.framed_summaries, opening.instructions_attempts, opening.instructions_acknowledged
+        );
+        if opening.framed_summaries == 0 || opening.instructions_acknowledged < opening.instructions_attempts {
+            deterministic_failures.push(format!(
+                "open with summary: framed={} attempts={} acknowledged={}",
+                opening.framed_summaries, opening.instructions_attempts, opening.instructions_acknowledged
+            ));
+        }
+        stage_ms.push(("open_summary_delivered".to_owned(), started.elapsed().as_millis()));
+
+        // Exchanges 1-2 (native), then the 20 s hold.
+        evidence.stage(EvidenceStage::HaulExchanges)?;
+        let (t1, _a1, _, s1) = native_question(&mut live, "S106", "haul_e1", s106_spec("haul_e1", true)).await?;
+        latencies.extend(t1.input_final_to_audio_ms());
+        let (t2, _a2, _, s2) = native_question(&mut live, "S106", "haul_e2", s106_spec("haul_e2", false)).await?;
+        latencies.extend(t2.input_final_to_audio_ms());
+        evidence.stage(EvidenceStage::HaulHold)?;
+        // Let the answer to exchange 2 finish, then 20 s of nothing.
+        wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(30)).await?;
+        let hold_greeted = silence_hold_greeting(&mut live, &evidence, channel, "S106", S106_LONG_HOLD_MS).await?;
+        if hold_greeted {
+            deterministic_failures.push("inbound speech during the 20 s silence hold".to_owned());
+        }
+        stage_ms.push(("long_hold_done".to_owned(), started.elapsed().as_millis()));
+
+        // Exchange 3: delegated long note; exchange 4: native recall.
+        evidence.stage(EvidenceStage::HaulExchanges)?;
+        let e3 = delegated_request(
+            &mut live,
+            started,
+            "S106",
+            "exchange 3 (haul_e3)",
+            PlayAt::new("haul_e3", Anchor::Now, 0).overlap_bound_ms(60_000),
+            None,
+            &mut seen_executor_turns,
+        )
+        .await?;
+        let _answer3 = answer_window(&mut live, "exchange 3", &e3).await?;
+        latencies.extend(e3.timing.input_final_to_audio_ms());
+        let notes_bytes = std::fs::metadata(workspace.join("notes.md")).map(|m| m.len()).unwrap_or(0) as usize;
+        println!("GPT_LIVE_S106_LONG_RESULT notes_md_bytes={notes_bytes}");
+        if notes_bytes <= S106_LONG_RESULT_BYTES {
+            deterministic_failures.push(format!(
+                "the long executor result must exceed {S106_LONG_RESULT_BYTES} bytes; notes.md has {notes_bytes}"
+            ));
+        }
+        let (t4, _a4, _, s4) = native_question(&mut live, "S106", "haul_e4", s106_spec("haul_e4", false)).await?;
+        latencies.extend(t4.input_final_to_audio_ms());
+        let timeline1 = live.peer.timeline().await?;
+        delegation_windows.extend(delegations_per_window(
+            &timeline1,
+            &[("e1", s1), ("e2", s2), ("e3", e3.fixture_start_ms), ("e4", s4)],
+        ));
+        utterances += live.peer.energy().await?.input_finals.len();
+        evidence.record(EvidenceRecord::Timeline { channel, entries: timeline1 })?;
+
+        // Reopen cycle 1 with a typed note during the closure.
+        let (cycle1, channel2) = s106_reopen_cycle(
+            &mut live,
+            &evidence,
+            channel,
+            Some(S106_TYPED_PROMPT),
+            &mut deterministic_failures,
+            &mut tolerant_failures,
+        )
+        .await?;
+        channel = channel2;
+        stage_ms.push(("reopen_1_done".to_owned(), started.elapsed().as_millis()));
+
+        // Exchanges 5 (native) and 6 (delegated).
+        evidence.stage(EvidenceStage::HaulExchanges)?;
+        let (t5, _a5, _, s5) = native_question(&mut live, "S106", "haul_e5", s106_spec("haul_e5", true)).await?;
+        latencies.extend(t5.input_final_to_audio_ms());
+        let e6 = delegated_request(
+            &mut live,
+            started,
+            "S106",
+            "exchange 6 (haul_e6)",
+            PlayAt::new("haul_e6", Anchor::AssistantQuiet, 300).quiet_ms(1200).require_speech(false).overlap_bound_ms(60_000),
+            None,
+            &mut seen_executor_turns,
+        )
+        .await?;
+        let _answer6 = answer_window(&mut live, "exchange 6", &e6).await?;
+        latencies.extend(e6.timing.input_final_to_audio_ms());
+        let timeline2 = live.peer.timeline().await?;
+        delegation_windows.extend(delegations_per_window(&timeline2, &[("e5", s5), ("e6", e6.fixture_start_ms)]));
+        utterances += live.peer.energy().await?.input_finals.len();
+        evidence.record(EvidenceRecord::Timeline { channel, entries: timeline2 })?;
+
+        // Reopen cycle 2.
+        let (cycle2, channel3) = s106_reopen_cycle(
+            &mut live,
+            &evidence,
+            channel,
+            None,
+            &mut deterministic_failures,
+            &mut tolerant_failures,
+        )
+        .await?;
+        channel = channel3;
+        stage_ms.push(("reopen_2_done".to_owned(), started.elapsed().as_millis()));
+
+        // Exchanges 7-10 (native).
+        evidence.stage(EvidenceStage::HaulExchanges)?;
+        let (t7, _a7, _, s7) = native_question(&mut live, "S106", "haul_e7", s106_spec("haul_e7", true)).await?;
+        latencies.extend(t7.input_final_to_audio_ms());
+        let (t8, _a8, _, s8) = native_question(&mut live, "S106", "haul_e8", s106_spec("haul_e8", false)).await?;
+        latencies.extend(t8.input_final_to_audio_ms());
+        let (t9, _first_answer9, events_before_e9, s9) =
+            native_question(&mut live, "S106", "haul_e9", s106_spec("haul_e9", false)).await?;
+        latencies.extend(t9.input_final_to_audio_ms());
+        // The model may answer the summary itself or delegate it to the
+        // executor and read the commentary back; the answer window is
+        // everything it said after the question, once the session settles.
+        wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(120)).await?;
+        let answer9 = answer_transcript_text(&live.peer.events().await?, events_before_e9);
+        let lower9 = answer9.to_lowercase();
+        let found: Vec<&str> = S106_TOKENS.iter().copied().filter(|t| lower9.contains(t)).collect();
+        record_tolerant(
+            &evidence,
+            channel,
+            "S106",
+            "final_summary_carries_three_planted_tokens",
+            found.len() == S106_TOKENS.len(),
+            format!("found={found:?} answer={:?}", answer9.trim()),
+            &mut tolerant_failures,
+        )?;
+        let (t10, _a10, _, s10) = native_question(&mut live, "S106", "haul_e10", s106_spec("haul_e10", false)).await?;
+        latencies.extend(t10.input_final_to_audio_ms());
+        let timeline3 = live.peer.timeline().await?;
+        delegation_windows.extend(delegations_per_window(
+            &timeline3,
+            &[("e7", s7), ("e8", s8), ("e9", s9), ("e10", s10)],
+        ));
+        utterances += live.peer.energy().await?.input_finals.len();
+        // e3 and e6 must delegate exactly once; e9 ("summarise everything")
+        // may be answered natively or delegated (model choice, recorded);
+        // the other exchanges must not delegate.
+        for (label, count) in &delegation_windows {
+            if label == "e9" {
+                continue;
+            }
+            let expected = usize::from(label == "e3" || label == "e6");
+            if *count != expected {
+                deterministic_failures.push(format!(
+                    "{label} produced {count} client delegations ({expected} expected)"
+                ));
+            }
+        }
+        live.record_workgraph_mode("S106", 2, &mut deterministic_failures).await?;
+
+        evidence.stage(EvidenceStage::Closing)?;
+        wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
+        live.record_uplink("S106").await?;
+        let close3 = close_or_record(&mut live, &evidence, channel, "S106", &mut deterministic_failures).await?;
+        stage_ms.push(("closed".to_owned(), started.elapsed().as_millis()));
+
+        // Canonical rows: typed turns (seed + typed note) + user utterances
+        // closed by arrival across the three channels.
+        let history = live
+            .rpc
+            .call("session/history", json!({"session_id":live.session_id,"offset":0,"limit":600}), 30)
+            .await?;
+        // Rows the runtime injects itself (a delegation result merged after
+        // its channel closed: "result of the voice request ...") are neither
+        // typed turns nor utterances and are excluded from the count.
+        let all_rows = s100_user_rows(&history);
+        let spoken: Vec<String> = all_rows
+            .spoken
+            .iter()
+            .filter(|row| !row.starts_with("result of the voice request"))
+            .cloned()
+            .collect();
+        let merged_results = all_rows.spoken.len() - spoken.len();
+        let rows = S100UserRows {
+            spoken,
+            executor_inputs: all_rows.executor_inputs,
+        };
+        let typed_turns = 2usize;
+        let expected_rows = typed_turns + utterances;
+        println!(
+            "GPT_LIVE_S106_HISTORY spoken_user_rows={} merged_result_rows={merged_results} expected_rows={expected_rows} (typed {typed_turns} + utterances {utterances}) executor_inputs={}",
+            rows.spoken.len(),
+            rows.executor_inputs.len()
+        );
+        if rows.spoken.len() != expected_rows {
+            deterministic_failures.push(format!(
+                "canonical spoken user rows ({}) differ from typed turns + utterances ({expected_rows}); rows: {:?}",
+                rows.spoken.len(),
+                rows.spoken
+            ));
+        }
+        latencies.sort_unstable();
+        let median = latencies.get(latencies.len() / 2).copied();
+        record_tolerant(
+            &evidence,
+            channel,
+            "S106",
+            "median_input_final_to_first_audio_under_3s",
+            median.is_some_and(|m| m < 3000),
+            format!("median_ms={median:?} all_ms={latencies:?}"),
+            &mut tolerant_failures,
+        )?;
+        evidence.record(EvidenceRecord::Timeline { channel, entries: timeline3.clone() })?;
+        let mut faults = evidence.faults()?;
+        faults.extend(live.peer.faults().await?);
+        if !faults.is_empty() {
+            deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
+        }
+        println!(
+            "GPT_LIVE_S106_OK total_ms={} stages={stage_ms:?} cycle1={cycle1:?} cycle2={cycle2:?} close3_ms={:?} notes_md_bytes={notes_bytes} utterances={utterances} median_ms={median:?} delegations={delegation_windows:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            started.elapsed().as_millis(),
+            close3.map(|c| c.ms)
+        );
+        println!("GPT_LIVE_S106_TIMELINE_3\n{}", format_timeline(&timeline3));
+        if !deterministic_failures.is_empty() {
+            return Err(format!(
+                "S106 deterministic checks failed:\n  - {}",
+                deterministic_failures.join("\n  - ")
+            )
+            .into());
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+    let browser_flush = live.peer.stop_evidence().await;
+    let outcome = if result.is_ok() && browser_flush.is_ok() {
+        evidence.stage(EvidenceStage::Finished)?;
+        evidence::Outcome::Passed
+    } else {
+        evidence::Outcome::Failed
+    };
+    let retained = evidence.finish(outcome);
+    live.peer.close().await;
+    live.server_task.abort();
+    result?;
+    retained?;
+    browser_flush?;
+    Ok(())
 }
 
 // ===========================================================================

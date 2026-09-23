@@ -225,6 +225,14 @@ them.
   same process-global participant name `resume-peer` and ran in parallel, so
   whichever registered second failed as displacing a live incumbent. The
   across-roots test now uses its own name.
+- CI budgets now fit the lanes that actually run: the GCP BuildBuddy SLO is
+  2400s from control-plane start (was 1200s; the cold `//...` prebuild alone
+  needs ~12-13 min and gates the native lanes, and the SDK suites action was
+  still running when the old watchdog fired at 1015s), the Prebuild and Native
+  jobs have 25 and 30 minute timeouts (the cold prebuild was cancelled at 97% by
+  the previous 12), and the top-level push-to-terminal budget is 3600s (was
+  2400s; GitHub queued the control-plane job for 4 minutes on consecutive
+  runs before the 2400s component SLO even started). No lane was narrowed.
 - The BuildBuddy wasm-check lane runs clippy through the sandbox toolchain's
   own `cargo-clippy`. `cargo clippy` resolves that subcommand from
   `$CARGO_HOME/bin` (the executor image's rustup proxy) before `PATH`, which

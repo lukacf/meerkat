@@ -82,10 +82,15 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          # 40 minutes: the GitHub-hosted Mob archive lane builds cold after a
-          # release commit (see mob-dense-topology.yml) and must still finish
-          # inside this budget on its first attempt.
-          MAX_SECONDS: "2400"
+          # 60 minutes from workflow creation: the GCP BuildBuddy component owns a
+          # 2400s SLO measured from its control-plane start (buildbuddy.yml), and
+          # on 2026-09-22 GitHub queued that control-plane job for 4 minutes on
+          # two consecutive runs before it started; add the control plane and
+          # executor lifecycle (~2 min up, ~1 min down) and the gates. The
+          # GitHub-hosted Mob archive lane (cold build after a release commit,
+          # see mob-dense-topology.yml) runs in parallel and finishes well inside
+          # this. The old 2400 only held while the BuildBuddy lanes were skipped.
+          MAX_SECONDS: "3600"
         run: |
           set -euo pipefail
           created_at="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at)"
@@ -100,7 +105,7 @@ jobs:
           )"
           echo "Push-to-full-CI terminal budget: ${elapsed}/${MAX_SECONDS} seconds"
           if ((elapsed > MAX_SECONDS)); then
-            echo "::error::Full CI exceeded the 40-minute push-to-terminal SLO (${elapsed}s)."
+            echo "::error::Full CI exceeded the 60-minute push-to-terminal SLO (${elapsed}s)."
             exit 1
           fi
 

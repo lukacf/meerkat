@@ -7,7 +7,7 @@
 //! diagnostic fallback, while nightly owns low-churn heavy coverage. These
 //! tests ratchet the load-bearing invariants: the typed governance gates
 //! (rmat-audit set) bind every run, both selected lanes stay on the hot path,
-//! and the aggregate gate enforces the 40-minute terminal budget.
+//! and the aggregate gate enforces the 60-minute terminal budget.
 
 use std::path::{Path, PathBuf};
 

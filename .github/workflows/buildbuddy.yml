@@ -84,8 +84,16 @@ env:
   MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB || '1000' }}
   MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_TYPE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_TYPE || 'pd-ssd' }}
   MEERKAT_GCP_BUILDBUDDY_DOWN_MODE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_DOWN_MODE || 'stopped' }}
-  MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "1200"
-  MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS: "1200"
+  # 40 minutes from control-plane start. Measured on the first full-fresh runs
+  # (2026-09-22): executors up + lane setup ~2 min; the cold `//...` prebuild
+  # was cut at 97% of 3,447 actions after 10.5 min of Bazel time, so it needs
+  # ~12-13 min and it gates the native lanes (all-features clippy, unit,
+  # integration-fast) that run after it; the SDK suites action (cold
+  # `cargo build -p meerkat-rpc`, wasm-pack, three SDK suites) was still
+  # running when the 1200s watchdog fired at 1015s. 1200s never held once the
+  # lanes ran for real; it only looked fine while `changed-paths` skipped them.
+  MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "2400"
+  MEERKAT_GCP_BUILDBUDDY_SDK_CI_MAX_SECONDS: "2400"
   MEERKAT_BUILDBUDDY_EXECUTOR_POOL: ${{ vars.MEERKAT_BUILDBUDDY_EXECUTOR_POOL || 'meerkat-ci' }}
   MEERKAT_BUILDBUDDY_CI_IMAGE: ${{ vars.MEERKAT_BUILDBUDDY_CI_IMAGE || 'europe-west1-docker.pkg.dev/king-dnn-training-dev/meerkat-ci/meerkat-ci-rust:1.94.0' }}
   MEERKAT_HOST_CARGO_HOME: /usr/local/cargo
@@ -231,7 +239,9 @@ jobs:
     name: Prebuild submitter
     needs: [control-plane-up, executors-up]
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    # Cold `//...` (3,447 actions) needs ~12-13 min of Bazel time plus setup;
+    # the previous 12 cancelled it at 97% on 2026-09-22.
+    timeout-minutes: 25
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
       BUILDBUDDY_HTTP_URL: ${{ needs.control-plane-up.outputs.http_url }}
@@ -279,7 +289,7 @@ jobs:
     name: Native submitter
     needs: [control-plane-up, executors-up, prebuild-submit]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
       BUILDBUDDY_HTTP_URL: ${{ needs.control-plane-up.outputs.http_url }}
@@ -426,7 +436,7 @@ jobs:
       BUILDBUDDY_HTTP_URL: ${{ needs.control-plane-up.outputs.http_url }}
       BUILDBUDDY_ENDPOINT: ${{ needs.control-plane-up.outputs.grpc_url }}
       CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
-      MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "1200"
+      MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "2400"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -630,7 +640,7 @@ jobs:
         shell: bash
         env:
           CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
-          MAX_SECONDS: "1200"
+          MAX_SECONDS: "2400"
         run: |
           if ! [[ "${CI_STARTED_AT_EPOCH}" =~ ^[0-9]+$ ]]; then
             echo "::error::Missing or invalid GCP BuildBuddy CI start timestamp: '${CI_STARTED_AT_EPOCH}'"

@@ -427,6 +427,12 @@ fn identity_session_load_error_class(
         // a still-live conflicting runtime — is a temporary hold the identity
         // machine may retry after the hold clears.
         SessionError::DurableEvidenceQuarantined { .. } => IdentitySessionLoadErrorClass::Malformed,
+        // The committed WholeBlob document fails its own audited-endpoint
+        // guard: rows intact, every read refuses, the sanctioned repair is the
+        // only way forward. Not a transient hold, not a retry.
+        SessionError::WholeBlobAuditedEndpointDivergence { .. } => {
+            IdentitySessionLoadErrorClass::Malformed
+        }
         SessionError::NotFound { .. }
         | SessionError::Busy { .. }
         | SessionError::CompactionDisabled

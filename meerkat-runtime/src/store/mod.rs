@@ -831,6 +831,12 @@ impl std::io::Write for WholeBlobSessionWriter {
     }
 }
 
+/// The current-envelope ingress guard's refusal text (meerkat-core session
+/// ingress). Matching it classifies a refused committed body as the typed
+/// audited-endpoint divergence rather than a generic read failure.
+pub const AUDITED_ENDPOINT_INGRESS_REFUSAL: &str =
+    "live transcript does not preserve the graph-proved audited endpoint";
+
 fn encode_whole_blob_session(
     session: &meerkat_core::Session,
 ) -> Result<(Arc<Vec<u8>>, String), RuntimeStoreError> {
@@ -842,9 +848,12 @@ fn encode_whole_blob_session(
             detail: format!("audited endpoint could not be verified before encoding: {error}"),
         }
     })? {
-        return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+        return Err(RuntimeStoreError::AuditedEndpointDivergence {
             runtime_id: session.id().to_string(),
-            detail: format!("refusing to persist a WholeBlob document whose {divergence}"),
+            detail: format!(
+                "{}{divergence}",
+                meerkat_core::AUDITED_ENDPOINT_WRITE_REFUSAL_PREFIX
+            ),
         });
     }
     let mut writer = WholeBlobSessionWriter {
@@ -1279,9 +1288,15 @@ impl CommittedWholeBlobSnapshot {
     ) -> Result<Self, RuntimeStoreError> {
         let decoded =
             meerkat_core::Session::decode_whole_blob_document(bytes.as_ref()).map_err(|error| {
-                RuntimeStoreError::ReadFailed(format!(
-                    "WholeBlob body is not a valid current Session: {error}"
-                ))
+                let detail = format!("WholeBlob body is not a valid current Session: {error}");
+                if detail.contains(AUDITED_ENDPOINT_INGRESS_REFUSAL) {
+                    RuntimeStoreError::AuditedEndpointDivergence {
+                        runtime_id: authority.session_id().to_string(),
+                        detail,
+                    }
+                } else {
+                    RuntimeStoreError::ReadFailed(detail)
+                }
             })?;
         if decoded.row_sha256_token() != authority.blob_sha256() {
             return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
@@ -2419,6 +2434,14 @@ pub enum RuntimeStoreError {
     /// checkpoint, canonical head, frozen legacy BLOB, or mutation shape.
     #[error("session persistence authority conflict for runtime '{runtime_id}': {detail}")]
     SessionPersistenceAuthorityConflict { runtime_id: String, detail: String },
+    /// A WholeBlob document's live transcript no longer preserves its
+    /// graph-proved audited endpoint. On write this is the fail-closed writer
+    /// guard (nothing was persisted); on read it is the committed document the
+    /// current decoder refuses, which needs the sanctioned audited-endpoint
+    /// repair. Rows are intact either way. Typed so hosts distinguish "session
+    /// needs repair" from I/O failure.
+    #[error("WholeBlob audited endpoint divergence for runtime '{runtime_id}': {detail}")]
+    AuditedEndpointDivergence { runtime_id: String, detail: String },
     /// A detached producer attempted to persist an ops snapshot after the
     /// matching epoch was atomically retired by unregister.
     #[error("Ops lifecycle epoch {epoch_id} for runtime {runtime_id} is retired")]

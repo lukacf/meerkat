@@ -11333,7 +11333,8 @@ pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
         // `durable_resume_hold` payload carry which hold applies.
         SessionError::DurableTailHeldForRecovery { .. }
         | SessionError::DurableTailRecoveryRefused { .. }
-        | SessionError::DurableEvidenceQuarantined { .. } => error::SESSION_NOT_RUNNING,
+        | SessionError::DurableEvidenceQuarantined { .. }
+        | SessionError::WholeBlobAuditedEndpointDivergence { .. } => error::SESSION_NOT_RUNNING,
         SessionError::Agent(agent_err) => match agent_err {
             meerkat_core::AgentError::TokenBudgetExceeded { .. }
             | meerkat_core::AgentError::TimeBudgetExceeded { .. }
@@ -11419,6 +11420,11 @@ fn rpc_error_to_session_error(err: RpcError, session_id: &SessionId) -> SessionE
             DurableResumeHold::EvidenceQuarantined => SessionError::DurableEvidenceQuarantined {
                 id: session_id.clone(),
             },
+            DurableResumeHold::AuditedEndpointDivergence => {
+                SessionError::WholeBlobAuditedEndpointDivergence {
+                    id: session_id.clone(),
+                }
+            }
         };
     }
     match err.code {

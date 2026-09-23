@@ -388,7 +388,8 @@ pub use service::{
     WorkGraphNamespaceGrant,
 };
 pub use session::{
-    AuditedEndpointDivergence, AuditedEndpointDivergenceKind, AuthorizedSessionToolVisibilityState,
+    AUDITED_ENDPOINT_WRITE_REFUSAL_PREFIX, AuditedEndpointDivergence,
+    AuditedEndpointDivergenceKind, AuditedEndpointRelation, AuthorizedSessionToolVisibilityState,
     ConsumedDeferredTurnInputs, DeferredFirstTurnPhase, DeferredToolLoadAuthority,
     INSTRUCTION_ACTIVATION_RENDER_VERSION_V1, ImportedReleased0810Session,
     InheritedToolVisibilityAuthority, InstructionActivationAdmissionErrorCode,

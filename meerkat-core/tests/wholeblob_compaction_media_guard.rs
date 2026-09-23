@@ -462,3 +462,87 @@ async fn long_lived_wholeblob_lifecycle_decodes_after_every_step() {
         .expect("complete intent");
     expect_decodes(&decoded, "re-encode after finalization cleanup");
 }
+
+/// Item 2: the ingress guard and the writer guard are one relation. For every
+/// live shape, the writer reports `None` exactly when ingress accepts, and
+/// reports a divergence exactly when ingress refuses.
+#[test]
+fn reader_and_writer_guards_agree_on_every_live_shape() {
+    let mut session = Session::new();
+    session.append_system_message("system prompt");
+    for turn in 0..4 {
+        session.push(Message::User(UserMessage::text(format!("question {turn}"))));
+    }
+    let live = session.messages().to_vec();
+    let mut replacement = vec![live[0].clone()];
+    replacement.push(Message::User(UserMessage::compaction_summary(
+        "[Compaction summary] earlier questions",
+    )));
+    replacement.extend(live[3..].iter().cloned());
+    session
+        .stage_validated_compaction_for_test(replacement, 12)
+        .expect("compaction commits");
+    let endpoint = session.messages().to_vec();
+
+    let mut appended = endpoint.clone();
+    appended.push(Message::User(UserMessage::text(
+        "appended after the endpoint",
+    )));
+    let mut tampered = endpoint.clone();
+    tampered[1] = Message::User(UserMessage::text("tampered inside the endpoint"));
+    let mut shorter = endpoint.clone();
+    shorter.truncate(endpoint.len() - 1);
+    let shapes: [(&str, Vec<Message>); 4] = [
+        ("exact endpoint", endpoint),
+        ("exact append", appended),
+        ("tampered prefix", tampered),
+        ("shorter than endpoint", shorter),
+    ];
+    for (label, rows) in shapes {
+        let mut probe = session.clone();
+        probe.replace_messages_unaudited_for_test(rows);
+        let writer = probe
+            .audited_endpoint_divergence()
+            .expect("writer relation");
+        let ingress = Session::from_persisted_bytes(&serde_json::to_vec(&probe).expect("encode"));
+        match (&writer, &ingress) {
+            (None, Ok(_)) | (Some(_), Err(_)) => {}
+            (writer, ingress) => panic!(
+                "guards disagree on '{label}': writer={writer:?} ingress_ok={}",
+                ingress.is_ok()
+            ),
+        }
+    }
+}
+
+/// A validated graph always carries a final endpoint witness: the validator
+/// refuses an edge-less graph at ingress, so "edges but no witness" cannot
+/// reach either guard.
+#[test]
+fn graph_without_edges_is_refused_before_either_guard_runs() {
+    let mut session = Session::new();
+    session.append_system_message("system prompt");
+    session.push(Message::User(UserMessage::text("question")));
+    session.push(Message::User(UserMessage::text("another")));
+    let live = session.messages().to_vec();
+    let mut replacement = vec![live[0].clone()];
+    replacement.push(Message::User(UserMessage::compaction_summary(
+        "[Compaction summary] q",
+    )));
+    session
+        .stage_validated_compaction_for_test(replacement, 12)
+        .expect("compaction commits");
+    let mut document = serde_json::to_value(&session).expect("serialize");
+    let graph = document
+        .get_mut("metadata")
+        .and_then(|metadata| metadata.get_mut("session_transcript_history_state_v1"))
+        .expect("graph present");
+    graph["edges"] = serde_json::json!([]);
+    let error = serde_json::from_value::<Session>(document).expect_err("edge-less graph refused");
+    assert!(
+        !error
+            .to_string()
+            .contains("live transcript does not preserve the graph-proved audited endpoint"),
+        "the graph validator, not the endpoint guard, must refuse: {error}"
+    );
+}

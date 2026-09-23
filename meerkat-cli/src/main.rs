@@ -2481,6 +2481,12 @@ enum SessionCommands {
         /// Commit the re-anchored document (default: diagnose only)
         #[arg(long)]
         apply: bool,
+        /// Allow --apply when the live transcript is SHORTER than the audited
+        /// endpoint (the one shape where re-anchoring drops audited content).
+        /// The report echoes both row counts. HomeCore's expected shape is the
+        /// longer-or-equal LivePrefixDiverges, which never needs this.
+        #[arg(long, requires = "apply")]
+        accept_shorter: bool,
         /// Print the report as JSON
         #[arg(long)]
         json: bool,
@@ -3766,9 +3772,12 @@ async fn cli_main() -> anyhow::Result<ExitCode> {
                 labels,
             } => list_sessions(limit, offset, labels, &cli_scope).await,
             SessionCommands::Show { id } => show_session(&id, &cli_scope).await,
-            SessionCommands::RepairWholeblob { id, apply, json } => {
-                repair_wholeblob_session(&id, apply, json, &cli_scope).await
-            }
+            SessionCommands::RepairWholeblob {
+                id,
+                apply,
+                accept_shorter,
+                json,
+            } => repair_wholeblob_session(&id, apply, accept_shorter, json, &cli_scope).await,
             SessionCommands::ExportAtif { id, output } => {
                 let destination = export_session_atif(&id, output, &cli_scope).await?;
                 println!("Wrote ATIF trajectory to {}", destination.display());
@@ -14124,12 +14133,13 @@ async fn export_session_atif(
 async fn repair_wholeblob_session(
     id: &str,
     apply: bool,
+    accept_shorter: bool,
     json: bool,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     #[cfg(not(feature = "session-store"))]
     {
-        let _ = (id, apply, json, scope);
+        let _ = (id, apply, accept_shorter, json, scope);
         anyhow::bail!("session repair requires the session-store feature");
     }
     #[cfg(feature = "session-store")]
@@ -14138,7 +14148,7 @@ async fn repair_wholeblob_session(
         let (config, _) = load_config(scope).await?;
         let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
         let report = service
-            .repair_whole_blob_audited_endpoint(&session_id, apply)
+            .repair_whole_blob_audited_endpoint(&session_id, apply, accept_shorter)
             .await?;
         if json {
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -14171,6 +14181,12 @@ async fn repair_wholeblob_session(
             println!(
                 "  intent parent {} -> revision {}",
                 intent.parent_revision, intent.revision
+            );
+        }
+        if let Some(accepted) = &report.accepted_shorter {
+            println!(
+                "accepted a live transcript of {} rows shorter than its {}-row audited endpoint (operator override)",
+                accepted.live_row_count, accepted.endpoint_row_count
             );
         }
         match &report.action {

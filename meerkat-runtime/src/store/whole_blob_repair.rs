@@ -51,6 +51,13 @@ pub struct DroppedCompactionIntent {
     pub revision: String,
 }
 
+/// Audit record of an explicitly accepted shorter-than-endpoint re-anchor.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AcceptedShorterLive {
+    pub live_row_count: usize,
+    pub endpoint_row_count: usize,
+}
+
 /// Facts about one repair attempt.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WholeBlobAuditedEndpointRepairReport {
@@ -69,6 +76,9 @@ pub struct WholeBlobAuditedEndpointRepairReport {
     /// Rewrite edges the dropped graph carried (audit history, not rows).
     pub graph_edges_dropped: usize,
     pub dropped_intents: Vec<DroppedCompactionIntent>,
+    /// Set only when the operator explicitly accepted re-anchoring on a live
+    /// transcript shorter than its audited endpoint (audit record).
+    pub accepted_shorter: Option<AcceptedShorterLive>,
     pub action: WholeBlobRepairAction,
     /// Store authority after an applied repair.
     pub committed_store_revision: Option<u64>,
@@ -91,10 +101,16 @@ fn metadata_object(
 /// written. With `apply == true` it is committed through the store's
 /// compare-and-swap against the observed authority, so a concurrent writer
 /// makes the repair report a conflict instead of clobbering anything.
+///
+/// A `LiveShorterThanEndpoint` divergence is the one case where re-anchoring
+/// on the live rows drops content the audited endpoint proves existed. Apply
+/// refuses it unless `accept_shorter` is set explicitly; the report and the
+/// audit record then echo both row counts.
 pub async fn repair_whole_blob_audited_endpoint(
     store: &dyn RuntimeStore,
     runtime_id: &LogicalRuntimeId,
     apply: bool,
+    accept_shorter: bool,
 ) -> Result<WholeBlobAuditedEndpointRepairReport, RuntimeStoreError> {
     let Some((bytes, authority)) = store
         .session_authority_ops()
@@ -117,6 +133,7 @@ pub async fn repair_whole_blob_audited_endpoint(
         live_row_count: 0,
         graph_edges_dropped: 0,
         dropped_intents: Vec::new(),
+        accepted_shorter: None,
         action: WholeBlobRepairAction::NoRepairNeeded,
         committed_store_revision: None,
         committed_blob_sha256: None,
@@ -226,6 +243,21 @@ pub async fn repair_whole_blob_audited_endpoint(
     if !apply {
         report.action = WholeBlobRepairAction::WouldReanchor;
         return Ok(report);
+    }
+    if let Some(divergence) = &report.divergence
+        && divergence.kind == meerkat_core::AuditedEndpointDivergenceKind::LiveShorterThanEndpoint
+    {
+        if !accept_shorter {
+            report.action = WholeBlobRepairAction::Refused(format!(
+                "live transcript ({} rows) is shorter than the audited endpoint ({} rows): re-anchoring would drop audited content; re-run with accept_shorter to confirm",
+                divergence.live_row_count, divergence.endpoint_row_count
+            ));
+            return Ok(report);
+        }
+        report.accepted_shorter = Some(AcceptedShorterLive {
+            live_row_count: divergence.live_row_count,
+            endpoint_row_count: divergence.endpoint_row_count,
+        });
     }
     let carrier = BoundSessionCommit::sealed(Arc::new(repaired)).map_err(|error| {
         RuntimeStoreError::WriteFailed(format!("failed to seal the re-anchored document: {error}"))

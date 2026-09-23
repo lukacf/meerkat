@@ -20,6 +20,7 @@ pub fn jsonrpc_code(err: &SessionError) -> i64 {
         SessionError::DurableTailRecoveryRefused { .. } => -32010,
         SessionError::ExternalWriteFenceConflict { .. } => -32011,
         SessionError::ExternalWriteFenceBackoff { .. } => -32012,
+        SessionError::WholeBlobAuditedEndpointDivergence { .. } => -32013,
         SessionError::Agent(_) | SessionError::FailedWithData { .. } => -32000,
     }
 }
@@ -33,6 +34,7 @@ pub fn http_status(err: &SessionError) -> u16 {
         | SessionError::DurableTailHeldForRecovery { .. }
         | SessionError::DurableTailRecoveryRefused { .. }
         | SessionError::DurableEvidenceQuarantined { .. }
+        | SessionError::WholeBlobAuditedEndpointDivergence { .. }
         | SessionError::ExternalWriteFenceConflict { .. }
         | SessionError::ExternalWriteFenceBackoff { .. } => 409,
         SessionError::PersistenceDisabled

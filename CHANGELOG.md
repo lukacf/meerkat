@@ -53,7 +53,20 @@ them.
   changes a message; it removes the audited transcript graph, its rewrite
   prefix authority and the pending compaction projection intents from the
   document metadata, leaves the store-owned outbox row for the runtime's
-  normal finalization, and reports what it dropped.
+  normal finalization, and reports what it dropped. A live transcript shorter
+  than its audited endpoint (the one shape where re-anchoring drops audited
+  content) is refused on apply unless `accept_shorter` / `--accept-shorter`
+  is given, and the report then records both row counts.
+- `SessionError::WholeBlobAuditedEndpointDivergence` (code
+  `SESSION_WHOLEBLOB_AUDITED_ENDPOINT_DIVERGENCE`, JSON-RPC -32013, HTTP 409,
+  resume hold `audited_endpoint_divergence`) and
+  `RuntimeStoreError::AuditedEndpointDivergence` type the refusal on both the
+  read side (a committed WholeBlob body the current decoder refuses) and the
+  write side (the writer guard), so hosts distinguish "session needs the
+  sanctioned repair" from an I/O failure. `DurableResumeHold` gains
+  `AuditedEndpointDivergence`. `audited_endpoint_relation` is the one shared
+  implementation of the audited-endpoint relation behind both the ingress
+  guard and the writer guard.
 - Public GPT Live open authority accepts `session_instructions_preface`
   (`PublicGptLiveOpenAuthorityConfig`), a per-session
   `PublicGptLiveInstructionsPreface` provider resolved at open for the canonical
@@ -220,6 +233,13 @@ them.
 
 
 ### Breaking
+- `SessionError` gains the variant `WholeBlobAuditedEndpointDivergence { id }`
+  (`SessionError::*` exhaustive matches must add the arm) and
+  `DurableResumeHold` gains `AuditedEndpointDivergence` (`DurableResumeHold::*`);
+  `RuntimeStoreError` (`#[non_exhaustive]`) gains `AuditedEndpointDivergence`.
+  `PersistentSessionService::repair_whole_blob_audited_endpoint` and
+  `meerkat_runtime::store::whole_blob_repair::repair_whole_blob_audited_endpoint`
+  take an `accept_shorter: bool` parameter.
 
 - `PublicGptLiveOpenAuthorityConfig` gains the public field
   `session_instructions_preface: Option<Arc<dyn PublicGptLiveInstructionsPreface>>`

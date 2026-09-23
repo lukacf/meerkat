@@ -114,6 +114,20 @@ pub enum SessionError {
     )]
     DurableEvidenceQuarantined { id: SessionId },
 
+    /// The committed WholeBlob document's live transcript no longer preserves
+    /// its graph-proved audited endpoint, so every read of the session refuses
+    /// it. The rows are intact and retained; the session needs the sanctioned
+    /// repair (`rkat sessions repair-wholeblob`, or
+    /// `PersistentSessionService::repair_whole_blob_audited_endpoint`) before
+    /// it can be resumed. Typed so hosts can tell "session needs repair" from
+    /// an I/O failure without reading `Display` text.
+    #[error(
+        "session {id} has a committed WholeBlob document whose live transcript does not \
+         preserve its graph-proved audited endpoint; it is preserved intact and needs the \
+         sanctioned audited-endpoint repair before it can be resumed"
+    )]
+    WholeBlobAuditedEndpointDivergence { id: SessionId },
+
     /// A session store operation failed.
     #[error("store error: {0}")]
     Store(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -167,6 +181,9 @@ pub enum DurableResumeHold {
     /// Durable evidence is forked or unverifiable, so no head is trustworthy
     /// enough to serve as authority.
     EvidenceQuarantined,
+    /// The committed WholeBlob document fails its own audited-endpoint guard.
+    /// Rows are intact; the sanctioned repair re-anchors the document.
+    AuditedEndpointDivergence,
 }
 
 impl DurableResumeHold {
@@ -176,6 +193,7 @@ impl DurableResumeHold {
             Self::TailHeldForRecovery => "tail_held_for_recovery",
             Self::RecoveryRefused => "recovery_refused",
             Self::EvidenceQuarantined => "evidence_quarantined",
+            Self::AuditedEndpointDivergence => "audited_endpoint_divergence",
         }
     }
 
@@ -186,6 +204,7 @@ impl DurableResumeHold {
             Self::TailHeldForRecovery,
             Self::RecoveryRefused,
             Self::EvidenceQuarantined,
+            Self::AuditedEndpointDivergence,
         ]
         .into_iter()
         .find(|hold| hold.as_str() == value)
@@ -341,6 +360,9 @@ impl SessionError {
             Self::DurableTailHeldForRecovery { .. } => "SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY",
             Self::DurableTailRecoveryRefused { .. } => "SESSION_DURABLE_TAIL_RECOVERY_REFUSED",
             Self::DurableEvidenceQuarantined { .. } => "SESSION_DURABLE_EVIDENCE_QUARANTINED",
+            Self::WholeBlobAuditedEndpointDivergence { .. } => {
+                "SESSION_WHOLEBLOB_AUDITED_ENDPOINT_DIVERGENCE"
+            }
             Self::Store(_) => "SESSION_STORE_ERROR",
             Self::Unsupported(_) => "SESSION_UNSUPPORTED",
             Self::ExternalWriteFenceConflict { .. } => "SESSION_EXTERNAL_WRITE_FENCE_CONFLICT",
@@ -362,6 +384,9 @@ impl SessionError {
             Self::DurableEvidenceQuarantined { id } => {
                 Some(self.durable_resume_hold_data(DurableResumeHold::EvidenceQuarantined, id))
             }
+            Self::WholeBlobAuditedEndpointDivergence { id } => Some(
+                self.durable_resume_hold_data(DurableResumeHold::AuditedEndpointDivergence, id),
+            ),
             _ => None,
         }
     }
@@ -374,6 +399,9 @@ impl SessionError {
             Self::DurableTailHeldForRecovery { .. } => Some(DurableResumeHold::TailHeldForRecovery),
             Self::DurableTailRecoveryRefused { .. } => Some(DurableResumeHold::RecoveryRefused),
             Self::DurableEvidenceQuarantined { .. } => Some(DurableResumeHold::EvidenceQuarantined),
+            Self::WholeBlobAuditedEndpointDivergence { .. } => {
+                Some(DurableResumeHold::AuditedEndpointDivergence)
+            }
             _ => None,
         }
     }

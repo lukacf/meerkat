@@ -300,7 +300,8 @@ impl From<meerkat_core::SessionError> for WireError {
             | meerkat_core::SessionError::Unsupported(_) => ErrorCode::CapabilityUnavailable,
             meerkat_core::SessionError::DurableTailHeldForRecovery { .. }
             | meerkat_core::SessionError::DurableTailRecoveryRefused { .. }
-            | meerkat_core::SessionError::DurableEvidenceQuarantined { .. } => {
+            | meerkat_core::SessionError::DurableEvidenceQuarantined { .. }
+            | meerkat_core::SessionError::WholeBlobAuditedEndpointDivergence { .. } => {
                 ErrorCode::SessionNotRunning
             }
             meerkat_core::SessionError::ExternalWriteFenceConflict { .. } => ErrorCode::StaleFence,

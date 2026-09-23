@@ -13297,6 +13297,7 @@ pub struct State {
     pub live_execution_phase_by_channel:
         std::collections::BTreeMap<String, LiveExecutionChannelPhase>,
     pub live_revoked_execution_channels: std::collections::BTreeSet<String>,
+    pub live_conversation_started_channels: std::collections::BTreeSet<String>,
     pub live_cancelled_recovery_channels: std::collections::BTreeSet<String>,
     pub live_execution_profile_by_channel: std::collections::BTreeMap<String, String>,
     pub live_execution_mode_by_channel: std::collections::BTreeMap<String, LiveExecutionMode>,
@@ -22579,6 +22580,7 @@ pub fn initial_state() -> State {
         live_execution_generation_by_channel: Default::default(),
         live_execution_phase_by_channel: Default::default(),
         live_revoked_execution_channels: Default::default(),
+        live_conversation_started_channels: Default::default(),
         live_cancelled_recovery_channels: Default::default(),
         live_execution_profile_by_channel: Default::default(),
         live_execution_mode_by_channel: Default::default(),

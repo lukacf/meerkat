@@ -463,6 +463,258 @@ mod live_context_mirror_tests {
         (machine, session_id, channel_id)
     }
 
+    /// The user's first utterance on a bound channel, as the coordinator
+    /// reports it: a user provider turn start. Startup history that missed
+    /// the provider open is released by this fact (or a client delegation
+    /// admission) and by nothing else.
+    async fn user_speaks_on(
+        machine: &crate::MeerkatMachine,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+        turn_ref: &str,
+    ) {
+        let state = machine
+            .session_dsl_state(session_id)
+            .await
+            .expect("read bound channel state");
+        let channel = channel_id.to_string();
+        let runtime_id = state
+            .live_execution_runtime_id_by_channel
+            .get(&channel)
+            .cloned()
+            .expect("bound execution runtime");
+        let fence_token = *state
+            .live_execution_fence_by_channel
+            .get(&channel)
+            .expect("bound execution fence");
+        let generation = *state
+            .live_execution_generation_by_channel
+            .get(&channel)
+            .expect("bound execution generation");
+        machine
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+                    channel_id: channel,
+                    runtime_id,
+                    fence_token,
+                    generation,
+                    interaction_id: meerkat_core::InteractionId::new().to_string(),
+                    provider_turn_ref: turn_ref.to_string(),
+                },
+                "test:UserSpeaks",
+            )
+            .await
+            .expect("user provider turn starts");
+    }
+
+    /// A whole user turn (start and finish) through the public observation
+    /// API, for tests that later drive their own provider turns.
+    async fn user_turn_completes_on(
+        machine: &crate::MeerkatMachine,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) {
+        let state = machine
+            .session_dsl_state(session_id)
+            .await
+            .expect("read bound channel state");
+        let channel = channel_id.to_string();
+        let fence_token = *state
+            .live_execution_fence_by_channel
+            .get(&channel)
+            .expect("bound execution fence");
+        let generation = *state
+            .live_execution_generation_by_channel
+            .get(&channel)
+            .expect("bound execution generation");
+        let provider_binding = meerkat_live::ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(generation.0),
+            meerkat_live::LiveRuntimeBindingFence::new(fence_token.0),
+        );
+        let turn = meerkat_live::LiveSidebandTurnRef::__from_provider_observation(
+            channel_id,
+            "first-user-turn".into(),
+            "provider-first-user-turn".into(),
+        )
+        .expect("turn");
+        machine
+            .observe_live_provider_turn_started(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding.clone(),
+                meerkat_live::LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("first user turn starts");
+        machine
+            .observe_live_provider_turn_finished(&meerkat_live::LiveSidebandObservation::new(
+                provider_binding,
+                meerkat_live::LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: "first spoken input".into(),
+                },
+            ))
+            .await
+            .expect("first user turn finishes");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_waits_for_the_first_user_turn_then_delivers_exactly_once() {
+        use crate::live_execution::{LiveContextPreparationStage, LiveContextPreparationStatus};
+        let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        let lease = machine
+            .begin_live_context_preparation(&session_id, &channel_id, 1)
+            .await
+            .expect("reserve");
+        machine
+            .mark_live_context_preparation_generating(&lease)
+            .await
+            .expect("generate");
+        let barrier = Arc::new(MirrorAppendBarrier {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let host = Arc::new(RecordingMirrorHost {
+            runtime: Some(machine.clone()),
+            bootstrap_barrier: Some(barrier.clone()),
+            ..Default::default()
+        });
+        machine.set_live_context_mirror_host(host.clone());
+        let delivery = tokio::spawn({
+            let machine = machine.clone();
+            let lease = lease.clone();
+            async move {
+                machine
+                    .deliver_live_context_preparation(&lease, "held historical prefix".into())
+                    .await
+            }
+        });
+        bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        // Media is active, the summary is generated, and still nothing
+        // reaches the provider: the user has not spoken.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                barrier.entered.notified()
+            )
+            .await
+            .is_err(),
+            "the bootstrap append must not start before the first user turn"
+        );
+        assert_eq!(
+            machine
+                .live_context_preparation_status(&session_id, &channel_id)
+                .await
+                .expect("status"),
+            LiveContextPreparationStatus::Preparing(LiveContextPreparationStage::Generating)
+        );
+        assert!(host.appends.lock().expect("records").is_empty());
+        user_speaks_on(&machine, &session_id, &channel_id, "first-user-turn").await;
+        assert!(
+            machine
+                .session_dsl_state(&session_id)
+                .await
+                .expect("state")
+                .live_conversation_started_channels
+                .contains(channel_id.as_str()),
+            "the user turn records the conversation start on the channel"
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            barrier.entered.notified(),
+        )
+        .await
+        .expect("append begins once the user has spoken");
+        barrier.release.add_permits(1);
+        delivery.await.expect("delivery task").expect("ACK");
+        assert_eq!(
+            machine
+                .live_context_preparation_status(&session_id, &channel_id)
+                .await
+                .expect("status"),
+            LiveContextPreparationStatus::ProviderAcknowledged
+        );
+        {
+            let records = host.appends.lock().expect("records");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].1, "held historical prefix");
+        }
+        // Delivered once: the phase has moved on, so a second delivery is
+        // refused and nothing more reaches the provider.
+        assert!(
+            machine
+                .deliver_live_context_preparation(&lease, "held historical prefix".into())
+                .await
+                .is_err()
+        );
+        assert_eq!(host.appends.lock().expect("records").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_held_for_the_user_turn_is_cancelled_when_the_channel_closes_first() {
+        use crate::live_execution::{LiveContextPreparationFailure, LiveContextPreparationStatus};
+        let (machine, session_id, channel_id) = prepared_experimental_live_machine().await;
+        stage_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        let lease = machine
+            .begin_live_context_preparation(&session_id, &channel_id, 1)
+            .await
+            .expect("reserve");
+        machine
+            .mark_live_context_preparation_generating(&lease)
+            .await
+            .expect("generate");
+        let host = Arc::new(RecordingMirrorHost {
+            runtime: Some(machine.clone()),
+            ..Default::default()
+        });
+        machine.set_live_context_mirror_host(host.clone());
+        let delivery = tokio::spawn({
+            let machine = machine.clone();
+            let lease = lease.clone();
+            async move {
+                machine
+                    .deliver_live_context_preparation(&lease, "never heard".into())
+                    .await
+            }
+        });
+        bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        // The channel closes before anyone speaks: the held summary is
+        // cancelled, never appended.
+        machine
+            .apply_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AbandonLiveOpenAdmission {
+                    session_id: session_id.to_string(),
+                    channel_id: channel_id.to_string(),
+                },
+                "test:close-before-speech",
+            )
+            .await
+            .expect("close");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), delivery)
+                .await
+                .expect("delivery settles")
+                .expect("delivery task")
+                .is_err(),
+            "a cancelled lease never delivers"
+        );
+        assert!(host.appends.lock().expect("records").is_empty());
+        assert_eq!(
+            machine
+                .live_context_preparation_status(&session_id, &channel_id)
+                .await
+                .expect("status"),
+            LiveContextPreparationStatus::Failed(LiveContextPreparationFailure::Cancelled)
+        );
+    }
+
     #[tokio::test]
     async fn bootstrap_slow_ack_allows_media_and_commits_then_drains_exact_tail() {
         use crate::live_execution::{LiveContextPreparationStage, LiveContextPreparationStatus};
@@ -501,6 +753,7 @@ mod live_context_mirror_tests {
         let delivery = tokio::spawn(delivery);
         machine.set_live_context_mirror_host(host.clone());
         bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        user_turn_completes_on(&machine, &session_id, &channel_id).await;
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             barrier.entered.notified(),
@@ -700,6 +953,13 @@ mod live_context_mirror_tests {
             .await
             .expect("generating");
         bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        user_speaks_on(
+            &machine,
+            &session_id,
+            &channel_id,
+            "bootstrap_owner_close_cancels_generation_and_fences_late_delivery-user-turn",
+        )
+        .await;
         let append = machine
             .authorize_live_context_bootstrap_append(&lease, "old summary")
             .await
@@ -821,6 +1081,7 @@ mod live_context_mirror_tests {
             .await
             .expect("initial generator");
         bind_experimental_live_machine(&machine, &session_id, &old_channel, 0).await;
+        user_turn_completes_on(&machine, &session_id, &old_channel).await;
         let bootstrap = machine
             .authorize_live_context_bootstrap_append(&old_lease, "initial summary")
             .await
@@ -994,6 +1255,7 @@ mod live_context_mirror_tests {
             )
             .await
             .expect("empty media activation");
+        user_turn_completes_on(&machine, &session_id, &replacement).await;
         assert_eq!(
             machine
                 .shared
@@ -1107,6 +1369,13 @@ mod live_context_mirror_tests {
             .await
             .expect("generate");
         bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        user_speaks_on(
+            &machine,
+            &session_id,
+            &channel_id,
+            "bootstrap_owner_ambiguous_ack_is_failed_without_delivered_cursor-user-turn",
+        )
+        .await;
         machine.set_live_context_mirror_host(Arc::new(RecordingMirrorHost {
             bootstrap_outcome: Some(meerkat_core::LiveAppendDeliveryOutcome::Ambiguous),
             ..Default::default()
@@ -1147,6 +1416,7 @@ mod live_context_mirror_tests {
             .await
             .expect("lease");
         bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+        user_turn_completes_on(&machine, &session_id, &channel_id).await;
         machine
             .mark_live_context_preparation_generating(&lease)
             .await
@@ -3788,6 +4058,7 @@ mod live_context_mirror_tests {
                 .await
                 .expect("generate");
             bind_experimental_live_machine(&machine, &session_id, &channel_id, 0).await;
+            user_turn_completes_on(&machine, &session_id, &channel_id).await;
             let append = machine
                 .authorize_live_context_bootstrap_append(&lease, "empty source summary")
                 .await

@@ -156,6 +156,17 @@ configure_rust_with_wasm_target() {
   export RUSTC="${sandbox_toolchain}/bin/rustc"
   export RUSTDOC="${sandbox_toolchain}/bin/rustdoc"
   export RUSTFMT="${sandbox_toolchain}/bin/rustfmt"
+  # `cargo clippy` resolves the external `cargo-clippy` subcommand from
+  # $CARGO_HOME/bin before PATH, and CARGO_HOME is the executor image's
+  # /usr/local/cargo, whose rustup proxy runs the image toolchain. That mixed a
+  # 1.94.1 clippy-driver into a 1.94.0 build (E0514 "compiled by an
+  # incompatible version of rustc") on the 2026-09-22 wasm-check lane. Name the
+  # sandbox binary and fail closed if the toolchain does not ship it.
+  export CARGO_CLIPPY="${sandbox_toolchain}/bin/cargo-clippy"
+  if [[ ! -x "${CARGO_CLIPPY}" || ! -x "${sandbox_toolchain}/bin/clippy-driver" ]]; then
+    echo "rules_rust host toolchain runfiles lack cargo-clippy/clippy-driver at ${sandbox_toolchain}/bin" >&2
+    exit 127
+  fi
   prepend_path "${sandbox_toolchain}/bin"
   prepend_path "${sandbox_toolchain}/lib/rustlib/${host_triple}/bin"
   export CARGO_HOME="${MEERKAT_HOST_CARGO_HOME:-${TEST_TMPDIR}/cargo-home}"
@@ -347,7 +358,7 @@ case "${lane}" in
     configure_rust_with_wasm_target
     append_rust_cfg 'getrandom_backend="wasm_js"'
     "${CARGO}" check -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets
-    "${CARGO}" clippy -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets -- -D warnings
+    "${CARGO_CLIPPY}" clippy -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets -- -D warnings
     ;;
   wasm-contract-tests)
     configure_rust_with_wasm_target

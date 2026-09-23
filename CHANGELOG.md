@@ -416,9 +416,12 @@ them.
 - Generated `MeerkatMachine` vocabulary gains the input
   `CloseStandaloneTurn { session_id, run_id, terminal_phase }`
   (`inputs::CloseStandaloneTurn`, `MeerkatMachineInput::CloseStandaloneTurn`,
-  `InputKind::CloseStandaloneTurn`, `TransitionId::CloseStandaloneTurn`):
-  discriminants and `PartialOrd` positions of the later variants of
-  `MeerkatMachineInput::*`, `InputKind::*`, and `TransitionId::*` move, and
+  `MeerkatMachineInputVariant::CloseStandaloneTurn`, kernel
+  `Input::CloseStandaloneTurn`, `InputKind::CloseStandaloneTurn`,
+  `TransitionId::CloseStandaloneTurn`): discriminants and `PartialOrd`
+  positions of the later variants of `MeerkatMachineInput::*`,
+  `MeerkatMachineInputVariant::*`, `InputKind::*`, and `TransitionId::*`
+  move, and
   exhaustive matches must add the arm. Behaviour: epochless standalone
   sessions now release lifecycle `Running` to `Idle` on a coherent terminal
   turn instead of staying `Running`.

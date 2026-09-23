@@ -2651,6 +2651,50 @@ where
         Ok(cause_kind)
     }
 
+    pub(super) fn execute_turn_terminal_effect(
+        &mut self,
+        effect: &TurnExecutionEffect,
+    ) -> Result<(), AgentError> {
+        if matches!(
+            effect,
+            TurnExecutionEffect::RunCompleted { .. }
+                | TurnExecutionEffect::RunFailed { .. }
+                | TurnExecutionEffect::RunCancelled { .. }
+        ) {
+            self.pending_compaction_boundary_index = None;
+            self.pending_compaction_request_pressure = None;
+            self.pending_compaction_request_budget = None;
+            self.post_compaction_pressure_check = None;
+        }
+        let Some(handle) = self.turn_state_handle.as_deref() else {
+            return Ok(());
+        };
+        let (result, effect_name, run_id) = match effect {
+            TurnExecutionEffect::RunCompleted { run_id } => {
+                (handle.run_completed(run_id.clone()), "RunCompleted", run_id)
+            }
+            TurnExecutionEffect::RunFailed { run_id, reason } => (
+                handle.run_failed(run_id.clone(), reason.clone()),
+                "RunFailed",
+                run_id,
+            ),
+            TurnExecutionEffect::RunCancelled { run_id } => {
+                (handle.run_cancelled(run_id.clone()), "RunCancelled", run_id)
+            }
+            TurnExecutionEffect::RunStarted { .. }
+            | TurnExecutionEffect::BoundaryApplied { .. }
+            | TurnExecutionEffect::CheckCompaction
+            | TurnExecutionEffect::LlmFailureRecoveryClassified { .. }
+            | TurnExecutionEffect::AssistantOutputClassified { .. }
+            | TurnExecutionEffect::CallTimeoutClassified { .. } => return Ok(()),
+        };
+        result.map_err(|err| {
+            AgentError::InternalError(format!(
+                "runtime turn-state handle rejected {effect_name} effect for {run_id:?}: {err}"
+            ))
+        })
+    }
+
     /// Execute side effects from a transition. Handles CheckCompaction
     /// effects emitted on CallingLlm entry.
     ///
@@ -2670,61 +2714,7 @@ where
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<(), AgentError> {
         for effect in &transition.effects {
-            if matches!(
-                effect,
-                TurnExecutionEffect::RunCompleted { .. }
-                    | TurnExecutionEffect::RunFailed { .. }
-                    | TurnExecutionEffect::RunCancelled { .. }
-            ) {
-                self.pending_compaction_boundary_index = None;
-                self.pending_compaction_request_pressure = None;
-                self.pending_compaction_request_budget = None;
-                self.post_compaction_pressure_check = None;
-            }
-            match effect {
-                TurnExecutionEffect::RunCompleted { run_id } => {
-                    if let Some(handle) = self.turn_state_handle.as_deref() {
-                        handle.run_completed(run_id.clone()).map_err(|err| {
-                            AgentError::InternalError(format!(
-                                "runtime turn-state handle rejected RunCompleted effect for \
-                                 {run_id:?}: {err}"
-                            ))
-                        })?;
-                    }
-                }
-                TurnExecutionEffect::RunFailed { run_id, reason } => {
-                    if let Some(handle) = self.turn_state_handle.as_deref() {
-                        handle
-                            .run_failed(run_id.clone(), reason.clone())
-                            .map_err(|err| {
-                                AgentError::InternalError(format!(
-                                    "runtime turn-state handle rejected RunFailed effect for \
-                                     {run_id:?}: {err}"
-                                ))
-                            })?;
-                    }
-                }
-                TurnExecutionEffect::RunCancelled { run_id } => {
-                    if let Some(handle) = self.turn_state_handle.as_deref() {
-                        handle.run_cancelled(run_id.clone()).map_err(|err| {
-                            AgentError::InternalError(format!(
-                                "runtime turn-state handle rejected RunCancelled effect for \
-                                 {run_id:?}: {err}"
-                            ))
-                        })?;
-                    }
-                }
-                TurnExecutionEffect::RunStarted { .. }
-                | TurnExecutionEffect::BoundaryApplied { .. }
-                | TurnExecutionEffect::CheckCompaction
-                // Classifier verdicts are mirrored directly at their call
-                // sites (classify_llm_failure_recovery / classify_assistant_output
-                // / classify_call_timeout); never routed through turn-effect
-                // execution.
-                | TurnExecutionEffect::LlmFailureRecoveryClassified { .. }
-                | TurnExecutionEffect::AssistantOutputClassified { .. }
-                | TurnExecutionEffect::CallTimeoutClassified { .. } => {}
-            }
+            self.execute_turn_terminal_effect(effect)?;
             if let TurnExecutionEffect::CheckCompaction = effect {
                 let Some(current_boundary_index) = self.pending_compaction_boundary_index.take()
                 else {
@@ -4230,11 +4220,13 @@ where
 
             // Check turn limit
             if !self.turn_in_extraction_flow()? && turn_count >= max_turns {
-                self.apply_turn_input(TurnExecutionInput::TurnLimitReached {
+                let transition = self.apply_turn_input(TurnExecutionInput::TurnLimitReached {
                     run_id: run_id.clone(),
                     turn_count: u64::from(turn_count),
                     max_turns: u64::from(max_turns),
                 })?;
+                self.execute_turn_effects(&transition, turn_count, &event_tx)
+                    .await?;
                 return self.build_result(turn_count, tool_call_count).await;
             }
 
@@ -4251,10 +4243,13 @@ where
                         )
                         .await;
                 }
-                self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
-                    run_id: run_id.clone(),
-                    exceeded,
-                })?;
+                let transition =
+                    self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
+                        run_id: run_id.clone(),
+                        exceeded,
+                    })?;
+                self.execute_turn_effects(&transition, turn_count, &event_tx)
+                    .await?;
                 return self.build_result(turn_count, tool_call_count).await;
             }
 
@@ -4393,9 +4388,10 @@ where
                 }
                 TurnPhase::Cancelling => {
                     // Handle cancellation
-                    self.apply_turn_input(TurnExecutionInput::CancellationObserved {
+                    let t = self.apply_turn_input(TurnExecutionInput::CancellationObserved {
                         run_id: run_id.clone(),
                     })?;
+                    self.execute_turn_effects(&t, turn_count, &event_tx).await?;
                     return self.build_result(turn_count, tool_call_count).await;
                 }
                 TurnPhase::ErrorRecovery => {
@@ -5414,10 +5410,12 @@ where
         }
         if let Some(exceeded) = BudgetExceeded::from_agent_error(&error) {
             emit_phase_event!(self, ctx, budget_warning_event(exceeded));
-            self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
+            let transition = self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
                 run_id: ctx.run_id.clone(),
                 exceeded,
             })?;
+            self.execute_turn_effects(&transition, ctx.turn_count, ctx.event_tx)
+                .await?;
             return Ok(CallingLlmGate::Done(
                 self.build_result(ctx.turn_count, ctx.tool_call_count).await,
             ));
@@ -5827,10 +5825,12 @@ where
                     .await,
                 ));
             }
-            self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
+            let transition = self.apply_turn_input(TurnExecutionInput::BudgetLimitExceeded {
                 run_id: ctx.run_id.clone(),
                 exceeded,
             })?;
+            self.execute_turn_effects(&transition, ctx.turn_count, ctx.event_tx)
+                .await?;
             return Ok(CallingLlmGate::Done(
                 self.build_result(ctx.turn_count, ctx.tool_call_count).await,
             ));
@@ -12738,16 +12738,18 @@ mod tests {
     ///
     /// Wraps the generated-kernel-backed [`TestTurnStateHandle`] so every
     /// non-terminal transition still moves through real MeerkatMachine
-    /// authority; only `run_completed` is forced to reject.
+    /// authority. Completion always rejects; failure rejection is opt-in.
     #[derive(Debug)]
     struct RejectRunCompletedHandle {
         inner: crate::agent::test_turn_state_handle::TestTurnStateHandle,
+        reject_failed: bool,
     }
 
     impl RejectRunCompletedHandle {
         fn new() -> Self {
             Self {
                 inner: crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+                reject_failed: false,
             }
         }
     }
@@ -12979,6 +12981,12 @@ mod tests {
             run_id: RunId,
             reason: crate::turn_execution_authority::TurnFailureReason,
         ) -> Result<(), crate::handles::DslTransitionError> {
+            if self.reject_failed {
+                return Err(crate::handles::DslTransitionError::guard_rejected(
+                    "RejectRunCompletedHandle::run_failed",
+                    "test handle rejects the terminal RunFailed effect",
+                ));
+            }
             self.inner.run_failed(run_id, reason)
         }
 
@@ -13026,6 +13034,84 @@ mod tests {
             "rejection must propagate as an InternalError naming the rejected terminal effect, \
              got: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn run_failed_effect_rejection_covers_all_limit_terminal_routes() {
+        struct RequestBudgetFailure;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for RequestBudgetFailure {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                Err(AgentError::TimeBudgetExceeded {
+                    elapsed_secs: 2,
+                    limit_secs: 1,
+                })
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        for route in [
+            "turn_limit",
+            "pre_call_budget",
+            "request_budget",
+            "usage_budget",
+        ] {
+            let client: Arc<dyn AgentLlmClient> = match route {
+                "request_budget" => Arc::new(RequestBudgetFailure),
+                "usage_budget" => Arc::new(HighUsageLlmClient),
+                _ => Arc::new(StaticLlmClient),
+            };
+            let handle = RejectRunCompletedHandle {
+                reject_failed: true,
+                ..RejectRunCompletedHandle::new()
+            };
+            let mut agent = AgentBuilder::new()
+                .resume_session({
+                    let mut session = crate::Session::new();
+                    session
+                        .set_build_state(crate::SessionBuildState::default())
+                        .expect("test build state");
+                    session
+                })
+                .with_turn_state_handle(Arc::new(handle))
+                .with_runtime_execution_kind_for_test(
+                    crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+                )
+                .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+                .await;
+            agent.config.max_turns = Some(if route == "turn_limit" { 0 } else { 10 });
+            agent.budget = Budget::new(match route {
+                "pre_call_budget" => BudgetLimits::unlimited().with_max_tool_calls(0),
+                "usage_budget" => BudgetLimits::unlimited().with_max_tokens(100),
+                _ => BudgetLimits::unlimited(),
+            });
+            let (tx, _rx) = mpsc::channel(32);
+            let error = agent
+                .run_with_events("prompt".into(), tx)
+                .await
+                .expect_err("a rejected terminal effect must never produce a successful result");
+            assert!(
+                matches!(error, AgentError::InternalError(ref message)
+                    if message.contains("rejected RunFailed effect")),
+                "{route}: {error:?}"
+            );
+        }
     }
 
     #[tokio::test]

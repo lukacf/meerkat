@@ -52,6 +52,8 @@ repo-local Meerkat WASM runtime, syncs it into `web/public/meerkat-pkg/`,
 installs npm dependencies, and starts the Vite dev server.
 
 Use `./examples.sh --clean` to force a fresh download/rebuild.
+The download cache is reused only when both WebCM files are nonempty; failed
+downloads remain unpromoted and a subsequent launch retries the pair.
 
 ## Architecture
 
@@ -93,6 +95,37 @@ and the in-memory autonomous host loop re-admits them when replies arrive. No
 application polling is required to wake agents. The UI does poll each event
 subscription to render incremental output. This is a standalone browser
 runtime; page reload clears its session and mob state.
+Agent instructions discover canonical `peer_id` values with `peers`; labels are
+for display only. Tool cards track call IDs independently, and rendered Markdown
+is sanitized before insertion.
+
+## Local regression checks
+
+`npm --prefix web run typecheck` checks the source contract (including readonly
+PTY settings); `npm --prefix web run build` also runs that check before bundling.
+`npm --prefix web test` exercises the changed browser functions, shell framing,
+literal file paths and cache helper with synthetic local inputs. It also initializes
+the current repo-local Meerkat WASM without external provider traffic. Tests need
+Playwright Chromium and the current `sdks/web/wasm` pair.
+
+The strict full-startup check runs the real `MobOrchestrator.init`, member
+spawning, role wiring and subscriptions against a successful synthetic provider.
+It passes with the repo-local WASM rebuilt from this checkout, including the
+cross-target comms-drain repair. A previously built 0.8.40 artifact can still
+contain the old spawn/wiring failure; rebuild rather than relying on its version
+string. These checks do not establish a completed live-provider coding session.
+
+`npm --prefix web run test:guest` separately boots the **real WebCM guest**
+through `WebCMHost` and checks literal filenames, short/chunked Unicode writes,
+exact file contents and PTY output/exit status. It requires the documented
+`web/public/webcm.mjs` + `webcm.wasm` cache (downloaded by `examples.sh`), runs
+without Meerkat or provider requests, has a 180-second total budget, deletes
+only its synthetic `/workspace/meerkat-smoke-*` guest directory, and closes its
+owned browser/server. Missing assets fail explicitly rather than being mocked.
+
+Pre-import VM boot failures dispose the terminal and PTY listener before retry;
+concurrent boot requests share one promise and an already booted host is reused.
+This does not claim an emulator shutdown API or durable browser sessions.
 
 ## What's in the VM
 

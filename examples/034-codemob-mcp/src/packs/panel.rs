@@ -10,7 +10,10 @@ use std::collections::BTreeMap;
 use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
 
-use super::{flow_step, format_context, identity_spawn_policy, mob_definition, resolve_model, turn_driven_profile, Pack};
+use super::{
+    flow_step, identity_spawn_policy, mob_definition, resolve_model, turn_driven_profile, Pack,
+    TASK_TEMPLATE,
+};
 
 pub struct PanelPack;
 
@@ -30,13 +33,9 @@ impl Pack for PanelPack {
 
     fn definition(
         &self,
-        task: &str,
-        context: &str,
         overrides: &BTreeMap<String, String>,
         pp: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
-        let ctx = format_context(context);
-
         // Diverse models across providers for genuine perspective differences
         let agents: Vec<(&str, &str, &str, String)> = vec![
             (
@@ -116,7 +115,7 @@ impl Pack for PanelPack {
             StepId::from("moderator_brief"),
             flow_step(
                 "moderator",
-                format!("Frame this panel discussion. Identify the key question, constraints, and what each panelist should pressure-test.\n\n{task}{ctx}"),
+                format!("Frame this panel discussion. Identify the key question, constraints, and what each panelist should pressure-test.\n\n{TASK_TEMPLATE}"),
                 &[],
                 300_000,
             ),
@@ -171,7 +170,11 @@ impl Pack for PanelPack {
         let mut flows = BTreeMap::new();
         flows.insert(
             FlowId::from("main"),
-            FlowSpec::new(Some("Structured panel debate with moderator synthesis".into()), steps, None),
+            FlowSpec::new(
+                Some("Structured panel debate with moderator synthesis".into()),
+                steps,
+                None,
+            ),
         );
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();

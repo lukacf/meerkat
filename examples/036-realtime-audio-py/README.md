@@ -82,3 +82,31 @@ live authentication is unavailable.
 
 If audio devices fail to open, run `python3 -m sounddevice` to list device names
 and pass `--input-device` or `--output-device`.
+
+Playback has one device owner. Interruptions discard queued audio for the
+affected response, reject its late chunks, and abort buffered device output
+without waiting for an in-progress write. Item-scoped truncations affect only
+that item/content. Missing identities conservatively suppress anonymous late
+audio; subsequent identified output still plays. Samples already heard cannot be recalled.
+Written transcript display is independent of playback.
+Known item-to-response associations also apply when late chunks omit their
+response ID. Before transferring the device to a different response/item/content
+scope, the owner calls `stop()` to drain the previous buffer; returning from
+`write()` alone is not evidence that samples were heard. Interrupt/shutdown can
+abort that drain without waiting for it. This keeps old and new scopes out of
+the same device buffer, so an old interruption neither leaves old PCM pending
+nor flushes/replays a newer answer.
+
+## Offline Regression Tests
+
+From the repository root:
+
+```bash
+PYTHONPATH=sdks/python python3 -m unittest discover -s examples/036-realtime-audio-py -p 'test_*.py' -v
+```
+
+These execute the receiver and playback owner with a synthetic blocked output
+device, including interrupt/truncate, late audio, cancellation, and no-speaker /
+text-probe behavior. No physical media device or provider is used. They are not
+a live barge-in or provider smoke test; those still require OpenAI credentials
+and permission to use the selected microphone/speaker.

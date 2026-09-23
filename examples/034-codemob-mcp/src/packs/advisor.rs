@@ -28,13 +28,9 @@ impl Pack for AdvisorPack {
 
     fn definition(
         &self,
-        task: &str,
-        context: &str,
         overrides: &BTreeMap<String, String>,
         pp: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
-        let ctx = format_context(context);
-
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("advisor"),
@@ -57,7 +53,7 @@ impl Pack for AdvisorPack {
         let mut steps = IndexMap::new();
         steps.insert(
             StepId::from("respond"),
-            flow_step("advisor", format!("{task}{ctx}"), &[], 300_000),
+            flow_step("advisor", TASK_TEMPLATE.into(), &[], 300_000),
         );
 
         let mut flows = BTreeMap::new();

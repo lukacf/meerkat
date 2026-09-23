@@ -4,6 +4,18 @@ A focused standalone example that composes built-in tools, two domain tools,
 budget limits, a file-backed store, inline behavior instructions, and event
 streaming. It is not an exhaustive production reference.
 
+## Offline Domain-Tool Fixtures
+
+`search_docs` returns three canned documentation entries; it never queries an
+internal documentation service. Its optional `limit` defaults to 5 and caps
+returned entries (0 returns none). `total` always reports the three available
+fixture entries, before limiting.
+
+`create_ticket` returns a **simulated** ticket with a fixed ID and timestamp.
+It does not create or update anything in an issue tracker. Both tools disclose
+their simulation in their model-facing descriptions and result data; terminal
+output also labels the demonstration. LLM calls still require provider access.
+
 ## Features Used
 - `AgentBuilder` configuration
 - `CompositeDispatcher` - merge built-in and domain tools

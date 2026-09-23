@@ -1,18 +1,19 @@
 # 028 — Mobpack Release Triage (Shell)
 
-Build, sign, inspect, validate, and deploy a **portable release-triage mobpack**
-that feels like something an ops team could actually use during a bad rollout.
+Build, sign, inspect, and validate a **portable release-triage mobpack**.
+This is an offline packaging example, not an incident-execution demo: it does
+not spawn members, send a prompt to a model, or produce a triage result.
 
 ## What This Example Teaches
 
 This example is intentionally opinionated: instead of packing a single toy
-agent, it creates a small incident room with distinct roles and skill files,
-then deploys the exact signed artifact against a concrete production scenario.
+agent, it packages a small incident-room definition with distinct roles and skill
+files for a host to instantiate later.
 
 It demonstrates why mobpacks matter in real workflows:
 - you can hand off one signed artifact between teams and environments
-- deploy uses the exact packaged definition, skills, and defaults
-- inspection and validation happen before the incident prompt hits the model
+- the artifact contains the definition, skills, and typed deploy defaults
+- inspection and validation need no provider credentials or model calls
 - skill files, defaults, and runtime contract travel together
 
 ## Team Design
@@ -46,8 +47,7 @@ It also writes sibling outputs outside that source tree:
 - `--sign` / `--signer-id` to attach provenance to the packed artifact
 - `rkat mob inspect` to see what was embedded
 - `rkat mob validate` to check the artifact contract before use
-- `rkat mob deploy` to run the same signed artifact with a real prompt
-- skill files referenced by `path` and inlined at pack time
+- skill files referenced by `path` and stored separately inside the archive
 - fail-closed `MobpackDeployPolicy` parsing for `max_tokens`, `models`, and `budget`
 
 Unknown sections or fields in `config/defaults.toml` are rejected rather than
@@ -58,12 +58,14 @@ currently satisfy a mobpack-declared `session_compaction` capability.
 ## Prerequisites
 
 ```bash
-export ANTHROPIC_API_KEY=sk-...
 ./scripts/repo-cargo build -p rkat --bin rkat
 
 # Optional override if you want to use a specific binary:
 export RKAT=/path/to/rkat
 ```
+
+No provider key is needed. All CLI roots are redirected into the example's
+`.work/`; no global config is modified.
 
 ## Run
 
@@ -78,20 +80,27 @@ export RKAT=/path/to/rkat
 3. Pack and sign `release-triage.mobpack`
 4. Inspect the artifact contents
 5. Validate the artifact contract
-6. Deploy the exact signed artifact against a realistic release-regression prompt
+6. Report the artifact path and explicitly stop before agent execution
 
-## Why The Scenario Feels Real
+## From Packaging To Execution
 
-The deploy prompt simulates a rollout where:
-- checkout error rate spikes after release
-- EU latency regresses sharply
-- enterprise support tickets arrive immediately
+Current CLI `rkat mob deploy` bootstraps an empty mob for this definition.
+Its `deployed` message does **not** mean members were spawned or the supplied
+incident prompt was processed. This example therefore does not invoke it.
 
-That forces the mob to do work an operator actually cares about:
-- severity classification
-- blast-radius estimation
-- halt vs rollback recommendation
-- stakeholder-update drafting
+A separate host must instantiate the roles, deliver a scenario and await
+committed results, or author a callable flow and run it with `rkat mob run`.
+This pack does not declare a callable flow. Packaging validation alone is not
+proof of severity classification, rollback advice, or stakeholder updates.
+
+## Offline Regression Test
+
+```bash
+python3 examples/028-mobpack-release-triage-sh/test_packaging.py
+```
+
+This uses the current CLI to pack, inspect and validate twice in a scratch copy,
+without credentials, and checks that no sessions were created.
 
 ## Notes
 

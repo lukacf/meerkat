@@ -4,6 +4,11 @@ Build IDE extensions and desktop apps with the JSON-RPC interface. JSON-RPC
 and REST both use Meerkat's runtime-backed session path; JSON-RPC is convenient
 for local stdio or TCP clients and streams events as server notifications.
 
+The connection handshake is inside `try/finally`, so initialization failures
+also release the runtime child. Fatal errors exit nonzero. The
+[offline regression checks](../003-hello-meerkat-ts/README.md#offline-regression-checks)
+exercise success and startup/session failure paths.
+
 ## Concepts
 - `rkat-rpc` - JSON-RPC 2.0 server over JSONL/stdio or TCP
 - Runtime-backed multi-turn session lifecycle

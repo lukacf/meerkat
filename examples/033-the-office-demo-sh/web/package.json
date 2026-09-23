@@ -7,10 +7,14 @@
     "sync:runtime": "node ./scripts/sync-runtime-from-rkat-web.mjs",
     "dev": "npm run sync:runtime && vite",
     "build": "npm run sync:runtime && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "node tests/regression.cjs",
+    "test:offline": "node tests/regression.cjs --offline"
   },
   "devDependencies": {
     "@rkat/web": "file:../../../sdks/web",
+    "playwright": "^1.63.0",
     "typescript": "^5.7.2",
     "vite": "^5.4.11"
   },

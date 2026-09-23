@@ -61,6 +61,12 @@ fi
 rm -rf "$MOB_DIR" "$WEB_OUT"
 mkdir -p "$WORK"
 cp -R "$SRC" "$MOB_DIR"
+mkdir -p "$WORK/project/.rkat" "$WORK/user"
+BASE_ARGS=(
+  --state-root "$WORK/state"
+  --context-root "$WORK/project"
+  --user-config-root "$WORK/user"
+)
 
 echo "=== 029 - Web Incident War Room ==="
 echo ""
@@ -70,17 +76,34 @@ echo "Output bundle:  $WEB_OUT"
 echo ""
 
 echo "--- 1. Packing browser-safe incident war room mob ---"
-"$RKAT" mob pack "$MOB_DIR" -o "$PACK"
+"$RKAT" "${BASE_ARGS[@]}" mob pack "$MOB_DIR" -o "$PACK"
 
 echo ""
 echo "--- 2. Inspecting artifact ---"
-"$RKAT" mob inspect "$PACK"
+"$RKAT" "${BASE_ARGS[@]}" mob inspect "$PACK"
 
 echo ""
 echo "--- 3. Building browser bundle ---"
 # This is a locally-built, unsigned demo pack, so allow unsigned with a
 # permissive trust policy (the default is strict, which rejects unsigned packs).
-"$RKAT" mob web build "$PACK" -o "$WEB_OUT" --wasm "$WASM_RUNTIME" --trust-policy permissive
+"$RKAT" "${BASE_ARGS[@]}" mob web build "$PACK" -o "$WEB_OUT" --wasm "$WASM_RUNTIME" --trust-policy permissive
+
+# createMob accepts an independent definition, not archive-relative file paths.
+python3 - "$MOB_DIR" "$WEB_OUT/definition.inline.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+definition = json.loads((source / "definition.json").read_text(encoding="utf-8"))
+for name, skill in definition["skills"].items():
+    if skill["source"] == "path":
+        definition["skills"][name] = {
+            "source": "inline",
+            "content": (source / skill["path"]).read_text(encoding="utf-8"),
+        }
+Path(sys.argv[2]).write_text(json.dumps(definition, indent=2) + "\n", encoding="utf-8")
+PY
 
 echo ""
 echo "--- 4. Generated bundle contents ---"
@@ -103,5 +126,6 @@ echo "  http://127.0.0.1:4173"
 echo ""
 echo "Suggested user flow:"
 echo "  1. Enter an API key and verify that the WASM runtime initializes."
-echo "  2. Integrate the bundle with an @rkat/web host that creates the mob and members."
+echo "  2. Pass '$WEB_OUT/definition.inline.json' to @rkat/web createMob(), then spawn members."
+echo "     Do not pass the source definition's filesystem paths; bootstrap does not inline them."
 echo "  3. Add a prompt UI and send the kickoff prompt above to the commander."

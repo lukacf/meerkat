@@ -2,15 +2,6 @@
 
 Flagship browser example: **9 autonomous AI agents** across 3 factions wage a territory war with real-time strategy, diplomacy, and deception — all running in-browser via the Meerkat WASM runtime.
 
-> **Current-runtime compatibility:** The checked-in narrator polling reads the
-> legacy top-level flow status, but raw `mob_flow_status` now returns a JSON
-> envelope `{ run: MobRun | null }`. As a result, the frontend does not display
-> the completed narrative in the **Correspondent** channel / **War Correspondent**
-> panel with the current runtime. A separate consumer migration must read `result.run` and
-> handle `run: null` before examining status and output. That is a necessary
-> migration, not a guarantee that all demo behavior is repaired; the flow
-> engine itself is not shown to have failed by this display mismatch.
-
 ## What it demonstrates
 
 This is primarily a **smoke test for the Meerkat WASM platform**, exercising:
@@ -40,21 +31,20 @@ Agents converse freely via comms tools (`send_message`, `peers`). No flows — c
 ### 1 Narrator Mob (turn-driven flow)
 
 A separate mob with a single `turn_driven` agent. After each turn resolves, a
-flow is intended to turn the conversation logs from all 9 agents into dramatic
-narrative with omniscient perspective. The UI labels the channel
-**Correspondent** and the panel **War Correspondent**. The mob ID is
-`diplomacy-narrator`; the member and channel IDs remain `narrator`.
-Displaying completed narrative currently requires the consumer migration noted
-above.
+flow turns the conversation logs from all 9 agents into dramatic narrative with
+omniscient perspective. The UI labels the channel **Correspondent** and the
+panel **War Correspondent**. The mob ID is `diplomacy-narrator`; the member and
+channel IDs remain `narrator`. The host reads the `mob_flow_status` envelope
+(`{ run: MobRun | null }`) and treats `run: null` as still pending.
 
-### 10 DM Channels
+### Nine chat cells and a separate narrator feed (10 channels)
 
 | Channel | Agents | Content |
 |---------|--------|---------|
 | France / Prussia / Russia (Planner ↔ Operator) | Planner ↔ Operator | Private strategy debate |
 | France / Prussia / Russia (Planner ↔ Ambassador) | Planner ↔ Ambassador | Diplomatic briefing (what to lie about) |
 | Franco-Prussian / Franco-Russian / Prussian-Russian | Ambassador ↔ Ambassador | Cross-faction negotiation |
-| Correspondent (`narrator` internally) | Narrator | Intended dramatic narrative; currently blocked by the polling mismatch above |
+| Correspondent (`narrator` internally) | Narrator | Omniscient dramatic narrative |
 
 ### Turn Flow
 
@@ -131,34 +121,35 @@ the prebuilt runtime and mobpack into the browser bundle.
 
 ## Usage
 
-1. Open settings (gear icon), enter your Anthropic API key
-2. Select a model (default: `claude-sonnet-4-6`)
-3. Click **Start Campaign**
-4. Watch agents deliberate in DM channels — click channels in the sidebar to follow conversations
+1. Click **Enter the War Room**, open settings (gear icon), and enter at least one provider API key
+2. Select models for France, Prussia, Russia and the narrator (available models depend on your keys)
+3. Click **Start**, then dismiss the reading guide with **Got it — Begin Campaign**
+4. Watch the 3×3 chat grid — each cell's arrow toggles compact summaries and verbose messages
 5. Territories change color on the map as combat resolves
-6. The **Correspondent** channel is intended to show narrative after each turn;
-   current-runtime display requires the narrator polling migration noted above
+6. The **Correspondent** channel shows dramatic omniscient narrative after each turn
 
 ### Controls
 
-- **Pause/Resume** — stop/resume progress in the JavaScript host loop. The stop
-  flag is checked during a round, not only between rounds, and does not cancel
-  in-flight autonomous agent work.
-- **Step** — run a host-loop iteration, then clear its running flag. Exact
-  single-round stepping is a current limitation: `tick()` can initiate another
-  iteration before the flag is cleared, so the number of completed rounds is
-  not guaranteed.
-- **Export** — download game state + all messages as JSON
+- **Pause/Resume** — pause the game loop at the next completed-turn boundary (agents finish the current round)
+- **Step** — advance exactly one turn when idle; during a round, finish only that round and pause
+- **Start** — replace the campaign after the current round finishes, closing old subscriptions and mobs first
+- **Export** — download game state, messages and typed run-failure reports as JSON
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `web/src/main.ts` | Game engine, mob definitions, event streaming, UI |
-| `web/src/styles.css` | Slack-like DM interface, territory map styling |
+| `web/src/main.ts` | Startup, turn orchestration, controls and HTML shell |
+| `web/src/runner.ts` | Owned campaign scheduling, bounded order and narrator polling |
+| `web/src/agents.ts` | Faction/narrator definitions and inline skills |
+| `web/src/events.ts` | Typed event ingress, peer-ID routing, structured summaries and battle narration |
+| `web/src/game.ts` | Combat resolution and per-order outcomes |
+| `web/src/ui.ts` / `map.ts` | Chat grid, narrator feed, scores / territory map |
+| `web/src/config.ts` / `types.ts` | Provider/model selection / game and runtime types |
+| `web/src/styles.css` | War-room grid and territory map styling |
 | `examples.sh` | Build script (mobpack + prebuilt WASM + Vite) |
 | `../../meerkat-web-runtime/src/lib.rs` | WASM exports powering the runtime |
-| `../../meerkat-mob/src/runtime/flow.rs` | Flow engine (narrator uses this) |
+| `../../meerkat-mob/src/runtime/flow_frame_engine.rs` | Flow engine (narrator uses this) |
 | `../../meerkat-comms/src/router.rs` | Cross-namespace inproc routing |
 
 ## Notes
@@ -167,3 +158,18 @@ the prebuilt runtime and mobpack into the browser bundle.
 - Each turn takes 1-3 minutes depending on model and conversation depth
 - The game detects API failures and stops with a clear error message
 - Debug: open browser console to see Rust tracing output via `tracing-wasm`
+
+## Local regression checks
+
+`npm --prefix web test` runs real example functions in a headless browser, including
+an offline initialization of the current repo-local WASM. Provider requests are
+intercepted with synthetic errors; this is not a live-provider campaign test.
+`npm --prefix web run build` runs strict TypeScript checking before bundling.
+The tests require Playwright Chromium and the current `sdks/web/wasm` pair.
+
+The strict full-startup check exercises actual faction creation, wiring and
+subscriptions with successful synthetic provider responses. It passes with the
+repo-local WASM rebuilt from this checkout, including the cross-target comms-drain
+repair. A previously built 0.8.40 artifact can still contain the old wiring
+failure; rebuild rather than relying on its version string. Offline startup is
+not proof of a live-provider campaign, and the test does not replace real wiring.

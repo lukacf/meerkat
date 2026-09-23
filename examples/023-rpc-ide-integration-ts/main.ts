@@ -20,10 +20,9 @@ import { MeerkatClient } from "@rkat/sdk";
 async function main() {
   const client = new MeerkatClient();
 
-  // connect() spawns rkat-rpc and performs the initialize handshake.
-  await client.connect({ isolated: true });
-
   try {
+    // Include the handshake in the cleanup scope: it can fail after spawning.
+    await client.connect({ isolated: true });
     console.log("=== 1. Capability Detection ===\n");
     // Capabilities are fetched during connect() and available as a property.
     const caps = client.capabilities;
@@ -96,4 +95,7 @@ Why JSON-RPC for IDE integrations:
   }
 }
 
-main().catch(console.error);
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

@@ -11,6 +11,10 @@ Shows the full pattern for tool-augmented agents.
 - `schemars::JsonSchema` — derive JSON Schema from Rust structs
 - `meerkat_tools::schema_for::<T>()` — helper to generate schema
 
+Weather units are a typed enum: `celsius` (the default) or `fahrenheit`.
+The emitted JSON Schema and dispatcher both reject unknown units instead of
+labeling Celsius values with arbitrary strings. Weather data is simulated.
+
 ## Pattern
 ```
 LLM decides to call tool → Agent loop calls dispatch() →

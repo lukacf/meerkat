@@ -11,19 +11,25 @@ messages while preserving recent and structurally important context.
 
 ## How It Works
 ```
-Messages accumulate → auto_compact_threshold exceeded →
+Current context/last-request token pressure exceeds auto_compact_threshold →
   Compactor selects messages → LLM summarizes →
   Old messages replaced with summary → Agent continues
 ```
 
 ## Preservation Rules
-- System prompt is always preserved
-- Up to `recent_turn_budget` recent complete conversational turns are retained,
-  including their tool-call/result structure and attached injected context.
-  Fewer turns may be retained to summarize actual old content and fit the
-  retained-history byte budget.
+- Unkeyed System messages and the latest version of each keyed prompt are
+  preserved in order; superseded keyed versions can be compacted
+- `recent_turn_budget` is an upper bound on recent complete turns retained
+  verbatim (including their tool-call/result structure and attached injected
+  context), not a minimum guarantee. Compaction removes at least one live turn
+  to make progress and can retain fewer turns to fit the retained-history byte
+  budget under request-capacity pressure.
 - Tool call/result pairs are kept together
 - Compaction summaries are themselves compactable
+
+The token threshold measures current context/last-request pressure, not
+lifetime cumulative billed input tokens. Whether this short live conversation
+triggers compaction depends on the provider's responses and token accounting.
 
 ## Run
 ```bash

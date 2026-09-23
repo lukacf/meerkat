@@ -16,7 +16,7 @@ use meerkat_mob::profile::{Profile, ProfileBinding, ToolConfig};
 use meerkat_mob::MobRuntimeMode;
 
 use super::ToolCallError;
-use crate::packs::{format_context, resolve_model, Pack};
+use crate::packs::{resolve_model, Pack, TASK_TEMPLATE};
 
 // ── Storage path ─────────────────────────────────────────────────────────────
 
@@ -100,12 +100,9 @@ fn default_timeout() -> u64 {
 impl UserMobConfig {
     fn to_mob_definition(
         &self,
-        task: &str,
-        context: &str,
         model_overrides: &BTreeMap<String, String>,
         provider_params: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
-        let ctx = format_context(context);
         let is_comms = self.mode == "comms";
         // `deliberate` no longer owns a local event-idle completion loop. Even
         // user-authored comms mobs therefore run as a MobMachine-owned flow;
@@ -114,7 +111,7 @@ impl UserMobConfig {
         let tools = ToolConfig {
             builtins: true,
             shell: true,
-            comms: !is_comms,
+            comms: true,
             ..ToolConfig::default()
         };
 
@@ -142,7 +139,7 @@ impl UserMobConfig {
                     },
                     external_addressable: true,
                     backend: None,
-                    runtime_mode: runtime.clone(),
+                    runtime_mode: runtime,
                     max_inline_peer_notifications: None,
                     output_schema: None,
                     provider_params: provider_params.cloned(),
@@ -194,7 +191,7 @@ impl UserMobConfig {
                         FlowStepSpec {
                             role: ProfileName::from(agent_name.as_str()),
                             message: ContentInput::from(format!(
-                                "Analyze the task independently. Return concise findings for the orchestrator to synthesize. Do not message peer agents directly.\n\n## Task\n{task}{ctx}"
+                                "Analyze the task independently. Return concise findings for the orchestrator to synthesize. Do not message peer agents directly.\n\n## Task\n{TASK_TEMPLATE}"
                             )),
                             depends_on: Vec::new(),
                             dispatch_mode: DispatchMode::default(),
@@ -219,10 +216,10 @@ impl UserMobConfig {
                     .collect::<Vec<_>>()
                     .join("\n\n");
                 let message = if peer_outputs.is_empty() {
-                    format!("Return the final answer for this task.\n\n## Task\n{task}{ctx}")
+                    format!("Return the final answer for this task.\n\n## Task\n{TASK_TEMPLATE}")
                 } else {
                     format!(
-                        "Synthesize the peer flow outputs into the final answer. Do not message peer agents directly.\n\n## Task\n{task}{ctx}\n\n## Peer outputs\n{peer_outputs}"
+                        "Synthesize the peer flow outputs into the final answer. Do not message peer agents directly.\n\n## Task\n{TASK_TEMPLATE}\n\n## Peer outputs\n{peer_outputs}"
                     )
                 };
                 step_specs.insert(
@@ -262,8 +259,8 @@ impl UserMobConfig {
                 for step in steps {
                     let msg = step
                         .message
-                        .replace("{{ task }}", &format!("{task}{ctx}"))
-                        .replace("{{task}}", &format!("{task}{ctx}"));
+                        .replace("{{ task }}", TASK_TEMPLATE)
+                        .replace("{{task}}", TASK_TEMPLATE);
                     step_specs.insert(
                         StepId::from(step.id.as_str()),
                         FlowStepSpec {
@@ -344,13 +341,11 @@ impl Pack for UserPack {
     }
     fn definition(
         &self,
-        task: &str,
-        context: &str,
         model_overrides: &BTreeMap<String, String>,
         provider_params: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
         self.config
-            .to_mob_definition(task, context, model_overrides, provider_params)
+            .to_mob_definition(model_overrides, provider_params)
     }
 }
 
@@ -526,7 +521,7 @@ mod tests {
 
         assert_eq!(pack.flow_step_count(), 2);
 
-        let definition = pack.definition("Ship it", "extra context", &BTreeMap::new(), None);
+        let definition = pack.definition(&BTreeMap::new(), None);
         let main = definition
             .flows
             .get(&FlowId::from("main"))
@@ -546,8 +541,7 @@ mod tests {
         assert_eq!(orchestrate.depends_on, vec![StepId::from("peer_0")]);
         let text = orchestrate.message.text_content();
         assert!(
-            text.contains("Ship it")
-                && text.contains("extra context")
+            text.contains(TASK_TEMPLATE)
                 && text.contains("{{ steps.peer_0 }}")
                 && text.contains("Do not message peer agents directly")
         );
@@ -555,7 +549,7 @@ mod tests {
         for binding in definition.profiles.values() {
             let profile = binding.as_inline().expect("inline user profile");
             assert_eq!(profile.runtime_mode, MobRuntimeMode::TurnDriven);
-            assert!(!profile.tools.comms);
+            assert!(profile.tools.comms);
         }
     }
 }

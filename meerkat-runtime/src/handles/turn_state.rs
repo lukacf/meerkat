@@ -77,6 +77,27 @@ impl RuntimeTurnStateHandle {
             "TurnStateHandle::standalone_prepare",
         )
     }
+
+    fn close_standalone_turn(
+        &self,
+        run_id: &RunId,
+        terminal_phase: mm_dsl::TurnPhase,
+    ) -> Result<(), DslTransitionError> {
+        let Some(session_id) = self.standalone_session_id.as_ref() else {
+            // Runtime-backed lifecycle publication remains owned by Commit/Fail.
+            return Ok(());
+        };
+        // This generated, effect-free close stays within the shared authority;
+        // it emits no cross-machine route for a CompositionDispatcher to consume.
+        self.dsl.apply_input(
+            mm_dsl::MeerkatMachineInput::CloseStandaloneTurn {
+                session_id: mm_dsl::SessionId::from_domain(session_id),
+                run_id: mm_dsl::RunId::from_domain(run_id),
+                terminal_phase,
+            },
+            "TurnStateHandle::close_standalone_turn",
+        )
+    }
 }
 
 fn parse_effect_run_id(
@@ -651,28 +672,20 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         )
     }
 
-    fn run_completed(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
-        // Runtime-backed run terminalization is owned by
-        // MeerkatMachine::Commit after the durable boundary receipt is ready.
-        // Core still emits this effect for standalone/test handles, but this
-        // runtime handle must not provide a second terminal writer.
-        Ok(())
+    fn run_completed(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.close_standalone_turn(&run_id, mm_dsl::TurnPhase::Completed)
     }
 
     fn run_failed(
         &self,
-        _run_id: RunId,
+        run_id: RunId,
         _reason: TurnFailureReason,
     ) -> Result<(), DslTransitionError> {
-        // Runtime-backed failure terminalization is owned by
-        // MeerkatMachine::Fail/Commit and its durable terminal receipt path.
-        Ok(())
+        self.close_standalone_turn(&run_id, mm_dsl::TurnPhase::Failed)
     }
 
-    fn run_cancelled(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
-        // Runtime-backed cancellation terminalization is owned by machine
-        // commands that can keep lifecycle and durable state aligned.
-        Ok(())
+    fn run_cancelled(&self, run_id: RunId) -> Result<(), DslTransitionError> {
+        self.close_standalone_turn(&run_id, mm_dsl::TurnPhase::Cancelled)
     }
 
     #[allow(clippy::expect_used)]
@@ -874,6 +887,389 @@ mod tests {
             )
             .unwrap();
         handle.primitive_applied(run_id.clone()).unwrap();
+    }
+
+    fn registered_turn_handle(
+        runtime_owned: bool,
+    ) -> (
+        meerkat_core::SessionId,
+        Arc<HandleDslAuthority>,
+        RuntimeTurnStateHandle,
+    ) {
+        let session_id = meerkat_core::SessionId::new();
+        let authority = if runtime_owned {
+            crate::meerkat_machine::dsl_authority::new_registered_authority(
+                &session_id,
+                &meerkat_core::RuntimeEpochId::new(),
+            )
+        } else {
+            crate::meerkat_machine::dsl_authority::new_registered_authority_without_runtime_entry(
+                &session_id,
+            )
+        }
+        .unwrap();
+        let dsl = Arc::new(HandleDslAuthority::from_shared(Arc::new(
+            std::sync::Mutex::new(authority),
+        )));
+        let handle = if runtime_owned {
+            RuntimeTurnStateHandle::new(dsl.clone())
+        } else {
+            RuntimeTurnStateHandle::standalone(dsl.clone(), session_id.clone())
+        };
+        (session_id, dsl, handle)
+    }
+
+    fn complete_turn(handle: &RuntimeTurnStateHandle, run_id: &RunId) {
+        handle.llm_returned_terminal(run_id.clone()).unwrap();
+        handle.boundary_complete(run_id.clone()).unwrap();
+    }
+
+    fn assert_standalone_close_rejected(
+        handle: &RuntimeTurnStateHandle,
+        run_id: &RunId,
+        terminal_phase: mm_dsl::TurnPhase,
+    ) {
+        let before = handle.dsl.snapshot_state();
+        let error = handle
+            .close_standalone_turn(run_id, terminal_phase)
+            .expect_err("the generated standalone close guard must refuse this input");
+        assert_eq!(error.context, "TurnStateHandle::close_standalone_turn");
+        assert_eq!(
+            error.kind,
+            meerkat_core::handles::DslRejectionKind::GuardRejected
+        );
+        assert_eq!(handle.dsl.snapshot_state(), before);
+    }
+
+    fn assert_recovered_standalone_close_rejected(
+        session_id: &meerkat_core::SessionId,
+        run_id: &RunId,
+        state: mm_dsl::MeerkatMachineState,
+        terminal_phase: mm_dsl::TurnPhase,
+    ) {
+        let authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state).unwrap();
+        let handle = RuntimeTurnStateHandle::standalone(
+            Arc::new(HandleDslAuthority::from_shared(Arc::new(
+                std::sync::Mutex::new(authority),
+            ))),
+            session_id.clone(),
+        );
+        assert_standalone_close_rejected(&handle, run_id, terminal_phase);
+    }
+
+    #[test]
+    fn standalone_terminal_close_has_no_composition_effects() {
+        for phase in [
+            mm_dsl::TurnPhase::Completed,
+            mm_dsl::TurnPhase::Failed,
+            mm_dsl::TurnPhase::Cancelled,
+        ] {
+            let (session_id, dsl, handle) = registered_turn_handle(false);
+            let run_id = RunId::new();
+            start_running_conversation_turn(&handle, &run_id);
+            if phase == mm_dsl::TurnPhase::Completed {
+                complete_turn(&handle, &run_id);
+            } else if phase == mm_dsl::TurnPhase::Failed {
+                handle
+                    .apply_turn_input(TurnExecutionInput::FatalFailure {
+                        run_id: run_id.clone(),
+                        failure: failure_source(TurnFailureSourceKind::Llm, "synthetic failure"),
+                    })
+                    .unwrap();
+            } else {
+                handle.cancel_now(run_id.clone()).unwrap();
+                handle.cancellation_observed(run_id.clone()).unwrap();
+            }
+            let mut expected = dsl.snapshot_state();
+            let effects = dsl
+                .apply_input_with_effects(
+                    mm_dsl::MeerkatMachineInput::CloseStandaloneTurn {
+                        session_id: mm_dsl::SessionId::from_domain(&session_id),
+                        run_id: mm_dsl::RunId::from_domain(&run_id),
+                        terminal_phase: phase,
+                    },
+                    "standalone close composition contract",
+                )
+                .unwrap();
+            assert!(
+                effects.is_empty(),
+                "standalone close gained an undispatched effect"
+            );
+            expected.lifecycle_phase = mm_dsl::MeerkatPhase::Idle;
+            expected.current_run_id = None;
+            expected.pre_run_phase = None;
+            assert_eq!(dsl.snapshot_state(), expected);
+        }
+    }
+
+    #[test]
+    fn standalone_terminal_close_preserves_evidence_and_admits_successive_runs() {
+        let (_, dsl, handle) = registered_turn_handle(false);
+        for _ in 0..3 {
+            let run_id = RunId::new();
+            start_running_conversation_turn(&handle, &run_id);
+            complete_turn(&handle, &run_id);
+            let before = dsl.snapshot_state();
+            handle.run_completed(run_id.clone()).unwrap();
+            let after = dsl.snapshot_state();
+            assert_eq!(after.lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
+            assert_eq!(after.current_run_id, None);
+            assert_eq!(after.pre_run_phase, None);
+            assert_eq!(after.turn_terminal_run_id, before.turn_terminal_run_id);
+            assert_eq!(after.terminal_outcome, before.terminal_outcome);
+            assert_eq!(after.terminal_cause_kind, before.terminal_cause_kind);
+            assert_eq!(after.runtime_completion_result_run_id, None);
+            assert!(after.runtime_completion_result_resolved);
+            assert_eq!(handle.snapshot().terminal_run_id, Some(run_id.clone()));
+            assert_standalone_close_rejected(&handle, &run_id, mm_dsl::TurnPhase::Completed);
+        }
+    }
+
+    #[test]
+    fn standalone_terminal_close_preserves_failure_then_allows_retry() {
+        let (_, dsl, handle) = registered_turn_handle(false);
+        let run_id = RunId::new();
+        start_running_conversation_turn(&handle, &run_id);
+        let effects = handle
+            .apply_turn_input(TurnExecutionInput::FatalFailure {
+                run_id: run_id.clone(),
+                failure: failure_source(TurnFailureSourceKind::Llm, "synthetic failure"),
+            })
+            .unwrap();
+        let reason = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                TurnExecutionEffect::RunFailed { reason, .. } => Some(reason),
+                _ => None,
+            })
+            .unwrap();
+        let before = handle.snapshot();
+        handle.run_failed(run_id, reason).unwrap();
+        assert_eq!(
+            dsl.snapshot_state().lifecycle_phase,
+            mm_dsl::MeerkatPhase::Idle
+        );
+        assert_eq!(handle.snapshot().terminal_outcome, before.terminal_outcome);
+        assert_eq!(
+            handle.snapshot().terminal_cause_kind,
+            before.terminal_cause_kind
+        );
+        start_running_conversation_turn(&handle, &RunId::new());
+    }
+
+    #[test]
+    fn standalone_terminal_close_requires_observed_cancellation_before_retry() {
+        let (_, dsl, handle) = registered_turn_handle(false);
+        let run_id = RunId::new();
+        start_running_conversation_turn(&handle, &run_id);
+        assert_standalone_close_rejected(&handle, &run_id, mm_dsl::TurnPhase::Cancelled);
+        handle.cancel_now(run_id.clone()).unwrap();
+        assert_eq!(handle.snapshot().turn_phase, TurnPhase::Cancelling);
+        assert_standalone_close_rejected(&handle, &run_id, mm_dsl::TurnPhase::Cancelled);
+        handle.cancellation_observed(run_id.clone()).unwrap();
+        handle.run_cancelled(run_id.clone()).unwrap();
+        assert_eq!(
+            dsl.snapshot_state().lifecycle_phase,
+            mm_dsl::MeerkatPhase::Idle
+        );
+        assert_eq!(handle.snapshot().terminal_run_id, Some(run_id));
+        assert_eq!(
+            handle.snapshot().terminal_outcome,
+            Some(TurnTerminalOutcome::Cancelled)
+        );
+        start_running_conversation_turn(&handle, &RunId::new());
+    }
+
+    #[test]
+    fn standalone_terminal_close_rejects_foreign_and_stale_effects() {
+        let (_, dsl, handle) = registered_turn_handle(false);
+        let run_id = RunId::new();
+        start_running_conversation_turn(&handle, &run_id);
+        complete_turn(&handle, &run_id);
+        let before = dsl.snapshot_state();
+        assert_standalone_close_rejected(&handle, &RunId::new(), mm_dsl::TurnPhase::Completed);
+        assert_standalone_close_rejected(&handle, &run_id, mm_dsl::TurnPhase::Cancelled);
+        let foreign =
+            RuntimeTurnStateHandle::standalone(dsl.clone(), meerkat_core::SessionId::new());
+        assert_standalone_close_rejected(&foreign, &run_id, mm_dsl::TurnPhase::Completed);
+        assert_eq!(dsl.snapshot_state(), before);
+        handle.run_completed(run_id.clone()).unwrap();
+        start_running_conversation_turn(&handle, &RunId::new());
+        let successor = dsl.snapshot_state();
+        assert_standalone_close_rejected(&handle, &run_id, mm_dsl::TurnPhase::Completed);
+        assert_eq!(dsl.snapshot_state(), successor);
+    }
+
+    #[test]
+    fn standalone_terminal_close_rejects_incoherent_terminal_and_completion_debt() {
+        let (session_id, dsl, handle) = registered_turn_handle(false);
+        let run_id = RunId::new();
+        start_running_conversation_turn(&handle, &run_id);
+        complete_turn(&handle, &run_id);
+        let mutations: [fn(&mut mm_dsl::MeerkatMachineState); 6] = [
+            |state| state.turn_terminal_run_id = None,
+            |state| {
+                state.current_run_id =
+                    Some(mm_dsl::RunId::from_domain(&RunId::from_uuid(Uuid::nil())));
+            },
+            |state| state.terminal_outcome = Some(mm_dsl::TurnTerminalOutcome::Cancelled),
+            |state| state.terminal_cause_kind = Some(mm_dsl::TurnTerminalCauseKind::Unknown),
+            |state| state.pre_run_phase = Some(mm_dsl::PreRunPhase::Attached),
+            |state| {
+                state.runtime_completion_result_run_id = state.current_run_id.clone();
+                state.runtime_completion_result_resolved = false;
+            },
+        ];
+        for mutate in mutations {
+            let mut state = dsl.snapshot_state();
+            mutate(&mut state);
+            assert_recovered_standalone_close_rejected(
+                &session_id,
+                &run_id,
+                state,
+                mm_dsl::TurnPhase::Completed,
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_terminal_close_rejects_failed_cause_outcome_mismatches() {
+        let (session_id, dsl, handle) = registered_turn_handle(false);
+        let run_id = RunId::new();
+        start_running_conversation_turn(&handle, &run_id);
+        handle
+            .fatal_failure(
+                run_id.clone(),
+                failure_source(TurnFailureSourceKind::Llm, "synthetic failure"),
+            )
+            .unwrap();
+        let terminal = dsl.snapshot_state();
+        assert_eq!(terminal.turn_phase, mm_dsl::TurnPhase::Failed);
+        let mutations: [fn(&mut mm_dsl::MeerkatMachineState); 6] = [
+            |state| state.terminal_cause_kind = None,
+            |state| state.terminal_cause_kind = Some(mm_dsl::TurnTerminalCauseKind::Unknown),
+            |state| state.terminal_outcome = Some(mm_dsl::TurnTerminalOutcome::Completed),
+            |state| {
+                state.terminal_cause_kind = Some(mm_dsl::TurnTerminalCauseKind::BudgetExhausted);
+            },
+            |state| {
+                state.terminal_cause_kind = Some(mm_dsl::TurnTerminalCauseKind::TimeBudgetExceeded);
+            },
+            |state| {
+                state.terminal_cause_kind =
+                    Some(mm_dsl::TurnTerminalCauseKind::StructuredOutputValidationFailed);
+            },
+        ];
+        for mutate in mutations {
+            let mut state = terminal.clone();
+            mutate(&mut state);
+            assert_recovered_standalone_close_rejected(
+                &session_id,
+                &run_id,
+                state,
+                mm_dsl::TurnPhase::Failed,
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_terminal_close_rejects_cancelled_incoherence() {
+        let (session_id, dsl, handle) = registered_turn_handle(false);
+        let run_id = RunId::new();
+        start_running_conversation_turn(&handle, &run_id);
+        handle.cancel_now(run_id.clone()).unwrap();
+        handle.cancellation_observed(run_id.clone()).unwrap();
+        let terminal = dsl.snapshot_state();
+        assert_eq!(terminal.turn_phase, mm_dsl::TurnPhase::Cancelled);
+        let mutations: [fn(&mut mm_dsl::MeerkatMachineState); 3] = [
+            |state| state.terminal_cause_kind = Some(mm_dsl::TurnTerminalCauseKind::LlmFailure),
+            |state| state.terminal_outcome = Some(mm_dsl::TurnTerminalOutcome::Failed),
+            |state| state.terminal_outcome = None,
+        ];
+        for mutate in mutations {
+            let mut state = terminal.clone();
+            mutate(&mut state);
+            assert_recovered_standalone_close_rejected(
+                &session_id,
+                &run_id,
+                state,
+                mm_dsl::TurnPhase::Cancelled,
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_terminal_close_rejects_epochless_bound_placement() {
+        let (session_id, dsl, handle) = registered_turn_handle(false);
+        // The model permits generation-typed epochless oracle placements.
+        // This isolates the placement guard from the separate epoch guard.
+        dsl.apply_input(
+            mm_dsl::MeerkatMachineInput::PrepareBindings {
+                agent_runtime_id: mm_dsl::AgentRuntimeId::from("root02-placed-oracle"),
+                fence_token: mm_dsl::FenceToken::from(1),
+                generation: Some(mm_dsl::Generation::from(1)),
+                runtime_epoch_id: None,
+                session_id: mm_dsl::SessionId::from_domain(&session_id),
+            },
+            "standalone close placement countercase",
+        )
+        .unwrap();
+        let run_id = RunId::new();
+        start_running_conversation_turn(&handle, &run_id);
+        complete_turn(&handle, &run_id);
+        let state = dsl.snapshot_state();
+        assert!(state.active_runtime_id.is_some());
+        assert!(state.active_runtime_epoch_id.is_none());
+        assert_standalone_close_rejected(&handle, &run_id, mm_dsl::TurnPhase::Completed);
+    }
+
+    #[test]
+    fn standalone_terminal_close_cannot_take_runtime_commit_ownership() {
+        let (session_id, dsl, handle) = registered_turn_handle(true);
+        let run_id = RunId::new();
+        dsl.apply_input(
+            mm_dsl::MeerkatMachineInput::Prepare {
+                session_id: mm_dsl::SessionId::from_domain(&session_id),
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+            },
+            "runtime-owned test prepare",
+        )
+        .unwrap();
+        start_running_conversation_turn(&handle, &run_id);
+        complete_turn(&handle, &run_id);
+        let before = dsl.snapshot_state();
+        handle.run_completed(run_id.clone()).unwrap();
+        handle
+            .run_failed(
+                run_id.clone(),
+                TurnFailureReason::with_cause(
+                    TurnTerminalCauseKind::LlmFailure,
+                    TurnTerminalCauseKind::LlmFailure.agent_error_class(),
+                    "synthetic failure",
+                ),
+            )
+            .unwrap();
+        handle.run_cancelled(run_id.clone()).unwrap();
+        assert_eq!(dsl.snapshot_state(), before);
+        assert_eq!(before.lifecycle_phase, mm_dsl::MeerkatPhase::Running);
+        assert!(
+            before.active_runtime_id.is_none(),
+            "epoch fences even unplaced runtime entries"
+        );
+        let forged_standalone = RuntimeTurnStateHandle::standalone(dsl.clone(), session_id);
+        assert_standalone_close_rejected(&forged_standalone, &run_id, mm_dsl::TurnPhase::Completed);
+        assert_eq!(dsl.snapshot_state(), before);
+        dsl.apply_input(
+            mm_dsl::MeerkatMachineInput::ServiceTurnCommitted {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+            },
+            "runtime-owned service receipt",
+        )
+        .unwrap();
+        assert_eq!(
+            dsl.snapshot_state().lifecycle_phase,
+            mm_dsl::MeerkatPhase::Idle
+        );
     }
 
     #[test]

@@ -6,8 +6,8 @@
 # textual merge produced no conflict marker, so the defect was invisible to
 # every cargo mode except --locked, which is what cargo publish uses.
 #
-# Offline and file-only: the cargo --locked half of the gate is exercised by
-# the gate itself, not by this test.
+# The root merge checks are file-only. Standalone example coverage below uses
+# real Cargo against dependency-free local fixtures with networking disabled.
 
 set -euo pipefail
 
@@ -96,5 +96,7 @@ if ! grep -q "absent-crate" "${TEST_ROOT}/missing.log"; then
   fail "the absent-package failure does not name the package" \
     "$(cat "${TEST_ROOT}/missing.log")"
 fi
+
+"$PYTHON" "$REPO_ROOT/scripts/test_example_locks.py"
 
 echo "lock consistency gate contract holds"

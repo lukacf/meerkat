@@ -26,6 +26,12 @@ The runtime-backed build contract has an explicit binding seam:
 - those bindings flow into `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
 - standalone / embedded / test-only builds should opt into `RuntimeBuildMode::StandaloneEphemeral` explicitly instead of relying on silent fallback
 
+Standalone sessions retain one generated authority across turns. After a coherent
+terminal effect, `CloseStandaloneTurn` releases the epochless, unplaced session's
+lifecycle while preserving its terminal evidence and model/tool-routing state.
+It does not mint a durable commit receipt or close a runtime-owned session;
+`SessionOwned` terminal publication remains with the runtime commit owner.
+
 `SessionRuntimeBindings` is the epoch-local runtime handle for a session. It carries:
 
 - `session_id`
@@ -137,6 +143,17 @@ capability never changes, rejects, or rewrites the durable Session itself.
 `interrupt(id)` cancels an in-flight turn.
 
 - If no turn is running: `SESSION_NOT_RUNNING`.
+
+When a service drops an active agent execution future, cancellation reports both
+the cancellation request and the observed end of that execution to the generated
+turn authority. The resulting terminal effect lets a standalone session accept
+a later turn; merely entering `Cancelling` is not terminal completion.
+
+For surfaces using `SurfaceRequestExecutor`, upgrading a cancellation action
+during initialization is serialized with request cancellation. Cancellation
+either receives the new action or the installer replays it for an already
+cancelled request. Actions run outside the owner locks and may re-enter the
+executor; this does not promise rollback of effects already executed.
 
 ### read and list
 

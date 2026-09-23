@@ -8434,6 +8434,246 @@ impl SessionRuntime {
         .await
     }
 
+    /// Materialize an idle session without running a provider turn.
+    ///
+    /// Unlike [`Self::create_session`]'s in-memory pre-turn staging, this
+    /// commits the session through the persistent service before returning.
+    /// `resume_id` loads the existing session through this runtime's authority;
+    /// callers cannot supply an unrelated snapshot or mint an existing identity.
+    /// This is intended for hosts that must publish comms/trust readiness and
+    /// survive restart before the first prompt arrives.
+    ///
+    /// On resume, durable configuration is inherited through the canonical
+    /// recovery owner; `build_config` supplies only process-local resources.
+    /// Build-policy changes must be explicit in `resume_overrides`. Failure or
+    /// cancellation rolls back this operation's exact materialization claim,
+    /// without archiving or replacing a durable predecessor.
+    pub async fn create_or_resume_session_without_turn(
+        self: &Arc<Self>,
+        build_config: AgentBuildConfig,
+        resume_id: Option<SessionId>,
+        labels: Option<BTreeMap<String, String>>,
+        resume_overrides: SurfaceSessionRecoveryOverrides,
+    ) -> Result<SessionId, RpcError> {
+        let runtime = Arc::clone(self);
+        let (mut result_tx, result_rx) = tokio::sync::oneshot::channel();
+        // Keep the registration fence until exact compensation has finished,
+        // including when the caller drops its response future.
+        tokio::spawn(async move {
+            let seed = Session::new();
+            let id = resume_id.clone().unwrap_or_else(|| seed.id().clone());
+            let registration_lock = runtime.runtime_registration_lock(&id);
+            let Ok(_registration_guard) = registration_lock.mutex().try_lock() else {
+                let _ = result_tx.send(Err(session_error_to_rpc(SessionError::Busy { id })));
+                return;
+            };
+            let result = async {
+                if result_tx.is_closed() {
+                    return Err(session_error_to_rpc(SessionError::Busy { id: id.clone() }));
+                }
+                if runtime.staged_sessions.contains(&id).await
+                    || runtime
+                        .runtime_adapter
+                        .runtime_state(&id)
+                        .await
+                        .is_ok_and(|state| matches!(state, RuntimeState::Running))
+                    || runtime
+                        .runtime_adapter
+                        .current_executor_attachment_witness(&id)
+                        .await
+                        .is_some()
+                    || runtime
+                        .service
+                        .has_live_session(&id)
+                        .await
+                        .map_err(session_error_to_rpc)?
+                {
+                    return Err(session_error_to_rpc(SessionError::Busy { id: id.clone() }));
+                }
+                #[cfg(feature = "mcp")]
+                if runtime.mcp_sessions.read().await.contains_key(&id) {
+                    return Err(session_error_to_rpc(SessionError::Busy { id: id.clone() }));
+                }
+                let session = if resume_id.is_some() {
+                    runtime
+                        .reject_archived_persisted_session_without_live(&id)
+                        .await?;
+                    runtime
+                        .load_persisted_session(&id)
+                        .await?
+                        .ok_or_else(|| Self::session_not_found_rpc(&id))?
+                } else {
+                    seed
+                };
+                let admission = runtime
+                    .service
+                    .reserve_create_session_admission()
+                    .await
+                    .map_err(session_error_to_rpc)?;
+                let mut prepared = runtime
+                    .runtime_adapter
+                    .prepare_session_materialization(id.clone())
+                    .await
+                    .map_err(|error| RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message: error.to_string(),
+                        data: None,
+                    })?;
+                let materialized = tokio::select! {
+                    biased;
+                    () = result_tx.closed() => None,
+                    result = runtime.materialize_without_turn(
+                        session, build_config, labels, resume_id.is_some(),
+                        resume_overrides, &mut prepared, admission,
+                    ) => Some(result),
+                };
+                match materialized {
+                    Some(Ok(actor_slot)) => {
+                        runtime
+                            .runtime_actor_witness_slots
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(id.clone(), actor_slot);
+                        Ok(id.clone())
+                    }
+                    error => {
+                        let rollback = prepared.rollback_now().await;
+                        #[cfg(feature = "mcp")]
+                        runtime.mcp_sessions.write().await.remove(&id);
+                        let primary = error.and_then(Result::err).unwrap_or_else(|| RpcError {
+                            code: error::INTERNAL_ERROR,
+                            message: "session materialization cancelled".into(),
+                            data: None,
+                        });
+                        Err(match rollback {
+                            Ok(_) => primary,
+                            Err(cleanup) => {
+                                tracing::warn!(
+                                    session_id = %id,
+                                    error = %cleanup,
+                                    "no-turn materialization rollback failed"
+                                );
+                                combine_rpc_cleanup_error(
+                                    primary,
+                                    cleanup,
+                                    "roll back exact no-turn materialization",
+                                )
+                            }
+                        })
+                    }
+                }
+            }
+            .await;
+            let _ = result_tx.send(result);
+        });
+        result_rx.await.map_err(|error| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("session materialization task ended without a result: {error}"),
+            data: None,
+        })?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn materialize_without_turn(
+        self: &Arc<Self>,
+        session: Session,
+        mut resources: AgentBuildConfig,
+        labels: Option<BTreeMap<String, String>>,
+        recovering: bool,
+        overrides: SurfaceSessionRecoveryOverrides,
+        prepared: &mut meerkat_runtime::PreparedSessionMaterialization,
+        admission: ActiveCapacityGuard,
+    ) -> Result<meerkat::LiveSessionActorWitnessSlot, RpcError> {
+        self.arm_schedule_host_for_agent_tools().await;
+        let mut request = if recovering {
+            let snapshot = self.realm_context_snapshot();
+            let mut request = self
+                .recovery_context(&snapshot)
+                .recovered_create_request_with_bindings(
+                    session.clone(),
+                    overrides,
+                    prepared.bindings_clone(),
+                )
+                .await
+                .map_err(Self::recovery_error_to_rpc)?;
+            if let Some(build) = request.build.as_mut() {
+                meerkat::session_runtime::recovery::inject_recovery_resources(build, &resources);
+            }
+            request
+        } else {
+            resources.llm_client_override = resources
+                .llm_client_override
+                .or_else(|| self.default_llm_client());
+            resources.resume_session = Some(session.clone());
+            resources.runtime_build_mode =
+                meerkat_core::RuntimeBuildMode::SessionOwned(prepared.bindings_clone());
+            let snapshot = self.realm_context_snapshot();
+            resources.realm_id = resources.realm_id.or(snapshot.realm_id);
+            resources.instance_id = resources.instance_id.or(snapshot.instance_id);
+            resources.backend = resources.backend.or_else(|| {
+                snapshot
+                    .backend
+                    .as_deref()
+                    .and_then(meerkat_core::RecoveryBackendKind::parse)
+            });
+            if resources.config_generation.is_none()
+                && let Some(config_runtime) = self.config_runtime()
+            {
+                resources.config_generation = config_runtime
+                    .get()
+                    .await
+                    .ok()
+                    .map(|snapshot| snapshot.generation);
+            }
+            CreateSessionRequest {
+                model: resources.model.clone(),
+                prompt: ContentInput::Text(String::new()),
+                injected_context: Vec::new(),
+                system_prompt: resources.system_prompt.clone(),
+                max_tokens: resources.max_tokens,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(resources.to_session_build_options()),
+                labels: None,
+            }
+        };
+        request.labels = labels;
+        #[cfg(feature = "mcp")]
+        {
+            let (event_tx, _) = mpsc::channel(1);
+            let build = AgentBuildConfig::from_create_session_request(&request, event_tx);
+            let build = self
+                .attach_mcp_adapter_for_pending_session(session.id().clone(), build)
+                .await?;
+            if let Some(options) = request.build.as_mut() {
+                options.external_tools = build.external_tools;
+            }
+        }
+        #[cfg(test)]
+        Self::wait_pending_promotion_pre_turn_hook(&self.runtime_routed_pre_promotion_hook).await;
+        meerkat::surface::materialize_prepared_session_actor_unattached_with_actor_slot(
+            &self.service,
+            &self.runtime_adapter,
+            prepared,
+            session,
+            request,
+            admission,
+        )
+        .await
+        .map(|(_, slot)| slot)
+        .map_err(|error| match error {
+            meerkat::surface::SurfaceRuntimeMaterializeError::Session(error) => {
+                session_error_to_rpc(error)
+            }
+            error => RpcError {
+                code: error::INTERNAL_ERROR,
+                message: error.to_string(),
+                data: None,
+            },
+        })
+    }
+
     /// Create a deferred session from a caller-owned exact session identity.
     ///
     /// This is deliberately private to runtime-owned durable workflows such as
@@ -13876,6 +14116,725 @@ mod tests {
             llm_client_override: Some(Arc::new(MockLlmClient)),
             ..AgentBuildConfig::new("claude-sonnet-4-5")
         }
+    }
+
+    async fn no_turn_disk_runtime(root: &std::path::Path) -> Arc<SessionRuntime> {
+        let (_, bundle) = meerkat::open_realm_persistence_in(
+            root,
+            "no-turn-tests",
+            Some(meerkat_store::RealmBackend::Sqlite),
+            None,
+        )
+        .await
+        .unwrap();
+        let runtime = Arc::new(SessionRuntime::new(
+            AgentFactory::new(root.join("sessions")),
+            Config::default(),
+            1,
+            bundle,
+            crate::router::NotificationSink::noop(),
+        ));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        runtime
+    }
+
+    fn invalid_no_turn_build() -> AgentBuildConfig {
+        let mut build = mock_build_config();
+        build.model_fallback = Some(meerkat_core::config::ModelFallbackConfig {
+            enabled: Some(true),
+            ..Default::default()
+        });
+        build
+    }
+
+    async fn await_no_turn_hook(hook: &PendingPromotionPreTurnHook) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !hook.reached_flag.load(AtomicOrdering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("no-turn materialization reached barrier");
+    }
+
+    fn install_no_turn_hook(runtime: &SessionRuntime) -> Arc<PendingPromotionPreTurnHook> {
+        let hook = Arc::new(PendingPromotionPreTurnHook {
+            reached_flag: std::sync::atomic::AtomicBool::new(false),
+            reached: Notify::new(),
+            release: Notify::new(),
+        });
+        *runtime.runtime_routed_pre_promotion_hook.lock().unwrap() = Some(Arc::clone(&hook));
+        hook
+    }
+
+    #[tokio::test]
+    async fn no_turn_actor_build_cancellation_preserves_owned_capacity_and_durable_predecessor() {
+        struct BlockingBuildConfig {
+            inner: meerkat_core::MemoryConfigStore,
+            hook: Arc<PendingPromotionPreTurnHook>,
+            armed: std::sync::atomic::AtomicBool,
+        }
+
+        #[async_trait]
+        impl ConfigStore for BlockingBuildConfig {
+            async fn get(&self) -> Result<Config, meerkat_core::config::ConfigError> {
+                if self.armed.swap(false, AtomicOrdering::SeqCst) {
+                    let released = self.hook.release.notified();
+                    self.hook.reached_flag.store(true, AtomicOrdering::SeqCst);
+                    self.hook.reached.notify_waiters();
+                    released.await;
+                }
+                self.inner.get().await
+            }
+
+            async fn set(&self, config: Config) -> Result<(), meerkat_core::config::ConfigError> {
+                self.inner.set(config).await
+            }
+
+            async fn patch(
+                &self,
+                delta: meerkat_core::config::ConfigDelta,
+            ) -> Result<Config, meerkat_core::config::ConfigError> {
+                self.inner.patch(delta).await
+            }
+        }
+
+        for recovering in [false, true] {
+            let temp = tempfile::tempdir_in(".").unwrap();
+            let seed_runtime = no_turn_disk_runtime(temp.path()).await;
+            let resume_id = if recovering {
+                let id = seed_runtime
+                    .create_or_resume_session_without_turn(
+                        mock_build_config(),
+                        None,
+                        None,
+                        Default::default(),
+                    )
+                    .await
+                    .unwrap();
+                let (event_tx, _event_rx) = mpsc::channel(100);
+                seed_runtime
+                    .start_turn_via_runtime(
+                        &id,
+                        "preserve this committed predecessor".into(),
+                        Vec::new(),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                Some(id)
+            } else {
+                None
+            };
+            let predecessor = match resume_id.as_ref() {
+                Some(id) => Some(
+                    serde_json::to_value(
+                        seed_runtime
+                            .load_persisted_session(id)
+                            .await
+                            .unwrap()
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                ),
+                None => None,
+            };
+            seed_runtime.try_shutdown().await.unwrap();
+            drop(seed_runtime);
+
+            let (_, persistence) = meerkat::open_realm_persistence_in(
+                temp.path(),
+                "no-turn-tests",
+                Some(meerkat_store::RealmBackend::Sqlite),
+                None,
+            )
+            .await
+            .unwrap();
+            let hook = Arc::new(PendingPromotionPreTurnHook {
+                reached_flag: std::sync::atomic::AtomicBool::new(false),
+                reached: Notify::new(),
+                release: Notify::new(),
+            });
+            let config_store = Arc::new(BlockingBuildConfig {
+                inner: meerkat_core::MemoryConfigStore::new(
+                    Config::default(),
+                    meerkat_models::canonical(),
+                ),
+                hook: Arc::clone(&hook),
+                armed: std::sync::atomic::AtomicBool::new(false),
+            });
+            let runtime = Arc::new(SessionRuntime::new_with_config_store(
+                temp_factory(&temp),
+                Config::default(),
+                config_store.clone(),
+                1,
+                persistence,
+                crate::router::NotificationSink::noop(),
+            ));
+            runtime.ensure_schedule_host_started().await.unwrap();
+            config_store.armed.store(true, AtomicOrdering::SeqCst);
+            let cancelled_runtime = Arc::clone(&runtime);
+            let cancelled_id = resume_id.clone();
+            let task = tokio::spawn(async move {
+                cancelled_runtime
+                    .create_or_resume_session_without_turn(
+                        mock_build_config(),
+                        cancelled_id,
+                        None,
+                        Default::default(),
+                    )
+                    .await
+            });
+            // This barrier is in FactoryAgentBuilder::resolve_config, inside
+            // the service's actor creation, not the outer promotion test hook.
+            await_no_turn_hook(&hook).await;
+            let id = runtime
+                .runtime_registration_locks
+                .lock()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            let lock = runtime.runtime_registration_lock(&id);
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            hook.release.notify_one();
+            let guard =
+                tokio::time::timeout(std::time::Duration::from_secs(10), lock.mutex().lock())
+                    .await
+                    .expect("actor-build cancellation finishes exact rollback");
+            assert!(!runtime.runtime_adapter.contains_session(&id).await);
+            assert!(!runtime.service.has_live_session(&id).await.unwrap());
+            assert!(!runtime.staged_sessions.contains(&id).await);
+            #[cfg(feature = "mcp")]
+            assert!(!runtime.mcp_sessions.read().await.contains_key(&id));
+            match predecessor {
+                Some(predecessor) => assert_eq!(
+                    predecessor,
+                    serde_json::to_value(
+                        runtime.load_persisted_session(&id).await.unwrap().unwrap(),
+                    )
+                    .unwrap()
+                ),
+                None => assert!(
+                    runtime
+                        .list_sessions(Default::default())
+                        .await
+                        .unwrap()
+                        .is_empty()
+                ),
+            }
+            drop(guard);
+            let retried = runtime
+                .create_or_resume_session_without_turn(
+                    mock_build_config(),
+                    resume_id.clone(),
+                    None,
+                    Default::default(),
+                )
+                .await
+                .expect("cancelled actor build releases capacity for retry");
+            if let Some(resume_id) = resume_id {
+                assert_eq!(retried, resume_id);
+            }
+            assert!(runtime.service.has_live_session(&retried).await.unwrap());
+            runtime.try_shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn no_turn_resume_is_busy_while_provider_runs_after_registration_unlock() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let (build, calls, release) = blocking_build_config();
+        let id = runtime
+            .create_or_resume_session_without_turn(build, None, None, Default::default())
+            .await
+            .unwrap();
+        let turn_runtime = Arc::clone(&runtime);
+        let turn_id = id.clone();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let turn = tokio::spawn(async move {
+            turn_runtime
+                .start_turn_via_runtime(
+                    &turn_id,
+                    "hold provider after admission".into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+        wait_for_llm_calls(&calls, 1, "provider in flight").await;
+        let lease = runtime.runtime_registration_lock(&id);
+        let guard = tokio::time::timeout(std::time::Duration::from_secs(2), lease.mutex().lock())
+            .await
+            .expect("ordinary turn releases registration lock before provider completion");
+        drop(guard);
+        let busy = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            runtime.create_or_resume_session_without_turn(
+                mock_build_config(),
+                Some(id.clone()),
+                None,
+                Default::default(),
+            ),
+        )
+        .await;
+        release.notify_one();
+        turn.await.unwrap().unwrap();
+        let error = busy
+            .expect("Busy must not wait behind the active service turn boundary")
+            .unwrap_err();
+        assert_eq!(error.code, error::SESSION_BUSY);
+        assert!(runtime.runtime_adapter.contains_session(&id).await);
+        runtime.try_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_turn_fresh_uses_runtime_default_client_without_build_override() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let id = runtime
+            .create_or_resume_session_without_turn(
+                AgentBuildConfig::new("claude-sonnet-4-5"),
+                None,
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let result = runtime
+            .start_turn_via_runtime(
+                &id,
+                "use the runtime default client".into(),
+                Vec::new(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.text, "Hello from mock");
+        runtime.try_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_turn_fresh_failure_releases_capacity_and_publishes_no_stage() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let failure = runtime
+            .create_or_resume_session_without_turn(
+                invalid_no_turn_build(),
+                None,
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            failure.message.contains("nonempty explicit chain"),
+            "{failure:?}"
+        );
+        assert!(
+            runtime
+                .list_sessions(Default::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            runtime
+                .staged_capacity_admissions
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        #[cfg(feature = "mcp")]
+        assert!(runtime.mcp_sessions.read().await.is_empty());
+        let id = runtime
+            .create_or_resume_session_without_turn(
+                mock_build_config(),
+                None,
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(runtime.service.has_live_session(&id).await.unwrap());
+        assert!(runtime.load_persisted_session(&id).await.unwrap().is_some());
+        runtime.try_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_turn_fresh_cancellation_releases_anonymous_admission() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 1);
+        let hook = install_no_turn_hook(&runtime);
+        let cancelled_runtime = Arc::clone(&runtime);
+        let task = tokio::spawn(async move {
+            cancelled_runtime
+                .create_or_resume_session_without_turn(
+                    mock_build_config(),
+                    None,
+                    None,
+                    Default::default(),
+                )
+                .await
+        });
+        await_no_turn_hook(&hook).await;
+        let id = runtime
+            .runtime_registration_locks
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let lock = runtime.runtime_registration_lock(&id);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let guard = tokio::time::timeout(std::time::Duration::from_secs(10), lock.mutex().lock())
+            .await
+            .unwrap();
+        assert!(!runtime.runtime_adapter.contains_session(&id).await);
+        assert!(
+            runtime
+                .list_sessions(Default::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            runtime
+                .staged_capacity_admissions
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        #[cfg(feature = "mcp")]
+        assert!(runtime.mcp_sessions.read().await.is_empty());
+        *runtime.runtime_routed_pre_promotion_hook.lock().unwrap() = None;
+        drop(guard);
+        runtime
+            .create_or_resume_session_without_turn(
+                mock_build_config(),
+                None,
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        runtime.try_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_turn_cold_failure_and_cancellation_preserve_predecessor() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let runtime = no_turn_disk_runtime(temp.path()).await;
+        let id = runtime
+            .create_or_resume_session_without_turn(
+                mock_build_config(),
+                None,
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let before = runtime.load_persisted_session(&id).await.unwrap().unwrap();
+        let before = serde_json::to_value(before).unwrap();
+        runtime.try_shutdown().await.unwrap();
+        drop(runtime);
+        let runtime = no_turn_disk_runtime(temp.path()).await;
+        let failure = runtime
+            .create_or_resume_session_without_turn(
+                invalid_no_turn_build(),
+                Some(id.clone()),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            failure.message.contains("nonempty explicit chain"),
+            "{failure:?}"
+        );
+        assert!(!runtime.runtime_adapter.contains_session(&id).await);
+        assert!(!runtime.staged_sessions.contains(&id).await);
+        assert_eq!(
+            before,
+            serde_json::to_value(runtime.load_persisted_session(&id).await.unwrap().unwrap(),)
+                .unwrap()
+        );
+
+        let hook = install_no_turn_hook(&runtime);
+        let cancelled_runtime = Arc::clone(&runtime);
+        let cancelled_id = id.clone();
+        let cancelled = tokio::spawn(async move {
+            cancelled_runtime
+                .create_or_resume_session_without_turn(
+                    mock_build_config(),
+                    Some(cancelled_id),
+                    None,
+                    Default::default(),
+                )
+                .await
+        });
+        await_no_turn_hook(&hook).await;
+        cancelled.abort();
+        assert!(cancelled.await.unwrap_err().is_cancelled());
+        // The worker owns the same fence until exact rollback and MCP cleanup
+        // complete; acquiring it is the cleanup barrier, not a timed sleep.
+        let lock = runtime.runtime_registration_lock(&id);
+        let guard = tokio::time::timeout(std::time::Duration::from_secs(10), lock.mutex().lock())
+            .await
+            .unwrap();
+        assert!(!runtime.runtime_adapter.contains_session(&id).await);
+        assert!(!runtime.service.has_live_session(&id).await.unwrap());
+        #[cfg(feature = "mcp")]
+        assert!(!runtime.mcp_sessions.read().await.contains_key(&id));
+        assert_eq!(
+            before,
+            serde_json::to_value(runtime.load_persisted_session(&id).await.unwrap().unwrap(),)
+                .unwrap()
+        );
+        *runtime.runtime_routed_pre_promotion_hook.lock().unwrap() = None;
+        drop(guard);
+        runtime
+            .create_or_resume_session_without_turn(
+                mock_build_config(),
+                Some(id),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        runtime.try_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_turn_same_id_loser_preserves_winner_and_normal_turn_registration() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let runtime = no_turn_disk_runtime(temp.path()).await;
+        let id = runtime
+            .create_or_resume_session_without_turn(
+                mock_build_config(),
+                None,
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        runtime.try_shutdown().await.unwrap();
+        drop(runtime);
+        let runtime = no_turn_disk_runtime(temp.path()).await;
+        let hook = install_no_turn_hook(&runtime);
+        let winner_runtime = Arc::clone(&runtime);
+        let winner_id = id.clone();
+        let winner = tokio::spawn(async move {
+            winner_runtime
+                .create_or_resume_session_without_turn(
+                    mock_build_config(),
+                    Some(winner_id),
+                    None,
+                    Default::default(),
+                )
+                .await
+        });
+        await_no_turn_hook(&hook).await;
+        let loser = runtime
+            .create_or_resume_session_without_turn(
+                mock_build_config(),
+                Some(id.clone()),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(loser.code, error::SESSION_BUSY);
+        assert!(runtime.runtime_adapter.contains_session(&id).await);
+
+        let turn_runtime = Arc::clone(&runtime);
+        let turn_id = id.clone();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let turn = tokio::spawn(async move {
+            turn_runtime
+                .start_turn_via_runtime(
+                    &turn_id,
+                    "after winner publication".into(),
+                    Vec::new(),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!turn.is_finished());
+        *runtime.runtime_routed_pre_promotion_hook.lock().unwrap() = None;
+        hook.release.notify_one();
+        assert_eq!(winner.await.unwrap().unwrap(), id);
+        tokio::time::timeout(std::time::Duration::from_secs(20), turn)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(runtime.runtime_adapter.contains_session(&id).await);
+        assert!(runtime.service.has_live_session(&id).await.unwrap());
+        #[cfg(feature = "mcp")]
+        assert!(runtime.mcp_adapter_for_session(&id).await.is_ok());
+        let session = runtime.load_persisted_session(&id).await.unwrap().unwrap();
+        assert!(
+            serde_json::to_string(&session)
+                .unwrap()
+                .contains("after winner publication")
+        );
+        runtime.try_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_turn_cold_resume_inherits_complete_build_state_and_rejects_forbidden_override() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let runtime = no_turn_disk_runtime(temp.path()).await;
+        let mut build = mock_build_config();
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::new(vec![
+            meerkat_client::LlmEvent::TextDelta {
+                delta: "{\"retained\":true}".into(),
+                meta: None,
+            },
+            meerkat_client::LlmEvent::Done {
+                outcome: meerkat_client::LlmDoneOutcome::Success {
+                    stop_reason: StopReason::EndTurn,
+                },
+            },
+        ])));
+        build.output_schema = Some(meerkat_core::OutputSchema::from_json_value(
+            serde_json::json!({"type":"object","properties":{"retained":{"type":"boolean"}},"required":["retained"],"additionalProperties":false}),
+        ).unwrap());
+        build.budget_limits = Some(meerkat_core::BudgetLimits {
+            max_tokens: Some(1000),
+            max_tool_calls: Some(3),
+            ..Default::default()
+        });
+        build.hooks_override.disable = vec![meerkat_core::HookId::new("retained-hook")];
+        build.app_context = Some(serde_json::json!({"retained": true}));
+        build.additional_instructions = Some(vec!["retained instruction".into()]);
+        build.shell_env = Some([("RETAINED_ENV".into(), "yes".into())].into());
+        build.call_timeout_override =
+            meerkat_core::CallTimeoutOverride::Value(std::time::Duration::from_secs(31));
+        build.realm_id = Some(meerkat_core::RealmId::parse("retained-realm").unwrap());
+        let id = runtime
+            .create_or_resume_session_without_turn(build, None, None, Default::default())
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn_via_runtime(
+                &id,
+                "durable first turn".into(),
+                Vec::new(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let before = runtime.load_persisted_session(&id).await.unwrap().unwrap();
+        let state = serde_json::to_value(before.build_state()).unwrap();
+        let messages = serde_json::to_value(before.messages()).unwrap();
+        let metadata = before.session_metadata().unwrap();
+        runtime.try_shutdown().await.unwrap();
+        drop(runtime);
+
+        let runtime = no_turn_disk_runtime(temp.path()).await;
+        let refused = runtime
+            .create_or_resume_session_without_turn(
+                mock_build_config(),
+                Some(id.clone()),
+                None,
+                SurfaceSessionRecoveryOverrides {
+                    provider: Some(meerkat_core::Provider::OpenAI),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, error::INVALID_PARAMS);
+        assert!(!runtime.runtime_adapter.contains_session(&id).await);
+        // Unit-test the extracted lowering with machine-issued consumed phase.
+        // This does not modify the durable predecessor used by the cold-resume
+        // assertions below.
+        let mut consumed = before;
+        let mut deferred = consumed.deferred_turn_state().unwrap();
+        deferred.mark_initial_turn_started();
+        consumed.set_deferred_turn_state(deferred).unwrap();
+        assert!(!meerkat_core::session_allows_first_turn_build_overrides(
+            &consumed
+        ));
+        let mut prepared = runtime
+            .runtime_adapter
+            .prepare_session_materialization(id.clone())
+            .await
+            .unwrap();
+        let snapshot = runtime.realm_context_snapshot();
+        let failure = runtime
+            .recovery_context(&snapshot)
+            .recovered_create_request_with_bindings(
+                consumed,
+                SurfaceSessionRecoveryOverrides {
+                    max_tokens: Some(17),
+                    ..Default::default()
+                },
+                prepared.bindings_clone(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            SessionRuntime::recovery_error_to_rpc(failure).code,
+            error::INVALID_PARAMS
+        );
+        prepared.rollback_now().await.unwrap();
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let mut resources = mock_build_config();
+        resources.agent_llm_client_decorator = Some(counting_agent_llm_client_decorator(
+            Arc::clone(&constructions),
+            Arc::new(AtomicUsize::new(0)),
+        ));
+        runtime
+            .create_or_resume_session_without_turn(
+                resources,
+                Some(id.clone()),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(constructions.load(AtomicOrdering::SeqCst), 1);
+        let after = runtime.load_persisted_session(&id).await.unwrap().unwrap();
+        assert_eq!(state, serde_json::to_value(after.build_state()).unwrap());
+        assert_eq!(messages, serde_json::to_value(after.messages()).unwrap());
+        assert_eq!(
+            metadata.realm_id,
+            after.session_metadata().unwrap().realm_id
+        );
+        assert_eq!(metadata.tooling, after.session_metadata().unwrap().tooling);
+        runtime.try_shutdown().await.unwrap();
     }
 
     fn test_auth_binding(realm: &str, binding: &str) -> meerkat_core::AuthBindingRef {

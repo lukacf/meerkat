@@ -4,6 +4,8 @@
 
 mod packs;
 mod state;
+#[cfg(test)]
+mod tests;
 mod tools;
 
 use meerkat::surface::{
@@ -12,19 +14,21 @@ use meerkat::surface::{
 };
 use serde_json::{json, Value};
 use state::ForceState;
+use std::io::BufRead;
 use std::sync::Arc;
-use tokio::io::{self, AsyncBufReadExt, BufReader};
+use tokio::io;
 use tokio::sync::{mpsc, OnceCell};
-
-static STATE: OnceCell<ForceState> = OnceCell::const_new();
 
 struct ToolCompletion {
     request_key: String,
     terminal: RequestTerminal<Value>,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    meerkat_runtime::host_stack::run_host("codemob-mcp", serve)?
+}
+
+async fn serve() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -33,19 +37,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
 
-    let stdin = io::stdin();
     let stdout = io::stdout();
     let (writer, writer_task) = spawn_stdio_json_writer(stdout, 128);
     let mut writer_task = Box::pin(writer_task);
+    let mut writer_joined = false;
     let executor = SurfaceRequestExecutor::new(tokio::time::Duration::from_secs(5));
+    let state = Arc::new(OnceCell::new());
     let (completion_tx, mut completion_rx) = mpsc::channel::<ToolCompletion>(128);
-    let mut reader = BufReader::new(stdin).lines();
+    let (input_tx, mut input_rx) = mpsc::channel(128);
+    // Tokio stdin uses an uncancellable blocking-pool read; dropping its
+    // runtime after a stdout failure would wait for another stdin byte.
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            if input_tx.blocking_send(line).is_err() {
+                break;
+            }
+        }
+    });
 
-    let server_result: Result<(), Box<dyn std::error::Error>> = loop {
+    let server_result: Result<(), Box<dyn std::error::Error + Send + Sync>> = loop {
         tokio::select! {
-            line = reader.next_line() => {
-                let Some(line) = line? else {
+            line = input_rx.recv() => {
+                let Some(line) = line else {
                     break Ok(());
+                };
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => break Err(error.into()),
                 };
                 let line = line.trim().to_string();
                 if line.is_empty() {
@@ -161,8 +179,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let tool_name = name.clone();
                         let request_id_for_task = request_id.clone();
                         let request_key_for_task = request_key.clone();
+                        let state = state.clone();
                         let handle = tokio::spawn(async move {
-                            let terminal = match get_state().await {
+                            let terminal = match get_state(&state).await {
                                 Ok(state) => match tools::handle_tool_call(
                                     state,
                                     &tool_name,
@@ -171,11 +190,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Some(progress_notifier),
                                     Some(context),
                                 ).await {
-                                    Ok(result) => RequestTerminal::RespondWithoutPublish(json!({
-                                        "jsonrpc": "2.0",
-                                        "id": request_id_for_task,
-                                        "result": result
-                                    })),
+                                    Ok(result) => {
+                                        let response = json!({
+                                            "jsonrpc": "2.0",
+                                            "id": request_id_for_task,
+                                            "result": result
+                                        });
+                                        if tool_name == "consult" {
+                                            RequestTerminal::Publish(response)
+                                        } else {
+                                            RequestTerminal::RespondWithoutPublish(response)
+                                        }
+                                    },
                                     Err(err) => RequestTerminal::RespondWithoutPublish(json!({
                                         "jsonrpc": "2.0",
                                         "id": request_id_for_task,
@@ -209,11 +235,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(completion) = completion_rx.recv() => {
                 match completion.terminal {
                     RequestTerminal::Publish(response) => {
+                        let id = response.get("id").cloned();
+                        let response = match executor.publish_or_cancelled(&completion.request_key).await {
+                            Ok(meerkat::surface::PublishOutcome::Published) => response,
+                            Ok(meerkat::surface::PublishOutcome::CancelledBeforePublish) => request_cancelled_response(id),
+                            Err(_) => request_authority_error_response(id),
+                        };
                         if writer.send(response).await.is_err() {
-                            let _ = executor.finish_unpublished(&completion.request_key).await;
                             break Ok(());
                         }
-                        let _ = executor.publish_and_complete(&completion.request_key);
                     }
                     RequestTerminal::RespondWithoutPublish(response) => {
                         let cancel_id = response.get("id").cloned();
@@ -234,6 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             writer_result = &mut writer_task => {
+                writer_joined = true;
                 match writer_result {
                     Ok(Ok(())) => break Ok(()),
                     Ok(Err(_)) | Err(_) => break Ok(()),
@@ -244,12 +275,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     executor.shutdown_and_abort_stragglers().await;
     drop(writer);
-    let _ = writer_task.await;
+    if !writer_joined {
+        let _ = writer_task.await;
+    }
     server_result
 }
 
-async fn get_state() -> Result<&'static ForceState, String> {
-    STATE
+async fn get_state(state: &OnceCell<ForceState>) -> Result<&ForceState, String> {
+    state
         .get_or_try_init(|| async {
             ForceState::new().map_err(|e| format!("State init failed: {e}"))
         })

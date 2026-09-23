@@ -2783,6 +2783,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RunCompleted`
   - anchors: `meerkat_machine`
   - scenarios: `recycle_and_compaction`
+- `CloseStandaloneTurn`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ServiceTurnCommittedRunningToIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

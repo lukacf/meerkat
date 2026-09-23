@@ -10,7 +10,10 @@ use std::collections::BTreeMap;
 use meerkat_mob::definition::*;
 use meerkat_mob::ids::*;
 
-use super::{flow_step, format_context, identity_spawn_policy, mob_definition, resolve_model, turn_driven_profile, Pack};
+use super::{
+    flow_step, identity_spawn_policy, mob_definition, resolve_model, turn_driven_profile, Pack,
+    TASK_TEMPLATE,
+};
 
 pub struct ImplementPack;
 
@@ -30,13 +33,9 @@ impl Pack for ImplementPack {
 
     fn definition(
         &self,
-        task: &str,
-        context: &str,
         overrides: &BTreeMap<String, String>,
         pp: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
-        let ctx = format_context(context);
-
         let mut profiles = BTreeMap::new();
         profiles.insert(
             ProfileName::from("implementer"),
@@ -76,7 +75,7 @@ impl Pack for ImplementPack {
             StepId::from("implement"),
             flow_step(
                 "implementer",
-                format!("Implement the requested change. Include the approach, changed files, and verification performed.\n\n{task}{ctx}"),
+                format!("Implement the requested change. Include the approach, changed files, and verification performed.\n\n{TASK_TEMPLATE}"),
                 &[],
                 600_000,
             ),
@@ -94,7 +93,11 @@ impl Pack for ImplementPack {
         let mut flows = BTreeMap::new();
         flows.insert(
             FlowId::from("main"),
-            FlowSpec::new(Some("Implementation followed by gate review".into()), steps, None),
+            FlowSpec::new(
+                Some("Implementation followed by gate review".into()),
+                steps,
+                None,
+            ),
         );
 
         mob_definition(

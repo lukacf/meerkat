@@ -20,6 +20,7 @@ use crate::trust::TrustStore;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::types::Envelope;
 use crate::types::InboxItem;
+use meerkat_core::time_compat::Instant;
 use meerkat_core::{
     InteractionId, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
     PeerIngressDeliveryContract, PeerIngressDequeueAuthority, PeerIngressDequeueFacts,
@@ -242,7 +243,7 @@ struct OutstandingClaim {
     claim_id: meerkat_core::interaction::PeerIngressClaimId,
     raw_item_id: InteractionId,
     delivery_contract: PeerIngressDeliveryContract,
-    claimed_at: std::time::Instant,
+    claimed_at: Instant,
 }
 
 impl ClassifiedInboxQueue {
@@ -510,7 +511,7 @@ impl ClassifiedInboxQueue {
             claim_id: meerkat_core::interaction::PeerIngressClaimId(uuid::Uuid::new_v4()),
             raw_item_id: entry.raw_item_id,
             delivery_contract: entry.delivery_contract,
-            claimed_at: std::time::Instant::now(),
+            claimed_at: Instant::now(),
         };
         self.outstanding_claim = Some(claim);
         self.claim_acquired_count = self.claim_acquired_count.saturating_add(1);

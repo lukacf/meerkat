@@ -13,6 +13,11 @@ SQLite.
 - `SessionFilter` - query sessions by date, limit, offset
 - Session save/load roundtrip
 
+Standalone automatic saves are best-effort. This example explicitly requires a
+successful save, then fails if loading returns no session, a different identity,
+or a different transcript. Only that readback proves the roundtrip; the second
+LLM turn continues the original in-memory agent and is not process recovery.
+
 ## Storage Architecture
 ```
 Agent ←→ StoreAdapter ←→ SessionStore trait

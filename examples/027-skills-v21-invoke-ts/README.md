@@ -28,3 +28,7 @@ npx tsx examples/027-skills-v21-invoke-ts/main.ts
 The example writes a tiny conventional project-local skill under
 `.work/project/.rkat/skills/`, addresses it with the canonical project-local
 source UUID, and starts the RPC runtime with isolated state rooted there.
+
+The runtime is closed even if its connection handshake fails, and fatal errors
+exit nonzero. The [offline regression checks](../003-hello-meerkat-ts/README.md#offline-regression-checks)
+cover these failure paths and the canonical skill-reference request.

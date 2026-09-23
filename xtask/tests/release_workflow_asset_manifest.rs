@@ -50,13 +50,36 @@ fn release_workflows_use_the_repository_pinned_rust_toolchain() {
         !release.contains("dtolnay/rust-toolchain@stable"),
         "release jobs must not resolve a moving stable compiler"
     );
+    let rust_jobs = [
+        "release_validate_cargo",
+        "release_semver_gate",
+        "build_binaries",
+        "build_binaries_windows_cross",
+        "build_web_sdk_package",
+        "publish_semver_baseline",
+        "publish_registries",
+    ];
     assert_eq!(
         release
             .matches("uses: ./.github/actions/setup-rust-ci")
             .count(),
-        6,
-        "all six Rust-using release jobs, including the semver gate, must use the pinned setup action"
+        rust_jobs.len(),
+        "all Rust-using release jobs, including the semver gate and Windows cross-build, must use the pinned setup action"
     );
+    let workflow = read_workflow(&release_path);
+    for job in rust_jobs {
+        let steps = workflow["jobs"][job]["steps"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("release job {job} must contain steps"));
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|step| step["uses"].as_str() == Some("./.github/actions/setup-rust-ci"))
+                .count(),
+            1,
+            "release job {job} must use the pinned setup action exactly once"
+        );
+    }
 
     let semver_path = release_path.with_file_name("release-semver-readiness.yml");
     let semver = std::fs::read_to_string(&semver_path)

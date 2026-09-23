@@ -29,13 +29,9 @@ impl Pack for BrainstormPack {
 
     fn definition(
         &self,
-        task: &str,
-        context: &str,
         overrides: &BTreeMap<String, String>,
         pp: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
-        let ctx = format_context(context);
-
         // Intentionally diverse default models for different perspectives
         let agents = [
             (
@@ -98,7 +94,7 @@ impl Pack for BrainstormPack {
             },
         );
 
-        let ideate_msg = format!("Generate ideas for:\n\n{task}{ctx}");
+        let ideate_msg = format!("Generate ideas for:\n\n{TASK_TEMPLATE}");
 
         let mut steps = IndexMap::new();
         steps.insert(

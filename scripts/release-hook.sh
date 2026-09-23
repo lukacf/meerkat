@@ -113,6 +113,9 @@ echo "==> Emitting schemas..."
 echo "==> Running SDK codegen..."
 "$PYTHON" "$ROOT/tools/sdk-codegen/generate.py"
 
+echo "==> Refreshing standalone example locks..."
+CARGO="$CARGO" "$PYTHON" "$ROOT/scripts/example-locks.py" refresh --stage --root "$ROOT"
+
 echo "==> Regenerating BuildBuddy BUILD files..."
 make buildbuddy-generate
 

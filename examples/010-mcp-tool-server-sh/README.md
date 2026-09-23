@@ -44,6 +44,11 @@ does not select its provider, and the Anthropic-key guard still applies.
 
 If `rkat` is not on your `PATH`, the script automatically falls back to
 repo-local binaries built by `./scripts/repo-cargo`.
+Fresh turns select `claude-sonnet-4-6` explicitly, matching the Anthropic key.
+`RKAT` can name an executable on `PATH`, or a literal absolute/relative path
+(including spaces). Relative overrides resolve from your invocation directory,
+not from the example's internal working directory. Do not include shell flags
+in `RKAT`.
 
 ## Run
 
@@ -57,11 +62,34 @@ repo-local binaries built by `./scripts/repo-cargo`.
 2. Registers a real project-scoped stdio MCP server
 3. Prints the generated `.work/project/.rkat/mcp.toml`
 4. Verifies the server with `rkat mcp list` and `rkat mcp get`
-5. Runs a live `rkat run --wait-for-mcp --verbose ...` prompt that should call the MCP tools
-6. Prints the cleanup command
+5. Runs a live `rkat run --model claude-sonnet-4-6 --wait-for-mcp --verbose ...` prompt that should call the MCP tools
+6. Prints a shell-escaped cleanup command and removes this run's registration on
+   exit, including on a failed agent turn
 
 Because all roots are redirected into `.work/`, this example does not touch
 your real user-level MCP config or the repo's top-level `.rkat/` state.
+Only a registration successfully created by this invocation is removed; existing
+entries are never overwritten or deleted. Session state is kept for inspection,
+and the script can be retried after a provider failure. If cleanup itself fails,
+run the printed command before retrying.
+
+`--wait-for-mcp` waits for the server handshake, not necessarily for inline tool
+advertisement. With the deferred catalog, the model first uses
+`tool_catalog_search` and `tool_catalog_load`; the actual MCP tools become
+available on the following boundary.
+
+## Offline Regression Tests
+
+```bash
+python3 examples/010-mcp-tool-server-sh/test_examples.py
+```
+
+These exercise malformed MCP requests followed by ping, real CLI registration
+and cleanup in scratch copies, executable path handling, and bounded synthetic
+Anthropic responses. The fixture follows the advertised inline or deferred
+catalog and requires both real MCP results; it never substitutes a fabricated
+incident answer or disables deferred discovery. These are not live-provider
+tests.
 
 ## Why This Example Is Useful
 

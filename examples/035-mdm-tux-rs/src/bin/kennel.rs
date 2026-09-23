@@ -18,8 +18,7 @@ use meerkat_mob::{
     AgentIdentity, MobBackendKind, MobDefinition, MobId, MobRuntimeMode, Profile, ProfileBinding,
     ProfileName, RuntimeBinding, SpawnMemberSpec, ToolConfig,
 };
-use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
-use meerkat_store::{JsonlStore, MemoryBlobStore, SessionStore};
+use meerkat_mob_mcp::MobMcpState;
 use parking_lot::Mutex;
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
@@ -56,16 +55,33 @@ struct TuxRecord {
     tx: mpsc::UnboundedSender<SignedKennelEnvelope>,
 }
 
-#[derive(Default)]
 struct KennelState {
     targets: HashMap<String, TargetRecord>,
     tuxes: HashMap<String, TuxRecord>,
+    broker_incarnation: String,
+    retired_targets: Vec<TargetRecord>,
+    peer_updates: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Default for KennelState {
+    fn default() -> Self {
+        Self {
+            targets: HashMap::new(),
+            tuxes: HashMap::new(),
+            broker_incarnation: uuid::Uuid::new_v4().to_string(),
+            retired_targets: Vec::new(),
+            peer_updates: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    meerkat_runtime::host_stack::run_host("mdm-kennel", run)?
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
         .init();
@@ -140,11 +156,14 @@ async fn main() -> anyhow::Result<()> {
         allow_external_unauthenticated: false,
         pairing_password: None,
     };
-    let mut hive_comms_runtime = meerkat_comms::CommsRuntime::new(hive_comms_config)
+    let session_dir = data_dir.join("hive/sessions");
+    let home = dirs::home_dir();
+    let hive_config = meerkat_core::Config::load_from(&session_dir, home.as_deref())
         .await
-        .map_err(|e| anyhow::anyhow!("hive comms runtime: {e}"))?;
-    hive_comms_runtime.set_blob_store(Arc::new(MemoryBlobStore::new()));
-    let hive_comms_runtime = Arc::new(hive_comms_runtime);
+        .unwrap_or_default();
+    let host = mdm_tux::runtime::ManagedRpcHost::open(&session_dir, hive_config, hive_comms_config)
+        .await?;
+    let hive_comms_runtime = host.comms.clone();
     let hive_comms_port = {
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
         let local_addr = listener.local_addr()?;
@@ -161,68 +180,10 @@ async fn main() -> anyhow::Result<()> {
         local_addr.port()
     };
 
-    // ── Hive agent: session directory & persistence ─────────────────────────
-    let hive_dir = data_dir.join("hive");
-    tokio::fs::create_dir_all(&hive_dir).await?;
-    let session_dir = hive_dir.join("sessions");
-    tokio::fs::create_dir_all(&session_dir).await?;
-
-    // ── Hive agent: AgentFactory + Config ───────────────────────────────────
-    let hive_factory = meerkat::AgentFactory::new(&session_dir)
-        .shell(true)
-        .builtins(true)
-        .comms(true)
-        .schedule(true)
-        .mob(true)
-        .with_comms_runtime(Arc::clone(&hive_comms_runtime));
-    let home = dirs::home_dir();
-    let hive_config = meerkat_core::Config::load_from(&session_dir, home.as_deref())
-        .await
-        .unwrap_or_default();
-
-    // ── Hive agent: persistence stores ──────────────────────────────────────
-    let hive_schedule_store = Arc::new(meerkat::SqliteScheduleStore::open(
-        session_dir.join("hive_schedule.sqlite"),
-    )?) as Arc<dyn meerkat::ScheduleStore>;
-    let hive_jsonl = Arc::new(JsonlStore::new(session_dir.to_path_buf()));
-    hive_jsonl.init().await?;
-    let hive_persistence = meerkat::PersistenceBundle::new_with_schedule_store(
-        hive_jsonl as Arc<dyn SessionStore>,
-        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
-        Arc::new(MemoryBlobStore::new()),
-        hive_schedule_store,
-    );
-
-    // ── Hive agent: SessionRuntime with mob tools ───────────────────────────
-    let hive_config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
-        meerkat_core::MemoryConfigStore::new(hive_config.clone(), meerkat_models::canonical()),
-    );
-    // RPC-host: this binary inline-hosts a TCP JSON-RPC server via meerkat_rpc::serve_tcp.
-    // SessionRuntime + NotificationSink (carrying RpcNotification mpsc::Sender) +
-    // serve_tcp form the canonical RPC-host triad. Lifting these would require an
-    // alternate transport stack; this surface legitimately owns the RPC-host role.
-    let hive_runtime = meerkat_rpc::session_runtime::SessionRuntime::new(
-        hive_factory,
-        hive_config,
-        1024,
-        hive_persistence,
-        meerkat_rpc::router::NotificationSink::noop(),
-    );
-    let hive_mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
-        hive_runtime.session_service(),
-        Some(hive_runtime.runtime_adapter()),
-        meerkat_mob::MobControlPrincipal::Owner,
-    ));
+    let hive_config_store = host.config_store.clone();
+    let hive_runtime = host.runtime.clone();
+    let hive_mob_state = hive_runtime.mob_state().context("managed mob state")?;
     let hive_mob_state_for_kennel = Arc::clone(&hive_mob_state);
-    hive_runtime.set_mob_tools(Arc::new(AgentMobToolSurfaceFactory::new(Arc::clone(
-        &hive_mob_state,
-    ))));
-    hive_runtime.set_mob_state(hive_mob_state);
-    hive_runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
-        Arc::clone(&hive_config_store),
-        session_dir.join("hive_config_state.json"),
-    )));
-    let hive_runtime = Arc::new(hive_runtime);
 
     // ── Hive agent: RPC TCP server ──────────────────────────────────────────
     let hive_rpc_port: u16 = find_flag(&args, "--hive-rpc-port")
@@ -254,58 +215,41 @@ async fn main() -> anyhow::Result<()> {
     // ── Create hive session directly on SessionRuntime ────────────────────
     let hive_session_id: Option<String> = {
         // Check for existing sessions (resume on restart)
-        let existing = hive_runtime
-            .list_sessions(Default::default())
-            .await
-            .unwrap_or_default();
-        let resumed_id = existing
-            .into_iter()
-            .next()
-            .map(|s| s.session_id.to_string());
-        if let Some(ref sid) = resumed_id {
-            eprintln!("[kennel] hive session resumed: {sid}");
-            resumed_id
-        } else {
-            let mut build = meerkat::AgentBuildConfig::new(hive_model.clone());
-            build.provider = hive_provider.map(|provider| match provider {
-                ProviderKind::Openai => meerkat_core::Provider::OpenAI,
-                ProviderKind::Anthropic => meerkat_core::Provider::Anthropic,
-                ProviderKind::Gemini => meerkat_core::Provider::Gemini,
-            });
-            build.system_prompt = meerkat::SystemPromptOverride::Set(
-                "You are the hive orchestrator for a fleet of managed target agents.\n\
+        let mut build = meerkat::AgentBuildConfig::new(hive_model.clone());
+        build.provider = hive_provider.map(|provider| match provider {
+            ProviderKind::Openai => meerkat_core::Provider::OpenAI,
+            ProviderKind::Anthropic => meerkat_core::Provider::Anthropic,
+            ProviderKind::Gemini => meerkat_core::Provider::Gemini,
+        });
+        build.system_prompt = meerkat::SystemPromptOverride::Set(
+            "You are the hive orchestrator for a fleet of managed target agents.\n\
                  Use the 'peers' tool to discover which targets are connected.\n\
                  Use 'send_request' to dispatch tasks to targets and collect responses.\n\
                  Use 'send_message' for fire-and-forget notifications.\n\
                  Always use 'peers' as the source of truth for available targets \
                  before dispatching work."
-                    .to_string(),
-            );
-            build.override_builtins = meerkat_core::ToolCategoryOverride::Enable;
-            build.override_shell = meerkat_core::ToolCategoryOverride::Enable;
-            build.override_mob = meerkat_core::ToolCategoryOverride::Enable;
-            match hive_runtime
-                .create_session(build, None, None, Vec::new())
-                .await
-            {
-                Ok(sid) => {
-                    let sid_str = sid.to_string();
-                    eprintln!("[kennel] hive session created: {sid_str}");
-                    // Verify the session is accessible
-                    let sessions = hive_runtime
-                        .list_sessions(Default::default())
-                        .await
-                        .unwrap_or_default();
-                    eprintln!("[kennel] sessions after create: {}", sessions.len());
-                    for s in &sessions {
-                        eprintln!("[kennel]   session: {} state={:?}", s.session_id, s.state);
-                    }
-                    Some(sid_str)
+                .to_string(),
+        );
+        build.override_builtins = meerkat_core::ToolCategoryOverride::Enable;
+        build.override_shell = meerkat_core::ToolCategoryOverride::Enable;
+        build.override_mob = meerkat_core::ToolCategoryOverride::Enable;
+        match host.managed_session("hive", build, Vec::new()).await {
+            Ok(sid) => {
+                let sid_str = sid.to_string();
+                eprintln!("[kennel] hive session ready: {sid_str}");
+                // Verify the session is accessible
+                let sessions = hive_runtime
+                    .list_sessions(Default::default())
+                    .await
+                    .unwrap_or_default();
+                eprintln!("[kennel] sessions after create: {}", sessions.len());
+                for s in &sessions {
+                    eprintln!("[kennel]   session: {} state={:?}", s.session_id, s.state);
                 }
-                Err(e) => {
-                    eprintln!("[kennel] failed to create hive session: {e:?}");
-                    None
-                }
+                Some(sid_str)
+            }
+            Err(e) => {
+                return Err(e.context("create or resume managed hive session"));
             }
         }
     };
@@ -422,6 +366,10 @@ async fn main() -> anyhow::Result<()> {
         state.clone(),
         keypair.clone(),
         kennel_id.clone(),
+        hive_comms_trust.clone(),
+        hive_mob_id
+            .clone()
+            .map(|id| (hive_mob_state_for_kennel.clone(), id)),
     ));
 
     loop {
@@ -442,13 +390,15 @@ async fn main() -> anyhow::Result<()> {
                 state,
                 keypair,
                 kennel_id,
-                hive_rpc_addr,
-                hive_comms_addr_c,
-                hive_sid,
-                mob_state,
-                mob_id,
-                hive_comms_trust,
-                hive_comms,
+                HiveConnectionContext {
+                    hive_rpc_addr,
+                    hive_comms_addr: hive_comms_addr_c,
+                    hive_session_id: hive_sid,
+                    hive_mob_state: mob_state,
+                    hive_mob_id: mob_id,
+                    hive_comms_trust,
+                    hive_comms_runtime: hive_comms,
+                },
             )
             .await
             {
@@ -465,11 +415,7 @@ enum SessionKind {
     Tux(String),
 }
 
-async fn handle_connection(
-    stream: TcpStream,
-    state: Arc<Mutex<KennelState>>,
-    keypair: Arc<meerkat_comms::identity::Keypair>,
-    kennel_id: String,
+struct HiveConnectionContext {
     hive_rpc_addr: String,
     hive_comms_addr: String,
     hive_session_id: Option<String>,
@@ -477,28 +423,65 @@ async fn handle_connection(
     hive_mob_id: Option<MobId>,
     hive_comms_trust: Option<Arc<ExampleGeneratedCommsTrustRouter>>,
     hive_comms_runtime: Arc<meerkat_comms::CommsRuntime>,
+}
+
+async fn handle_connection(
+    stream: TcpStream,
+    state: Arc<Mutex<KennelState>>,
+    keypair: Arc<meerkat_comms::identity::Keypair>,
+    kennel_id: String,
+    hive: HiveConnectionContext,
 ) -> anyhow::Result<()> {
+    let HiveConnectionContext {
+        hive_rpc_addr,
+        hive_comms_addr,
+        hive_session_id,
+        hive_mob_state,
+        hive_mob_id,
+        hive_comms_trust,
+        hive_comms_runtime,
+    } = hive;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let (tx, mut rx) = mpsc::unbounded_channel::<SignedKennelEnvelope>();
 
+    // A failed write is a failed connection. On Linux a peer's RST surfaces on
+    // the next write (the post-ack broadcast here) and the following read then
+    // sees a plain EOF; on macOS the read itself fails with ECONNRESET. Carry
+    // the write failure into the handler result so both paths return Err.
     let writer_task = tokio::spawn(async move {
         while let Some(env) = rx.recv().await {
             if let Err(e) = write_envelope(&mut writer, &env).await {
                 eprintln!("[kennel] write error: {e}");
-                break;
+                return Err(e.context("kennel connection write failed"));
             }
         }
+        Ok::<(), anyhow::Error>(())
     });
 
     let mut session_kind: Option<SessionKind> = None;
-
-    loop {
+    let peer_updates = state.lock().peer_updates.clone();
+    let result: anyhow::Result<()> = async {
+      loop {
         let Some(env) = read_envelope(&mut reader).await? else {
             break;
         };
         let signer = verify_envelope(&env)?;
         let signer_id = signer.to_peer_id().to_string();
+
+        if let Some(registered) = &session_kind {
+            match &env.payload {
+                KennelPayload::TargetRegister { target_id, .. } => anyhow::ensure!(
+                    matches!(registered, SessionKind::Target(id) if id == target_id),
+                    "connection cannot change its registered participant"
+                ),
+                KennelPayload::TuxRegister { tux_id, .. } => anyhow::ensure!(
+                    matches!(registered, SessionKind::Tux(id) if id == tux_id),
+                    "connection cannot change its registered participant"
+                ),
+                _ => {}
+            }
+        }
 
         match &env.payload {
             KennelPayload::TargetRegister {
@@ -511,6 +494,7 @@ async fn handle_connection(
                 capabilities,
                 attached_tux_id,
             } => {
+                let _peer_guard = peer_updates.lock().await;
                 anyhow::ensure!(target_id == &signer_id, "target signer_id mismatch");
                 anyhow::ensure!(pubkey == &env.signer_id, "target pubkey mismatch");
                 let target_pubkey = meerkat_comms::identity::PubKey::from_pubkey_string(pubkey)
@@ -534,13 +518,14 @@ async fn handle_connection(
                     &kennel_id,
                 )? {
                     RegisterTargetOutcome::Registered { post_ack_effects } => {
+                        session_kind = Some(SessionKind::Target(target_id.clone()));
                         let Some(hive_comms_trust) = hive_comms_trust.as_ref() else {
                             anyhow::bail!(
                                 "generated hive comms trust authority unavailable for target registration"
                             );
                         };
                         hive_comms_trust
-                            .add_trusted_peer(&name, target_pubkey, &direct_addr)
+                            .add_trusted_peer(name, target_pubkey, direct_addr)
                             .await?;
 
                         let reply = build_signed_envelope(
@@ -564,7 +549,6 @@ async fn handle_connection(
                                 &kennel_id,
                             );
                         }
-                        session_kind = Some(SessionKind::Target(target_id.clone()));
 
                         // Spawn target as external mob member in the hive fleet.
                         // RuntimeBinding::External carries the real target identity
@@ -676,6 +660,7 @@ async fn handle_connection(
                     &keypair,
                     &kennel_id,
                     KennelPayload::TuxRegistered {
+                        broker_incarnation: state.lock().broker_incarnation.clone(),
                         hive_rpc_addr: Some(hive_rpc_addr.clone()),
                         hive_session_id: hive_session_id.clone(),
                     },
@@ -724,9 +709,16 @@ async fn handle_connection(
                 let reply = build_signed_envelope(
                     &keypair,
                     &kennel_id,
-                    KennelPayload::ClaimGranted { claims },
+                    KennelPayload::ClaimGranted { claims: claims.clone() },
                 )?;
                 let _ = tx.send(reply);
+                let refused_target_ids = target_ids.iter()
+                    .filter(|id| !claims.iter().any(|claim| &claim.target_id == *id))
+                    .cloned().collect();
+                let _ = tx.send(build_signed_envelope(&keypair, &kennel_id,
+                    KennelPayload::ClaimRequestCompleted {
+                        in_reply_to: env.message_id.clone(), refused_target_ids,
+                    })?);
             }
 
             KennelPayload::ClaimAck { lease_ids } => {
@@ -821,45 +813,54 @@ async fn handle_connection(
             KennelPayload::TuxHeartbeat | KennelPayload::TargetHeartbeat => {}
             _ => {}
         }
-    }
+      }
+      Ok(())
+    }.await;
 
     writer_task.abort();
+    let write_result = match writer_task.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(err),
+        Err(join) if join.is_cancelled() => Ok(()),
+        Err(join) => Err(anyhow::anyhow!("kennel writer task failed: {join}")),
+    };
+    let result = result.and(write_result);
 
+    let _peer_guard = peer_updates.lock().await;
     if let Some(kind) = session_kind {
-        // Look up the target name before taking the lock for mob retire.
-        let target_name_for_retire = match &kind {
-            SessionKind::Target(target_id) => {
-                let guard = state.lock();
-                guard.targets.get(target_id).map(|t| t.name.clone())
-            }
-            _ => None,
-        };
-
         {
             let mut guard = state.lock();
             match &kind {
                 SessionKind::Target(target_id) => {
-                    handle_target_disconnect(&mut guard, &keypair, &kennel_id, target_id);
+                    if guard
+                        .targets
+                        .get(target_id)
+                        .is_some_and(|record| record.tx.same_channel(&tx))
+                    {
+                        handle_target_disconnect(&mut guard, &keypair, &kennel_id, target_id);
+                    }
                 }
                 SessionKind::Tux(tux_id) => {
-                    handle_tux_disconnect(&mut guard, &keypair, &kennel_id, tux_id);
+                    if guard
+                        .tuxes
+                        .get(tux_id)
+                        .is_some_and(|record| record.tx.same_channel(&tx))
+                    {
+                        handle_tux_disconnect(&mut guard, &keypair, &kennel_id, tux_id);
+                    }
                 }
-            }
-        }
-
-        // Retire the target from the hive mob (async, outside the lock).
-        if let (SessionKind::Target(_), Some(mob_id), Some(name)) =
-            (&kind, &hive_mob_id, target_name_for_retire)
-        {
-            let member_identity = AgentIdentity::from(name.clone());
-            match hive_mob_state.mob_retire(mob_id, member_identity).await {
-                Ok(()) => eprintln!("[kennel] retired {name} from hive mob"),
-                Err(e) => eprintln!("[kennel] failed to retire {name} from hive mob: {e}"),
             }
         }
     }
-
-    Ok(())
+    let cleanup = reconcile_retired_targets(
+        &state,
+        hive_comms_trust.as_deref(),
+        &keypair,
+        &kennel_id,
+        hive_mob_id.as_ref().map(|id| (&hive_mob_state, id)),
+    )
+    .await;
+    result.and(cleanup)
 }
 
 // ── Machine-backed operations ────────────────────────────────────────────────
@@ -927,13 +928,6 @@ fn register_target(
                 .targets
                 .get_mut(&target_id)
                 .expect("checked contains_key");
-            existing.name = name;
-            existing.pubkey = pubkey;
-            existing.direct_addr = direct_addr;
-            existing.rpc_addr = rpc_addr;
-            existing.labels = labels;
-            existing.capabilities = capabilities;
-            existing.tx = tx;
             let (new_state, effects) = kennel_target_control::transition(
                 existing.control_state.clone(),
                 ControlEvent::Registered {
@@ -943,6 +937,13 @@ fn register_target(
                 },
             )
             .map_err(|e| anyhow::anyhow!("target re-register transition: {e}"))?;
+            existing.name = name;
+            existing.pubkey = pubkey;
+            existing.direct_addr = direct_addr;
+            existing.rpc_addr = rpc_addr;
+            existing.labels = labels;
+            existing.capabilities = capabilities;
+            existing.tx = tx;
             existing.control_state = new_state;
             effects_to_dispatch = effects;
         }
@@ -1108,6 +1109,7 @@ fn handle_claim_ack(
         let event = ControlEvent::ClaimAcked {
             lease_id: lease_id.clone(),
             tux_id: tux_id.to_string(),
+            now_ms: chrono::Utc::now().timestamp_millis(),
         };
         let Ok((new_state, effects)) =
             kennel_target_control::transition(target.control_state.clone(), event)
@@ -1139,6 +1141,7 @@ fn handle_renew_leases(
             lease_id: lease_id.clone(),
             tux_id: tux_id.to_string(),
             new_expires_at_ms,
+            now_ms: chrono::Utc::now().timestamp_millis(),
         };
         let Ok((new_state, _effects)) =
             kennel_target_control::transition(target.control_state.clone(), event)
@@ -1395,7 +1398,9 @@ fn dispatch_effects(
             ControlEffect::Lease(kennel_lease::Effect::DropTargetRecord {
                 target_id: effect_tid,
             }) => {
-                state.targets.remove(effect_tid);
+                if let Some(record) = state.targets.remove(effect_tid) {
+                    state.retired_targets.push(record);
+                }
             }
         }
     }
@@ -1407,38 +1412,106 @@ async fn run_janitor(
     state: Arc<Mutex<KennelState>>,
     keypair: Arc<meerkat_comms::identity::Keypair>,
     kennel_id: String,
+    hive_comms_trust: Option<Arc<ExampleGeneratedCommsTrustRouter>>,
+    hive_mob: Option<(Arc<MobMcpState>, MobId)>,
 ) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let mut guard = state.lock();
-
-        // Collect target IDs that need tick processing (avoid borrow issues)
-        let target_ids: Vec<String> = guard.targets.keys().cloned().collect();
-        for target_id in target_ids {
-            apply_target_event(
-                &mut guard,
-                &target_id,
-                ControlEvent::Tick { now_ms },
-                &keypair,
-                &kennel_id,
-            );
-        }
-
-        // Remove phantom targets: disconnected records that expired back to
-        // Available. These have a closed tx (dead TCP connection) and must
-        // not appear in listings or accept new claims.
-        guard.targets.retain(|_, target| {
-            if matches!(
-                target.control_state.lease,
-                kennel_lease::State::Available { .. }
-            ) && target.tx.is_closed()
-            {
-                false // remove phantom
-            } else {
-                true
+        let peer_updates = state.lock().peer_updates.clone();
+        let _peer_guard = peer_updates.lock().await;
+        {
+            let mut guard = state.lock();
+            let target_ids: Vec<String> = guard.targets.keys().cloned().collect();
+            for target_id in target_ids {
+                apply_target_event(
+                    &mut guard,
+                    &target_id,
+                    ControlEvent::Tick { now_ms },
+                    &keypair,
+                    &kennel_id,
+                );
             }
-        });
+        }
+        if let Err(error) = reconcile_retired_targets(
+            &state,
+            hive_comms_trust.as_deref(),
+            &keypair,
+            &kennel_id,
+            hive_mob.as_ref().map(|(state, id)| (state, id)),
+        )
+        .await
+        {
+            eprintln!("[kennel] peer retirement failed (will retry): {error}");
+        }
+    }
+}
+
+// Call under peer_updates: registration and asynchronous trust removal must not
+// overtake each other. Failed removals remain obligations for the janitor.
+async fn reconcile_retired_targets(
+    state: &Mutex<KennelState>,
+    trust: Option<&ExampleGeneratedCommsTrustRouter>,
+    keypair: &meerkat_comms::identity::Keypair,
+    kennel_id: &str,
+    hive_mob: Option<(&Arc<MobMcpState>, &MobId)>,
+) -> anyhow::Result<()> {
+    loop {
+        let Some(retired) = state.lock().retired_targets.last().cloned() else {
+            return Ok(());
+        };
+        if !state.lock().targets.contains_key(&retired.target_id) {
+            let trust = trust.context("hive trust owner unavailable during retirement")?;
+            let peer_id =
+                meerkat_comms::identity::PubKey::from_pubkey_string(&retired.pubkey)?.to_peer_id();
+            trust.remove_trusted_peer(&peer_id).await?;
+            if let Some((mob_state, mob_id)) = hive_mob
+                && let Err(error) = mob_state
+                    .mob_retire(mob_id, AgentIdentity::from(retired.name.clone()))
+                    .await
+            {
+                eprintln!(
+                    "[kennel] experimental mob retirement {}: {error}",
+                    retired.name
+                );
+            }
+            let envelope = build_signed_envelope(
+                keypair,
+                kennel_id,
+                KennelPayload::PeerUnwire {
+                    peer_id: retired.pubkey,
+                },
+            )?;
+            for survivor in state.lock().targets.values() {
+                let _ = survivor.tx.send(envelope.clone());
+            }
+        }
+        state.lock().retired_targets.pop();
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn find_flag(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
+}
+
+/// Resolve the externally-reachable IP for this host.
+///
+/// If `listen_host` is a wildcard (`0.0.0.0` or `::`), probe the default
+/// route via a non-sending UDP connect to discover the LAN-facing IP.
+/// Otherwise return `listen_host` as-is.
+fn resolve_advertise_ip(listen_host: &str) -> anyhow::Result<String> {
+    if listen_host == "0.0.0.0" || listen_host == "::" || listen_host.is_empty() {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("bind UDP probe socket")?;
+        // Connect to a well-known external address (doesn't send any data).
+        sock.connect("8.8.8.8:80")
+            .context("UDP probe to discover local IP")?;
+        Ok(sock.local_addr()?.ip().to_string())
+    } else {
+        Ok(listen_host.to_string())
     }
 }
 
@@ -1447,6 +1520,304 @@ mod tests {
     use super::*;
     use mdm_tux::machines::kennel_lease::State as LeaseState;
     use meerkat_comms::identity::Keypair;
+
+    #[test]
+    fn teardown_is_unconditional_incarnation_fenced_and_unwires_retired_peers() {
+        meerkat_runtime::host_stack::run_host("kennel-cleanup-test", || async {
+            use tokio::io::AsyncWriteExt;
+            let root = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
+            let comms = meerkat_comms::ResolvedCommsConfig {
+                enabled: true,
+                name: "hive".into(),
+                inproc_namespace: None,
+                listen_tcp: None,
+                listen_uds: None,
+                advertise_address: None,
+                event_listen_tcp: None,
+                #[cfg(unix)]
+                event_listen_uds: None,
+                identity_dir: root.path().join("identity"),
+                trusted_peers_path: root.path().join("peers.json"),
+                comms_config: Default::default(),
+                auth: Default::default(),
+                require_peer_auth: true,
+                allow_external_unauthenticated: false,
+                pairing_password: None,
+            };
+            let host =
+                mdm_tux::runtime::ManagedRpcHost::open(root.path(), Default::default(), comms)
+                    .await
+                    .unwrap();
+            host.runtime.set_default_llm_client(Some(Arc::new(
+                meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI),
+            )));
+            let mut build = meerkat::AgentBuildConfig::new("gpt-5.5");
+            build.provider = Some(meerkat_core::Provider::OpenAI);
+            let session_id = host
+                .managed_session("hive", build, Vec::new())
+                .await
+                .unwrap();
+            let trust = Arc::new(ExampleGeneratedCommsTrustRouter::new(
+                host.runtime.runtime_adapter(),
+                session_id.clone(),
+                host.comms.clone(),
+            ));
+            let state = Arc::new(Mutex::new(KennelState::default()));
+            let kennel_key = Arc::new(Keypair::generate());
+            let target_key = Keypair::generate();
+            let peer_key = Keypair::generate();
+            let mut clients = Vec::new();
+            let mut tasks = Vec::new();
+            for (name, key) in [
+                ("target", &target_key),
+                ("survivor", &peer_key),
+                ("target", &target_key),
+            ] {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let client = TcpStream::connect(listener.local_addr().unwrap())
+                    .await
+                    .unwrap();
+                let (server, _) = listener.accept().await.unwrap();
+                tasks.push(tokio::spawn(handle_connection(
+                    server,
+                    state.clone(),
+                    kennel_key.clone(),
+                    "kennel".into(),
+                    HiveConnectionContext {
+                        hive_rpc_addr: "tcp://127.0.0.1:1".into(),
+                        hive_comms_addr: "tcp://127.0.0.1:2".into(),
+                        hive_session_id: Some(session_id.to_string()),
+                        hive_mob_state: host.runtime.mob_state().unwrap(),
+                        hive_mob_id: None,
+                        hive_comms_trust: Some(trust.clone()),
+                        hive_comms_runtime: host.comms.clone(),
+                    },
+                )));
+                let (reader, mut writer) = client.into_split();
+                let mut reader = BufReader::new(reader);
+                write_envelope(
+                    &mut writer,
+                    &build_signed_envelope(
+                        key,
+                        "",
+                        KennelPayload::TargetRegister {
+                            target_id: key.public_key().to_peer_id().to_string(),
+                            name: name.into(),
+                            pubkey: key.public_key().to_pubkey_string(),
+                            direct_addr: "tcp://127.0.0.1:3".into(),
+                            rpc_addr: None,
+                            labels: Default::default(),
+                            capabilities: Default::default(),
+                            attached_tux_id: None,
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+                let reply = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    read_envelope(&mut reader),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let Some(reply) = reply else {
+                    panic!(
+                        "registration closed: {:?}",
+                        tasks.pop().unwrap().await.unwrap()
+                    );
+                };
+                assert!(matches!(
+                    reply.payload,
+                    KennelPayload::TargetRegistered { .. }
+                ));
+                clients.push((reader, writer));
+            }
+            let registration_switch_checks = async {
+            for (index, (first_target, second_target, change_key)) in [
+                (true, true, true),
+                (false, false, true),
+                (true, false, false),
+                (false, true, false),
+                (true, true, false),
+                (false, false, false),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let first_key = Keypair::generate();
+                let other_key = Keypair::generate();
+                let second_key = if change_key { &other_key } else { &first_key };
+                let registration = |key: &Keypair, target: bool| {
+                    if target {
+                        KennelPayload::TargetRegister {
+                            target_id: key.public_key().to_peer_id().to_string(),
+                            name: format!("registration-{index}"),
+                            pubkey: key.public_key().to_pubkey_string(),
+                            direct_addr: "tcp://127.0.0.1:3".into(),
+                            rpc_addr: None,
+                            labels: Default::default(),
+                            capabilities: Default::default(),
+                            attached_tux_id: None,
+                        }
+                    } else {
+                        KennelPayload::TuxRegister {
+                            tux_id: key.public_key().to_peer_id().to_string(),
+                            pubkey: key.public_key().to_pubkey_string(),
+                            attached_target_ids: Vec::new(),
+                        }
+                    }
+                };
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let connection = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+                let (socket, _) = listener.accept().await.unwrap();
+                let task = tokio::spawn(handle_connection(
+                    socket, state.clone(), kennel_key.clone(), "kennel".into(),
+                    HiveConnectionContext {
+                        hive_rpc_addr: "tcp://127.0.0.1:1".into(),
+                        hive_comms_addr: "tcp://127.0.0.1:2".into(),
+                        hive_session_id: Some(session_id.to_string()),
+                        hive_mob_state: host.runtime.mob_state().unwrap(),
+                        hive_mob_id: None,
+                        hive_comms_trust: Some(trust.clone()),
+                        hive_comms_runtime: host.comms.clone(),
+                    },
+                ));
+                let (reader, mut writer) = connection.into_split();
+                let mut reader = BufReader::new(reader);
+                for (attempt, (key, target)) in
+                    [(&first_key, first_target), (second_key, second_target)].into_iter().enumerate()
+                {
+                    write_envelope(&mut writer, &build_signed_envelope(
+                        key, "", registration(key, target),
+                    ).unwrap()).await.unwrap();
+                    if attempt == 1 && (change_key || first_target != second_target) {
+                        break;
+                    }
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        loop {
+                            let reply = read_envelope(&mut reader).await.unwrap().unwrap();
+                            if matches!(reply.payload, KennelPayload::TargetRegistered { .. })
+                                || matches!(reply.payload, KennelPayload::TuxRegistered { .. })
+                            {
+                                break;
+                            }
+                        }
+                    }).await.unwrap();
+                }
+                let rejected = change_key || first_target != second_target;
+                if !rejected {
+                    writer.shutdown().await.unwrap();
+                }
+                let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+                    .await.unwrap().unwrap();
+                assert_eq!(result.is_err(), rejected, "registration case {index}: {result:?}");
+                for key in [&first_key, second_key] {
+                    let id = key.public_key().to_peer_id().to_string();
+                    assert!(!state.lock().targets.contains_key(&id));
+                    assert!(!state.lock().tuxes.contains_key(&id));
+                    assert!(!host.comms.trusted_peers_shared().contains(&key.public_key().to_peer_id()));
+                }
+            }
+            };
+            // Invalid input on the obsolete socket must not disconnect the replacement.
+            clients[0].1.write_all(b"not-json\n").await.unwrap();
+            assert!(tasks.remove(0).await.unwrap().is_err());
+            let id = target_key.public_key().to_peer_id().to_string();
+            assert!(state.lock().targets.contains_key(&id));
+            assert_eq!(
+                host.runtime
+                    .runtime_adapter()
+                    .direct_peer_endpoints(&session_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                2
+            );
+            assert!(host.comms.trusted_peers_shared().contains(&target_key.public_key().to_peer_id()));
+
+            // Signature verification failure on the current socket still retires it.
+            let mut invalid =
+                build_signed_envelope(&target_key, "", KennelPayload::TargetHeartbeat).unwrap();
+            invalid.signature = "invalid".into();
+            write_envelope(&mut clients[2].1, &invalid).await.unwrap();
+            assert!(tasks.pop().unwrap().await.unwrap().is_err());
+            assert!(!state.lock().targets.contains_key(&id));
+            assert_eq!(
+                host.runtime
+                    .runtime_adapter()
+                    .direct_peer_endpoints(&session_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(!host.comms.trusted_peers_shared().contains(&target_key.public_key().to_peer_id()));
+            loop {
+                let envelope = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    read_envelope(&mut clients[1].0),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+                if let KennelPayload::PeerUnwire { peer_id } = envelope.payload {
+                    assert_eq!(peer_id, target_key.public_key().to_pubkey_string());
+                    break;
+                }
+            }
+            // Re-enroll the retired name with a new identity, then fail its
+            // transport with a real TCP RST rather than a protocol error.
+            let replacement_key = Keypair::generate();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let envelope = build_signed_envelope(
+                &replacement_key, "",
+                KennelPayload::TargetRegister {
+                    target_id: replacement_key.public_key().to_peer_id().to_string(),
+                    name: "target".into(),
+                    pubkey: replacement_key.public_key().to_pubkey_string(),
+                    direct_addr: "tcp://127.0.0.1:4".into(), rpc_addr: None,
+                    labels: Default::default(), capabilities: Default::default(),
+                    attached_tux_id: None,
+                },
+            ).unwrap();
+            let mut resetter = tokio::process::Command::new("python3")
+                .args(["-c", "import socket,struct,sys\ns=socket.create_connection(('127.0.0.1',int(sys.argv[1])))\ns.sendall((sys.argv[2]+'\\n').encode())\nreply=b''\nwhile b'\\n' not in reply: reply+=s.recv(4096)\ns.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0))\ns.close()"])
+                .arg(listener.local_addr().unwrap().port().to_string())
+                .arg(serde_json::to_string(&envelope).unwrap())
+                .kill_on_drop(true).spawn().unwrap();
+            let (server, _) = listener.accept().await.unwrap();
+            let reset_handler = tokio::spawn(handle_connection(
+                server, state.clone(), kennel_key.clone(), "kennel".into(),
+                HiveConnectionContext {
+                    hive_rpc_addr: "tcp://127.0.0.1:1".into(),
+                    hive_comms_addr: "tcp://127.0.0.1:2".into(),
+                    hive_session_id: Some(session_id.to_string()),
+                    hive_mob_state: host.runtime.mob_state().unwrap(),
+                    hive_mob_id: None,
+                    hive_comms_trust: Some(trust.clone()),
+                    hive_comms_runtime: host.comms.clone(),
+                },
+            ));
+            assert!(resetter.wait().await.unwrap().success());
+            assert!(tokio::time::timeout(std::time::Duration::from_secs(10), reset_handler)
+                .await.unwrap().unwrap().is_err());
+            assert_eq!(state.lock().targets.len(), 1);
+            assert!(!host.comms.trusted_peers_shared().contains(&replacement_key.public_key().to_peer_id()));
+            for (_, writer) in &mut clients {
+                let _ = writer.shutdown().await;
+            }
+            for task in tasks {
+                task.await.unwrap().unwrap();
+            }
+            drop(clients);
+            registration_switch_checks.await;
+            host.shutdown().await.unwrap();
+        })
+        .unwrap();
+    }
 
     #[test]
     fn claim_ack_transitions_directly_to_claimed() {
@@ -1472,8 +1843,8 @@ mod tests {
                         target_id: "target-1".into(),
                         lease_id: "lease-1".into(),
                         tux_id: "tux-1".into(),
-                        expires_at_ms: 10_000,
-                        ack_deadline_ms: 5_000,
+                        expires_at_ms: chrono::Utc::now().timestamp_millis() + 10_000,
+                        ack_deadline_ms: chrono::Utc::now().timestamp_millis() + 5_000,
                     },
                 },
             },
@@ -1504,30 +1875,5 @@ mod tests {
                 ..
             }) if target_id == "target-1" && lease_id == "lease-1" && tux_id == "tux-1"
         ));
-    }
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-fn find_flag(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1).cloned())
-}
-
-/// Resolve the externally-reachable IP for this host.
-///
-/// If `listen_host` is a wildcard (`0.0.0.0` or `::`), probe the default
-/// route via a non-sending UDP connect to discover the LAN-facing IP.
-/// Otherwise return `listen_host` as-is.
-fn resolve_advertise_ip(listen_host: &str) -> anyhow::Result<String> {
-    if listen_host == "0.0.0.0" || listen_host == "::" || listen_host.is_empty() {
-        let sock = std::net::UdpSocket::bind("0.0.0.0:0").context("bind UDP probe socket")?;
-        // Connect to a well-known external address (doesn't send any data).
-        sock.connect("8.8.8.8:80")
-            .context("UDP probe to discover local IP")?;
-        Ok(sock.local_addr()?.ip().to_string())
-    } else {
-        Ok(listen_host.to_string())
     }
 }

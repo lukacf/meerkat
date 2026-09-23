@@ -16,7 +16,7 @@ sessions.
 
 ## Architecture
 ```
-App indexes a fact via MemoryStore::index_scoped("team uses Rust")
+App indexes a fact via MemoryStore::index_scoped(MemoryIndexRequest)
   -> fact enters the selected store (in-memory keyword matching in this demo)
 
 Later: Agent calls the memory_search("what language for backend?") tool
@@ -24,9 +24,28 @@ Later: Agent calls the memory_search("what language for backend?") tool
   -> result injected into agent context
 ```
 
+Indexing and search are scoped to the same session owner. For production
+factory wiring, enable `AgentFactory::new(store_path).memory(true)`; its HNSW
+store is rooted at `<factory store_path>/memory/`, not a fixed `.rkat/memory/`.
+
 ## Run
 ```bash
 # From the repository root
 ANTHROPIC_API_KEY=sk-... ./scripts/repo-cargo run -p meerkat \
   --example 014-semantic-memory --features jsonl-store,memory-store-session
 ```
+
+## Deterministic behavior test
+
+```bash
+./scripts/repo-cargo test -p meerkat --example 014-semantic-memory \
+  --features jsonl-store,memory-store-session
+```
+
+The test invokes the same client-injected async body as `main`, using the real
+agent, memory store, session scope and `memory_search` dispatcher. A scripted
+client requests searches on both turns and derives its replies from the actual
+tool results; the test requires all five indexed facts, accumulated history,
+and scoped directory cleanup. It does not use external transport or test
+credentials. Production still constructs the normal Anthropic client and uses
+`claude-sonnet-4-6`.

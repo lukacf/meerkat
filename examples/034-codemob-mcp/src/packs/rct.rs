@@ -32,13 +32,9 @@ impl Pack for RctPack {
 
     fn definition(
         &self,
-        task: &str,
-        context: &str,
         overrides: &BTreeMap<String, String>,
         pp: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition {
-        let ctx = format_context(context);
-
         let tools_with_shell = ToolConfig {
             builtins: true,
             shell: true,
@@ -162,7 +158,7 @@ impl Pack for RctPack {
 
         let mut steps = IndexMap::new();
         steps.insert(StepId::from("plan"), flow_step("orchestrator",
-            format!("Analyze this task and create an implementation plan. Create .rct/spec.yaml and .rct/checklist.yaml.\n\n{task}{ctx}"),
+            format!("Analyze this task and create an implementation plan. Create .rct/spec.yaml and .rct/checklist.yaml.\n\n{TASK_TEMPLATE}"),
             &[], 300_000));
         steps.insert(StepId::from("implement"), flow_step("implementer",
             "Implement the plan. Read .rct/checklist.yaml for tasks. Run verification commands. Mark tasks done.\n\n## Plan\n{{ steps.plan }}".into(),
@@ -179,9 +175,11 @@ impl Pack for RctPack {
         let mut flows = BTreeMap::new();
         flows.insert(
             FlowId::from("main"),
-            FlowSpec::new(Some(
-                    "RCT: plan → implement → parallel gate review → aggregate".into(),
-                ), steps, None),
+            FlowSpec::new(
+                Some("RCT: plan → implement → parallel gate review → aggregate".into()),
+                steps,
+                None,
+            ),
         );
 
         let names: Vec<&str> = agents.iter().map(|(n, ..)| *n).collect();

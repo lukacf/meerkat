@@ -4,7 +4,7 @@ Production guardrails: token budgets, tool-call limits, and retry policies for
 resilient agent execution.
 
 ## Concepts
-- `BudgetLimits` — cumulative token-usage stopping limits, plus caps on tool calls and duration
+- `BudgetLimits` — measured token exhaustion thresholds, tool-call limits, and time budgets
 - `RetryPolicy` - exponential backoff for provider failures classified as
   retryable
 - Applying a retry policy to an `AgentBuilder`
@@ -13,14 +13,25 @@ resilient agent execution.
 ## Budget Types
 | Limit | Description |
 |-------|-------------|
-| `max_tokens` | Cumulative accounted-token stopping limit; the final provider call may overshoot |
+| `max_tokens` | Cumulative measured token threshold for exhaustion/continuation |
 | `max_tool_calls` | Max tool invocations |
-| `max_duration` | Wall clock timeout |
+| `max_duration` | Agent-lifetime wall-clock budget; not reset for each run |
+| `max_turn_duration` | Optional aggregate per-run time budget, re-armed on each run |
+| `max_tokens_per_turn` | Per-LLM-request output-token limit on `AgentBuilder` (512 in this example), not a cumulative billing cap |
 
-The cumulative token limit is checked around provider calls using accounted
-usage, so a completed call can exceed the remaining budget before further work
-is stopped. Separately, `max_tokens_per_turn` bounds the requested response
-output (512 in this example), not cumulative input and output usage.
+Usage is charged when the provider reports measured accounting. An in-flight
+call can exceed `max_tokens`; the remaining cumulative budget is not a hard
+limit on the next request's tokens. Missing accounting does not advance the
+token counter. Do not use this threshold as a guaranteed billing ceiling.
+
+Token exhaustion can return `Ok(RunResult)` with the typed
+`terminal_cause_kind = BudgetExhausted`. The example reports that separately
+from normal completion, handles only typed time-budget errors as expected, and
+propagates unrelated failures. The response preview counts Unicode scalar
+values, not bytes, and adds an ellipsis only when truncated.
+
+Both JSONL stores are guarded scratch directories under the current directory
+and are removed on normal completion or returned errors (not forced termination).
 
 ## Retry Strategy
 

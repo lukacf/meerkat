@@ -16,7 +16,7 @@ standalone runtime mode explicitly.
 
 ```bash
 # Build from the repository root
-./scripts/repo-cargo build --manifest-path examples/034-codemob-mcp/Cargo.toml --release
+./scripts/repo-cargo build --manifest-path examples/034-codemob-mcp/Cargo.toml --locked --release
 
 # The binary is written under the repo-cargo target root:
 export CODEMOB_BIN="$(./scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/release/codemob-mcp"
@@ -45,11 +45,18 @@ available.
 
 ### `list_packs`
 
-List available packs with descriptions and agent counts.
+List available packs with descriptions, agent/step counts, and a `roles` object
+mapping exact model-override role names to their default models. Custom packs
+expose the same metadata.
 
 ### `consult`
 
 Quick opinion from a single agent. Returns a `session_id` for multi-turn conversations.
+
+MCP cancellation prevents unadmitted turns and interrupts an admitted turn. A
+new session cancelled before its response is published is discarded; cancelling
+a continuation leaves the existing session available. Cancellation does not
+roll back shell/file side effects that already occurred.
 
 ```
 consult(question: "Should I use a B-tree or hash map for this index?")
@@ -81,7 +88,7 @@ consult(question: "What about the edge case?", session_id: "<id from previous ca
 - `system_prompt` — Custom persona (default: general technical advisor)
 - `shell` — Enable shell access for running commands
 - `skills` — Inject domain knowledge (e.g. `["meerkat-platform", "rct-methodology"]`)
-- `provider_params` — Typed initial-session build settings (e.g. `{"temperature": 0.2}`, or `{"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}`). Ignored when `session_id` is supplied; continuations retain the session's settings.
+- `provider_params` — Typed **new-session-only** provider settings (e.g. `{"temperature": 0.2}`, or `{"provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}}`). Continuation inherits these settings; passing this field with `session_id` is rejected rather than silently ignored.
 - `session_id` — Continue a previous session (model/system prompt/shell/provider settings inherited)
 
 ### `deliberate`
@@ -171,11 +178,13 @@ Available skills (depends on your environment):
 `consult` returns a real session ID. Passing it back in a follow-up `consult`
 call continues the conversation with its retained history, model, system
 prompt, shell setting, injected skills, and provider settings. Supplying
-`provider_params` on a continuation does not update the existing session.
+`provider_params` together with `session_id` is rejected before any lookup or
+turn; continuations always keep the existing session's settings.
 
 `deliberate` also labels its mob ID as `session_id`, but its current reuse path
 does not preserve the first call's history reliably or replace an existing
-flow's baked task on later calls. Treat each deliberate call as independent;
+mob's profiles and flow definition. Task/context are supplied afresh as flow
+parameters, but treat each deliberate call as independent;
 pass prior results explicitly through `context`. `list_sessions` and
 `destroy_session` manage `consult` sessions only.
 
@@ -211,9 +220,9 @@ See the [pack definitions](src/packs/) for role configuration and defaults.
 ## Provider Parameters
 
 For `deliberate`, provider settings are applied to all agents when constructing
-the pack. For `consult`, they are initial-session build settings only:
-continuations inherit the existing settings and ignore a supplied
-`provider_params` value.
+the pack. For `consult`, they are new-session build settings only:
+continuations inherit the existing settings, and a request that combines
+`provider_params` with `session_id` is rejected rather than silently ignored.
 
 ```
 deliberate(
@@ -267,10 +276,56 @@ Claude Code ──(stdio)──► codemob-mcp
 
 ## Security Boundary
 
+The server captures its process working directory as the workspace at startup.
+Configure your MCP host to launch it from the intended project (or use a wrapper
+that changes to that directory before executing the binary). Default/relative
+shell commands and builtin file tools are rooted there. Session scratch storage
+lives separately under `.codemob-mcp/sessions-*` and is removed on clean shutdown.
+Custom definitions live under `.codemob-mcp/mobs/`; an override of a builtin name
+is supported, and deleting it immediately restores the builtin.
+
 Built-in deliberation profiles and custom flow profiles enable shell access in
 the server workspace. Treat this example as a trusted local MCP server: only
 connect trusted clients, run it in a workspace whose files and commands those
 clients may access, and only load trusted custom skills and mob definitions.
+
+Task/context strings are activation data, not template source: nested JSON and
+literal `{{...}}` text are preserved. Custom flow messages remain trusted
+templates; `{{ task }}` / `{{task}}` expand to task plus the optional Context
+heading, while `{{ steps.<id> }}` forwards the earlier step's output.
+
+`implement`, `panel`, and `rct` are bounded flows, not interactive debate or
+automatic rework loops. Each role returns its assigned artifact, and the graph
+advances the process. A failed review requires a new caller request.
+
+## Validation
+
+```bash
+./scripts/repo-cargo test --manifest-path examples/034-codemob-mcp/Cargo.toml --locked
+```
+
+The tests use local synthetic clients (no provider credentials), exercise real
+session/mob admission and flow rendering, and launch the actual MCP binary for
+handshake, CRUD, error, cancellation-race, EOF, and broken-pipe checks. The
+subprocess harness requires Python 3. These are deterministic/local checks,
+not proof of live-provider behavior.
+
+The manifest's `[profile.test.package.meerkat-mob]` sets `opt-level = 1` for
+ordinary `repo-cargo test` invocations while retaining debug assertions.
+Sampling an unoptimized macOS run found CPU-intensive replay in flow-provenance
+validation: RCT terminalization alone took about 92 seconds. With this narrow
+test-only optimization, all eight complete pack handlers finished in about
+40 seconds together. Timings depend on hardware and load. Production build
+profiles and runtime validation are unchanged; this is not a runtime fix.
+All eight tests retain their 90-second deadline, full assertions, and teardown.
+
+With `GEMINI_API_KEY` configured, an optional smoke test sends only two fixed
+synthetic prompts from an isolated empty workspace, with a 45-second bound per
+request, then destroys the session:
+
+```bash
+python3 examples/034-codemob-mcp/tests/live_consult.py "$CODEMOB_BIN"
+```
 
 ## File Structure
 

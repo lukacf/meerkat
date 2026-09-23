@@ -5,6 +5,8 @@
   "scripts": {
     "start": "tsx src/server.ts",
     "check": "tsc --noEmit",
+    "build": "tsc --noEmit false --outDir dist",
+    "test": "node --test --test-timeout=60000 tests/*.test.cjs",
     "smoke:webrtc": "node .smoke/run-webrtc-smoke.cjs",
     "smoke:webrtc:test": "playwright test .smoke/webrtc-smoke.spec.cjs"
   },

@@ -1,19 +1,26 @@
-CARGO   ?= cargo
+CARGO   ?= RUST_LANE_ID=examples-audit-H CARGO_BUILD_JOBS=2 ../../scripts/repo-cargo
 PROFILE ?= release
-TARGET_DIR := target/$(PROFILE)
+TARGET_DIR = $(shell $(CARGO) --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')/$(PROFILE)
 
 BINS := mdm-tux mdm-target mdm-kennel
 
-.PHONY: all build sign clean docker-smoke docker-tux docker-tmux docker-live-suite docker-architecture-suite docker-logs docker-down docker-clean
+.PHONY: all build check test sign clean docker-smoke docker-tux docker-tmux docker-live-suite docker-architecture-suite docker-logs docker-down docker-clean
 
 all: build sign
 
 build:
 ifeq ($(PROFILE),release)
-	$(CARGO) build --release
+	$(CARGO) build --locked --release
 else
-	$(CARGO) build
+	$(CARGO) build --locked
 endif
+
+check:
+	$(CARGO) check --locked --all-targets
+
+test:
+	$(CARGO) test --locked
+	python3 scripts/test-scripts.py
 
 sign: build
 	@for bin in $(BINS); do \

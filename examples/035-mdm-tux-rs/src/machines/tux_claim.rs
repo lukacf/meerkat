@@ -77,6 +77,8 @@ pub enum Event {
         now_ms: i64,
     },
     ClaimReleased,
+    ClaimRefused,
+    BrokerRestarted,
     ReleaseRequested,
     KennelDisconnected,
 }
@@ -116,6 +118,27 @@ fn err(state: &'static str, event: &str, reason: &str) -> TransitionError {
 
 pub fn transition(state: State, event: Event) -> Result<(State, Vec<Effect>), TransitionError> {
     match (state, event) {
+        (state, Event::BrokerRestarted) => Ok((
+            State::Available {
+                target_id: state.target_id().to_string(),
+                target_name: state.target_name().to_string(),
+            },
+            vec![],
+        )),
+        (
+            State::ClaimRequested {
+                target_id,
+                target_name,
+            },
+            Event::ClaimRefused,
+        ) => Ok((
+            State::Available {
+                target_id,
+                target_name,
+            },
+            vec![],
+        )),
+        (state, Event::ClaimRefused) => Ok((state, vec![])),
         (
             State::Available {
                 target_id,

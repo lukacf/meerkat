@@ -11,6 +11,7 @@ import { defaultState, resolveOrders } from "./game";
 import { renderMap } from "./map";
 import { buildFactionDefinition, buildNarratorDefinition, serializeState } from "./agents";
 import { drainAllEvents, buildNarratorSummary } from "./events";
+import { CampaignRunner, pollNarrative, waitForOrders } from "./runner";
 import {
   $, setSessionRef, setPhase, setStatus, setBadge, showBanner, showVictory,
   renderScore, renderGrid, pushMessage, pushNarrator, parseJsResult, sleep,
@@ -113,6 +114,21 @@ app.innerHTML = `
 
 let runtime: RuntimeModule | null = null;
 let session: MatchSession | null = null;
+const runner = new CampaignRunner<MatchSession>(
+  tick,
+  current => current.running && !current.state.winner,
+  async current => {
+    if (!runtime) return;
+    for (const sub of current.subs) runtime.close_subscription(sub.handle);
+    for (const id of [...current.factions.map(f => f.mobId), current.narratorMobId].filter((id): id is string => id !== null)) {
+      await runtime.mob_lifecycle(id, "destroy");
+    }
+    runtime.destroy_runtime();
+    current.running = false;
+    session = null;
+    setSessionRef(null);
+  },
+);
 
 async function loadRuntime(): Promise<RuntimeModule> {
   if (runtime) return runtime;
@@ -127,7 +143,7 @@ async function loadRuntime(): Promise<RuntimeModule> {
 // Game Loop — Autonomous Agents
 // ═══════════════════════════════════════════════════════════
 
-async function tick(): Promise<void> {
+async function tick(session: MatchSession): Promise<void> {
   if (!runtime || !session || !session.running) return;
   if (session.state.winner) { session.running = false; showVictory(session.state.winner, session.state); setBadge("Complete"); return; }
 
@@ -140,6 +156,7 @@ async function tick(): Promise<void> {
     setPhase("deliberation");
     showBanner(`Round ${turn}`, "The powers deliberate and negotiate...", 8000);
 
+    const allErrors: string[] = [];
     for (const f of session.factions) {
       const stateStr = serializeState(f.team, session.state);
       const prompt = `=== TURN ${turn} GAME STATE ===\n${stateStr}\n\nBegin: message your operator to discuss strategy, then brief your ambassador.`;
@@ -150,14 +167,13 @@ async function tick(): Promise<void> {
           JSON.stringify({ content: prompt, handling_mode: "queue" }),
         );
       }
-      catch (e) { console.warn(`Failed to trigger ${f.team} planner:`, e); }
+      catch (e) { allErrors.push(`${f.team}-planner: ${String(e)}`); }
     }
 
     const MAX_WAIT_MS = 120_000;
     const QUIET_THRESHOLD = 8_000;
     const deadline = Date.now() + MAX_WAIT_MS;
     let lastEventTime = Date.now();
-    const allErrors: string[] = [];
 
     while (Date.now() < deadline && session.running) {
       await sleep(300);
@@ -199,7 +215,7 @@ async function tick(): Promise<void> {
     setStatus(`Round ${turn}: Extracting final orders...`);
     for (const f of session.factions) {
       const validTargets = session.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
-      const plannerAddr = `diplomacy-${f.team}/planner/${f.team}-planner`;
+      const plannerPeer = [...session.peerMembers].find(([, member]) => member === `${f.team}-planner`)?.[0];
       try {
         await mod.mob_member_send(
           f.mobId,
@@ -209,24 +225,23 @@ async function tick(): Promise<void> {
               `TIME IS UP. Send your final order to your planner NOW using send_message. ` +
               `Valid targets: ${validTargets.join(", ")}. ` +
               `Your message MUST contain: FINAL ORDER: target=<region-id> aggression=<0-100>. ` +
-              `Send it to: ${plannerAddr}`,
+              `Call peers to discover your planner, then send_message with peer_id=${plannerPeer}, handling_mode="queue", and body containing the order.`,
             handling_mode: "queue",
           }),
         );
-      } catch (e) { console.warn(`Failed to prompt ${f.team} operator for order:`, e); }
+      } catch (e) { allErrors.push(`${f.team}-operator: ${String(e)}`); }
     }
-    const extractDeadline = Date.now() + 20_000;
-    while (Date.now() < extractDeadline && session.running) {
-      await sleep(300);
-      const { events: n } = drainAllEvents(mod, session, turn);
-      if (n > 0) lastEventTime = Date.now();
-      const allHaveOrders = session.factions.every(f =>
-        session!.messages.some(m => m.turn === turn && m.faction === f.team && m.role === "operator" && /FINAL\s*ORDER/i.test(m.content))
+    await waitForOrders(() => {
+      const { errors } = drainAllEvents(mod, session, turn);
+      allErrors.push(...errors);
+      return session.factions.every(f =>
+        session.messages.some(m => m.turn === turn && m.faction === f.team && m.role === "operator" && /FINAL\s*ORDER/i.test(m.content))
       );
-      if (allHaveOrders) break;
-      if (Date.now() - lastEventTime > 6_000) break;
-    }
+    }, () => session.running, sleep);
     if (!session.running) return;
+    if (allErrors.length > 0) {
+      setStatus(`Round ${turn}: ${allErrors.join("; ")}`);
+    }
 
     // Parse orders
     const decisions = session.factions.map(f => {
@@ -237,7 +252,7 @@ async function tick(): Promise<void> {
           const validTargets = session!.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
           const aggression = Math.max(0, Math.min(100, parseInt(match[2], 10)));
           return { order: { team: f.team, aggression, fortify: 100 - aggression,
-            target_region: validTargets.includes(match[1]) ? match[1] : validTargets[0] }, reasoning: opMsgs[i].content };
+            target_region: validTargets.includes(match[1]) ? match[1] : validTargets[0] }, reasoning: opMsgs[i].content, received: true };
         }
       }
       for (let i = opMsgs.length - 1; i >= 0; i--) {
@@ -249,14 +264,17 @@ async function tick(): Promise<void> {
             if (o.target_region && o.aggression != null) {
               const validTargets = session!.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
               return { order: { team: f.team, aggression: Math.max(0, Math.min(100, Number(o.aggression) || 50)), fortify: 100 - (Number(o.aggression) || 50),
-                target_region: validTargets.includes(o.target_region) ? o.target_region : validTargets[0] }, reasoning: opMsgs[i].content };
+                target_region: validTargets.includes(o.target_region) ? o.target_region : validTargets[0] }, reasoning: opMsgs[i].content, received: true };
             }
           }
         } catch { /* skip */ }
       }
       const validTargets = session!.state.regions.filter(r => r.controller !== f.team).map(r => r.id);
-      return { order: { team: f.team, aggression: 50, fortify: 50, target_region: validTargets[0] }, reasoning: "Fallback." };
+      return { order: { team: f.team, aggression: 50, fortify: 50, target_region: validTargets[0] }, reasoning: "Fallback.", received: false };
     });
+    if (allErrors.length > 0 && decisions.every(d => !d.received)) {
+      throw new Error(`No orders received; combat not resolved. ${allErrors.join("; ")}`);
+    }
 
     // Resolve & Render
     setPhase("resolution");
@@ -266,7 +284,7 @@ async function tick(): Promise<void> {
     await sleep(1500);
     if (!session.running) return;
 
-    const newState = resolveOrders(session.state, decisions);
+    const { state: newState, outcomes } = resolveOrders(session.state, decisions);
     const captures = new Set<string>();
     const nc = new Map(newState.regions.map(r => [r.id, r.controller]));
     for (const [id, t] of nc) if (session.prevControllers.get(id) !== t) captures.add(id);
@@ -279,25 +297,14 @@ async function tick(): Promise<void> {
     // Narrator
     if (session.narratorMobId) {
       try {
-        const summary = buildNarratorSummary(session, turn, decisions, captures, newState);
+        const summary = buildNarratorSummary(session, turn, outcomes, captures, newState);
         const runId = parseJsResult(await mod.mob_run_flow(session.narratorMobId, "narrate", JSON.stringify({ summary })));
-        for (let i = 0; i < 40; i++) {
-          await sleep(500);
-          const raw = parseJsResult(await mod.mob_flow_status(session.narratorMobId, runId));
-          if (raw === "null") continue;
-          try {
-            const result = JSON.parse(raw);
-            if (result.status === "completed") {
-              const step = result.step_ledger?.find((s: any) => s.step_id === "summarize" && s.status === "completed");
-              const narrative = step?.output?.narrative ?? (typeof step?.output === "string" ? step.output : null);
-              if (narrative) {
-                pushMessage({ channel: "narrator", role: "narrator", faction: "neutral", content: narrative, turn });
-                pushNarrator(narrative, turn);
-              }
-              break;
-            }
-            if (result.status !== "running" && result.status !== "pending") break;
-          } catch { /* parse error */ }
+        const narrative = await pollNarrative(
+          async () => parseJsResult(await mod.mob_flow_status(session.narratorMobId!, runId)), sleep,
+        );
+        if (narrative) {
+          pushMessage({ channel: "narrator", role: "narrator", faction: "neutral", content: narrative, turn });
+          pushNarrator(narrative, turn);
         }
       } catch (e) { console.warn("Narrator error:", e); }
     }
@@ -310,7 +317,6 @@ async function tick(): Promise<void> {
       setBadge("Complete"); return;
     }
     await sleep(2000);
-    if (session.running) void tick();
   } catch (error) {
     if (session) session.running = false;
     setBadge("Error"); setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
@@ -321,19 +327,19 @@ async function tick(): Promise<void> {
 // Start Match
 // ═══════════════════════════════════════════════════════════
 
-async function startMatch(): Promise<void> {
+async function createMatch(): Promise<MatchSession | null> {
   try {
     $<HTMLDivElement>("victory").classList.remove("visible");
     $<HTMLDivElement>("startOverlay").classList.add("hidden");
     const keys = getApiKeys();
-    if (!keys.anthropic && !keys.openai && !keys.gemini) { setStatus("Enter at least one API key in settings."); return; }
+    if (!keys.anthropic && !keys.openai && !keys.gemini) { setStatus("Enter at least one API key in settings."); return null; }
     const models: Record<Team | "narrator", string> = {
       france: $<HTMLSelectElement>("modelFrance").value,
       prussia: $<HTMLSelectElement>("modelPrussia").value,
       russia: $<HTMLSelectElement>("modelRussia").value,
       narrator: $<HTMLSelectElement>("modelNarrator").value,
     };
-    if (!models.france || !models.prussia || !models.russia) { setStatus("Select models for all factions."); return; }
+    if (!models.france || !models.prussia || !models.russia) { setStatus("Select models for all factions."); return null; }
 
     setBadge("Loading...", true); setStatus("Loading WASM runtime...");
     const mod = await loadRuntime();
@@ -354,6 +360,7 @@ async function startMatch(): Promise<void> {
 
     const factions: FactionMob[] = [];
     const subs: MatchSession["subs"] = [];
+    const peerMembers = new Map<string, string>();
 
     for (const team of TEAMS) {
       setStatus(`Creating ${TEAM_LABELS[team]} faction (3 autonomous agents)...`);
@@ -369,6 +376,10 @@ async function startMatch(): Promise<void> {
       await mod.mob_wire(mobId, `${team}-planner`, `${team}-ambassador`);
 
       for (const role of ["planner", "operator", "ambassador"] as const) {
+        const target = JSON.parse(await mod.mob_member_peer_target(mobId, `${team}-${role}`));
+        const peerId = target.external?.peer_id;
+        if (typeof peerId !== "string") throw new Error(`Missing canonical peer identity for ${team}-${role}`);
+        peerMembers.set(peerId, `${team}-${role}`);
         try { subs.push({ agentIdentity: `${team}-${role}`, handle: await mod.mob_member_subscribe(mobId, `${team}-${role}`), role, team }); }
         catch (e) { console.warn(`Failed to subscribe to ${team}-${role}:`, e); }
       }
@@ -400,9 +411,10 @@ async function startMatch(): Promise<void> {
 
     const state = defaultState();
     session = { factions, narratorMobId, subs, state, messages: [], running: true,
-      prevControllers: new Map(state.regions.map(r => [r.id, r.controller])), seenToolCallIds: new Set() };
+      prevControllers: new Map(state.regions.map(r => [r.id, r.controller])),
+      seenEventIds: new Set(), peerMembers, summarizedRuns: new Set(), failures: [] };
     setSessionRef(session);
-    renderMap(state); renderScore(state);
+    renderGrid(); renderMap(state); renderScore(state);
     showBanner("The Campaign Begins", `${TEAMS.map(t => TEAM_LABELS[t]).join(", ")} \u2014 9 agents, 3 powers`, 3000);
     setBadge("Live"); setStatus("Campaign started.");
     $<HTMLDivElement>("drawer").classList.remove("open");
@@ -414,8 +426,23 @@ async function startMatch(): Promise<void> {
       document.getElementById("guideDismiss")!.addEventListener("click", () => resolve(), { once: true });
     });
 
-    await tick();
-  } catch (e) { setBadge("Error"); setStatus(`Failed: ${e instanceof Error ? e.message : String(e)}`); }
+    return session;
+  } catch (e) {
+    runtime?.destroy_runtime();
+    session = null;
+    setSessionRef(null);
+    setBadge("Error"); setStatus(`Failed: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+async function startMatch(): Promise<void> {
+  try {
+    await runner.replace(createMatch);
+    await runner.resume();
+  } catch (e) {
+    setBadge("Error"); setStatus(`Failed: ${String(e)}`);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -452,9 +479,15 @@ document.getElementById("startBtn")!.addEventListener("click", () => void startM
 document.getElementById("startBigBtn")!.addEventListener("click", () => {
   $<HTMLDivElement>("startOverlay").classList.add("hidden");
 });
-document.getElementById("pauseBtn")!.addEventListener("click", () => { if (!session) return; session.running = !session.running; (document.getElementById("pauseBtn") as HTMLButtonElement).textContent = session.running ? "Pause" : "Resume"; if (session.running) void tick(); });
-document.getElementById("stepBtn")!.addEventListener("click", () => { if (!session) return; session.running = true; (document.getElementById("pauseBtn") as HTMLButtonElement).textContent = "Resume"; const doStep = async () => { await tick(); if (session) session.running = false; (document.getElementById("pauseBtn") as HTMLButtonElement).textContent = "Resume"; }; void doStep(); });
-document.getElementById("exportBtn")!.addEventListener("click", () => { if (!session) return; const b = new Blob([JSON.stringify({state:session.state,messages:session.messages},null,2)],{type:"application/json"}); const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "replay.json"; a.click(); });
+document.getElementById("pauseBtn")!.addEventListener("click", () => {
+  if (runner.paused) void runner.resume(); else runner.pause();
+  $<HTMLButtonElement>("pauseBtn").textContent = runner.paused ? "Resume" : "Pause";
+});
+document.getElementById("stepBtn")!.addEventListener("click", () => {
+  void runner.step();
+  $<HTMLButtonElement>("pauseBtn").textContent = "Resume";
+});
+document.getElementById("exportBtn")!.addEventListener("click", () => { if (!session) return; const b = new Blob([JSON.stringify({state:session.state,messages:session.messages,failures:session.failures},null,2)],{type:"application/json"}); const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "replay.json"; a.click(); });
 document.getElementById("gearBtn")!.addEventListener("click", () => $<HTMLDivElement>("drawer").classList.toggle("open"));
 document.getElementById("closeDrawer")!.addEventListener("click", () => $<HTMLDivElement>("drawer").classList.remove("open"));
 document.getElementById("guideDismiss")!.addEventListener("click", () => $<HTMLDivElement>("guideOverlay").classList.add("hidden"));

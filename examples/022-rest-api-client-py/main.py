@@ -21,10 +21,11 @@ Run:
 
 import json
 import os
+import sys
 
 # Using stdlib only — no external dependencies required
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 
 BASE_URL = os.environ.get("MEERKAT_REST_URL", "http://localhost:8080")
@@ -46,7 +47,7 @@ def api_request(method: str, path: str, body: dict | None = None) -> dict:
         raise
 
 
-def main():
+def main() -> int:
     print("=== Meerkat REST API Client ===\n")
     print(f"Base URL: {BASE_URL}")
     print("(Start the server with: rkat-rest)\n")
@@ -64,10 +65,15 @@ def main():
         print(f"  Response: {result['text'][:150]}...")
         print(f"  Tokens: {result['usage']['input_tokens'] + result['usage']['output_tokens']}")
     except Exception as e:
-        print(f"  Failed to connect. Is the REST server running? ({e})")
-        print("\n  Start it with: ANTHROPIC_API_KEY=sk-... rkat-rest")
+        if isinstance(e, HTTPError):
+            print(f"  Session creation failed: HTTP {e.code} {e.reason}", file=sys.stderr)
+        elif isinstance(e, URLError):
+            print(f"  Failed to connect. Is the REST server running? ({e})", file=sys.stderr)
+            print("\n  Start it with: ANTHROPIC_API_KEY=sk-... rkat-rest")
+        else:
+            print(f"  Failed to create session: {e}", file=sys.stderr)
         show_reference()
-        return
+        return 1
 
     # ── 2. Continue the session ──
     print(f"\n--- 2. POST /sessions/{session_id[:8]}../messages (continue) ---")
@@ -84,6 +90,7 @@ def main():
     print(f"  Tokens: {info.get('total_tokens', 'N/A')}")
 
     show_reference()
+    return 0
 
 
 def show_reference():
@@ -118,4 +125,4 @@ Streaming via SSE:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

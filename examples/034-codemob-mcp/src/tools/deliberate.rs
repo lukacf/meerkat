@@ -1,4 +1,4 @@
-use meerkat::surface::{request_action, RequestContext};
+use meerkat::surface::{request_action, CancelActionInstallOutcome, RequestContext};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -71,8 +71,7 @@ pub async fn handle(
                 input.pack
             )));
         }
-        let definition =
-            pack.definition(&input.task, context, &overrides, provider_params.as_ref());
+        let definition = pack.definition(&overrides, provider_params.as_ref());
         (total_steps, definition)
     };
 
@@ -91,8 +90,9 @@ pub async fn handle(
         false
     };
 
+    let _setup_cancel = super::cancellation::cancellation_signal(request_context.as_ref()).await?;
     if let Some(context) = request_context.as_ref() {
-        if !resuming {
+        if !mob_exists {
             let mob_state_cleanup = state.mob_state.clone();
             let mob_id_for_cleanup = mob_id.clone();
             context.set_unpublished_cleanup(request_action(move || {
@@ -102,29 +102,6 @@ pub async fn handle(
                     let _ = mob_state.mob_destroy(&mob_id).await;
                 }
             }));
-            let mob_state = state.mob_state.clone();
-            let mob_id_for_cancel = mob_id.clone();
-            let _ = context
-                .install_cancel_action(request_action(move || {
-                    let mob_state = mob_state.clone();
-                    let mob_id = mob_id_for_cancel.clone();
-                    async move {
-                        let _ = mob_state.mob_destroy(&mob_id).await;
-                    }
-                }))
-                .await;
-        } else {
-            let mob_state = state.mob_state.clone();
-            let mob_id_for_cancel = mob_id.clone();
-            let _ = context
-                .install_cancel_action(request_action(move || {
-                    let mob_state = mob_state.clone();
-                    let mob_id = mob_id_for_cancel.clone();
-                    async move {
-                        let _ = mob_state.mob_stop(&mob_id).await;
-                    }
-                }))
-                .await;
         }
     }
 
@@ -133,6 +110,7 @@ pub async fn handle(
     let flow_timeout = derive_flow_watchdog_timeout(&definition, &FlowId::from("main"))?;
 
     if !mob_exists {
+        check_cancelled(request_context.as_ref())?;
         // Override the mob id when resuming with a new mob
         let mut definition = definition;
         if resuming {
@@ -145,6 +123,7 @@ pub async fn handle(
             .mob_create_definition(definition)
             .await
             .map_err(|e| ToolCallError::internal(format!("Mob creation failed: {e}")))?;
+        check_setup_cancellation(state, &mob_id, request_context.as_ref()).await?;
 
         // Spawn one agent per profile (agent_identity = profile name for simplicity)
         let specs: Vec<SpawnMemberSpec> = profile_names
@@ -157,6 +136,7 @@ pub async fn handle(
             .mob_spawn_many(&mob_id, specs)
             .await
             .map_err(|e| ToolCallError::internal(format!("Spawn failed: {e}")))?;
+        check_setup_cancellation(state, &mob_id, request_context.as_ref()).await?;
 
         // Fail fast if any agent failed to spawn — every flow step targets a
         // specific role, so a missing agent means a guaranteed downstream failure.
@@ -182,15 +162,13 @@ pub async fn handle(
         let expected = profile_names.len();
         let mut visible = 0;
         for _ in 0..20 {
+            check_setup_cancellation(state, &mob_id, request_context.as_ref()).await?;
             // 20 attempts × 50ms = 1s max wait
-            match state.mob_state.mob_list_members(&mob_id).await {
-                Ok(members) => {
-                    visible = members.len();
-                    if visible >= expected {
-                        break;
-                    }
+            if let Ok(members) = state.mob_state.mob_list_members(&mob_id).await {
+                visible = members.len();
+                if visible >= expected {
+                    break;
                 }
-                Err(_) => {}
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
@@ -223,16 +201,20 @@ pub async fn handle(
         {
             tracing::warn!(mob_id = %mob_id, error = %e, "kickoff barrier failed; proceeding anyway");
         }
+        check_setup_cancellation(state, &mob_id, request_context.as_ref()).await?;
     }
 
     let result = run_flow(
         state,
         &mob_id,
-        total_steps,
-        progress_token.as_ref(),
-        progress_notifier.as_ref(),
+        FlowProgress {
+            total_steps,
+            token: progress_token.as_ref(),
+            notifier: progress_notifier.as_ref(),
+        },
         request_context.as_ref(),
         flow_timeout,
+        crate::packs::flow_params(&input.task, context),
     )
     .await;
 
@@ -259,15 +241,26 @@ pub async fn handle(
 
 // ── Flow-based execution (structured packs) ─────────────────────────────────
 
+struct FlowProgress<'a> {
+    total_steps: usize,
+    token: Option<&'a Value>,
+    notifier: Option<&'a ProgressNotifier>,
+}
+
 async fn run_flow(
     state: &ForceState,
     mob_id: &MobId,
-    total_steps: usize,
-    progress_token: Option<&Value>,
-    progress_notifier: Option<&ProgressNotifier>,
+    progress: FlowProgress<'_>,
     request_context: Option<&RequestContext>,
     flow_timeout: Duration,
+    params: Value,
 ) -> Result<Value, ToolCallError> {
+    let FlowProgress {
+        total_steps,
+        token: progress_token,
+        notifier: progress_notifier,
+    } = progress;
+    check_cancelled(request_context)?;
     let flow_id = FlowId::from("main");
 
     if let Some(token) = progress_token {
@@ -276,7 +269,7 @@ async fn run_flow(
 
     let run_id = state
         .mob_state
-        .mob_run_flow(mob_id, flow_id, json!({}))
+        .mob_run_flow(mob_id, flow_id, params)
         .await
         .map_err(|e| ToolCallError::internal(format!("Flow start failed: {e}")))?;
 
@@ -284,8 +277,8 @@ async fn run_flow(
         let mob_state = state.mob_state.clone();
         let mob_id_for_cancel = mob_id.clone();
         let run_id_for_cancel = run_id.clone();
-        let _ = context
-            .install_cancel_action(request_action(move || {
+        if context
+            .install_cancel_action_or_cancelled(request_action(move || {
                 let mob_state = mob_state.clone();
                 let mob_id = mob_id_for_cancel.clone();
                 let run_id = run_id_for_cancel.clone();
@@ -294,7 +287,11 @@ async fn run_flow(
                     let _ = mob_state.mob_destroy(&mob_id).await;
                 }
             }))
-            .await;
+            .await
+            == CancelActionInstallOutcome::AlreadyCancelled
+        {
+            return Err(ToolCallError::cancelled());
+        }
     }
 
     let last_completed = Arc::new(AtomicUsize::new(0));
@@ -318,23 +315,7 @@ async fn run_flow(
                 let last_progress = Arc::clone(&last_progress);
                 let progress_token = progress_token.clone();
                 async move {
-                    // Count unique completed step IDs (not ledger entries, which can
-                    // have multiple entries per step for retries and per-target dispatch).
-                    let completed = run
-                        .step_ledger
-                        .iter()
-                        .filter(|e| e.status == StepRunStatus::Completed)
-                        .map(|e| &e.step_id)
-                        .collect::<std::collections::HashSet<_>>()
-                        .len();
-                    let in_progress: Vec<_> = run
-                        .step_ledger
-                        .iter()
-                        .filter(|e| e.status == StepRunStatus::Dispatched)
-                        .map(|e| e.step_id.to_string())
-                        .collect::<std::collections::HashSet<_>>()
-                        .into_iter()
-                        .collect();
+                    let (completed, in_progress) = flow_progress(&run)?;
 
                     let previous = last_completed.load(Ordering::Relaxed);
                     if completed > previous {
@@ -430,6 +411,64 @@ async fn run_flow(
             ))),
         },
     }
+}
+
+fn check_cancelled(context: Option<&RequestContext>) -> Result<(), ToolCallError> {
+    if context.is_some_and(RequestContext::cancel_already_requested) {
+        Err(ToolCallError::cancelled())
+    } else {
+        Ok(())
+    }
+}
+
+async fn check_setup_cancellation(
+    state: &ForceState,
+    mob_id: &MobId,
+    context: Option<&RequestContext>,
+) -> Result<(), ToolCallError> {
+    if let Err(cancelled) = check_cancelled(context) {
+        state.mob_state.mob_destroy(mob_id).await.map_err(|error| {
+            ToolCallError::internal(format!("Mob cancellation cleanup failed: {error}"))
+        })?;
+        return Err(cancelled);
+    }
+    Ok(())
+}
+
+fn flow_progress(run: &MobRun) -> Result<(usize, Vec<String>), ToolCallError> {
+    use meerkat_mob::run::flow_frame::{FlowNodeKind, FrameScope, NodeRunStatus};
+    if !run.frames.is_empty() {
+        let frame = run
+            .frames
+            .values()
+            .find(|frame| frame.kernel_state.frame_scope == FrameScope::Root)
+            .ok_or_else(|| ToolCallError::internal("Flow progress is missing its root frame"))?;
+        let steps = frame.kernel_state.node_status.iter().filter(|(node, _)| {
+            frame.kernel_state.node_kind.get(*node) == Some(&FlowNodeKind::Step)
+        });
+        let completed = steps
+            .clone()
+            .filter(|(_, status)| **status == NodeRunStatus::Completed)
+            .count();
+        let active = steps
+            .filter(|(_, status)| **status == NodeRunStatus::Running)
+            .map(|(node, _)| node.to_string())
+            .collect();
+        return Ok((completed, active));
+    }
+    let statuses = run
+        .step_status_snapshot()
+        .map_err(|error| ToolCallError::internal(error.to_string()))?;
+    let completed = statuses
+        .values()
+        .filter(|status| **status == StepRunStatus::Completed)
+        .count();
+    let active = statuses
+        .iter()
+        .filter(|(_, status)| **status == StepRunStatus::Dispatched)
+        .map(|(step, _)| step.to_string())
+        .collect();
+    Ok((completed, active))
 }
 
 fn derive_flow_watchdog_timeout(
@@ -579,6 +618,126 @@ mod tests {
             },
         );
         FlowSpec::new(Some("sample".into()), steps, None)
+    }
+
+    #[test]
+    fn progress_uses_current_aggregate_not_per_target_history() {
+        let ids = ["plan", "z_active", "a_active"];
+        let mut flow_state = MobRun::flow_state_for_steps(ids.map(StepId::from)).unwrap();
+        for (step, status) in [
+            ("plan", "Completed"),
+            ("z_active", "Dispatched"),
+            ("a_active", "Dispatched"),
+        ] {
+            flow_state.step_status.insert(
+                StepId::from(step),
+                Some(serde_json::from_value(json!(status)).unwrap()),
+            );
+        }
+        flow_state
+            .step_target_counts
+            .insert(StepId::from("z_active"), 2);
+        flow_state
+            .step_target_success_counts
+            .insert(StepId::from("z_active"), 1);
+        let mut run: MobRun = serde_json::from_value(json!({
+            "run_id": uuid::Uuid::new_v4().to_string(),
+            "mob_id":"synthetic", "flow_id":"main", "status":"running",
+            "flow_state": flow_state, "activation_params": {},
+            "created_at":"2026-01-01T00:00:00Z", "completed_at":null,
+            "step_ledger":[
+                {"step_id":"plan","agent_identity":"worker","status":"dispatched","output":null,"timestamp":"2026-01-01T00:00:00Z"},
+                {"step_id":"plan","agent_identity":"worker","status":"completed","output":"done","timestamp":"2026-01-01T00:00:01Z"},
+                {"step_id":"z_active","agent_identity":"first","status":"completed","output":"one target","timestamp":"2026-01-01T00:00:02Z"},
+                {"step_id":"a_active","agent_identity":"retry","status":"failed","output":null,"timestamp":"2026-01-01T00:00:02Z"}
+            ],
+            "failure_ledger":[]
+        })).unwrap();
+        for _ in 0..20 {
+            assert_eq!(
+                flow_progress(&run).unwrap(),
+                (1, vec!["a_active".into(), "z_active".into()])
+            );
+        }
+        for status in run.flow_state.step_status.values_mut() {
+            *status = Some(serde_json::from_value(json!("Completed")).unwrap());
+        }
+        assert_eq!(flow_progress(&run).unwrap(), (3, vec![]));
+
+        use meerkat_mob::ids::{FlowNodeId, FrameId};
+        use meerkat_mob::run::flow_frame::{FlowNodeKind, FrameScope, NodeRunStatus, State};
+        let mut frame = State {
+            frame_scope: FrameScope::Root,
+            ..Default::default()
+        };
+        for (node, status) in [
+            ("plan", NodeRunStatus::Completed),
+            ("z_active", NodeRunStatus::Running),
+            ("a_active", NodeRunStatus::Running),
+        ] {
+            frame
+                .node_kind
+                .insert(FlowNodeId::from(node), FlowNodeKind::Step);
+            frame.node_status.insert(FlowNodeId::from(node), status);
+        }
+        run.frames.insert(
+            FrameId::from("root"),
+            meerkat_mob::run::FrameSnapshot {
+                kernel_state: frame,
+            },
+        );
+        assert_eq!(
+            flow_progress(&run).unwrap(),
+            (1, vec!["a_active".into(), "z_active".into()])
+        );
+        for status in run
+            .frames
+            .get_mut(&FrameId::from("root"))
+            .unwrap()
+            .kernel_state
+            .node_status
+            .values_mut()
+        {
+            *status = NodeRunStatus::Completed;
+        }
+        assert_eq!(flow_progress(&run).unwrap(), (3, vec![]));
+    }
+
+    #[tokio::test]
+    async fn cancelled_setup_destroys_created_mob_before_member_admission() {
+        use meerkat::surface::{noop_request_action, SurfaceRequestExecutor};
+        let dir = tempfile::Builder::new()
+            .prefix(".audit-setup-")
+            .tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
+            .unwrap();
+        let client = Arc::new(crate::tests::CaptureClient::default());
+        let state = ForceState::with_test_client(dir.path(), client.clone());
+        let definition = state
+            .pack_registry()
+            .get("advisor")
+            .unwrap()
+            .definition(&BTreeMap::new(), None);
+        let mob_id = definition.id.clone();
+        let executor = SurfaceRequestExecutor::new(Duration::from_secs(1));
+        let context = executor.begin_request("setup", noop_request_action());
+        let _signal = super::super::cancellation::cancellation_signal(Some(&context))
+            .await
+            .unwrap();
+        state
+            .mob_state
+            .mob_create_definition(definition)
+            .await
+            .unwrap();
+        executor.cancel_request("setup").await;
+        assert_eq!(
+            check_setup_cancellation(&state, &mob_id, Some(&context))
+                .await
+                .unwrap_err()
+                .code,
+            -32005
+        );
+        assert!(state.mob_state.mob_list().await.unwrap().is_empty());
+        assert!(client.requests.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -27,3 +27,15 @@ is not sufficient for every run.
 ```bash
 ./examples/004-cli-one-liners-sh/examples.sh
 ```
+
+Fresh turns explicitly select `claude-sonnet-4-6` (Anthropic), matching the
+credential above. Resume keeps the session's model; it does not force a new one.
+State and config roots are example-local under `.work/`; no global config is
+modified. Re-running creates new example sessions and resumes the one just created.
+Set `RKAT="/path with spaces/to/rkat"` to use a literal executable path (not a
+shell command plus flags). Relative paths are relative to your invocation directory.
+
+Offline regression tests (also cover 010):
+```bash
+python3 examples/010-mcp-tool-server-sh/test_examples.py
+```

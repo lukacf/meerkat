@@ -10,6 +10,10 @@ and state transition is surfaced as a typed `AgentEvent`.
 - `spawn_event_logger()` - built-in helper for CLI-like streaming
 - Custom event processing with `mpsc::Receiver`
 
+The custom handler flushes each text delta, including newline-free output, so
+pipe consumers see incremental text immediately. Output errors are returned;
+the receiver closes and the task is joined rather than leaving a stuck producer.
+
 ## Event Types
 | Event | Description |
 |-------|-------------|

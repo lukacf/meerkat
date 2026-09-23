@@ -1028,21 +1028,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
-name = "foreign-types"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
-dependencies = [
- "foreign-types-shared",
-]
-
-[[package]]
-name = "foreign-types-shared"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
-
-[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1483,22 +1468,6 @@ dependencies = [
  "tokio-rustls",
  "tower-service",
  "webpki-roots",
-]
-
-[[package]]
-name = "hyper-tls"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
-dependencies = [
- "bytes",
- "http-body-util",
- "hyper",
- "hyper-util",
- "native-tls",
- "tokio",
- "tokio-native-tls",
- "tower-service",
 ]
 
 [[package]]
@@ -2127,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2138,6 +2107,7 @@ dependencies = [
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
+ "meerkat-copilot",
  "meerkat-core",
  "meerkat-gemini",
  "meerkat-hooks",
@@ -2165,11 +2135,12 @@ dependencies = [
  "tokio",
  "tokio_with_wasm",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "meerkat-anthropic"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2177,6 +2148,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "meerkat-auth-core",
+ "meerkat-copilot",
  "meerkat-core",
  "meerkat-llm-core",
  "meerkat-models",
@@ -2191,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-atif"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "chrono",
  "meerkat-core",
@@ -2202,7 +2174,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-auth-core"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "axum",
@@ -2234,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-capabilities"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "inventory",
  "meerkat-core",
@@ -2245,7 +2217,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-client"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "meerkat-anthropic",
  "meerkat-core",
@@ -2256,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-comms"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "base64",
@@ -2290,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-contracts"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "base64",
  "chrono",
@@ -2309,8 +2281,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-copilot"
+version = "0.8.40"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "futures",
+ "meerkat-auth-core",
+ "meerkat-core",
+ "meerkat-llm-core",
+ "parking_lot",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "meerkat-core"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "base64",
@@ -2341,7 +2334,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-gemini"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2351,6 +2344,7 @@ dependencies = [
  "getrandom 0.3.4",
  "indexmap",
  "meerkat-auth-core",
+ "meerkat-copilot",
  "meerkat-core",
  "meerkat-llm-core",
  "meerkat-models",
@@ -2364,7 +2358,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-hooks"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2385,7 +2379,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-jobs"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2403,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-live"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "axum",
@@ -2421,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-llm-core"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2445,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-derive"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "quote",
  "syn 2.0.117",
@@ -2453,14 +2447,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-dsl"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "meerkat-machine-dsl-core",
 ]
 
 [[package]]
 name = "meerkat-machine-dsl-core"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2469,7 +2463,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-kernels"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "indexmap",
  "meerkat-core",
@@ -2480,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-schema"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "indexmap",
  "meerkat-core",
@@ -2492,7 +2486,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mcp"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "futures",
@@ -2515,7 +2509,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-memory"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "hnsw_rs",
@@ -2536,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2574,12 +2568,13 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-mcp"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "chrono",
  "futures",
  "indexmap",
+ "jsonschema",
  "meerkat",
  "meerkat-client",
  "meerkat-contracts",
@@ -2590,8 +2585,10 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tokio_with_wasm",
  "tracing",
  "uuid",
@@ -2599,14 +2596,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-models"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "meerkat-core",
 ]
 
 [[package]]
 name = "meerkat-openai"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2617,6 +2614,7 @@ dependencies = [
  "indexmap",
  "meerkat-auth-core",
  "meerkat-contracts",
+ "meerkat-copilot",
  "meerkat-core",
  "meerkat-llm-core",
  "meerkat-models",
@@ -2634,7 +2632,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-providers"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "meerkat-auth-core",
  "meerkat-llm-core",
@@ -2642,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-rpc"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "axum",
@@ -2675,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-runtime"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2685,6 +2683,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-live",
+ "meerkat-llm-core",
  "meerkat-machine-derive",
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",
@@ -2704,7 +2703,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-schedule"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2728,7 +2727,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-session"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "futures",
@@ -2752,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-skills"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "indexmap",
@@ -2773,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-sqlite"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "rusqlite",
  "thiserror 2.0.18",
@@ -2781,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-store"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2804,7 +2803,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-tools"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "base64",
@@ -2843,7 +2842,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-workgraph"
-version = "0.8.24"
+version = "0.8.40"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2937,23 +2936,6 @@ dependencies = [
  "thiserror 2.0.18",
  "widestring",
  "windows 0.48.0",
-]
-
-[[package]]
-name = "native-tls"
-version = "0.2.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "465500e14ea162429d264d44189adc38b199b62b1c21eea9f69e4b73cb03bbf2"
-dependencies = [
- "libc",
- "log",
- "openssl",
- "openssl-probe",
- "openssl-sys",
- "schannel",
- "security-framework 3.7.0",
- "security-framework-sys",
- "tempfile",
 ]
 
 [[package]]
@@ -3162,9 +3144,9 @@ dependencies = [
 
 [[package]]
 name = "oai-rt-rs"
-version = "0.4.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffa624202cb21ad8d10f56124160a83b425564a4951d04c07837a0d060cd242f"
+checksum = "4599e99d72b96a11b2c1faec40780ecfee890bf2a422916d0bf1915edfeb87fc"
 dependencies = [
  "async-trait",
  "base64",
@@ -3238,48 +3220,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "openssl"
-version = "0.10.77"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfe4646e360ec77dff7dde40ed3d6c5fee52d156ef4a62f53973d38294dad87f"
-dependencies = [
- "bitflags 2.11.0",
- "cfg-if",
- "foreign-types",
- "libc",
- "once_cell",
- "openssl-macros",
- "openssl-sys",
-]
-
-[[package]]
-name = "openssl-macros"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
-
-[[package]]
-name = "openssl-sys"
-version = "0.9.113"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad2f2c0eba47118757e4c6d2bff2838f3e0523380021356e7875e858372ce644"
-dependencies = [
- "cc",
- "libc",
- "pkg-config",
- "vcpkg",
-]
 
 [[package]]
 name = "option-ext"
@@ -3937,13 +3881,11 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-rustls",
- "hyper-tls",
  "hyper-util",
  "js-sys",
  "log",
  "mime",
  "mime_guess",
- "native-tls",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -3954,7 +3896,6 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
- "tokio-native-tls",
  "tokio-rustls",
  "tokio-util",
  "tower",
@@ -4979,16 +4920,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "tokio-native-tls"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
-dependencies = [
- "native-tls",
- "tokio",
 ]
 
 [[package]]

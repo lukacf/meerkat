@@ -24,11 +24,19 @@ export interface ModelAssignments {
   reviewer: string;
 }
 
-interface PanelState {
+export interface PanelState {
   stream: StreamRenderer;
   statusEl: HTMLElement;
   subHandle: string | null;
-  currentCard: HTMLElement | null;
+  pendingCards: Map<string, HTMLElement>;
+  seenEvents: Set<string>;
+}
+
+export function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter(block => block?.type === "text" && typeof block.text === "string")
+    .map(block => block.text).join("\n");
 }
 
 export interface MobRuntime {
@@ -93,7 +101,7 @@ Working directory: /workspace/ (use /workspace/src/ for source code)
 
 const MOB_ID = "dev-team";
 
-function buildMobDefinition(models: ModelAssignments): object {
+export function buildMobDefinition(models: ModelAssignments): object {
   const tools = { builtins: false, comms: true, shell: false };
 
   // Shared profile defaults — only model, skills, tools, and peer_description vary per role.
@@ -104,7 +112,6 @@ function buildMobDefinition(models: ModelAssignments): object {
     runtime_mode: "autonomous_host" as const,
     max_inline_peer_notifications: null,
     output_schema: null,
-    provider_params: { reasoning_effort: "low" },
   };
 
   return {
@@ -138,28 +145,29 @@ function buildMobDefinition(models: ModelAssignments): object {
 ${VM_ENV}
 
 Your peers:
-- dev-team/planner/planner — creates implementation plans
-- dev-team/coder/coder — writes and tests code
-- dev-team/reviewer/reviewer — reviews code quality
+- planner — creates implementation plans
+- coder — writes and tests code
+- reviewer — reviews code quality
+Call peers to discover their canonical peer_id values. Send with send_message(peer_id: "<discovered peer_id>", handling_mode: "queue", body: "..."). Never use display addresses as identity.
 
 ON STARTUP (no messages): Say "Alpha Meerkat ready." — no tool calls, end your turn.
 
 WHEN YOU RECEIVE A USER TASK (external message):
-- Send the task to the planner via send_message(to: "dev-team/planner/planner", handling_mode: "queue", body: "<detailed task description including language/runtime constraints from the environment spec>")
+- Send the task to the planner via send_message(peer_id: "<planner peer_id from peers>", handling_mode: "queue", body: "<detailed task description including language/runtime constraints from the environment spec>")
 - Then END YOUR TURN. Do NOT wait or poll. The system wakes you when a reply arrives.
 
 WHEN YOU RECEIVE A REPLY FROM THE PLANNER:
 - Read the plan if needed (read_file /workspace/plan.md)
-- Send instructions to the coder via send_message(to: "dev-team/coder/coder", handling_mode: "queue", body: "<implementation instructions referencing the plan>")
+- Send instructions to the coder via send_message(peer_id: "<coder peer_id from peers>", handling_mode: "queue", body: "<implementation instructions referencing the plan>")
 - Then END YOUR TURN.
 
 WHEN YOU RECEIVE A REPLY FROM THE CODER:
-- Send a review request to the reviewer via send_message(to: "dev-team/reviewer/reviewer", handling_mode: "queue", body: "<review request>")
+- Send a review request to the reviewer via send_message(peer_id: "<reviewer peer_id from peers>", handling_mode: "queue", body: "<review request>")
 - Then END YOUR TURN.
 
 WHEN YOU RECEIVE A REPLY FROM THE REVIEWER:
 - Read /workspace/review.md if needed
-- If the reviewer found issues to fix: send the feedback to the coder via send_message(to: "dev-team/coder/coder", handling_mode: "queue", body: "<fix instructions based on review>"). Then END YOUR TURN. When the coder replies, send it back to the reviewer for re-review.
+- If the reviewer found issues to fix: send the feedback to the coder via send_message(peer_id: "<coder peer_id from peers>", handling_mode: "queue", body: "<fix instructions based on review>"). Then END YOUR TURN. When the coder replies, send it back to the reviewer for re-review.
 - If the review is clean (no issues): summarize the final results for the user and END YOUR TURN.
 
 CRITICAL RULES:
@@ -179,7 +187,7 @@ WHEN YOU RECEIVE A TASK via message:
 1. Analyze requirements — consider the VM environment constraints above
 2. Break into ordered steps with file paths, function signatures, and test commands
 3. Write the plan to /workspace/plan.md using write_file
-4. Send the plan summary back to the Alpha Meerkat: send_message(to: "dev-team/orchestrator/orchestrator", handling_mode: "queue", body: "Plan written to /workspace/plan.md. <brief summary>")
+4. Discover the orchestrator's canonical peer_id using peers, then send_message(peer_id: "<discovered peer_id>", handling_mode: "queue", body: "Plan written to /workspace/plan.md. <brief summary>"). Never address messages with display labels.
 
 Tools: shell, write_file, read_file, send_message.`,
       },
@@ -195,7 +203,7 @@ WHEN YOU RECEIVE INSTRUCTIONS via message:
 1. Read /workspace/plan.md if referenced
 2. Implement the code in /workspace/src/ using write_file
 3. Test with shell — run the code, fix errors until it works
-4. Send completion notice to the Alpha Meerkat: send_message(to: "dev-team/orchestrator/orchestrator", handling_mode: "queue", body: "Implementation complete. <summary of what was built and test results>")
+4. Discover the orchestrator's canonical peer_id using peers, then send_message(peer_id: "<discovered peer_id>", handling_mode: "queue", body: "Implementation complete. <summary of what was built and test results>"). Never address messages with display labels.
 
 Tools: shell, write_file, read_file, send_message.`,
       },
@@ -211,7 +219,7 @@ WHEN YOU RECEIVE A REVIEW REQUEST via message:
 1. Read source files in /workspace/src/
 2. Run the code with shell to verify correctness
 3. Write review to /workspace/review.md using write_file
-4. Send review results to the Alpha Meerkat: send_message(to: "dev-team/orchestrator/orchestrator", handling_mode: "queue", body: "Review complete. <summary of findings>")
+4. Discover the orchestrator's canonical peer_id using peers, then send_message(peer_id: "<discovered peer_id>", handling_mode: "queue", body: "Review complete. <summary of findings>"). Never address messages with display labels.
 
 Tools: shell, write_file, read_file, send_message.`,
       },
@@ -334,11 +342,18 @@ export class MobOrchestrator {
   }
 
   /** Clear any pending tool call spinner on a panel. */
-  private clearCard(panel: PanelState, output = "", isError = false): void {
-    if (panel.currentCard) {
-      panel.stream.resolveToolCall(panel.currentCard, output, isError);
-      panel.currentCard = null;
+  private clearCards(panel: PanelState, output: string): void {
+    for (const card of panel.pendingCards.values()) {
+      panel.stream.resolveToolCall(card, output, true);
     }
+    panel.pendingCards.clear();
+  }
+
+  private resolveCard(panel: PanelState, id: string, output: string, isError: boolean): void {
+    const card = panel.pendingCards.get(id);
+    if (!card) return;
+    panel.stream.resolveToolCall(card, output, isError);
+    panel.pendingCards.delete(id);
   }
 
   private pollAll(): void {
@@ -361,6 +376,10 @@ export class MobOrchestrator {
   }
 
   private routeEnvelope(agent: string, envelope: any, panel: PanelState): void {
+    if (envelope.event_id) {
+      if (panel.seenEvents.has(envelope.event_id)) return;
+      panel.seenEvents.add(envelope.event_id);
+    }
     // EventEnvelope<AgentEvent> — payload is the AgentEvent
     const ev = envelope.payload || envelope;
 
@@ -383,16 +402,17 @@ export class MobOrchestrator {
         break;
 
       case "tool_call_requested":
-        panel.currentCard = panel.stream.beginToolCall(ev.name, ev.args);
+        if (!panel.pendingCards.has(ev.id)) panel.pendingCards.set(ev.id, panel.stream.beginToolCall(ev.name, ev.args));
         this.updateStatus(agent, `${ev.name}`, "tool-use");
         break;
 
       case "tool_execution_completed":
-        this.clearCard(panel, ev.result || "", ev.is_error || false);
+      case "tool_result_received":
+        this.resolveCard(panel, ev.id, contentText(ev.content), ev.is_error === true);
         break;
 
-      case "tool_result_received":
-        this.clearCard(panel); // fallback if tool_execution_completed was missed
+      case "tool_execution_timed_out":
+        this.resolveCard(panel, ev.id, `Timed out after ${ev.timeout_ms}ms`, true);
         break;
 
       case "tool_execution_started":
@@ -403,10 +423,11 @@ export class MobOrchestrator {
         // Show the incoming prompt as a collapsed card.
         // Comms messages contain peer addresses (e.g. "dev-team/planner/planner").
         // User messages (via member send) are raw text — already shown as ❯ line.
-        const isComms = ev.prompt && ev.prompt.includes(`${this.mobId}/`);
-        if (ev.prompt && (agent !== "orchestrator" || isComms)) {
-          const card = panel.stream.beginToolCall("message received", { text: ev.prompt });
-          panel.stream.resolveToolCall(card, ev.prompt, false);
+        const prompt = ev.input?.kind === "content" ? contentText(ev.input.content) : null;
+        const isComms = prompt?.includes(`${this.mobId}/`);
+        if (prompt && (agent !== "orchestrator" || isComms)) {
+          const card = panel.stream.beginToolCall("message received", { text: prompt });
+          panel.stream.resolveToolCall(card, prompt, false);
         }
         this.updateStatus(agent, "thinking", "thinking");
         break;
@@ -417,13 +438,15 @@ export class MobOrchestrator {
         break;
 
       case "turn_completed":
+        break;
       case "run_completed":
-        this.clearCard(panel); // clear any lingering tool spinners
+        this.clearCards(panel, "Run ended without a tool result");
         this.updateStatus(agent, "idle");
         break;
 
       case "run_failed":
-        panel.stream.appendError(ev.error || "Run failed");
+        this.clearCards(panel, ev.error_report?.message ?? "Run failed without a diagnostic");
+        panel.stream.appendError(ev.error_report?.message ?? "Run failed without a diagnostic", ev.error_report);
         this.updateStatus(agent, "error", "error");
         break;
     }

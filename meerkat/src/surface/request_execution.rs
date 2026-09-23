@@ -370,21 +370,33 @@ impl RequestContext {
     /// immediately so initialization-time races can't leave the caller with a
     /// stale noop action on a cancelled request.
     ///
+    /// Phase observation and callback replacement share the cancellation
+    /// authority's critical section. Replayed callbacks run after locks are
+    /// released, so they may re-enter the request executor.
+    ///
     /// Returns the generated phase observed at install time, or `None` when
     /// generated authority has no lifecycle fact for this request.
     pub async fn install_cancel_action(
         &self,
         action: RequestAsyncAction,
     ) -> Option<SurfaceRequestPhase> {
-        let (phase, maybe_run) = {
-            let phase = self.phase();
-            let mut slot = lock_or_recover(&self.entry.cancel_action);
-            *slot = Arc::clone(&action);
-            // If cancel already landed, honour the upgrade by re-firing now.
-            let run =
-                matches!(phase, Some(SurfaceRequestPhase::Cancelled)).then(|| Arc::clone(&slot));
-            (phase, run)
-        };
+        self.install_cancel_action_inner(action, || {}).await
+    }
+
+    /// `after_phase_observed` runs inside the authority critical section right
+    /// after the phase is read; production passes a no-op and tests use it to
+    /// interleave a cancellation attempt.
+    async fn install_cancel_action_inner(
+        &self,
+        action: RequestAsyncAction,
+        after_phase_observed: impl FnOnce(),
+    ) -> Option<SurfaceRequestPhase> {
+        let (phase, maybe_run) = self.authority.install_cancel_action(
+            &self.key,
+            &self.entry,
+            &action,
+            after_phase_observed,
+        );
         if let Some(action) = maybe_run {
             action().await;
         }
@@ -551,13 +563,39 @@ impl SurfaceRequestAuthorityShell {
     }
 
     fn phase(&self, key: &str) -> Option<SurfaceRequestPhase> {
-        lock_or_recover(&self.inner)
+        Self::phase_locked(&lock_or_recover(&self.inner), key)
+    }
+
+    fn phase_locked(
+        inner: &SurfaceRequestAuthorityState,
+        key: &str,
+    ) -> Option<SurfaceRequestPhase> {
+        inner
             .authority
             .state()
             .surface_request_phases
             .get(key)
             .copied()
             .map(SurfaceRequestPhase::from)
+    }
+
+    fn install_cancel_action(
+        &self,
+        key: &str,
+        entry: &RequestEntry,
+        action: &RequestAsyncAction,
+        after_phase_observed: impl FnOnce(),
+    ) -> (Option<SurfaceRequestPhase>, Option<RequestAsyncAction>) {
+        // Match cancel_request's authority -> action lock order. Observing the
+        // phase and replacing the callback must linearize against cancellation.
+        let inner = lock_or_recover(&self.inner);
+        let phase = Self::phase_locked(&inner, key);
+        after_phase_observed();
+        let mut slot = lock_or_recover(&entry.cancel_action);
+        *slot = Arc::clone(action);
+        let replay =
+            matches!(phase, Some(SurfaceRequestPhase::Cancelled)).then(|| Arc::clone(&slot));
+        (phase, replay)
     }
 
     async fn cancel_request(&self, key: &str) -> CancelOutcome {
@@ -1086,6 +1124,142 @@ async fn prepare_surface_session_from_seed(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn cancellation_cannot_pass_between_phase_observation_and_action_installation() {
+        use std::sync::{TryLockError, mpsc};
+
+        let executor = SurfaceRequestExecutor::new(Duration::from_secs(1));
+        let old_calls = Arc::new(AtomicUsize::new(0));
+        let new_calls = Arc::new(AtomicUsize::new(0));
+        let context = executor.begin_request(
+            "install-race",
+            request_action({
+                let calls = old_calls.clone();
+                move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    async {}
+                }
+            }),
+        );
+        let (observed_tx, observed_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let installer = std::thread::spawn({
+            let context = context.clone();
+            let calls = new_calls.clone();
+            move || {
+                futures::executor::block_on(context.install_cancel_action_inner(
+                    request_action(move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        async {}
+                    }),
+                    || {
+                        observed_tx.send(()).expect("observation barrier");
+                        release_rx
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("installation barrier released");
+                    },
+                ))
+            }
+        });
+        observed_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("installer reached phase observation");
+        let serialized = match context.authority.inner.try_lock() {
+            Ok(guard) => {
+                drop(guard);
+                false
+            }
+            Err(TryLockError::WouldBlock) => true,
+            Err(TryLockError::Poisoned(_)) => panic!("request authority poisoned"),
+        };
+        let canceller = std::thread::spawn({
+            let executor = executor.clone();
+            move || futures::executor::block_on(executor.cancel_request("install-race"))
+        });
+        // With the old split locks, force cancellation to finish in the gap.
+        // With an atomic owner critical section it cannot enter until released.
+        let cancelled = if serialized {
+            release_tx.send(()).expect("release serialized install");
+            canceller.join().expect("canceller")
+        } else {
+            let result = canceller.join().expect("canceller");
+            release_tx.send(()).expect("release split-lock install");
+            result
+        };
+        assert_eq!(
+            installer.join().expect("installer"),
+            Some(SurfaceRequestPhase::Pending)
+        );
+        assert_eq!(cancelled, CancelOutcome::Cancelled);
+        assert_eq!(context.phase(), Some(SurfaceRequestPhase::Cancelled));
+        assert_eq!(
+            new_calls.load(Ordering::SeqCst),
+            1,
+            "cancellation must reach the newly installed action"
+        );
+        assert_eq!(old_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            serialized,
+            "phase and action binding share the owner critical section"
+        );
+        assert_eq!(
+            futures::executor::block_on(executor.cancel_request("install-race")),
+            CancelOutcome::AlreadyCancelled
+        );
+        assert_eq!(new_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            futures::executor::block_on(executor.finish_unpublished("install-race")),
+            CompleteOutcome::SupersededByCancel
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn already_cancelled_install_replays_outside_authority_lock() {
+        use std::sync::mpsc;
+
+        let executor = SurfaceRequestExecutor::new(Duration::from_secs(1));
+        let context = executor.begin_request("reentrant-install", noop_request_action());
+        assert_eq!(
+            futures::executor::block_on(executor.cancel_request("reentrant-install")),
+            CancelOutcome::Cancelled
+        );
+        let (finished_tx, finished_rx) = mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            let observed = Arc::new(AtomicUsize::new(0));
+            let action = request_action({
+                let executor = executor.clone();
+                let observed = observed.clone();
+                move || {
+                    let executor = executor.clone();
+                    let observed = observed.clone();
+                    async move {
+                        assert_eq!(
+                            executor.phase("reentrant-install"),
+                            Some(SurfaceRequestPhase::Cancelled)
+                        );
+                        assert_eq!(
+                            executor.cancel_request("reentrant-install").await,
+                            CancelOutcome::AlreadyCancelled
+                        );
+                        observed.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            });
+            let installed =
+                futures::executor::block_on(context.install_cancel_action_or_cancelled(action));
+            assert_eq!(installed, CancelActionInstallOutcome::AlreadyCancelled);
+            assert_eq!(observed.load(Ordering::SeqCst), 1);
+            futures::executor::block_on(executor.finish_unpublished("reentrant-install"));
+            finished_tx.send(()).expect("completion observer");
+        });
+        finished_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("replayed action can re-enter the shared owner");
+        worker.join().expect("reentrant installer");
+    }
 
     #[test]
     fn surface_semantics_do_not_own_raw_request_lifecycle_tables() {

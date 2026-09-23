@@ -38,9 +38,9 @@ use tokio::sync::mpsc;
 struct SearchDocsArgs {
     /// Search query
     query: String,
-    /// Maximum results to return
+    /// Maximum fixture results to return (0 returns none; total counts all matches)
     #[serde(default = "default_limit")]
-    _limit: usize,
+    limit: usize,
 }
 
 fn default_limit() -> usize {
@@ -65,13 +65,13 @@ impl AgentToolDispatcher for DomainTools {
         vec![
             Arc::new(ToolDef {
                 name: "search_docs".into(),
-                description: "Search internal documentation".to_string(),
+                description: "Search three offline documentation fixtures, not real internal documentation. Results are simulated.".to_string(),
                 input_schema: meerkat_tools::schema_for::<SearchDocsArgs>(),
                 provenance: None,
             }),
             Arc::new(ToolDef {
                 name: "create_ticket".into(),
-                description: "Create a support ticket in the issue tracker".to_string(),
+                description: "Simulate a support ticket using an offline fixture. Does not create anything in an issue tracker.".to_string(),
                 input_schema: meerkat_tools::schema_for::<CreateTicketArgs>(),
                 provenance: None,
             }),
@@ -85,15 +85,17 @@ impl AgentToolDispatcher for DomainTools {
                 let args: SearchDocsArgs = call
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                // Simulated documentation search
+                let fixtures = [
+                    json!({"title": "Getting Started Guide", "relevance": 0.95}),
+                    json!({"title": "API Reference", "relevance": 0.87}),
+                    json!({"title": "Troubleshooting FAQ", "relevance": 0.72}),
+                ];
                 let results = json!({
+                    "simulated": true,
+                    "source": "offline fixtures; no documentation service queried",
                     "query": args.query,
-                    "results": [
-                        {"title": "Getting Started Guide", "relevance": 0.95},
-                        {"title": "API Reference", "relevance": 0.87},
-                        {"title": "Troubleshooting FAQ", "relevance": 0.72},
-                    ],
-                    "total": 3
+                    "results": &fixtures[..args.limit.min(fixtures.len())],
+                    "total": fixtures.len()
                 });
                 Ok(ToolResult::new(call.id.to_string(), results.to_string(), false).into())
             }
@@ -102,6 +104,9 @@ impl AgentToolDispatcher for DomainTools {
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let ticket = json!({
+                    "simulated": true,
+                    "external_mutation": false,
+                    "notice": "Offline ticket fixture only; no issue tracker ticket was created",
                     "id": "TICKET-1234",
                     "title": args.title,
                     "description": args.description,
@@ -118,8 +123,11 @@ impl AgentToolDispatcher for DomainTools {
 
 // ── Main ───────────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    meerkat_runtime::host_stack::run_host("025-full-stack-agent", async_main)?
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
@@ -153,7 +161,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── 4. Build the agent ─────────────────────────────────────────────────
     let behavior_instructions = r"
 ## Role
-You are a software support agent for a product.
+You are demonstrating a software support agent with offline domain-tool fixtures.
+search_docs returns canned documentation entries, not real search results.
+create_ticket only simulates a ticket; it never writes to an issue tracker.
+Explicitly label these results as simulated. Never claim a real ticket was created.
 
 ## Capabilities
 1. Search documentation to answer user questions
@@ -187,6 +198,8 @@ Professional, concise, action-oriented. Always provide next steps.
 
     // ── 5. Run with event streaming ────────────────────────────────────────
     println!("=== Composed Agent: Product Support ===\n");
+    println!("DEMO: documentation search and ticket creation use offline fixtures.");
+    println!("No documentation service is queried and no issue tracker ticket is created.\n");
 
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
     let logger = spawn_event_logger(
@@ -232,7 +245,7 @@ Professional, concise, action-oriented. Always provide next steps.
 │                                                            │
 │  Tools:                                                    │
 │  ├── Built-in: task_create, task_list, task_update, datetime │
-│  ├── Domain:   search_docs, create_ticket                  │
+│  ├── Fixtures: search_docs, create_ticket (simulated)       │
 │                                                            │
 │  Events:    Streaming to event logger (verbose mode)       │
 │  Storage:   JsonlStore in a temporary directory             │
@@ -253,4 +266,72 @@ Not configured here:
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn dispatch(name: &str, args: serde_json::Value) -> serde_json::Value {
+        let arguments = serde_json::value::to_raw_value(&args).unwrap();
+        let outcome = DomainTools
+            .dispatch(ToolCallView {
+                id: "fixture-call",
+                name,
+                args: &arguments,
+            })
+            .await
+            .unwrap();
+        let result = outcome.result;
+        assert!(!result.is_error);
+        serde_json::from_str(&result.text_content()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn search_limits_bound_results_without_changing_total_matches() {
+        for (limit, expected) in [(None, 3), (Some(0), 0), (Some(1), 1), (Some(10), 3)] {
+            let mut args = json!({"query": "synthetic query"});
+            if let Some(limit) = limit {
+                args["limit"] = json!(limit);
+            }
+            let output = dispatch("search_docs", args).await;
+            assert_eq!(output["results"].as_array().unwrap().len(), expected);
+            assert_eq!(output["total"], 3);
+            assert_eq!(output["simulated"], true);
+        }
+    }
+
+    #[test]
+    fn tool_catalog_discloses_fixtures_and_exposes_limit() {
+        let tools = DomainTools.tools();
+        let search = tools
+            .iter()
+            .find(|tool| tool.name == "search_docs")
+            .unwrap();
+        assert!(search.input_schema["properties"].get("limit").is_some());
+        assert!(search.input_schema["properties"].get("_limit").is_none());
+        assert!(
+            tools
+                .iter()
+                .all(|tool| tool.description.contains("offline"))
+        );
+    }
+
+    #[tokio::test]
+    async fn ticket_dispatch_returns_an_explicit_simulation_not_an_external_write() {
+        let output = dispatch(
+            "create_ticket",
+            json!({"title": "Synthetic ticket", "description": "Fixture only", "priority": "high"}),
+        )
+        .await;
+        assert_eq!(output["simulated"], true);
+        assert_eq!(output["external_mutation"], false);
+        assert_eq!(output["title"], "Synthetic ticket");
+        assert!(
+            output["notice"]
+                .as_str()
+                .unwrap()
+                .contains("no issue tracker")
+        );
+    }
 }

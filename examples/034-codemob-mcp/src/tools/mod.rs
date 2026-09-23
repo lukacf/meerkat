@@ -1,3 +1,4 @@
+pub(crate) mod cancellation;
 pub mod consult;
 pub mod deliberate;
 pub mod mobs;
@@ -14,12 +15,19 @@ use crate::state::ForceState;
 
 pub type ProgressNotifier = Arc<dyn Fn(Value, usize, usize, String) + Send + Sync>;
 
+#[derive(Debug)]
 pub struct ToolCallError {
     pub code: i32,
     pub message: String,
 }
 
 impl ToolCallError {
+    pub fn cancelled() -> Self {
+        Self {
+            code: -32005,
+            message: "request cancelled before response publish".into(),
+        }
+    }
     pub fn invalid_params(msg: impl Into<String>) -> Self {
         Self {
             code: -32602,
@@ -65,7 +73,7 @@ pub fn tools_list() -> Vec<Value> {
     vec![
         json!({
             "name": "list_packs",
-            "description": "List all available deliberation packs (built-in and user-created) with their descriptions and agent counts.",
+            "description": "List all available deliberation packs with descriptions, agent counts, and exact role names mapped to default models.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         json!({
@@ -104,7 +112,7 @@ pub fn tools_list() -> Vec<Value> {
                     },
                     "provider_params": {
                         "type": "object",
-                        "description": "Typed per-turn provider parameters. Examples: {\"provider_tag\": {\"provider\": \"open_ai\", \"reasoning_effort\": \"high\"}} for OpenAI reasoning effort, {\"thinking_budget_tokens\": 5000} for Anthropic extended thinking, {\"temperature\": 0.2} for more deterministic output",
+                        "description": "Typed provider parameters for a NEW session only. Continuation inherits the original configuration; supplying provider_params with session_id is rejected. Examples: {\"provider_tag\": {\"provider\": \"open_ai\", \"reasoning_effort\": \"high\"}}, {\"thinking_budget_tokens\": 5000}, {\"temperature\": 0.2}",
                         "additionalProperties": true
                     },
                     "session_id": {
@@ -160,7 +168,7 @@ pub fn tools_list() -> Vec<Value> {
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Experimental mob reuse handle. Current reuse does not reliably preserve first-call history or replace an existing flow's baked task. Omit this field for normal deliberate calls."
+                        "description": "Experimental mob reuse handle. Current reuse does not reliably preserve first-call history or replace an existing mob's profiles and flow definition. Omit this field for normal deliberate calls."
                     }
                 },
                 "required": ["pack", "task"]
@@ -327,7 +335,7 @@ pub async fn handle_tool_call(
             let packs: Vec<Value> = state
                 .pack_registry()
                 .all()
-                .map(|p| json!({"name": p.name(), "description": p.description(), "agents": p.agent_count(), "flow_steps": p.flow_step_count()}))
+                .map(|p| json!({"name": p.name(), "description": p.description(), "agents": p.agent_count(), "flow_steps": p.flow_step_count(), "roles": p.roles()}))
                 .collect();
             Ok(
                 json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&packs).unwrap_or_default()}]}),

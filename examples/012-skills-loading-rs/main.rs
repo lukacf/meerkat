@@ -12,13 +12,13 @@
 //! - Composes both sources via `CompositeSkillSource`
 //! - Builds a `DefaultSkillEngine` and wraps it in a `SkillRuntime`
 //! - Wires the `SkillRuntime` into the agent via `AgentBuilder::with_skill_engine()`
-//! - The agent's system prompt is augmented with the skill inventory
-//! - Demonstrates resolving and rendering a specific skill by ID
+//! - Explicitly activates the review skill through a typed per-turn key
+//! - Demonstrates inventory rendering separately for the host terminal
 //!
 //! ## What you'll learn
 //! - The skill resolution pipeline: Source -> Engine -> Runtime -> AgentBuilder
 //! - Creating skills from different sources (in-memory, filesystem)
-//! - How skills compose with the system prompt via the inventory section
+//! - Registration, inventory visibility, and body activation are separate steps
 //! - How `SkillRuntime` type-erases the engine for the agent loop
 //!
 //! ## Run
@@ -26,7 +26,7 @@
 //! ANTHROPIC_API_KEY=... ./scripts/repo-cargo run -p meerkat --example 012-skills-loading --features jsonl-store,skills
 //! ```
 
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use indexmap::IndexMap;
 use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, SkillRuntime, SkillScope};
@@ -43,23 +43,19 @@ use meerkat_skills::{
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
+type ExampleError = Box<dyn std::error::Error + Send + Sync>;
 
-    let _tmp = tempfile::tempdir()?;
-    let store_dir = _tmp.path().join("sessions");
-    std::fs::create_dir_all(&store_dir)?;
+fn main() -> Result<(), ExampleError> {
+    meerkat_runtime::host_stack::run_host("skills-loading", run)?
+}
 
-    let factory = AgentFactory::new(store_dir.clone());
-    let client = Arc::new(AnthropicClient::new(api_key)?);
-    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
+fn review_key() -> SkillKey {
+    SkillKey::builtin(SkillName::parse("review-rust-reviewer").expect("valid skill name"))
+}
 
-    let store = Arc::new(JsonlStore::new(store_dir));
-    store.init().await?;
-    let store = Arc::new(StoreAdapter::new(store));
-
+fn skill_engine(
+    skill_dir: &Path,
+) -> Result<DefaultSkillEngine<CompositeSkillSource>, ExampleError> {
     // ── Step 1: Create in-memory skills ──────────────────────────────────────
     //
     // InMemorySkillSource holds skill documents directly in memory.
@@ -69,9 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let code_review_skill = SkillDocument {
         descriptor: {
             let mut d = SkillDescriptor::new(
-                SkillKey::builtin(
-                    SkillName::parse("review-rust-reviewer").expect("valid skill name"),
-                ),
+                review_key(),
                 "Rust Code Reviewer",
                 "Reviews Rust code for idiomatic patterns, \
                           safety issues, and performance.",
@@ -131,18 +125,15 @@ You are an API design consultant.
 
     // ── Step 2: Create a filesystem-based skill ──────────────────────────────
     //
-    // FilesystemSkillSource scans a directory tree for SKILL.md files.
-    // The skill ID is derived from the relative path within the root.
-    // Example: root/.rkat/skills/security/auditor/SKILL.md -> id "security/auditor"
+    // Use a direct child whose directory and frontmatter share a lowercase slug.
+    // Canonical identity is (source UUID, skill name), not a slash-delimited path.
 
-    let _skill_tmp = tempfile::tempdir()?;
-    let skill_dir = _skill_tmp.path().to_path_buf();
-    let security_skill_dir = skill_dir.join("security").join("auditor");
+    let security_skill_dir = skill_dir.join("security-auditor");
     std::fs::create_dir_all(&security_skill_dir)?;
     std::fs::write(
         security_skill_dir.join("SKILL.md"),
         r"---
-name: Security Auditor
+name: security-auditor
 description: Audits code for common security vulnerabilities
 ---
 
@@ -164,13 +155,17 @@ You are a security auditor reviewing code for vulnerabilities.
 ",
     )?;
 
-    let fs_source = FilesystemSkillSource::new(skill_dir.clone(), SkillScope::Project);
+    let fs_source = FilesystemSkillSource::new_with_identity(
+        skill_dir.to_path_buf(),
+        SkillScope::Project,
+        SourceUuid::project_local(),
+        Default::default(),
+    );
 
     // ── Step 3: Compose skill sources ────────────────────────────────────────
     //
-    // CompositeSkillSource merges multiple named sources. When skills have
-    // the same ID across sources, the first source wins (shadowing).
-    // This enables layering: project skills override user skills override builtins.
+    // Composition preserves each source UUID. Equal names in different sources
+    // are distinct skills; only identical full SkillKeys can shadow.
 
     let inline_identity = SourceIdentityRecord {
         source_uuid: SourceUuid::builtin(),
@@ -213,8 +208,21 @@ You are a security auditor reviewing code for vulnerabilities.
     //   - Inventory rendering (XML skill list for the system prompt)
     //   - Skill resolution and rendering (load + wrap in XML tags)
 
-    let engine = DefaultSkillEngine::new(composite_source, vec![]);
+    Ok(DefaultSkillEngine::new(composite_source, vec![]))
+}
 
+async fn run() -> Result<(), ExampleError> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
+    let scratch = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let store_dir = scratch.path().join("sessions");
+    let factory = AgentFactory::new(store_dir.clone());
+    let client = Arc::new(AnthropicClient::new(api_key)?);
+    let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
+    let store = Arc::new(JsonlStore::new(store_dir));
+    store.init().await?;
+    let store = Arc::new(StoreAdapter::new(store));
+    let engine = skill_engine(&scratch.path().join("skills"))?;
     // ── Step 5: Demonstrate the engine directly ──────────────────────────────
     //
     // Before wiring into an agent, let's see what the skill engine produces.
@@ -224,11 +232,7 @@ You are a security auditor reviewing code for vulnerabilities.
     println!("{inventory}\n");
 
     println!("=== Resolved Skill: review-rust-reviewer ===\n");
-    let resolved = engine
-        .resolve_and_render(&[SkillKey::builtin(
-            SkillName::parse("review-rust-reviewer").expect("valid skill name"),
-        )])
-        .await?;
+    let resolved = engine.resolve_and_render(&[review_key()]).await?;
     for skill in &resolved {
         println!("Name: {}", skill.name);
         println!("Size: {} bytes", skill.byte_size);
@@ -239,22 +243,21 @@ You are a security auditor reviewing code for vulnerabilities.
     //
     // SkillRuntime type-erases the engine (which is generic over SkillSource)
     // into a Send + Sync + Clone runtime that the agent loop can use.
-    // The agent loop calls:
-    //   - inventory_section() to build the system prompt skill inventory
-    //   - resolve_and_render() when /skill-ref directives are encountered
+    // Registration alone does not expose inventory or activate bodies. This
+    // example retains EmptyToolDispatcher: no on-demand skill tools are exposed.
 
     let skill_runtime = Arc::new(SkillRuntime::new(Arc::new(engine)));
 
     let mut agent = AgentBuilder::new()
         .model("claude-sonnet-4-6")
         .system_prompt(
-            "You are a code review assistant. Use the skills available to you \
-             when reviewing code. Apply the appropriate skill based on the review type.",
+            "You are a code review assistant. Apply the explicitly activated review skill.",
         )
         .max_tokens_per_turn(2048)
         .with_skill_engine(skill_runtime)
         .build(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
         .await?;
+    agent.pending_skill_references = Some(vec![review_key()]);
 
     // ── Step 7: Run the agent with skills ────────────────────────────────────
 
@@ -287,7 +290,7 @@ fn process_items(items: Vec<String>) -> Vec<String> {
 
     println!("\n=== Skill System Architecture ===\n");
     println!(
-        r#"Skill resolution pipeline:
+        r"Skill resolution pipeline:
 
   SkillSource (where skills live)
     |-- InMemorySkillSource    (inline / SDK embedding)
@@ -298,7 +301,7 @@ fn process_items(items: Vec<String>) -> Vec<String> {
     |-- ExternalSkillSource    (stdio protocol with external process)
     |
     v
-  CompositeSkillSource (merges named sources with shadowing)
+  CompositeSkillSource (canonical keys retain source identity)
     |
     v
   DefaultSkillEngine (capability filtering + rendering)
@@ -311,34 +314,51 @@ fn process_items(items: Vec<String>) -> Vec<String> {
     |
     v
   Agent loop:
-    - inventory_section() -> system prompt augmentation
-    - resolve_and_render() -> on-demand skill activation
+    - pending_skill_references -> typed per-turn body activation
+    - emits SkillsResolved and appends canonical SkillContext blocks
 
-SKILL.md file format:
-  ---
-  name: Shell Patterns
-  description: "Background job workflows"
-  requires_capabilities: [builtins, shell]
-  ---
-  # Shell Patterns
-  ... markdown body ...
-
-Config (.rkat/config.toml):
-  [[skills]]
-  source = "path"
-  path = ".rkat/skills/"
-
-  [[skills]]
-  source = "git"
-  url = "https://github.com/org/skills.git"
-
-CLI preload accepts only bare embedded-builtin slugs:
-  rkat run --skill shell-patterns "Inspect this shell workflow..."
+Printing inventory on the host is not model visibility. A host may explicitly
+compose inventory and discovery tools; this example activates only the review
+body, without granting any tools.
 
 For local filesystem skills, resolve the typed source UUID and SkillKey through
 the RPC or SDK skill APIs, then preload that typed reference on session create.
-"#
+"
+    );
+    println!("SKILL.md format (in a shell-patterns/ directory):\n{SHELL_SKILL}");
+    println!("Config (.rkat/config.toml):\n{SKILLS_CONFIG}");
+    println!(
+        "CLI preload (builtins only; compatible with the default Safe tools):\n  {PRELOAD_COMMAND}"
     );
 
     Ok(())
 }
+
+const SHELL_SKILL: &str = r#"---
+name: shell-patterns
+description: "Background job workflows"
+requires_capabilities: [builtins, shell]
+---
+# Shell Patterns
+Use explicit working directories and inspect command results.
+"#;
+
+const SKILLS_CONFIG: &str = r#"[skills]
+[[skills.repositories]]
+name = "project-examples"
+source_uuid = "11111111-1111-4111-8111-111111111111"
+type = "filesystem"
+path = ".rkat/skills/"
+
+[[skills.repositories]]
+name = "team-examples"
+source_uuid = "22222222-2222-4222-8222-222222222222"
+type = "git"
+url = "https://github.com/org/skills.git"
+"#;
+
+const PRELOAD_COMMAND: &str =
+    "rkat run --skill builtin-utilities-workflow \"Explain the builtin utility workflow.\"";
+
+#[cfg(test)]
+mod tests;

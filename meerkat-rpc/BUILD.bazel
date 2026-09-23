@@ -1035,6 +1035,7 @@ rust_test(
     ],
     size = "small",
     data = [
+        ":package_runfiles",
         "//meerkat-rpc:rkat_rpc_bin",
     ],
     env = {

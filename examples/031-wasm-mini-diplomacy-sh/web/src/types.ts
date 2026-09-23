@@ -13,6 +13,10 @@ export interface ArenaState {
 }
 export interface OrderSet { team: Team; aggression: number; fortify: number; target_region: string }
 export interface TurnDecision { order: OrderSet; reasoning: string }
+export interface OrderOutcome {
+  order: OrderSet;
+  result: "captured" | "repelled" | "skipped";
+}
 
 // ── DM Channels ──
 export type ChannelId =
@@ -63,10 +67,17 @@ export interface RuntimeModule {
   mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<string>;
   poll_subscription: (handle: string) => string;
   close_subscription: (handle: string) => void;
+  mob_lifecycle: (mobId: string, action: string) => Promise<void>;
+  destroy_runtime: () => void;
 }
 
 export interface AgentSub { agentIdentity: string; handle: string; role: MessageRole; team: Team }
 export interface FactionMob { team: Team; mobId: string }
+export interface RunFailure {
+  agentIdentity: string;
+  turn: number;
+  report: { class: string; message: string; reason?: unknown };
+}
 export interface MatchSession {
   factions: FactionMob[];
   narratorMobId: string | null;
@@ -75,5 +86,8 @@ export interface MatchSession {
   messages: ChatMessage[];
   running: boolean;
   prevControllers: Map<string, Team>;
-  seenToolCallIds: Set<string>;
+  seenEventIds: Set<string>;
+  peerMembers: Map<string, string>;
+  summarizedRuns: Set<string>;
+  failures: RunFailure[];
 }

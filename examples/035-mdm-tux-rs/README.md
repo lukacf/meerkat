@@ -23,7 +23,7 @@ service that brokers target discovery and claim management.
   │                          │       │  Pure RPC client (no comms identity)        │
   │ JSON-RPC over TCP        │       │  Direct mode: select target, type command   │
   │ Agent runtime + comms    │       │  Hive mode:   LLM fans out to all targets   │
-  │ Mode-dependent RPC tools │       │  Slash commands for model/steer/queue/etc.  │
+  │ Runtime-owned RPC tools  │       │  Slash commands for model/resume/etc.       │
   └──────────────────────────┘       └────────────────────────────────────────────┘
            │                                      │
            │ Kennel protocol                      │ Kennel protocol
@@ -49,15 +49,21 @@ TUX each target's RPC address; subsequent agent interaction goes directly to
 that target's RPC server.
 
 **Target** serves JSON-RPC over TCP on `--rpc-port` and persists sessions to
-disk. The two startup modes do not currently have equivalent runtime wiring:
+disk. Target and Hive hosts use the shared `ManagedRpcHost`: one RPC
+`SessionRuntime`, one session service, and the disk storage provider's matching
+SQLite session/runtime/schedule stores and durable blob store. State lives
+under the explicit data directory (`sessions/mdm` for a target,
+`hive/sessions/mdm` for Hive); JSONL projections are not session authority.
+Managed sessions are discovered by their `mdm_host` identity in canonical
+session app context (not a separate session-id file). A failed resume
+fails startup rather than silently creating a replacement.
 
 - Kennel mode creates or resumes a managed session through the full target
-  pipeline, loads layered MCP configuration, wires comms and mob tools into the
-  RPC runtime, and starts its RPC schedule host.
-- Direct mode builds the backing services but does not create a session. Its
-  RPC runtime also lacks the kennel-mode mob-state and schedule-host wiring.
-  TUX can therefore only resume an already persisted session in direct mode,
-  and mob/delegation/scheduled execution should not be assumed to work there.
+  RPC runtime, stages layered MCP servers on that runtime's session-owned
+  dispatcher, wires comms and mob tools, and starts its schedule host.
+- Direct mode opens the same durable runtime but does not create a session or
+  load the target's layered MCP configuration. TUX can only resume an already
+  persisted session in direct mode.
   Direct-mode `--model` and `--provider` values are currently parsed but are not
   applied to the RPC session runtime.
 
@@ -73,6 +79,28 @@ trusted peer set and wires targets to each other. The hive agent can then use
 the normal comms tools (`peers`, `send_request`, `send_message`) to coordinate
 the fleet.
 
+Discovery never claims a target. Releases remain released until an explicit
+`/claim`. Acknowledged leases expire even on a connected control socket;
+re-registration proves connection liveness, not ownership. TUX preserves claims
+through transport loss and stale/empty lists, but a signed registration with a
+new broker incarnation invalidates obsolete leases. Correlated refusals finish
+losing requests so `/claim` can be retried on the same connection.
+Claim snapshots are applied in control-socket order before notifying the UI;
+delayed UI updates cannot resurrect a lease released or invalidated meanwhile.
+Every post-registration UI projection carries the signed broker incarnation
+and a local connection epoch, including grants, releases and Hive discovery.
+Old-connection projections cannot change the current view or enqueue RPC work.
+An ordinary reconnect rotates this projection epoch without clearing live claims.
+Definitive target retirement removes generated Hive trust and unwires survivors;
+transient recovery preserves peer wiring.
+
+TUX owns one scoped stream per bound session, including the initial Hive
+session. Rebinding closes the previous stream; notifications from old sessions,
+streams, or connections cannot update the displayed timeline.
+Selections are reserved before asynchronous discovery/binding starts. The UI
+checks the connection-owned selection witness when consuming each bound result,
+so a delayed older completion cannot replace a newer session selection.
+
 Kennel signatures authenticate each envelope against the public key carried by
 that participant, but the demo has no enrollment allowlist or operator
 authorization layer. A newly generated key can register itself. Claims are
@@ -87,8 +115,44 @@ coordination leases, not authorization for the target or hive RPC ports.
 Fresh direct-mode startup is currently incomplete: `mdm-target` starts its RPC
 server but does not create a session, and TUX intentionally does not create one
 on connect. Use a data directory that already contains a session created by a
-previous kennel-mode run. `/new` is also unavailable in direct mode because no
-local mob definition is created.
+previous kennel-mode run. `/new` is unavailable in every mode: the example has
+no owner-coordinated managed reset transaction. It never archives Hive from the
+generic client or assumes the optional experimental mob exists.
+
+### Locked local validation
+
+From the repository root:
+
+```bash
+RUST_LANE_ID=examples-audit-H CARGO_BUILD_JOBS=2 ./scripts/repo-cargo check \
+  --locked --all-targets --manifest-path examples/035-mdm-tux-rs/Cargo.toml
+RUST_LANE_ID=examples-audit-H CARGO_BUILD_JOBS=2 ./scripts/repo-cargo test \
+  --locked --manifest-path examples/035-mdm-tux-rs/Cargo.toml
+RUST_LANE_ID=examples-audit-H CARGO_BUILD_JOBS=2 ./scripts/repo-cargo clippy \
+  --locked --all-targets --manifest-path examples/035-mdm-tux-rs/Cargo.toml -- -D warnings
+python3 examples/035-mdm-tux-rs/scripts/test-scripts.py
+```
+
+This excluded workspace has its own lockfile. After workspace dependency
+version changes, refresh **this** manifest's lock through `scripts/repo-cargo`
+before rerunning the locked checks. These tests use local synthetic transports
+and no live model calls; they are not Docker or physical-device validation.
+
+The host uses `SessionRuntime::create_or_resume_session_without_turn` because
+ordinary deferred RPC creation only stages an in-memory session until its first
+turn. Direct service creation cannot install the RPC runtime's captured actor
+publication witness. The narrow seam loads any predecessor through that same
+runtime and uses an exact, capacity-admitted materialization claim. It never
+opens a live channel. Resumes inherit durable configuration through the
+canonical recovery owner; semantic changes require explicit
+`SurfaceSessionRecoveryOverrides`, while the build config supplies process-local
+resources. The managed host explicitly reauthorizes its builtins, shell, and mob
+tool categories on resume; it does not clear saved hooks, budgets, output schemas,
+or application context. Failed creation must release its anonymous reservation;
+recovery failure must not archive or replace the durable predecessor.
+`tests/runtime.rs` exercises real RPC, full store reopen, scoped-stream rebinding,
+local MCP, peer ingress, schedules, exact build-state and rewrite-history recovery,
+failed-create capacity, and recovery override admission with synthetic clients.
 
 ```bash
 # Terminal 1 - target agent using an existing target data directory
@@ -292,13 +356,12 @@ key before making a live hive turn.
 
 | Command | Description |
 |---------|-------------|
-| `/new` | Hive: archive the current session and create another. Kennel target: request a `hive-fleet` mob respawn. Direct target: currently unsupported. |
+| `/new` | Disabled in all modes: no owner-coordinated managed reset transaction. |
 | `/resume` | List past sessions |
 | `/resume <ID>` | Resume session by ID |
 | `/model <name>` | Stage a model change for the next submitted turn |
 | `/models` | List available models |
-| `/steer` | Select cooperative inner-loop handling for subsequently submitted work, at the earliest admissible boundary |
-| `/queue` | Set handling mode to queue (waits for current turn) |
+| `/steer`, `/queue` | Disabled: `turn/start` has no handling-mode parameter. Wait for completion or use `/interrupt`. |
 | `/interrupt` | Interrupt the current turn |
 | `/claim` | Claim the selected target from the kennel (kennel mode) |
 | `/release` | Release the selected target back to the kennel (kennel mode) |
@@ -323,10 +386,9 @@ delegation, mob management, and schedule tools:
   `meerkat_schedule_occurrences`
 
 Kennel mode also loads MCP tools from the user and per-target layered MCP
-configuration. Direct mode does not load those MCP tools, does not attach mob
-state to its RPC runtime, and does not start that runtime's schedule host. The
-tool names may appear in factory configuration, but direct-mode delegation and
-scheduled execution are not a supported behavior in the current example.
+configuration into its session-owned RPC dispatcher. Direct mode does not load
+that layered MCP configuration or create a managed session; use kennel mode
+for the complete fresh-start comms/scheduling topology.
 
 ---
 

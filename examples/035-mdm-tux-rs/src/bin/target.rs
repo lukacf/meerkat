@@ -6,14 +6,13 @@
 //!
 //! Kennel mode is the complete demo path:
 //! - Agent construction via `AgentFactory::build_agent()`
-//! - Session lifecycle via `PersistentSessionService`
-//! - Input routing via `MeerkatMachine` with `HandlingMode::Steer`
+//! - One durable `SessionRuntime`/service for session, trust and schedule ownership
+//! - Input routing through the shared RPC runtime
 //! - JSON-RPC over TCP for all command/control traffic
 //! - Mob, schedule, comms, and layered MCP tool wiring
 //!
 //! Direct mode is intentionally incomplete. It starts the RPC server but does
-//! not create a session, does not attach mob state to that RPC runtime, and
-//! does not start its RPC schedule host. TUX can only resume a session already
+//! not create a session or load layered MCP configuration. TUX can only resume a session already
 //! persisted in the selected data directory. Direct-mode model/provider flags
 //! are parsed but are not applied to the RPC runtime.
 //!
@@ -34,7 +33,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
+#[cfg(test)]
 use meerkat::PersistentSessionService;
+#[cfg(test)]
 use meerkat::surface::{
     NoopScheduleMobHost, ScheduledEventDispatch, ScheduledPromptDispatch,
     SharedScheduleTargetAdapter, SurfaceScheduleSessionHost,
@@ -42,31 +43,43 @@ use meerkat::surface::{
     schedule_runtime_correlation_id, schedule_runtime_delivery_idempotency_key,
     spawn_schedule_host,
 };
+#[cfg(test)]
 use meerkat::{
     AgentFactory, FactoryAgentBuilder, PersistenceBundle, ScheduleDeliveryIdentity,
     ScheduleService, ScheduleToolDispatcher, SqliteScheduleStore,
 };
 use meerkat_comms::{CommsRuntime, ResolvedCommsConfig};
+use meerkat_core::Config;
+#[cfg(test)]
+use meerkat_core::Session;
+#[cfg(test)]
 use meerkat_core::lifecycle::RunId;
+#[cfg(test)]
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
     CoreExecutorInterruptHandle, CoreExecutorPostStopCleanupHandle, CoreExecutorPublicationHandle,
     CoreExecutorTurnFinalizationBoundaryHandle,
 };
+#[cfg(test)]
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::mcp_config::McpConfig;
+#[cfg(test)]
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
     StartTurnRequest, StartTurnRuntimeSemantics,
 };
+#[cfg(test)]
 use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
-use meerkat_core::{AgentToolDispatcher as _, Config, Session};
-use meerkat_mcp::{McpRouter, McpRouterAdapter};
+#[cfg(test)]
 use meerkat_mob::MobSessionService;
+#[cfg(test)]
 use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
+#[cfg(test)]
 use meerkat_runtime::input::{InputDurability, InputHeader, InputVisibility};
+#[cfg(test)]
 use meerkat_runtime::{IdempotencyKey, Input, InputOrigin, MeerkatMachine, PromptInput};
-use meerkat_store::{JsonlStore, MemoryBlobStore, SessionFilter, SessionStore};
+#[cfg(test)]
+use meerkat_store::{JsonlStore, MemoryBlobStore, SessionStore};
 
 use mdm_tux::{
     DirectControlPayload, ExampleGeneratedCommsTrustRouter, KennelPayload, ProviderKind,
@@ -82,10 +95,10 @@ Execute user requests using your available tools. Respond conversationally.
 Your current session_id is '{session_id}'. If you schedule follow-up work for this same running agent session, use that exact session_id.
 Your responses stream directly to the controller — do not use the 'send_message' comms tool to reply.";
 
+#[cfg(test)]
 struct TargetRuntimeSurface {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<MeerkatMachine>,
-    jsonl_store: Arc<JsonlStore>,
     mob_state: Arc<MobMcpState>,
     _factory: Arc<AgentFactory>,
     _config: Config,
@@ -93,12 +106,14 @@ struct TargetRuntimeSurface {
 }
 
 #[derive(Clone)]
+#[cfg(test)]
 struct TargetScheduleSessionHost {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<MeerkatMachine>,
     mob_state: Arc<MobMcpState>,
 }
 
+#[cfg(test)]
 impl TargetScheduleSessionHost {
     fn new(
         service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
@@ -183,6 +198,7 @@ impl TargetScheduleSessionHost {
 }
 
 #[async_trait::async_trait]
+#[cfg(test)]
 impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
     async fn probe_session_target(
         &self,
@@ -241,6 +257,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                     service: Arc::clone(&self.service),
                     mob_state: Arc::clone(&self.mob_state),
                     session_id: session_id.clone(),
+                    reload_cleanup: Default::default(),
                 }),
             )
             .await
@@ -254,14 +271,8 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             peer_meta: create.peer_meta.clone(),
             resume_session: Some(session),
             provider_params: create.provider_params.clone(),
-            preload_skills: (!create.preload_skills.is_empty()).then(|| {
-                create
-                    .preload_skills
-                    .iter()
-                    .cloned()
-                    .map(Into::into)
-                    .collect()
-            }),
+            preload_skills: (!create.preload_skills.is_empty())
+                .then(|| create.preload_skills.to_vec()),
             additional_instructions: (!create.additional_instructions.is_empty())
                 .then(|| create.additional_instructions.clone()),
             realm_id: create
@@ -504,6 +515,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
     }
 }
 
+#[cfg(test)]
 async fn build_target_runtime_surface(
     session_dir: &Path,
     comms_runtime: Arc<CommsRuntime>,
@@ -519,13 +531,13 @@ async fn build_target_runtime_surface(
         session_dir.join("schedule.sqlite"),
     )?) as Arc<dyn meerkat::ScheduleStore>;
     let schedule_service = ScheduleService::new(Arc::clone(&schedule_store));
-    let home = dirs::home_dir();
-    let config = Config::load_from(session_dir, home.as_deref())
-        .await
-        .unwrap_or_default();
+    let config = Config::default();
     let shared_factory = Arc::new(factory.clone());
     let shared_config = config.clone();
-    let builder = FactoryAgentBuilder::new(factory, config);
+    let mut builder = FactoryAgentBuilder::new(factory, config);
+    builder.default_llm_client = Some(Arc::new(meerkat_client::TestClient::for_provider(
+        meerkat_core::Provider::OpenAI,
+    )));
     let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
     *builder
         .default_schedule_tools
@@ -585,7 +597,6 @@ async fn build_target_runtime_surface(
     Ok(TargetRuntimeSurface {
         service,
         runtime_adapter,
-        jsonl_store,
         mob_state,
         _factory: shared_factory,
         _config: shared_config,
@@ -593,6 +604,7 @@ async fn build_target_runtime_surface(
     })
 }
 
+#[cfg(test)]
 async fn discard_live_session_with_mob_cleanup(
     service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
     mob_state: &Arc<MobMcpState>,
@@ -631,6 +643,7 @@ fn target_comms_config(name: &str, data_dir: &Path) -> ResolvedCommsConfig {
 }
 
 /// Create a `CommsRuntime` with the target's stable identity and a blob store.
+#[cfg(test)]
 async fn create_target_comms_runtime(
     name: &str,
     data_dir: &Path,
@@ -663,8 +676,11 @@ async fn spawn_comms_listener(comms_runtime: &Arc<CommsRuntime>) -> anyhow::Resu
     Ok(local_addr.port())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    meerkat_runtime::host_stack::run_host("mdm-target", run)?
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
         .init();
@@ -677,7 +693,7 @@ async fn main() -> anyhow::Result<()> {
             "   or: mdm-target --kennel HOST:PORT [--advertise IP] [--rpc-port PORT] [--name NAME] [--data-dir PATH] [--model MODEL --provider PROVIDER]"
         );
         eprintln!(
-            "Direct mode requires an existing persisted session; its model/provider flags and kennel-mode mob/schedule wiring are not applied to the RPC runtime."
+            "Direct mode requires an existing persisted session; its model/provider flags and layered MCP configuration are not applied to the RPC runtime."
         );
         eprintln!("Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY");
         eprintln!(
@@ -712,57 +728,28 @@ async fn main() -> anyhow::Result<()> {
                 .join(format!(".rkat/mdm/targets/{name}"))
         });
 
-    // ── 1. Create CommsRuntime with target's stable identity ───────────────
-    let comms_runtime = create_target_comms_runtime(&name, &data_dir).await?;
+    let session_dir = data_dir.join("sessions");
+    let home = dirs::home_dir();
+    let config = Config::load_from(&session_dir, home.as_deref())
+        .await
+        .unwrap_or_default();
+    let host = mdm_tux::runtime::ManagedRpcHost::open(
+        &session_dir,
+        config,
+        target_comms_config(&name, &data_dir),
+    )
+    .await?;
+    let comms_runtime = host.comms.clone();
 
     // ── 2. Bind TCP listener (0.0.0.0:0 for port discovery) ─────────────────
     let comms_port = spawn_comms_listener(&comms_runtime).await?;
-
-    // ── 3. Build runtime-backed session service ───────────────────────────────
-    let session_dir = data_dir.join("sessions");
-    tokio::fs::create_dir_all(&session_dir).await?;
-    let _surface = build_target_runtime_surface(&session_dir, Arc::clone(&comms_runtime)).await?;
 
     // ── 4. RPC TCP server (replaces old comms-based command protocol) ────────
     let rpc_port: u16 = find_flag(&args, "--rpc-port")
         .and_then(|p| p.parse().ok())
         .unwrap_or(4800);
-    let rpc_factory = AgentFactory::new(&session_dir)
-        .shell(true)
-        .builtins(true)
-        .comms(true)
-        .schedule(true)
-        .mob(true)
-        .with_comms_runtime(Arc::clone(&comms_runtime));
-    let home = dirs::home_dir();
-    let rpc_config = Config::load_from(&session_dir, home.as_deref())
-        .await
-        .unwrap_or_default();
-    let rpc_schedule_store = Arc::new(SqliteScheduleStore::open(
-        session_dir.join("rpc_schedule.sqlite"),
-    )?) as Arc<dyn meerkat::ScheduleStore>;
-    let rpc_jsonl = Arc::new(JsonlStore::new(session_dir.to_path_buf()));
-    rpc_jsonl.init().await?;
-    let rpc_persistence = PersistenceBundle::new_with_schedule_store(
-        rpc_jsonl as Arc<dyn SessionStore>,
-        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
-        Arc::new(MemoryBlobStore::new()),
-        rpc_schedule_store,
-    );
-    let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
-        meerkat_core::MemoryConfigStore::new(rpc_config.clone(), meerkat_models::canonical()),
-    );
-    // RPC-host: this binary inline-hosts a TCP JSON-RPC server via meerkat_rpc::serve_tcp.
-    // SessionRuntime + NotificationSink (carrying RpcNotification mpsc::Sender) +
-    // serve_tcp form the canonical RPC-host triad. Lifting these would require an
-    // alternate transport stack; this surface legitimately owns the RPC-host role.
-    let rpc_runtime = Arc::new(meerkat_rpc::session_runtime::SessionRuntime::new(
-        rpc_factory,
-        rpc_config,
-        10,
-        rpc_persistence,
-        meerkat_rpc::router::NotificationSink::noop(),
-    ));
+    let rpc_runtime = host.runtime;
+    let rpc_config_store = host.config_store;
 
     println!("=== MDM Target: {name} ===");
     println!("rpc       : tcp://0.0.0.0:{rpc_port}");
@@ -944,64 +931,8 @@ fn require_generated_reregister_intent(
 
 // ── Session lifecycle ────────────────────────────────────────────────────────
 
-/// Create a new session or resume an existing one. Registers the session
-/// with the MeerkatMachine and subscribes to its events.
-async fn create_or_resume_session(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    runtime_adapter: &Arc<MeerkatMachine>,
-    jsonl_store: &JsonlStore,
-    model: &str,
-    system_prompt: &str,
-    mob_state: &Arc<MobMcpState>,
-    provider: &str,
-    external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
-    comms_runtime: Option<Arc<meerkat_comms::CommsRuntime>>,
-) -> anyhow::Result<SessionId> {
-    // Try to auto-resume the most recent session. On failure, warn and start fresh.
-    if let Ok(mut sessions) = jsonl_store.list(SessionFilter::default()).await {
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        if let Some(latest) = sessions.first() {
-            eprintln!(
-                "[target] auto-resuming session {} ({} messages)",
-                latest.id, latest.message_count
-            );
-            match setup_session(
-                service,
-                runtime_adapter,
-                Some(latest.id.clone()),
-                model,
-                system_prompt,
-                mob_state,
-                provider,
-                external_tools.clone(),
-                comms_runtime.clone(),
-            )
-            .await
-            {
-                Ok(sid) => return Ok(sid),
-                Err(e) => {
-                    eprintln!("[target] auto-resume failed: {e} — starting fresh session");
-                }
-            }
-        }
-    }
-
-    eprintln!("[target] starting fresh session");
-    setup_session(
-        service,
-        runtime_adapter,
-        None,
-        model,
-        system_prompt,
-        mob_state,
-        provider,
-        external_tools,
-        comms_runtime,
-    )
-    .await
-}
-
 /// Create or resume a session and register it with the runtime adapter.
+#[cfg(test)]
 async fn setup_session(
     service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: &Arc<MeerkatMachine>,
@@ -1010,8 +941,6 @@ async fn setup_session(
     system_prompt: &str,
     mob_state: &Arc<MobMcpState>,
     provider: &str,
-    external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
-    comms_runtime: Option<Arc<meerkat_comms::CommsRuntime>>,
 ) -> anyhow::Result<SessionId> {
     let resume_session = match &resume_id {
         Some(id) => {
@@ -1046,6 +975,7 @@ async fn setup_session(
                 service: Arc::clone(service),
                 mob_state: Arc::clone(mob_state),
                 session_id: prepared_session_id.clone(),
+                reload_cleanup: Default::default(),
             }),
         )
         .await
@@ -1058,7 +988,6 @@ async fn setup_session(
         override_mob: meerkat_core::ToolCategoryOverride::Enable,
         resume_session: Some(prepared_session),
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(prepared.bindings_clone()),
-        external_tools,
         ..Default::default()
     };
 
@@ -1151,19 +1080,6 @@ async fn setup_session(
         .await
         .map_err(|error| anyhow::anyhow!("runtime executor attachment commit failed: {error}"))?;
 
-    // Enable peer ingress for this session so the hive can reach us via comms.
-    // This is the one session the mob manages for this target — TUX resets go
-    // through mob/respawn, not session/create, so this wiring is stable.
-    if let Some(comms) = comms_runtime {
-        let _ = runtime_adapter
-            .update_peer_ingress_context(
-                &session_id,
-                true,
-                Some(comms as Arc<dyn meerkat_core::agent::CommsRuntime>),
-            )
-            .await;
-    }
-
     Ok(session_id)
 }
 
@@ -1172,6 +1088,7 @@ async fn setup_session(
 /// Bridges the MeerkatMachine's runtime loop to the PersistentSessionService.
 /// When the runtime loop dequeues an input (via DefaultPolicyTable routing),
 /// it calls `apply()` which translates the RunPrimitive into a `start_turn()`.
+#[cfg(test)]
 struct TargetCoreExecutor {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<MeerkatMachine>,
@@ -1180,14 +1097,43 @@ struct TargetCoreExecutor {
     publication_actor_witness: Option<meerkat::LiveSessionActorWitness>,
 }
 
+#[cfg(test)]
 struct TargetCorePostStopCleanupHandle {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     mob_state: Arc<MobMcpState>,
     session_id: SessionId,
+    reload_cleanup: std::sync::OnceLock<Arc<dyn CoreExecutorPostStopCleanupHandle>>,
 }
 
 #[async_trait::async_trait]
+#[cfg(test)]
 impl CoreExecutorPostStopCleanupHandle for TargetCorePostStopCleanupHandle {
+    fn durability_reload_cleanup_capability(
+        &self,
+    ) -> meerkat_core::lifecycle::core_executor::CoreDurabilityReloadCleanupCapability {
+        meerkat_core::lifecycle::core_executor::CoreDurabilityReloadCleanupCapability::ProcessLocalNonTerminal
+    }
+
+    async fn prepare_durability_reload_cleanup(&self) -> Result<(), CoreExecutorError> {
+        self.reload_cleanup
+            .get_or_init(|| {
+                meerkat::surface::persistent_runtime_post_stop_cleanup_handle(
+                    self.service.clone(),
+                    self.session_id.clone(),
+                )
+            })
+            .prepare_durability_reload_cleanup()
+            .await
+    }
+
+    async fn cleanup_after_durability_reload_required(&self) -> Result<(), CoreExecutorError> {
+        self.reload_cleanup
+            .get()
+            .ok_or_else(|| CoreExecutorError::Internal("cleanup was not prepared".into()))?
+            .cleanup_after_durability_reload_required()
+            .await
+    }
+
     async fn cleanup_after_runtime_stop_terminalized(&self) -> Result<(), CoreExecutorError> {
         meerkat::surface::persistent_runtime_post_stop_cleanup_handle(
             Arc::clone(&self.service),
@@ -1229,6 +1175,7 @@ impl CoreExecutorPostStopCleanupHandle for TargetCorePostStopCleanupHandle {
     }
 }
 
+#[cfg(test)]
 impl TargetCoreExecutor {
     fn new(
         service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
@@ -1247,6 +1194,7 @@ impl TargetCoreExecutor {
     }
 }
 
+#[cfg(test)]
 struct TargetCoreBoundaryHandle {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<MeerkatMachine>,
@@ -1254,6 +1202,7 @@ struct TargetCoreBoundaryHandle {
 }
 
 #[async_trait::async_trait]
+#[cfg(test)]
 impl CoreExecutorBoundaryHandle for TargetCoreBoundaryHandle {
     async fn cancel_after_boundary(
         &self,
@@ -1289,6 +1238,7 @@ impl CoreExecutorBoundaryHandle for TargetCoreBoundaryHandle {
     }
 }
 
+#[cfg(test)]
 struct TargetCoreInterruptHandle {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<MeerkatMachine>,
@@ -1296,6 +1246,7 @@ struct TargetCoreInterruptHandle {
 }
 
 #[async_trait::async_trait]
+#[cfg(test)]
 impl CoreExecutorInterruptHandle for TargetCoreInterruptHandle {
     async fn hard_cancel_run_if_current(
         &self,
@@ -1317,6 +1268,7 @@ impl CoreExecutorInterruptHandle for TargetCoreInterruptHandle {
     }
 }
 
+#[cfg(test)]
 fn start_turn_request_from_primitive(
     primitive: &RunPrimitive,
 ) -> Result<StartTurnRequest, CoreExecutorError> {
@@ -1328,7 +1280,11 @@ fn start_turn_request_from_primitive(
     let metadata = primitive.turn_metadata();
     Ok(StartTurnRequest {
         injected_context: Vec::new(),
-        prompt: primitive.extract_content_input(),
+        prompt: if primitive.typed_turn_appends().is_empty() {
+            primitive.extract_content_input()
+        } else {
+            ContentInput::Text(String::new())
+        },
         system_prompt: None,
         event_tx: None,
         runtime: StartTurnRuntimeSemantics::new(
@@ -1343,6 +1299,7 @@ fn start_turn_request_from_primitive(
 }
 
 #[async_trait::async_trait]
+#[cfg(test)]
 impl CoreExecutor for TargetCoreExecutor {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
         Some(Arc::new(TargetCoreBoundaryHandle {
@@ -1378,6 +1335,7 @@ impl CoreExecutor for TargetCoreExecutor {
             service: Arc::clone(&self.service),
             mob_state: Arc::clone(&self.mob_state),
             session_id: self.session_id.clone(),
+            reload_cleanup: Default::default(),
         }))
     }
 
@@ -1503,6 +1461,7 @@ impl CoreExecutor for TargetCoreExecutor {
             service: Arc::clone(&self.service),
             mob_state: Arc::clone(&self.mob_state),
             session_id: self.session_id.clone(),
+            reload_cleanup: Default::default(),
         }
         .cleanup_after_runtime_stop_terminalized()
         .await
@@ -1518,42 +1477,6 @@ struct ActiveAdoption {
     tux_id: String,
     tux_pubkey: String,
     tux_direct_addr: String,
-}
-
-/// Load MCP tools from `~/.rkat/mcp.toml` (user scope) and optionally
-/// `<data_dir>/.rkat/mcp.toml` (per-target project scope).
-/// Returns `None` when no servers are configured.
-async fn load_mcp_tools(data_dir: Option<&Path>) -> anyhow::Result<Option<McpRouterAdapter>> {
-    // data_dir as project scope, home dir as user scope
-    let home = dirs::home_dir();
-    let servers = McpConfig::load_with_scopes_from_roots(data_dir, home.as_deref())
-        .await
-        .map_err(|e| anyhow::anyhow!("MCP config: {e}"))?;
-    if servers.is_empty() {
-        return Ok(None);
-    }
-    eprintln!("[target] staging {} MCP server(s)", servers.len());
-    let mut router = McpRouter::new();
-    for s in &servers {
-        eprintln!("[target]   - {}", s.server.name);
-        router
-            .stage_add(s.server.clone())
-            .map_err(|e| anyhow::anyhow!("MCP stage: {e}"))?;
-    }
-    router
-        .apply_staged()
-        .await
-        .map_err(|e| anyhow::anyhow!("MCP apply: {e}"))?;
-    let adapter = McpRouterAdapter::new(router);
-    // Wait up to 30s for servers to connect
-    let _ = adapter
-        .wait_until_ready(std::time::Duration::from_secs(30))
-        .await;
-    adapter
-        .refresh_tools()
-        .await
-        .map_err(|e| anyhow::anyhow!("MCP refresh: {e}"))?;
-    Ok(Some(adapter))
 }
 
 async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
@@ -1581,48 +1504,37 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                 .join(format!(".rkat/mdm/targets/{name}"))
         });
 
-    // Load MCP servers from ~/.rkat/mcp.toml (user) + <data_dir>/.rkat/mcp.toml (per-target)
-    let mcp_external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>> =
-        match load_mcp_tools(Some(&data_dir)).await {
-            Ok(Some(adapter)) => {
-                let adapter = Arc::new(adapter);
-                eprintln!("[target] MCP tools loaded: {}", adapter.tools().len());
-                Some(adapter)
-            }
-            Ok(None) => None,
-            Err(e) => {
-                eprintln!("[target] MCP load failed (continuing without): {e}");
-                None
-            }
-        };
-
-    let comms_runtime = create_target_comms_runtime(&name, &data_dir).await?;
+    let home = dirs::home_dir();
+    let mcp_servers = McpConfig::load_with_scopes_from_roots(Some(&data_dir), home.as_deref())
+        .await?
+        .into_iter()
+        .map(|entry| entry.server)
+        .collect();
+    let session_dir = data_dir.join("sessions");
+    let config = Config::load_from(&session_dir, home.as_deref())
+        .await
+        .unwrap_or_default();
+    let host = mdm_tux::runtime::ManagedRpcHost::open(
+        &session_dir,
+        config,
+        target_comms_config(&name, &data_dir),
+    )
+    .await?;
+    let comms_runtime = host.comms.clone();
     let comms_port = spawn_comms_listener(&comms_runtime).await?;
     let target_id = comms_runtime.public_key().to_peer_id().to_string();
     let target_pubkey = comms_runtime.public_key().to_pubkey_string();
-    let session_dir = data_dir.join("sessions");
-    tokio::fs::create_dir_all(&session_dir).await?;
-    let surface = build_target_runtime_surface(&session_dir, Arc::clone(&comms_runtime)).await?;
-    let _schedule_host_guard = surface._schedule_host.as_ref();
-    let service = Arc::clone(&surface.service);
-    let runtime_adapter = Arc::clone(&surface.runtime_adapter);
-    let jsonl_store = Arc::clone(&surface.jsonl_store);
-    let mob_state = Arc::clone(&surface.mob_state);
-    let system_prompt = SYSTEM_PROMPT.replace("{name}", &name);
-    let current_session_id = create_or_resume_session(
-        &service,
-        &runtime_adapter,
-        &jsonl_store,
-        &model,
-        &system_prompt,
-        &mob_state,
-        &provider,
-        mcp_external_tools.as_ref().cloned(),
-        None,
-    )
-    .await?;
+    let mut build = meerkat::AgentBuildConfig::new(model.clone());
+    build.provider = Some(meerkat_core::Provider::from_name(&provider));
+    build.system_prompt = meerkat::SystemPromptOverride::Set(
+        SYSTEM_PROMPT.replace("{name}", &name).replace(
+            "Your current session_id is '{session_id}'. If you schedule follow-up work for this same running agent session, use that exact session_id.\n", ""
+        ),
+    );
+    let current_session_id = host.managed_session(&name, build, mcp_servers).await?;
+    eprintln!("[target] session ready: {current_session_id}");
     let comms_trust = Arc::new(ExampleGeneratedCommsTrustRouter::new(
-        Arc::clone(&runtime_adapter),
+        host.runtime.runtime_adapter(),
         current_session_id.clone(),
         Arc::clone(&comms_runtime),
     ));
@@ -1634,83 +1546,20 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
     let rpc_port: u16 = find_flag(args, "--rpc-port")
         .and_then(|p| p.parse().ok())
         .unwrap_or(4800);
-    let rpc_session_runtime = {
-        let rpc_factory = AgentFactory::new(&session_dir)
-            .shell(true)
-            .builtins(true)
-            .comms(true)
-            .schedule(true)
-            .mob(true)
-            .with_comms_runtime(Arc::clone(&comms_runtime));
-        let home = dirs::home_dir();
-        let rpc_config = Config::load_from(&session_dir, home.as_deref())
-            .await
-            .unwrap_or_default();
-        let rpc_schedule_store = Arc::new(SqliteScheduleStore::open(
-            session_dir.join("rpc_schedule.sqlite"),
-        )?) as Arc<dyn meerkat::ScheduleStore>;
-        let rpc_jsonl = Arc::new(JsonlStore::new(session_dir.to_path_buf()));
-        rpc_jsonl.init().await?;
-        let rpc_persistence = PersistenceBundle::new_with_schedule_store(
-            rpc_jsonl as Arc<dyn SessionStore>,
-            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
-            Arc::new(MemoryBlobStore::new()),
-            rpc_schedule_store,
-        );
-        let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(
-            meerkat_core::MemoryConfigStore::new(rpc_config.clone(), meerkat_models::canonical()),
-        );
-        // RPC-host: this binary inline-hosts a TCP JSON-RPC server via meerkat_rpc::serve_tcp.
-        // SessionRuntime + NotificationSink (carrying RpcNotification mpsc::Sender) +
-        // serve_tcp form the canonical RPC-host triad. Lifting these would require an
-        // alternate transport stack; this surface legitimately owns the RPC-host role.
-        let rpc_runtime = meerkat_rpc::session_runtime::SessionRuntime::new(
-            rpc_factory,
-            rpc_config,
-            1024,
-            rpc_persistence,
-            meerkat_rpc::router::NotificationSink::noop(),
-        );
-        // Wire mob tools so delegate/mob_create/mob_profile_* are available
-        let rpc_mob_state = Arc::new(MobMcpState::new_with_runtime_adapter(
-            rpc_runtime.session_service(),
-            Some(rpc_runtime.runtime_adapter()),
-            meerkat_mob::MobControlPrincipal::Owner,
-        ));
-        rpc_runtime.set_mob_tools(Arc::new(AgentMobToolSurfaceFactory::new(Arc::clone(
-            &rpc_mob_state,
-        ))));
-        rpc_runtime.set_mob_state(rpc_mob_state);
-        // Wire config runtime so hot-swap (turn/start with model override) can
-        // resolve self-hosted models from the loaded config.
-        rpc_runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
-            Arc::clone(&rpc_config_store),
-            session_dir.join("rpc_config_state.json"),
-        )));
-        let rpc_runtime = Arc::new(rpc_runtime);
-        let rpc_config_store_clone = Arc::clone(&rpc_config_store);
-        let rpc_runtime_clone = Arc::clone(&rpc_runtime);
-        tokio::spawn(async move {
-            let addr = format!("0.0.0.0:{rpc_port}");
-            // RPC-host: inline-hosted TCP JSON-RPC server entry point; pairs with the
-            // SessionRuntime + NotificationSink above to complete the RPC-host triad.
-            if let Err(e) =
-                meerkat_rpc::serve_tcp(&addr, rpc_runtime_clone, rpc_config_store_clone, None).await
-            {
-                eprintln!("[target] RPC server error: {e}");
-            }
-        });
-        rpc_runtime
-    };
-    rpc_session_runtime.ensure_schedule_host_started().await?;
-    rpc_session_runtime
-        .enable_autonomous_comms_drain(
-            &current_session_id,
-            Arc::clone(&comms_runtime) as Arc<dyn meerkat_core::agent::CommsRuntime>,
+    let rpc_runtime = host.runtime.clone();
+    let rpc_config_store = host.config_store.clone();
+    tokio::spawn(async move {
+        if let Err(error) = meerkat_rpc::serve_tcp(
+            &format!("0.0.0.0:{rpc_port}"),
+            rpc_runtime,
+            rpc_config_store,
+            None,
         )
         .await
-        .map_err(|error| anyhow::anyhow!("enable RPC comms drain: {}", error.message))?;
-    let _ = rpc_session_runtime; // keep alive
+        {
+            eprintln!("[target] RPC server error: {error}");
+        }
+    });
 
     println!("=== MDM Target: {name} ===");
     println!("rpc       : tcp://0.0.0.0:{rpc_port}");
@@ -1807,13 +1656,12 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                 hive_comms_addr,
             } => {
                 // Add the hive as a trusted peer so it can send us comms messages.
-                if let (Some(pk_str), Some(addr)) = (hive_pubkey, hive_comms_addr) {
-                    if let Ok(pk) =
+                if let (Some(pk_str), Some(addr)) = (hive_pubkey, hive_comms_addr)
+                    && let Ok(pk) =
                         meerkat_comms::identity::PubKey::from_pubkey_string(pk_str.as_str())
-                    {
-                        comms_trust.add_trusted_peer("hive", pk, addr).await?;
-                        eprintln!("[target] added hive as trusted peer at {addr}");
-                    }
+                {
+                    comms_trust.add_trusted_peer("hive", pk, addr).await?;
+                    eprintln!("[target] added hive as trusted peer at {addr}");
                 }
                 kennel_session_state = target_kennel_session::transition(
                     kennel_session_state,
@@ -2019,11 +1867,10 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                             }
                         }
                         KennelPayload::TargetRegistered { hive_pubkey, hive_comms_addr } => {
-                            if let (Some(pk_str), Some(addr)) = (hive_pubkey, hive_comms_addr) {
-                                if let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(pk_str.as_str()) {
+                            if let (Some(pk_str), Some(addr)) = (hive_pubkey, hive_comms_addr)
+                                && let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(pk_str.as_str()) {
                                     comms_trust.add_trusted_peer("hive", pk, &addr).await?;
                                 }
-                            }
                             kennel_session_state = target_kennel_session::transition(
                                 kennel_session_state,
                                 TksEvent::RegistrationAcked,
@@ -2359,7 +2206,7 @@ fn parse_provider_override(args: &[String]) -> anyhow::Result<Option<ProviderKin
 #[cfg(test)]
 mod tests {
     mod test_support {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/test_support.rs"));
+        include!("../test_support.rs");
     }
 
     use super::{
@@ -2367,7 +2214,6 @@ mod tests {
         create_target_comms_runtime, discard_live_session_with_mob_cleanup,
         parse_provider_override, setup_session,
     };
-    use anyhow::Context as _;
     use chrono::{Duration as ChronoDuration, Utc};
     use mdm_tux::ProviderKind;
     use meerkat::surface::{
@@ -2386,16 +2232,12 @@ mod tests {
     use meerkat_comms::{CommsRuntime, ResolvedCommsConfig};
     use meerkat_core::Config;
     use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
-    use meerkat_core::ops_lifecycle::OperationKind;
-    use meerkat_core::service::{
-        CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
-        StartTurnRuntimeSemantics,
-    };
+    use meerkat_core::service::{CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions};
     use meerkat_core::types::ContentInput;
     use meerkat_mob::MobSessionService;
     use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
     use meerkat_store::{JsonlStore, MemoryBlobStore, SessionStore};
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
     use test_support::CaptureClient;
@@ -2462,7 +2304,7 @@ mod tests {
         }
 
         fn provider(&self) -> meerkat_core::Provider {
-            meerkat_core::Provider::Other
+            meerkat_core::Provider::OpenAI
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -2550,7 +2392,6 @@ mod tests {
         Ok(TargetRuntimeSurface {
             service,
             runtime_adapter,
-            jsonl_store,
             mob_state,
             _factory: Arc::new(AgentFactory::new(session_dir)),
             _config: Config::default(),
@@ -2752,8 +2593,6 @@ mod tests {
             "test",
             &surface.mob_state,
             "openai",
-            None,
-            None,
         )
         .await
         .unwrap();
@@ -2877,140 +2716,203 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn target_setup_session_routes_background_shell_completions_into_runtime_feed() {
-        let temp = tempfile::tempdir().unwrap();
-        let comms_runtime = Arc::new(
-            CommsRuntime::new_with_silent_intents(
-                ResolvedCommsConfig {
-                    enabled: true,
-                    name: "test-background-feed".to_string(),
-                    inproc_namespace: None,
-                    listen_tcp: None,
-                    listen_uds: None,
-                    advertise_address: None,
-                    event_listen_tcp: None,
-                    #[cfg(unix)]
-                    event_listen_uds: None,
-                    identity_dir: temp.path().join("identity"),
-                    trusted_peers_path: temp.path().join("trusted_peers.json"),
-                    comms_config: Default::default(),
-                    auth: Default::default(),
-                    require_peer_auth: false,
-                    allow_external_unauthenticated: false,
-                    pairing_password: None,
-                },
-                Arc::new(HashSet::new()),
-            )
-            .await
-            .unwrap(),
+    #[test]
+    fn managed_target_background_shell_uses_durable_job_authority() {
+        assert_background_shell_uses_durable_job_authority(true, BackgroundShellTopology::Fleet);
+    }
+
+    #[test]
+    fn first_turn_target_background_shell_uses_durable_job_authority() {
+        assert_background_shell_uses_durable_job_authority(false, BackgroundShellTopology::Fleet);
+    }
+
+    #[test]
+    fn plain_rpc_background_shell_uses_durable_job_authority() {
+        assert_background_shell_uses_durable_job_authority(
+            false,
+            BackgroundShellTopology::ShellOnly,
         );
-        let llm_client: Arc<dyn LlmClient> = Arc::new(ScriptedClient::new(vec![
-            vec![
-                LlmEvent::ToolCallComplete {
-                    id: "tc_shell_background".to_string(),
-                    name: "shell".to_string(),
-                    args: serde_json::json!({
-                        "command": "echo target-background-feed",
-                        "background": true,
-                    }),
-                    meta: None,
-                },
-                LlmEvent::Done {
-                    outcome: LlmDoneOutcome::Success {
-                        stop_reason: meerkat_core::StopReason::ToolUse,
-                    },
-                },
-            ],
-            vec![
-                LlmEvent::TextDelta {
-                    delta: "background started".to_string(),
-                    meta: None,
-                },
-                LlmEvent::Done {
-                    outcome: LlmDoneOutcome::Success {
-                        stop_reason: meerkat_core::StopReason::EndTurn,
-                    },
-                },
-            ],
-        ]));
-        let surface =
-            build_target_runtime_surface_with_client(temp.path(), comms_runtime, llm_client)
+    }
+
+    #[test]
+    fn no_comms_background_shell_uses_durable_job_authority() {
+        assert_background_shell_uses_durable_job_authority(false, BackgroundShellTopology::NoComms);
+    }
+
+    #[test]
+    fn no_schedule_background_shell_uses_durable_job_authority() {
+        assert_background_shell_uses_durable_job_authority(
+            false,
+            BackgroundShellTopology::NoSchedule,
+        );
+    }
+
+    #[test]
+    fn no_mob_background_shell_uses_durable_job_authority() {
+        assert_background_shell_uses_durable_job_authority(false, BackgroundShellTopology::NoMob);
+    }
+
+    enum BackgroundShellTopology {
+        Fleet,
+        ShellOnly,
+        NoComms,
+        NoSchedule,
+        NoMob,
+    }
+
+    fn assert_background_shell_uses_durable_job_authority(
+        managed: bool,
+        topology: BackgroundShellTopology,
+    ) {
+        let temp = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
+        let path = temp.path().to_path_buf();
+        // Keep the fixture outside the host thread through runtime shutdown.
+        meerkat_runtime::host_stack::run_host("mdm-shell-probe", move || async move {
+            let mut comms = super::target_comms_config("test-background-job", &path);
+            comms.inproc_namespace = Some(path.display().to_string());
+            let host = mdm_tux::runtime::ManagedRpcHost::open(&path, Config::default(), comms)
                 .await
                 .unwrap();
-
-        let session_id = setup_session(
-            &surface.service,
-            &surface.runtime_adapter,
-            None,
-            "gpt-5.5",
-            "test background shell",
-            &surface.mob_state,
-            "openai",
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-        let runtime_registry = surface
-            .runtime_adapter
-            .ops_lifecycle_registry(&session_id)
-            .await
-            .expect("runtime registry must exist after setup");
-        let feed = runtime_registry.completion_feed_handle();
-        assert_eq!(feed.watermark(), 0);
-
-        let admission = surface
-            .service
-            .reserve_runtime_turn_admission(&session_id)
-            .await
-            .unwrap();
-        surface
-            .service
-            .run_machine_committed_live_turn(
-                meerkat::MachineServiceTurnCommitProtocol::from_machine(&surface.runtime_adapter),
-                &session_id,
-                StartTurnRequest {
-                    injected_context: Vec::new(),
-                    prompt: ContentInput::Text("run shell".to_string()),
-                    system_prompt: None,
-                    event_tx: None,
-                    runtime: StartTurnRuntimeSemantics::runtime_metadata(
-                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                            execution_kind: Some(
-                                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
-                            ),
-                            ..Default::default()
+            assert!(host.runtime.blob_store().is_persistent());
+            assert_eq!(host.runtime.realm_id().unwrap().as_str(), "mdm");
+            let llm_client: Arc<dyn LlmClient> = Arc::new(ScriptedClient::new(vec![
+                vec![
+                    LlmEvent::ToolCallComplete {
+                        id: "tc_shell_background".to_string(),
+                        name: "shell".to_string(),
+                        args: serde_json::json!({
+                            "command": "echo target-background-feed",
+                            "background": true,
+                        }),
+                        meta: None,
+                    },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::ToolUse,
                         },
-                    ),
-                },
-                admission,
-            )
-            .await
-            .map_err(|(error, _admission)| error)
-            .unwrap();
-
-        timeout(Duration::from_secs(5), async {
-            loop {
-                if feed.watermark() > 0 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
+                    },
+                ],
+                vec![
+                    LlmEvent::TextDelta {
+                        delta: "background started".to_string(),
+                        meta: None,
+                    },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::EndTurn,
+                        },
+                    },
+                ],
+            ]));
+            host.runtime.set_default_llm_client(Some(llm_client));
+            let mut build = meerkat::AgentBuildConfig::new("gpt-5.5");
+            build.provider = Some(meerkat_core::Provider::OpenAI);
+            build.override_builtins = meerkat_core::ToolCategoryOverride::Enable;
+            build.override_shell = meerkat_core::ToolCategoryOverride::Enable;
+            build.override_mob = meerkat_core::ToolCategoryOverride::Enable;
+            if matches!(
+                topology,
+                BackgroundShellTopology::NoMob | BackgroundShellTopology::ShellOnly
+            ) {
+                build.override_mob = meerkat_core::ToolCategoryOverride::Disable;
             }
-        })
-        .await
-        .context("background shell completion should advance the runtime feed")
-        .unwrap();
-
-        let batch = feed.list_since(0);
-        assert!(
-            batch
-                .entries
+            if matches!(
+                topology,
+                BackgroundShellTopology::NoComms | BackgroundShellTopology::ShellOnly
+            ) {
+                build.override_comms = meerkat_core::ToolCategoryOverride::Disable;
+            }
+            if matches!(
+                topology,
+                BackgroundShellTopology::NoSchedule | BackgroundShellTopology::ShellOnly
+            ) {
+                build.override_schedule = meerkat_core::ToolCategoryOverride::Disable;
+            }
+            let id = if managed {
+                host.managed_session("test-background-job", build, Vec::new())
+                    .await
+                    .unwrap()
+            } else {
+                host.runtime
+                    .create_session(build, None, None, Vec::new())
+                    .await
+                    .unwrap()
+            };
+            let (events, _rx) = mpsc::channel(128);
+            host.runtime
+                .start_turn_via_runtime(
+                    &id,
+                    "run shell".into(),
+                    Vec::new(),
+                    events,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let session = host
+                .runtime
+                .load_persisted_session(&id)
+                .await
+                .unwrap()
+                .unwrap();
+            let results = session
+                .messages()
                 .iter()
-                .any(|entry| entry.kind == OperationKind::BackgroundToolOp),
-            "runtime feed should contain a background shell completion"
-        );
+                .find_map(|message| match message {
+                    meerkat_core::Message::ToolResults { results, .. } => Some(results),
+                    _ => None,
+                })
+                .expect("shell tool result");
+            if results[0].is_error {
+                host.shutdown().await.unwrap();
+            }
+            assert!(!results[0].is_error, "{:?}", results[0]);
+            let result: serde_json::Value =
+                serde_json::from_str(&results[0].text_content()).unwrap();
+            let job_id = serde_json::from_value(result["job_id"].clone()).unwrap();
+            let terminal = timeout(Duration::from_secs(10), async {
+                loop {
+                    let job = host
+                        .runtime
+                        .detached_job_service()
+                        .get(&job_id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if let Some(result) = job.terminal_result {
+                        break result;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("durable shell terminal result");
+            let meerkat::JobTerminalResult::Succeeded {
+                result_ref: Some(result_ref),
+            } = terminal
+            else {
+                panic!("shell did not succeed: {terminal:?}");
+            };
+            let output = host
+                .runtime
+                .blob_store()
+                .get(&meerkat_core::BlobId::new(result_ref.as_str()))
+                .await
+                .unwrap();
+            let result: serde_json::Value = serde_json::from_str(&output.data).unwrap();
+            assert_eq!(result["exit_code"], 0);
+            assert!(
+                result["stdout"]
+                    .as_str()
+                    .unwrap()
+                    .contains("target-background-feed")
+            );
+            host.shutdown().await.unwrap();
+        })
+        .unwrap();
     }
 
     /// Regression: ensure setup_session through PersistentSessionService
@@ -3149,8 +3051,6 @@ mod tests {
             "test",
             &surface.mob_state,
             "openai",
-            None,
-            None,
         )
         .await
         .unwrap();

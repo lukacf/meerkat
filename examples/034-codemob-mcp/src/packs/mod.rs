@@ -35,14 +35,24 @@ pub trait Pack: Send + Sync {
     fn agent_count(&self) -> usize;
     /// Number of flow steps in the required `"main"` flow.
     fn flow_step_count(&self) -> usize;
-    /// Build the [`MobDefinition`] with task/context interpolated and overrides applied.
+    /// Build fixed flow templates. Caller text is supplied as activation parameters.
     fn definition(
         &self,
-        task: &str,
-        context: &str,
         model_overrides: &BTreeMap<String, String>,
         provider_params: Option<&meerkat_core::ProviderParamsOverride>,
     ) -> MobDefinition;
+
+    fn roles(&self) -> BTreeMap<String, String> {
+        self.definition(&BTreeMap::new(), None)
+            .profiles
+            .iter()
+            .filter_map(|(name, binding)| {
+                binding
+                    .as_inline()
+                    .map(|profile| (name.to_string(), profile.model.clone()))
+            })
+            .collect()
+    }
 }
 
 // ── Registry ─────────────────────────────────────────────────────────────────
@@ -69,11 +79,6 @@ impl PackRegistry {
     /// Register a dynamic pack (e.g. user-created). Overwrites if name exists.
     pub fn register(&mut self, pack: Box<dyn Pack>) {
         self.packs.insert(pack.name().to_string(), pack);
-    }
-
-    /// Remove a pack by name. Returns true if it existed.
-    pub fn remove(&mut self, name: &str) -> bool {
-        self.packs.remove(name).is_some()
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Pack> {
@@ -106,6 +111,12 @@ pub fn format_context(context: &str) -> String {
     } else {
         format!("\n\n## Context\n\n{context}")
     }
+}
+
+pub const TASK_TEMPLATE: &str = "{{ params.task }}{{ params.context }}";
+
+pub fn flow_params(task: &str, context: &str) -> serde_json::Value {
+    serde_json::json!({"task": task, "context": format_context(context)})
 }
 
 /// Build a turn-driven profile with file-reading builtins and comms.
@@ -205,7 +216,7 @@ mod tests {
         let mut models = Vec::new();
 
         for pack in registry.all() {
-            let definition = pack.definition("check defaults", "", &BTreeMap::new(), None);
+            let definition = pack.definition(&BTreeMap::new(), None);
             for binding in definition.profiles.values() {
                 let profile = binding
                     .as_inline()
@@ -237,7 +248,7 @@ mod tests {
         let registry = PackRegistry::new();
 
         for pack in registry.all() {
-            let definition = pack.definition("check diversity", "", &BTreeMap::new(), None);
+            let definition = pack.definition(&BTreeMap::new(), None);
             let mut seen = std::collections::BTreeSet::new();
             let mut models = Vec::new();
 
@@ -261,7 +272,7 @@ mod tests {
         let registry = PackRegistry::new();
 
         for pack in registry.all() {
-            let definition = pack.definition("check flows", "", &BTreeMap::new(), None);
+            let definition = pack.definition(&BTreeMap::new(), None);
             assert!(
                 pack.flow_step_count() > 0,
                 "pack '{}' must expose a machine-owned main flow",
@@ -273,5 +284,49 @@ mod tests {
                 pack.name()
             );
         }
+    }
+
+    #[test]
+    fn bounded_role_instructions_match_pack_graphs_and_role_inventory() {
+        let registry = PackRegistry::new();
+        let mut checked = 0;
+        for (name, steps) in [("implement", 2), ("panel", 6), ("rct", 6)] {
+            let pack = registry.get(name).unwrap();
+            let definition = pack.definition(&BTreeMap::new(), None);
+            let main = &definition.flows[&FlowId::from("main")];
+            assert_eq!(main.steps.len(), steps);
+            assert_eq!(pack.roles().len(), definition.profiles.len());
+            for (role, model) in pack.roles() {
+                assert_eq!(
+                    definition.profiles[&ProfileName::from(role)]
+                        .as_inline()
+                        .unwrap()
+                        .model,
+                    model
+                );
+            }
+            for (key, source) in &definition.skills {
+                if matches!(
+                    key.as_str(),
+                    "implementer-skill"
+                        | "moderator-skill"
+                        | "rct-orchestrator-skill"
+                        | "purist-skill"
+                        | "pragmatist-skill"
+                        | "skeptic-skill"
+                        | "veteran-skill"
+                ) {
+                    checked += 1;
+                    let SkillSource::Inline { content } = source else {
+                        panic!("embedded role must be inline")
+                    };
+                    assert!(content.contains("flow"), "{key}");
+                    assert!(!content.contains("Continue revising until"));
+                    assert!(!content.contains("spawn implementer"));
+                    assert!(!content.contains("After 3-4 exchanges"));
+                }
+            }
+        }
+        assert_eq!(checked, 7);
     }
 }

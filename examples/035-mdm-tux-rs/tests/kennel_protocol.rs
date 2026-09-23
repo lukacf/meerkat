@@ -39,11 +39,19 @@ impl KennelSession {
     }
 
     async fn recv(&mut self) -> anyhow::Result<KennelPayload> {
-        let env = read_envelope(&mut self.reader)
-            .await?
+        loop {
+            let env = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                read_envelope(&mut self.reader),
+            )
+            .await??
             .context("connection closed")?;
-        verify_envelope(&env)?;
-        Ok(env.payload)
+            verify_envelope(&env)?;
+            if matches!(env.payload, KennelPayload::ClaimRequestCompleted { .. }) {
+                continue;
+            }
+            return Ok(env.payload);
+        }
     }
 
     fn id(&self) -> &str {
@@ -55,6 +63,14 @@ impl KennelSession {
     }
 }
 
+/// Resolve the kennel binary from the runtime environment so archived test
+/// binaries keep working outside the build that produced them.
+fn kennel_binary() -> std::path::PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_mdm-kennel")
+        .map(std::path::PathBuf::from)
+        .expect("CARGO_BIN_EXE_mdm-kennel is set by cargo test")
+}
+
 /// Spawn a real kennel process on a random port and return its address.
 ///
 /// There is still a tiny TOCTOU gap between releasing the probe listener and the
@@ -62,11 +78,12 @@ impl KennelSession {
 /// port if the child exits early or never becomes reachable.
 async fn spawn_kennel() -> anyhow::Result<(String, tokio::process::Child, tempfile::TempDir)> {
     let mut last_err = None;
-    let kennel = std::env::var_os("CARGO_BIN_EXE_mdm-kennel")
-        .expect("Cargo or Nextest must provide the runtime kennel binary path");
+    let kennel = kennel_binary();
 
     for attempt in 0..10 {
-        let temp = tempfile::tempdir()?;
+        let temp = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())?;
+        std::fs::create_dir(temp.path().join(".rkat"))?;
+        std::fs::write(temp.path().join(".rkat/config.toml"), "")?;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -77,6 +94,12 @@ async fn spawn_kennel() -> anyhow::Result<(String, tokio::process::Child, tempfi
             .arg(format!("127.0.0.1:{port}"))
             .arg("--data-dir")
             .arg(temp.path())
+            .arg("--advertise")
+            .arg("127.0.0.1")
+            .arg("--hive-rpc-port")
+            .arg("0")
+            .env("OPENAI_API_KEY", "synthetic-no-network")
+            .env("HOME", temp.path())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
@@ -119,6 +142,196 @@ async fn spawn_kennel() -> anyhow::Result<(String, tokio::process::Child, tempfi
 }
 
 // ── Envelope tests ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial_test::serial]
+async fn real_broker_restart_changes_incarnation_but_preserves_hive_session() {
+    let (addr, mut child, root) = spawn_kennel().await.unwrap();
+    let mut first_session = None;
+    let mut first_incarnation = None;
+    for epoch in 0..2 {
+        if epoch == 1 {
+            child = tokio::process::Command::new(kennel_binary())
+                .args([
+                    "--listen",
+                    &addr,
+                    "--advertise",
+                    "127.0.0.1",
+                    "--hive-rpc-port",
+                    "0",
+                    "--data-dir",
+                ])
+                .arg(root.path())
+                .env("HOME", root.path())
+                .env("OPENAI_API_KEY", "synthetic-no-network")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+        }
+        let mut tux = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Ok(client) = KennelSession::connect(&addr, Keypair::generate()).await {
+                    break client;
+                }
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "restarted kennel exited"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tux.send(KennelPayload::TuxRegister {
+            tux_id: tux.id().into(),
+            pubkey: tux.pubkey(),
+            attached_target_ids: vec![],
+        })
+        .await
+        .unwrap();
+        let KennelPayload::TuxRegistered {
+            hive_session_id,
+            broker_incarnation,
+            ..
+        } = tux.recv().await.unwrap()
+        else {
+            panic!("signed broker registration");
+        };
+        let session = hive_session_id.expect("durable Hive session");
+        assert!(!broker_incarnation.is_empty());
+        if epoch == 0 {
+            first_session = Some(session);
+            first_incarnation = Some(broker_incarnation);
+        } else {
+            assert_eq!(first_session.as_ref(), Some(&session));
+            assert_ne!(first_incarnation.as_ref(), Some(&broker_incarnation));
+        }
+        drop(tux);
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn connected_expiry_and_correlated_refusal_allow_retry_on_same_connection() {
+    let (addr, _kennel, _root) = spawn_kennel().await.unwrap();
+    let mut target = KennelSession::connect(&addr, Keypair::generate())
+        .await
+        .unwrap();
+    let target_id = target.id().to_string();
+    target
+        .send(KennelPayload::TargetRegister {
+            target_id: target_id.clone(),
+            name: "expiry-target".into(),
+            pubkey: target.pubkey(),
+            direct_addr: "tcp://127.0.0.1:3".into(),
+            labels: Default::default(),
+            rpc_addr: None,
+            capabilities: Default::default(),
+            attached_tux_id: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        target.recv().await.unwrap(),
+        KennelPayload::TargetRegistered { .. }
+    ));
+    let mut first = KennelSession::connect(&addr, Keypair::generate())
+        .await
+        .unwrap();
+    let mut loser = KennelSession::connect(&addr, Keypair::generate())
+        .await
+        .unwrap();
+    for client in [&mut first, &mut loser] {
+        client
+            .send(KennelPayload::TuxRegister {
+                tux_id: client.id().into(),
+                pubkey: client.pubkey(),
+                attached_target_ids: vec![],
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            client.recv().await.unwrap(),
+            KennelPayload::TuxRegistered { .. }
+        ));
+    }
+    first
+        .send(KennelPayload::ClaimTargets {
+            target_ids: vec![target_id.clone()],
+            lease_ttl_sec: Some(2),
+        })
+        .await
+        .unwrap();
+    let KennelPayload::ClaimGranted { claims } = first.recv().await.unwrap() else {
+        panic!("grant");
+    };
+    let lease_id = claims[0].lease_id.clone();
+    first
+        .send(KennelPayload::ClaimAck {
+            lease_ids: vec![lease_id.clone()],
+        })
+        .await
+        .unwrap();
+    let request = build_signed_envelope(
+        &loser.keypair,
+        loser.id(),
+        KennelPayload::ClaimTargets {
+            target_ids: vec![target_id.clone()],
+            lease_ttl_sec: Some(30),
+        },
+    )
+    .unwrap();
+    write_envelope(&mut loser.writer, &request).await.unwrap();
+    let KennelPayload::ClaimGranted { claims } = loser.recv().await.unwrap() else {
+        panic!("grant");
+    };
+    assert!(claims.is_empty());
+    let completion = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        read_envelope(&mut loser.reader),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    verify_envelope(&completion).unwrap();
+    assert!(
+        matches!(completion.payload, KennelPayload::ClaimRequestCompleted {
+        in_reply_to, refused_target_ids,
+    } if in_reply_to == request.message_id && refused_target_ids == vec![target_id.clone()])
+    );
+    assert!(matches!(
+        first.recv().await.unwrap(),
+        KennelPayload::ClaimReleased {
+            reason: mdm_tux::LeaseTerminationReason::LeaseExpired,
+            ..
+        }
+    ));
+    first
+        .send(KennelPayload::RenewLeases {
+            lease_ids: vec![lease_id],
+            lease_ttl_sec: Some(30),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(first.recv().await.unwrap(), KennelPayload::LeasesRenewed { leases } if leases.is_empty())
+    );
+    loser
+        .send(KennelPayload::ClaimTargets {
+            target_ids: vec![target_id],
+            lease_ttl_sec: Some(30),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(loser.recv().await.unwrap(), KennelPayload::ClaimGranted { claims } if claims.len() == 1)
+    );
+}
 
 #[test]
 fn signed_envelope_roundtrip() {

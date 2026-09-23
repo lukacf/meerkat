@@ -203,6 +203,15 @@ The renderer produces two output formats:
     When running background jobs...
     </skill>
     ```
+
+    Per-turn `skill_refs` become typed `SkillContext` blocks in the canonical
+    user transcript, including on runtime-backed create and continue requests.
+    Core prepends the resolved blocks once to the first conversational user
+    message without replacing other messages, injected context, or media. For
+    a peer/system-only turn, core appends a skill-only user message after the
+    admitted messages. Activation never adds a System instruction: the provider
+    receives the rendered bodies as user context. A run-start hook denial
+    commits neither the activation nor the turn's admitted messages.
   </Tab>
 </Tabs>
 

@@ -2449,7 +2449,7 @@ impl DetachedMemberReadinessContext {
         agent_identity: &AgentIdentity,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
-        #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
+        #[cfg(feature = "runtime-adapter")]
         {
             let Some(bridge_session_id) = member_ref.bridge_session_id() else {
                 return Ok(());
@@ -2490,7 +2490,7 @@ impl DetachedMemberReadinessContext {
             }
         }
 
-        #[cfg(any(target_arch = "wasm32", not(feature = "runtime-adapter")))]
+        #[cfg(not(feature = "runtime-adapter"))]
         {
             let _ = (agent_identity, member_ref);
         }

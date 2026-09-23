@@ -2,12 +2,13 @@
 // Incidents -- RPG Battle Log format
 // =====================================================================
 
-import type { AgentId, Incident } from "./types";
+import type { AgentId, Incident, IncidentMessage } from "./types";
 import { AGENTS } from "./types";
 
 let incidents: Incident[] = [];
 let nextId = 0;
 let renderCallback: (() => void) | null = null;
+const activity: Array<{ incident: Incident | null; message: IncidentMessage }> = [];
 
 export function setRenderCallback(cb: () => void): void {
   renderCallback = cb;
@@ -45,18 +46,18 @@ export function addMessage(
 ): void {
   const target = incidentId
     ? incidents.find(i => i.id === incidentId)
-    : incidents.find(i => i.status === "active");
+    : null;
 
-  if (!target) return;
-
-  target.messages.push({
+  const message: IncidentMessage = {
     from,
     to: to ?? "system",
     content,
     headline,
     timestamp: Date.now(),
     category,
-  });
+  };
+  target?.messages.push(message);
+  activity.push({ incident: target ?? null, message });
   renderCallback?.();
 }
 
@@ -89,30 +90,28 @@ function agentColor(id: string): string {
 }
 
 export function renderIncidentPanel(container: HTMLElement): void {
-  if (incidents.length === 0) {
+  if (activity.length === 0) {
     container.innerHTML = `<div class="log-empty">AWAITING EVENTS...</div>`;
     return;
   }
 
   let html = "";
-  // Render oldest first so newest activity is at the bottom (scroll target)
-  const ordered = [...incidents].reverse();
-  for (const inc of ordered) {
-    const timeAgo = formatTimeAgo(inc.timestamp);
-    html += `<div class="log-incident-header">${escapeHtml(inc.icon)} ${escapeHtml(inc.title.toUpperCase())} [${timeAgo}]</div>`;
+  // Only the initiating UI action has a known source. Agent replies are not
+  // causally attributed by the event contract, so never attach them to a scenario.
+  for (const { incident, message: m } of activity) {
+    html += `<div class="log-incident-header">${incident
+      ? escapeHtml(`${incident.icon} ${incident.title.toUpperCase()}`)
+      : "UNCORRELATED ACTIVITY"} [${formatTimeAgo(m.timestamp)}]</div>`;
+    const fromColor = agentColor(m.from);
+    const fromName = agentName(m.from);
+    const toName = m.to && m.to !== "system" ? agentName(m.to) : "";
+    const arrow = toName ? ` <span class="log-arrow">&gt;</span> <span style="color:${agentColor(m.to)}">${toName}</span>` : "";
+    const headlineText = escapeHtml(m.headline.length > 70 ? m.headline.slice(0, 67) + "..." : m.headline);
 
-    for (const m of inc.messages) {
-      const fromColor = agentColor(m.from);
-      const fromName = agentName(m.from);
-      const toName = m.to && m.to !== "system" ? agentName(m.to) : "";
-      const arrow = toName ? ` <span class="log-arrow">&gt;</span> <span style="color:${agentColor(m.to)}">${toName}</span>` : "";
-      const headlineText = escapeHtml(m.headline.length > 70 ? m.headline.slice(0, 67) + "..." : m.headline);
-
-      html += `<div class="log-entry">` +
-        `<span class="log-sender" style="color:${fromColor}">${fromName}</span>${arrow}` +
-        `<span class="log-headline">${headlineText}</span>` +
-        `</div>`;
-    }
+    html += `<div class="log-entry">` +
+      `<span class="log-sender" style="color:${fromColor}">${fromName}</span>${arrow}` +
+      `<span class="log-headline">${headlineText}</span>` +
+      `</div>`;
   }
 
   container.innerHTML = html;

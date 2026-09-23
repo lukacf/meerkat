@@ -15,6 +15,7 @@ pub mod generated_comms_trust;
 pub mod kennel;
 pub mod machines;
 pub mod rpc_client;
+pub mod runtime;
 pub use generated_comms_trust::ExampleGeneratedCommsTrustRouter;
 pub use kennel::*;
 
@@ -90,7 +91,7 @@ pub const DIRECT_CONTROL_INTENT: &str = "mdm.direct";
 pub enum DirectControlPayload {
     AttachRequest { lease_id: String, target_id: String },
     AttachAck { lease_id: String },
-    StreamEvent { event: AgentEvent },
+    StreamEvent { event: Box<AgentEvent> },
 }
 
 pub fn parse_direct_control_message(

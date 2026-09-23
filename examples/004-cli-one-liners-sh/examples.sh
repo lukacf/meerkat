@@ -51,37 +51,45 @@ resolve_rkat() {
 }
 
 RKAT="$(resolve_rkat)"
+WORK="$ROOT/.work"
+mkdir -p "$WORK/state" "$WORK/project/.rkat" "$WORK/user"
+BASE_ARGS=(
+  --state-root "$WORK/state"
+  --context-root "$WORK/project"
+  --user-config-root "$WORK/user"
+)
+MODEL="claude-sonnet-4-6"
 
 echo "=== 1. Single-turn prompt ==="
-$RKAT run "List three benefits of Rust. Be concise."
+"$RKAT" "${BASE_ARGS[@]}" run --model "$MODEL" "List three benefits of Rust. Be concise."
 
 echo ""
 echo "=== 2. Create a session and continue it ==="
-$RKAT run "Remember: my favorite color is blue."
+"$RKAT" "${BASE_ARGS[@]}" run --model "$MODEL" "Remember: my favorite color is blue."
 
 echo ""
 echo "=== 3. Resume the latest session ==="
-$RKAT run --resume last "What is my favorite color?"
+"$RKAT" "${BASE_ARGS[@]}" run --resume last "What is my favorite color?"
 
 echo ""
 echo "=== 4. List sessions ==="
-$RKAT session list
+"$RKAT" "${BASE_ARGS[@]}" session list
 
 echo ""
 echo "=== 5. Fresh isolated realm ==="
-$RKAT run --isolated "This session lives in its own isolated realm."
+"$RKAT" "${BASE_ARGS[@]}" run --isolated --model "$MODEL" "This session lives in its own isolated realm."
 
 echo ""
 echo "=== 6. Configuration from CLI ==="
-$RKAT config get
+"$RKAT" "${BASE_ARGS[@]}" config get
 
 echo ""
 echo "=== 7. Verbose mode (shows tool calls, events) ==="
-$RKAT run --verbose "What is 2 + 2?"
+"$RKAT" "${BASE_ARGS[@]}" run --model "$MODEL" --verbose "What is 2 + 2?"
 
 echo ""
 echo "=== 8. Streaming mode (token-by-token output) ==="
-$RKAT run --stream "Write a haiku about systems programming."
+"$RKAT" "${BASE_ARGS[@]}" run --model "$MODEL" --stream "Write a haiku about systems programming."
 
 echo ""
 echo "Done! See each example above for the output."

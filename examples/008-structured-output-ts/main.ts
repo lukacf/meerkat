@@ -28,6 +28,8 @@ const sentimentSchema = {
     },
     confidence: {
       type: "number" as const,
+      minimum: 0,
+      maximum: 1,
       description: "Confidence score between 0 and 1",
     },
     key_phrases: {
@@ -74,9 +76,9 @@ async function analyzeSentiment(
 
 async function main() {
   const client = new MeerkatClient();
-  await client.connect();
 
   try {
+    await client.connect();
     const texts = [
       "The new release is incredible! Performance improved 3x and the API is much cleaner.",
       "The server has been down for hours. Support is unresponsive. Very disappointed.",
@@ -100,4 +102,7 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

@@ -1,6 +1,6 @@
 //! # 011 — Hooks & Guardrails (Rust)
 //!
-//! Hooks let you observe and guard the agent loop at 8 defined points.
+//! Hooks let you observe and guard the agent loop at eight defined loop points.
 //! Use them for content filtering, audit logging, cost tracking, approval
 //! gates, and policy checks — without touching agent code.
 //!
@@ -8,7 +8,7 @@
 //! - Defining hooks in configuration (command, HTTP, in-process)
 //! - Hook points: pre_llm_request, post_llm_response, pre_tool_execution, etc.
 //! - Hook decisions: Allow or Deny
-//! - Failure policy compatibility fields and typed hook runtime failures
+//! - Typed hook runtime failures
 //!
 //! ## Run
 //! ```bash
@@ -75,8 +75,11 @@ impl AgentToolDispatcher for WeatherDispatcher {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    meerkat_runtime::host_stack::run_host("hooks-guardrails", run)?
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "Set ANTHROPIC_API_KEY to run this example")?;
 
@@ -245,8 +248,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Show config-based hook definitions ─────────────────────────────────
 
     println!("\n=== Hook configuration (for .rkat/config.toml) ===\n");
-    println!(
-        r#"# .rkat/config.toml hook examples:
+    println!("{HOOK_CONFIG}");
+    Ok(())
+}
+
+const HOOK_CONFIG: &str = r#"# .rkat/config.toml hook examples:
 
 # Audit log: observe every turn boundary
 [[hooks.entries]]
@@ -272,19 +278,21 @@ type = "http"
 url = "http://localhost:8080/filter"
 method = "POST"
 
-# Cost tracker: monitor token usage
+# Cost tracker: read stdin, log bounded usage metadata, return JSON on stdout.
+# Run from the repo root; choose a log path owned by you.
+# The script creates the log's parent directory. Python 3 is required.
 [[hooks.entries]]
 id = "cost-tracker"
-point = "turn_boundary"
-mode = "background"
+point = "post_llm_response"
+mode = "foreground"
 capability = "observe"
 
 [hooks.entries.runtime]
 type = "command"
-command = "bash"
-args = ["-c", "echo $HOOK_PAYLOAD >> /tmp/costs.log"]
+command = "python3"
+args = ["examples/011-hooks-guardrails-rs/cost_tracker.py", ".rkat/example-hooks/costs.jsonl"]
 
-# Available hook points:
+# Agent-loop hook points (eight):
 #   turn_boundary        - Between agent loop iterations
 #   pre_tool_execution   - Before a tool is called
 #   post_tool_execution  - After a tool returns
@@ -292,18 +300,20 @@ args = ["-c", "echo $HOOK_PAYLOAD >> /tmp/costs.log"]
 #   post_llm_response    - After LLM responds
 #   run_started          - When the agent run begins
 #   run_completed        - When the agent run finishes
+#   run_failed           - When the agent run fails
+# Runtime-only observation points additionally cover input acceptance,
+# rejection, deduplication, peer ingress/egress, and interaction completion.
+# See meerkat_core::HookPoint for the full catalog.
 
 # Hook capabilities:
 #   observe    - Read-only, cannot modify the flow
 #   guardrail  - Can deny and short-circuit all remaining hooks
-#   rewrite    - Retired compatibility label; no patch authority
 
 # Hook runtime kinds:
 #   command    - Shell command (receives JSON on stdin, returns JSON on stdout)
 #   http       - HTTP endpoint (POST with JSON body)
 #   in_process - Registered Rust function (for embedded use)
-"#
-    );
+"#;
 
-    Ok(())
-}
+#[cfg(test)]
+mod tests;

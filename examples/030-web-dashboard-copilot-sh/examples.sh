@@ -60,6 +60,12 @@ if [[ ! -s "$WASM_RUNTIME" ]]; then
 fi
 
 mkdir -p "$MOB_DIR/skills" "$WORK"
+mkdir -p "$WORK/project/.rkat" "$WORK/user"
+BASE_ARGS=(
+  --state-root "$WORK/state"
+  --context-root "$WORK/project"
+  --user-config-root "$WORK/user"
+)
 
 cat > "$MOB_DIR/manifest.toml" <<'TOML'
 [mobpack]
@@ -299,21 +305,38 @@ cat > "$QUESTIONS" <<'MD'
 MD
 
 echo "=== Packing dashboard copilot mobpack ==="
-"$RKAT_BIN" mob pack "$MOB_DIR" -o "$PACK"
+"$RKAT_BIN" "${BASE_ARGS[@]}" mob pack "$MOB_DIR" -o "$PACK"
 
 echo
 echo "=== Inspecting artifact ==="
-"$RKAT_BIN" mob inspect "$PACK"
+"$RKAT_BIN" "${BASE_ARGS[@]}" mob inspect "$PACK"
 
 echo
 echo "=== Validating artifact ==="
 # Locally-built unsigned demo pack: allow unsigned via a permissive trust policy
 # (the default is strict, which rejects unsigned packs).
-"$RKAT_BIN" mob validate "$PACK" --trust-policy permissive
+"$RKAT_BIN" "${BASE_ARGS[@]}" mob validate "$PACK" --trust-policy permissive
 
 echo
 echo "=== Building browser bundle ==="
-"$RKAT_BIN" mob web build "$PACK" -o "$WEB_OUT" --wasm "$WASM_RUNTIME" --trust-policy permissive
+"$RKAT_BIN" "${BASE_ARGS[@]}" mob web build "$PACK" -o "$WEB_OUT" --wasm "$WASM_RUNTIME" --trust-policy permissive
+
+# createMob accepts an independent definition, not archive-relative file paths.
+python3 - "$MOB_DIR" "$WEB_OUT/definition.inline.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+definition = json.loads((source / "definition.json").read_text(encoding="utf-8"))
+for name, skill in definition["skills"].items():
+    if skill["source"] == "path":
+        definition["skills"][name] = {
+            "source": "inline",
+            "content": (source / skill["path"]).read_text(encoding="utf-8"),
+        }
+Path(sys.argv[2]).write_text(json.dumps(definition, indent=2) + "\n", encoding="utf-8")
+PY
 
 echo
 echo "=== Generated web manifest (derived output) ==="
@@ -331,9 +354,11 @@ echo
 echo "Artifacts:"
 echo "  mobpack:        $PACK"
 echo "  web bundle:     $WEB_OUT"
+echo "  host definition: $WEB_OUT/definition.inline.json"
 echo "  dashboard JSON: $PLAYBOOK"
 echo "  embed snippet:  $EMBED_SNIPPET"
 echo
 echo "Suggested next step:"
-echo "  Integrate '$WEB_OUT' with an @rkat/web host that creates the mob, spawns members,"
-echo "  and passes '$PLAYBOOK' into a prompt and transcript UI."
+echo "  Pass '$WEB_OUT/definition.inline.json' to @rkat/web createMob(), spawn members,"
+echo "  and pass '$PLAYBOOK' into a prompt and transcript UI."
+echo "  Do not use source filesystem skill paths; runtime bootstrap does not inline them."

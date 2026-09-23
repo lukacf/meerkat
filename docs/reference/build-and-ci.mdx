@@ -215,7 +215,7 @@ cache limit in one pull request:
 | `fmt-governance` | always | `make fmt-check docs-check semver-breaks-selftest verify-version-parity verify-lock-consistency verify-bazel-module-lock-inputs check-rust-release-config ci-lanes-selftest` plus the release doctor contract test |
 | `ratchets` | always (steps conditional) | schema, SDK codegen, event inventory, RPC/REST surface, and SDK wrapper freshness when generated-contract paths changed; `machine-check-drift` and `protocol-check-drift` when machine-authority paths changed |
 | `clippy` (one lane per shard) | Rust-relevant change | `repo-cargo clippy -p <changed packages> --no-deps --all-targets --all-features -- -D warnings` |
-| `unit` (one lane per shard) | Rust-relevant change | `repo-cargo nextest run -p <changed packages> --lib --bins --profile ci-pr` (the fast lane minus the wall-clock latency bounds, which nightly and release keep) |
+| `unit` (one lane per shard) | Rust-relevant change | `repo-cargo nextest run -p <changed packages> --lib --bins --profile ci-pr` (the PR lane's named profile, identical to `fast`) |
 | `closure-check` | Rust-relevant change | `repo-cargo check -p <reverse-dependency closure> --all-targets --all-features` (catches downstream compile breaks the direct lanes miss) |
 | `wasm-check` | web-runtime, contracts, or workspace-wide change | `make wasm-check` |
 | `sdk-host` | `sdks/python`, `sdks/typescript`, or SDK tooling change | `make test-sdk-python test-sdk-typescript` |

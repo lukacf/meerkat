@@ -139,9 +139,9 @@ them.
   paths and fails closed: any `.rs`, `Cargo.toml`, `Cargo.lock`, `.cargo/`,
   nextest, toolchain, build-wrapper, or `ci.yml` change yields at least one
   `clippy --no-deps --all-targets --all-features` lane and one
-  `nextest --lib --bins --profile ci-pr` lane (the fast lane minus the two
-  `actor_isolation` wall-clock latency bounds, which nightly and release
-  keep running unchanged) over the directly changed
+  `nextest --lib --bins --profile ci-pr` lane (`ci-pr` is the PR lane's
+  named profile and is identical to `fast`; nothing is excluded) over the
+  directly changed
   packages (packed into at most six parallel shards, eight for a
   whole-workspace plan, balanced by estimated build-and-link cost), a `cargo check
   --all-targets --all-features` lane over their reverse-dependency closure,

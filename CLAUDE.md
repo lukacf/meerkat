@@ -354,8 +354,8 @@ GitHub-hosted runners and sized to a 20-minute push-to-terminal budget:
   `machine-check-drift`/`protocol-check-drift` when machine authority changed.
 - `clippy` and `unit`: one lane per shard of the directly changed packages
   (`clippy --no-deps --all-targets --all-features -D warnings`,
-  `nextest --lib --bins --profile ci-pr`, the fast lane minus wall-clock
-  latency bounds that nightly and release keep).
+  `nextest --lib --bins --profile ci-pr`, the PR lane's named profile,
+  identical to `fast`).
 - `closure-check`: `cargo check --all-targets --all-features` over the
   reverse-dependency closure of the changed packages.
 - `wasm-check` and `sdk-host` when their inputs changed.

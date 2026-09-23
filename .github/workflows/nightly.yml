@@ -82,6 +82,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-workspace-unit
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
           cache-on-failure: true
 
       - name: Install nextest
@@ -115,6 +119,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-workspace-int
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
           cache-on-failure: true
 
       - name: Install nextest
@@ -148,6 +156,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-e2e-fast
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
           cache-on-failure: true
 
       - name: Install nextest
@@ -197,6 +209,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-machine-verify
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
           cache-on-failure: true
 
       - name: Install pinned TLC
@@ -248,6 +264,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-sdk-host
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
           cache-on-failure: true
 
       - name: Build RPC binary for SDK smoke tests
@@ -285,6 +305,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-clippy-full
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
 
       - name: Clippy (workspace, all features, all targets)
         run: make lint
@@ -311,6 +335,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-matrix
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -345,6 +373,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-minimal
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -379,6 +411,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-release-stack
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -414,6 +450,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-e2e-system
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -463,6 +503,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-sdk-web
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
 
       - name: Web SDK build and tests
         run: make test-sdk-web
@@ -503,6 +547,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-wasm-contract
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
 
       - name: Build browser contract test (wasm32)
         run: ./scripts/repo-cargo test -p meerkat-web-runtime --target wasm32-unknown-unknown --test browser_contract --no-run
@@ -532,6 +580,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-packaging
+          # Registry only: compiled objects come from sccache. Per-job target
+          # caches would exceed the repository's 10 GB cache limit and evict the
+          # pull-request lanes' sccache objects every night.
+          cache-targets: "false"
 
       - name: Check Rust release packaging
         run: make check-rust-release-packaging

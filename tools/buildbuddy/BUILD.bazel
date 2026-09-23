@@ -178,6 +178,45 @@ sh_test(
     tags = CARGO_EQUIVALENT_TAGS,
 )
 
+# The SDK suites as three remote actions instead of one. Together they need a
+# cold `cargo build -p meerkat-rpc`, a cold wasm-pack build of
+# meerkat-web-runtime, and three package installs; on one 30-core executor the
+# single action was still running at 2138s on 2026-09-23. Split by suite the
+# same work runs in parallel on separate executors. `sdk_suites_cargo_equivalent_test`
+# above stays the local single-action form.
+SDK_SUITE_CARGO_EQUIVALENT_TESTS = {
+    "sdk_python_cargo_equivalent_test": "sdk-python",
+    "sdk_typescript_cargo_equivalent_test": "sdk-typescript",
+    "sdk_web_cargo_equivalent_test": "sdk-web",
+}
+
+[
+    sh_test(
+        name = name,
+        srcs = ["full_lane_test.sh"],
+        args = [lane],
+        data = [
+            "//:workspace_runfiles",
+            "@wasm_pack_darwin_arm64//:wasm-pack",
+            "@wasm_pack_linux_x86_64//:wasm-pack",
+        ] + RUST_TOOLCHAIN_DATA + WASM_RUST_TOOLCHAIN_DATA + SDK_TOOL_DATA,
+        exec_properties = CARGO_EQUIVALENT_EXEC_PROPERTIES,
+        size = "enormous",
+        timeout = "eternal",
+        tags = CARGO_EQUIVALENT_TAGS,
+    )
+    for name, lane in SDK_SUITE_CARGO_EQUIVALENT_TESTS.items()
+]
+
+test_suite(
+    name = "sdk_suites_cargo_equivalent_tests",
+    tests = [
+        ":" + name
+        for name in SDK_SUITE_CARGO_EQUIVALENT_TESTS.keys()
+    ],
+    tags = CARGO_EQUIVALENT_TAGS,
+)
+
 sh_test(
     name = "wasm_check_cargo_equivalent_test",
     srcs = ["full_lane_test.sh"],

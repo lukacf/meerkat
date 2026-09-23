@@ -233,6 +233,14 @@ them.
   the previous 12), and the top-level push-to-terminal budget is 3600s (was
   2400s; GitHub queued the control-plane job for 4 minutes on consecutive
   runs before the 2400s component SLO even started). No lane was narrowed.
+- The BuildBuddy SDK suites lane runs one remote action per suite
+  (`sdk_python_cargo_equivalent_test`, `sdk_typescript_cargo_equivalent_test`,
+  `sdk_web_cargo_equivalent_test`, grouped as
+  `//tools/buildbuddy:sdk_suites_cargo_equivalent_tests`) instead of one
+  action that built `rkat-rpc` cold, then ran the wasm-pack build and all three
+  suites on a single executor; that action was still running at 2138s on
+  2026-09-23. Each suite keeps exactly the steps it had; the single-action
+  target remains for local use.
 - The BuildBuddy wasm-check lane runs clippy through the sandbox toolchain's
   own `cargo-clippy`. `cargo clippy` resolves that subcommand from
   `$CARGO_HOME/bin` (the executor image's rustup proxy) before `PATH`, which

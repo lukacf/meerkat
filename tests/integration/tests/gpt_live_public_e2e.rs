@@ -2221,6 +2221,24 @@ async fn s99_native_exchange(
 /// Let the assistant finish whatever it is saying before the next question,
 /// as a person would: queued context the provider voices after the user
 /// stops speaking must not be mistaken for the reply to the next question.
+/// Owned thinking-append attempts that are causal tail: every attempt minus
+/// the fragments of the channels' late summaries (the summary is context
+/// data and legitimately names the historical facts it summarizes).
+fn s99_causal_tail(evidence: &Journal) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let summaries: Vec<String> = (1..=evidence.current_channel()?)
+        .filter_map(|channel| evidence.first_owned_thinking_append(channel).transpose())
+        .collect::<Result<_, _>>()?;
+    Ok(evidence
+        .thinking_append_attempt_texts()?
+        .into_iter()
+        .filter(|text| {
+            !summaries
+                .iter()
+                .any(|summary| summary.contains(text.as_str()))
+        })
+        .collect())
+}
+
 async fn s99_wait_for_assistant_quiet(
     live: &mut PublicLiveHarness,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2440,13 +2458,27 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // acknowledgement is never re-sent: the vault phrase was first spoken
     // after it, and the current-facts answer is the only assistant speech
     // naming cobalt and marigold together.
+    // Late summary (the gated summarizer misses the pre-open bound): nothing
+    // rides the instructions lane; the summary is the first owned thinking
+    // append on the channel, prefixed, delivered after the first user
+    // utterance and acknowledged.
+    assert_late_summary_seed(&evidence, 1)?;
     let owner = evidence.owner_appends()?;
-    assert_eq!(owner.framed_summaries, 1, "exactly one summary was delivered");
-    assert!(
-        owner.instructions_attempts >= owner.framed_summaries,
-        "instructions attempts are the summary and its continuation fragments"
+    assert_eq!(
+        owner.framed_summaries, 0,
+        "a late summary never uses the instructions lane"
     );
-    let attempts = evidence.thinking_append_attempt_texts()?;
+    let first_thinking = evidence.first_owned_thinking_append(1)?.unwrap_or_default();
+    assert!(
+        first_thinking.starts_with(LATE_SUMMARY_PREFIX),
+        "the first owned thinking append must be the prefixed late summary, got {:?}",
+        first_thinking.chars().take(200).collect::<String>()
+    );
+    assert!(
+        owner.thinking_acknowledged >= 1,
+        "the late summary fragments were not acknowledged"
+    );
+    let attempts = s99_causal_tail(&evidence)?;
     assert!(
         !attempts
             .iter()
@@ -2511,12 +2543,30 @@ async fn run_s99_concurrent_context(evidence: Journal) -> Result<(), Box<dyn std
     // replacement's summary the owner has delivered exactly two framed
     // summaries (the obsolete job's late summary went nowhere), and nothing
     // spoken after an acknowledgement was ever queued for reassertion.
+    // Channel 2 was the obsolete reopen (closed while its preparation was
+    // pending, never spoken to); the replacement is the journal's current
+    // channel.
+    let replacement_channel = evidence.current_channel()?;
+    assert_late_summary_seed(&evidence, 2)?;
+    assert_late_summary_seed(&evidence, replacement_channel)?;
+    assert!(
+        evidence.first_owned_thinking_append(2)?.is_none(),
+        "the obsolete channel was closed before any utterance, so nothing may ride its thinking lane"
+    );
     let owner = evidence.owner_appends()?;
+    let second_thinking = evidence
+        .first_owned_thinking_append(replacement_channel)?
+        .unwrap_or_default();
+    assert!(
+        second_thinking.starts_with(LATE_SUMMARY_PREFIX),
+        "the reopened channel's first owned thinking append must be its prefixed late summary, got {:?}",
+        second_thinking.chars().take(200).collect::<String>()
+    );
     assert_eq!(
-        owner.framed_summaries, 2,
+        owner.framed_summaries, 0,
         "the original and the replacement summary were delivered; the obsolete job's was not"
     );
-    let attempts = evidence.thinking_append_attempt_texts()?;
+    let attempts = s99_causal_tail(&evidence)?;
     assert!(
         !attempts
             .iter()
@@ -2894,6 +2944,180 @@ const S100_DELEGATION_CONTEXT_PREFIX: &str = "Live delegation execution context:
 /// is everything before it, the assistant transcript of the window only
 /// after it.
 const ASSISTANT_CONTEXT_HEADING_START: &str = "assistant already generated on the call meanwhile";
+
+/// Prefix of a late bootstrap summary delivered on the thinking lane after
+/// the first user utterance (facade `LIVE_LATE_SUMMARY_PREFIX`, summary
+/// seeding redesign). A summary ready before the open rides `session.input`
+/// instead and uses no append lane at all.
+const LATE_SUMMARY_PREFIX: &str =
+    "Conversation history summary (context data, not a new user request):";
+
+/// Recent turns the host seeds verbatim next to a ready summary (facade
+/// `LIVE_STARTUP_RECENT_TURNS`).
+const LIVE_STARTUP_RECENT_TURNS: usize = 4;
+
+/// Which way one open with summary went. The host waits at most the
+/// pre-open bound for the summarizer, so the real summarizer decides per run
+/// whether the summary rides the create body or follows late.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeedCase {
+    /// The summary rode `session.input` as a developer item.
+    Seeded,
+    /// The summarizer missed the bound; the summary follows on the thinking
+    /// lane after the channel's first user utterance.
+    Late,
+}
+
+/// Reads the host-side seed of one open with summary (the browser never sees
+/// the create body) and validates its shape: seeded is exactly one developer
+/// item plus at most `LIVE_STARTUP_RECENT_TURNS` recent turns, late is an
+/// empty create body; the startup instructions frame the history in both
+/// cases. Journals the case and returns it with any shape failure.
+fn classify_summary_open(
+    evidence: &Journal,
+    scenario: &str,
+    label: &str,
+    channel: u32,
+) -> Result<(Option<SeedCase>, Option<String>), Box<dyn std::error::Error>> {
+    let seed = evidence.session_input_seed(channel)?;
+    println!(
+        "GPT_LIVE_{scenario}_SESSION_INPUT_SEED label={label} channel={channel} seed={seed:?}"
+    );
+    let Some(seed) = seed else {
+        return Ok((
+            None,
+            Some(format!(
+                "{label}: no session.start seed was captured for channel {channel}"
+            )),
+        ));
+    };
+    let mut problems = Vec::new();
+    let case = match (seed.developer_items, seed.input_items) {
+        (1, items) if (1..=1 + LIVE_STARTUP_RECENT_TURNS).contains(&items) => {
+            Some(SeedCase::Seeded)
+        }
+        (0, 0) => Some(SeedCase::Late),
+        (developer, items) => {
+            problems.push(format!(
+                "expected one developer item among 1..={} input items (seeded) or an empty create body (late), got {developer} developer items among {items}",
+                1 + LIVE_STARTUP_RECENT_TURNS
+            ));
+            None
+        }
+    };
+    if !seed.frames_history {
+        problems
+            .push("the startup instructions do not carry the history framing clause".to_owned());
+    }
+    if let Some(case) = case {
+        println!(
+            "GPT_LIVE_{scenario}_SUMMARY_OPEN_CASE label={label} channel={channel} case={case:?}"
+        );
+        evidence.record(EvidenceRecord::Tolerant {
+            channel,
+            check: "summary_open_case".to_owned(),
+            passed: true,
+            detail: format!("{label}: {case:?}"),
+        })?;
+    }
+    Ok((
+        case,
+        (!problems.is_empty()).then(|| format!("{label}: {}", problems.join("; "))),
+    ))
+}
+
+/// Late-case follow-up, read once the channel has had its first user
+/// utterance: the summary must be the channel's first owned thinking append,
+/// carrying the late-summary prefix.
+fn assert_late_summary_delivered(
+    evidence: &Journal,
+    scenario: &str,
+    channel: u32,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let first = evidence.first_owned_thinking_append(channel)?;
+    println!(
+        "GPT_LIVE_{scenario}_LATE_SUMMARY channel={channel} prefixed={} bytes={}",
+        first
+            .as_deref()
+            .is_some_and(|text| text.starts_with(LATE_SUMMARY_PREFIX)),
+        first.as_deref().map_or(0, str::len)
+    );
+    Ok(match first {
+        Some(text) if text.starts_with(LATE_SUMMARY_PREFIX) => None,
+        Some(text) => Some(format!(
+            "channel {channel} opened late but its first owned thinking append is not the prefixed summary: {:?}",
+            text.chars().take(120).collect::<String>()
+        )),
+        None => Some(format!(
+            "channel {channel} opened late but no owned thinking append followed the first utterance"
+        )),
+    })
+}
+
+/// Late-summary rule, host side: the summarizer missed the pre-open bound, so
+/// the create body carries no history items at all while the startup
+/// instructions still carry the history framing clause.
+fn assert_late_summary_seed(
+    evidence: &Journal,
+    channel: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let seed = evidence.session_input_seed(channel)?;
+    println!("GPT_LIVE_S99_SESSION_INPUT_SEED channel={channel} seed={seed:?}");
+    let seed =
+        seed.ok_or_else(|| format!("no session.start seed was captured for channel {channel}"))?;
+    assert_eq!(
+        (seed.input_items, seed.developer_items),
+        (0, 0),
+        "a late summary must leave session.input empty on channel {channel}"
+    );
+    assert!(
+        seed.frames_history,
+        "the startup instructions must carry the history framing clause on channel {channel}"
+    );
+    Ok(())
+}
+
+/// Open-with-summary rule: no owned append of either lane may appear before
+/// the channel's first user utterance. A seeded summary is a developer item
+/// in the session.start body; a late one waits for the first utterance. The
+/// counters are compared against `before` (taken before the open) because
+/// earlier channels may have carried late summaries. Records the counters
+/// and returns the seed case with a failure text when anything was sent.
+fn assert_no_appends_at_open(
+    evidence: &Journal,
+    scenario: &str,
+    label: &str,
+    channel: u32,
+    before: &evidence::OwnerAppends,
+) -> Result<(Option<SeedCase>, Option<String>), Box<dyn std::error::Error>> {
+    let (case, seed_failure) = classify_summary_open(evidence, scenario, label, channel)?;
+    let owner = evidence.owner_appends()?;
+    println!(
+        "GPT_LIVE_{scenario}_OPEN_APPENDS label={label} instructions_attempts={} thinking_attempts={} framed_summaries={} instructions_acknowledged={} thinking_acknowledged={}",
+        owner.instructions_attempts,
+        owner.thinking_attempts,
+        owner.framed_summaries,
+        owner.instructions_acknowledged,
+        owner.thinking_acknowledged
+    );
+    let new_instructions = owner
+        .instructions_attempts
+        .saturating_sub(before.instructions_attempts);
+    let new_thinking = owner
+        .thinking_attempts
+        .saturating_sub(before.thinking_attempts);
+    let append_failure = (new_instructions > 0 || new_thinking > 0).then(|| {
+        format!(
+            "{label}: no append lane may be used before the first user turn (a seeded summary rides session.input, a late one waits for the first utterance), but {new_instructions} instructions and {new_thinking} thinking appends were sent"
+        )
+    });
+    let failure = match (seed_failure, append_failure) {
+        (None, None) => None,
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (Some(a), Some(b)) => Some(format!("{a}\n  - {b}")),
+    };
+    Ok((case, failure))
+}
 
 /// Split a normalized executor task into its request part and, when the
 /// runtime appended one, the labelled assistant-context part.
@@ -5035,30 +5259,6 @@ fn s104_policy() -> LiveDelegationExecutionPolicy {
     }
 }
 
-/// Wait until the concurrent bootstrap summary has been appended and every
-/// owned instructions-lane fragment acknowledged, or `bound` passes; returns
-/// the owner-append counters either way.
-async fn wait_for_summary_appends(
-    evidence: &Journal,
-    framed_before: usize,
-    bound: Duration,
-) -> Result<evidence::OwnerAppends, Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + bound;
-    loop {
-        let owner = evidence.owner_appends()?;
-        // A new framed summary beyond `framed_before` (earlier channels'
-        // appends must not satisfy a later cycle) with every owned fragment
-        // acknowledged.
-        if (owner.framed_summaries > framed_before
-            && owner.instructions_acknowledged >= owner.instructions_attempts)
-            || Instant::now() >= deadline
-        {
-            return Ok(owner);
-        }
-        sleep(Duration::from_millis(250)).await;
-    }
-}
-
 /// Scenario 104: the session has typed history, the channel opens with a
 /// concurrent bootstrap summary (the MobKit console's composition), the
 /// user says nothing for 4 s (no fresh greeting allowed), starts a 20 s job
@@ -5163,19 +5363,19 @@ async fn run_s104_handoff_voice_typed_voice(
                 "the assistant greeted on its own after the open with summary".to_owned(),
             );
         }
-        let appends = wait_for_summary_appends(&evidence, 0, Duration::from_secs(30)).await?;
-        println!(
-            "GPT_LIVE_S104_OPEN_APPENDS framed_summaries={} instructions_attempts={} instructions_acknowledged={} thinking_attempts={}",
-            appends.framed_summaries, appends.instructions_attempts, appends.instructions_acknowledged, appends.thinking_attempts
-        );
-        if appends.framed_summaries == 0 {
-            deterministic_failures.push("no framed bootstrap summary landed on the instructions lane after the open".to_owned());
+        let mut late_channels: Vec<u32> = Vec::new();
+        let (open_case, open_failure) = assert_no_appends_at_open(
+            &evidence,
+            "S104",
+            "open with summary",
+            channel,
+            &evidence::OwnerAppends::default(),
+        )?;
+        if let Some(failure) = open_failure {
+            deterministic_failures.push(failure);
         }
-        if appends.instructions_acknowledged < appends.instructions_attempts {
-            deterministic_failures.push(format!(
-                "instructions-lane fragments not all acknowledged after the open: attempts={} acknowledged={}",
-                appends.instructions_attempts, appends.instructions_acknowledged
-            ));
+        if open_case == Some(SeedCase::Late) {
+            late_channels.push(channel);
         }
 
         // The job by voice.
@@ -5281,6 +5481,7 @@ async fn run_s104_handoff_voice_typed_voice(
         }
 
         // Reopen on the same session and ask what happened.
+        let appends_before_reopen = evidence.owner_appends()?;
         let reopen_requested = Instant::now();
         match timeout(S104_REOPEN_BOUND, live.reopen()).await {
             Ok(Ok(())) => println!("GPT_LIVE_S104_REOPEN ms={}", reopen_requested.elapsed().as_millis()),
@@ -5315,22 +5516,18 @@ async fn run_s104_handoff_voice_typed_voice(
                 "the assistant greeted on its own after the reopen with summary".to_owned(),
             );
         }
-        let owner = wait_for_summary_appends(&evidence, 1, Duration::from_secs(30)).await?;
-        println!(
-            "GPT_LIVE_S104_REOPEN_APPENDS framed_summaries={} instructions_attempts={} instructions_acknowledged={} thinking_attempts={}",
-            owner.framed_summaries, owner.instructions_attempts, owner.instructions_acknowledged, owner.thinking_attempts
-        );
-        if owner.framed_summaries < 2 {
-            deterministic_failures.push(format!(
-                "the reopen did not land a second framed summary (framed_summaries={})",
-                owner.framed_summaries
-            ));
+        let (reopen_case, reopen_failure) = assert_no_appends_at_open(
+            &evidence,
+            "S104",
+            "reopen with summary",
+            channel2,
+            &appends_before_reopen,
+        )?;
+        if let Some(failure) = reopen_failure {
+            deterministic_failures.push(failure);
         }
-        if owner.instructions_acknowledged < owner.instructions_attempts {
-            deterministic_failures.push(format!(
-                "instructions-lane fragments not all acknowledged after the reopen: attempts={} acknowledged={}",
-                owner.instructions_attempts, owner.instructions_acknowledged
-            ));
+        if reopen_case == Some(SeedCase::Late) {
+            late_channels.push(channel2);
         }
         evidence.stage(EvidenceStage::HandoffBack)?;
         let events_before_back = live.peer.events().await?.len();
@@ -5343,6 +5540,57 @@ async fn run_s104_handoff_voice_typed_voice(
         .await?;
         live.record_time_to_talk("S104", &mut tolerant_failures).await?;
         evidence.record(back.latency_record(channel2, 1, None))?;
+        // The reopen's summary (a late one rides the thinking lane at this
+        // question's first delta) and the job-result commentary land in the
+        // same turn as the question, and the model has been seen to speak
+        // only after both (journal s104/307adb3e, channel 2: commentary at
+        // 9.2 s, the audio-end window closed at 12.2 s with an empty
+        // answer). The answer window therefore ends when the session settles
+        // (3 s quiet, 60 s bound, the S106 e9 rule) and the answer is
+        // everything said after the question. The audio-end reading, the
+        // commentary arrival and the transcript after it are journaled so the
+        // next sample separates "answer delayed by the appends" from
+        // "answered after the window".
+        let answer_at_audio_end = answer_back;
+        wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
+        let events_settled = live.peer.events().await?;
+        let answer_back = answer_transcript_text(&events_settled, events_before_back);
+        let timeline_back = live.peer.timeline().await?;
+        let commentary = timeline_back
+            .iter()
+            .filter(|entry| entry.kind == TimelineKind::CommentaryAppended)
+            .find(|entry| entry.t_ms >= back_start)
+            .or_else(|| {
+                timeline_back
+                    .iter()
+                    .filter(|entry| entry.kind == TimelineKind::CommentaryAppended)
+                    .max_by_key(|entry| entry.t_ms)
+            });
+        let transcript_after_commentary = commentary
+            .and_then(|entry| entry.detail_u64("event_index"))
+            .map(|index| {
+                let start = usize::try_from(index)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(1)
+                    .min(events_settled.len());
+                output_transcript_text(&events_settled, start)
+            })
+            .unwrap_or_default();
+        record_tolerant(
+            &evidence,
+            channel2,
+            "S104",
+            "post_reopen_answer_window",
+            true,
+            format!(
+                "fixture_start_ms={back_start} audio_end_answer={:?} settled_answer={:?} commentary_ms={:?} transcript_after_commentary={:?}",
+                answer_at_audio_end.trim(),
+                answer_back.trim(),
+                commentary.map(|entry| entry.t_ms),
+                transcript_after_commentary.trim()
+            ),
+            &mut tolerant_failures,
+        )?;
         let lower = answer_back.to_lowercase();
         record_tolerant(
             &evidence,
@@ -5379,6 +5627,11 @@ async fn run_s104_handoff_voice_typed_voice(
         faults.extend(live.peer.faults().await?);
         if !faults.is_empty() {
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
+        }
+        for late in &late_channels {
+            if let Some(failure) = assert_late_summary_delivered(&evidence, "S104", *late)? {
+                deterministic_failures.push(failure);
+            }
         }
         println!(
             "GPT_LIVE_S104_OK total_ms={} connected_ms={connected_ms} close1_ms={:?} typed_ms={typed_ms} executor_done_at_ms={executor_done_at_ms:?} back_start_ms={back_start} back_ms={:?} close2_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
@@ -5470,9 +5723,10 @@ async fn s106_reopen_cycle(
     evidence: &Journal,
     channel: u32,
     typed_prompt: Option<&str>,
+    utterances: &mut usize,
     deterministic_failures: &mut Vec<String>,
     tolerant_failures: &mut Vec<String>,
-) -> Result<(S106Cycle, u32), Box<dyn std::error::Error>> {
+) -> Result<(S106Cycle, u32, Option<SeedCase>), Box<dyn std::error::Error>> {
     let before = evidence.owner_appends()?;
     let texts_before = evidence.instructions_append_attempt_texts()?.len();
     evidence.stage(EvidenceStage::HaulReopen)?;
@@ -5480,6 +5734,11 @@ async fn s106_reopen_cycle(
     // close: a result still in flight at close hits the runtime's
     // exact-once delivery invariant (finding A on the WorkGraph branch).
     wait_for_settled(live, Duration::from_secs(3), Duration::from_secs(60)).await?;
+    // Utterances close by arrival (the reply's first transcript delta or a
+    // delegation), so the channel's count is read only once it has settled:
+    // read right after the last question, the reply to it may still be in
+    // flight and its utterance still pending.
+    *utterances += live.peer.energy().await?.input_finals.len();
     live.record_uplink("S106").await?;
     let close = close_or_record(live, evidence, channel, "S106", deterministic_failures).await?;
     if let Some(prompt) = typed_prompt {
@@ -5510,9 +5769,14 @@ async fn s106_reopen_cycle(
     let delivery_started = Instant::now();
     let greeted =
         silence_hold_greeting(live, evidence, new_channel, "S106", S106_REOPEN_HOLD_MS).await?;
-    let after =
-        wait_for_summary_appends(evidence, before.framed_summaries, Duration::from_secs(45))
-            .await?;
+    // Seeded reopen: the summary rides session.input, so no append lane is
+    // used; `after` is read once the hold has passed.
+    let after = evidence.owner_appends()?;
+    let (case, seed_failure) =
+        classify_summary_open(evidence, "S106", "reopen with summary", new_channel)?;
+    if let Some(failure) = seed_failure {
+        deterministic_failures.push(failure);
+    }
     let summary_delivery_ms = delivery_started.elapsed().as_millis();
     let texts = evidence.instructions_append_attempt_texts()?;
     let cycle_fragments: Vec<&String> = texts.iter().skip(texts_before).collect();
@@ -5552,9 +5816,15 @@ async fn s106_reopen_cycle(
             "the assistant greeted on its own after the reopen (channel {new_channel})"
         ));
     }
-    if cycle.framed_after <= cycle.framed_before {
+    if after.instructions_attempts > before.instructions_attempts
+        || after.thinking_attempts > before.thinking_attempts
+    {
         deterministic_failures.push(format!(
-            "no new framed summary landed on the reopen (channel {new_channel})"
+            "the reopen used an append lane before the first user turn (instructions {} -> {}, thinking {} -> {}) on channel {new_channel}",
+            before.instructions_attempts,
+            after.instructions_attempts,
+            before.thinking_attempts,
+            after.thinking_attempts
         ));
     }
     if cycle.fragments != cycle.expected_fragments
@@ -5572,7 +5842,7 @@ async fn s106_reopen_cycle(
             cycle.fragments, cycle.acknowledged
         ));
     }
-    Ok((cycle, new_channel))
+    Ok((cycle, new_channel, case))
 }
 
 /// Scenario 106: an ~8 minute voice session with ten exchanges, a 20 s
@@ -5662,16 +5932,19 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         if silence_hold_greeting(&mut live, &evidence, channel, "S106", S106_REOPEN_HOLD_MS).await? {
             deterministic_failures.push("the assistant greeted on its own after the open with summary".to_owned());
         }
-        let opening = wait_for_summary_appends(&evidence, 0, Duration::from_secs(45)).await?;
-        println!(
-            "GPT_LIVE_S106_OPEN_APPENDS framed_summaries={} instructions_attempts={} instructions_acknowledged={}",
-            opening.framed_summaries, opening.instructions_attempts, opening.instructions_acknowledged
-        );
-        if opening.framed_summaries == 0 || opening.instructions_acknowledged < opening.instructions_attempts {
-            deterministic_failures.push(format!(
-                "open with summary: framed={} attempts={} acknowledged={}",
-                opening.framed_summaries, opening.instructions_attempts, opening.instructions_acknowledged
-            ));
+        let mut late_channels: Vec<u32> = Vec::new();
+        let (open_case, open_failure) = assert_no_appends_at_open(
+            &evidence,
+            "S106",
+            "open with summary",
+            channel,
+            &evidence::OwnerAppends::default(),
+        )?;
+        if let Some(failure) = open_failure {
+            deterministic_failures.push(failure);
+        }
+        if open_case == Some(SeedCase::Late) {
+            late_channels.push(channel);
         }
         stage_ms.push(("open_summary_delivered".to_owned(), started.elapsed().as_millis()));
 
@@ -5718,20 +5991,23 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             &timeline1,
             &[("e1", s1), ("e2", s2), ("e3", e3.fixture_start_ms), ("e4", s4)],
         ));
-        utterances += live.peer.energy().await?.input_finals.len();
         evidence.record(EvidenceRecord::Timeline { channel, entries: timeline1 })?;
 
         // Reopen cycle 1 with a typed note during the closure.
-        let (cycle1, channel2) = s106_reopen_cycle(
+        let (cycle1, channel2, case1) = s106_reopen_cycle(
             &mut live,
             &evidence,
             channel,
             Some(S106_TYPED_PROMPT),
+            &mut utterances,
             &mut deterministic_failures,
             &mut tolerant_failures,
         )
         .await?;
         channel = channel2;
+        if case1 == Some(SeedCase::Late) {
+            late_channels.push(channel2);
+        }
         stage_ms.push(("reopen_1_done".to_owned(), started.elapsed().as_millis()));
 
         // Exchanges 5 (native) and 6 (delegated).
@@ -5752,20 +6028,23 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         latencies.extend(e6.timing.input_final_to_audio_ms());
         let timeline2 = live.peer.timeline().await?;
         delegation_windows.extend(delegations_per_window(&timeline2, &[("e5", s5), ("e6", e6.fixture_start_ms)]));
-        utterances += live.peer.energy().await?.input_finals.len();
         evidence.record(EvidenceRecord::Timeline { channel, entries: timeline2 })?;
 
         // Reopen cycle 2.
-        let (cycle2, channel3) = s106_reopen_cycle(
+        let (cycle2, channel3, case2) = s106_reopen_cycle(
             &mut live,
             &evidence,
             channel,
             None,
+            &mut utterances,
             &mut deterministic_failures,
             &mut tolerant_failures,
         )
         .await?;
         channel = channel3;
+        if case2 == Some(SeedCase::Late) {
+            late_channels.push(channel3);
+        }
         stage_ms.push(("reopen_2_done".to_owned(), started.elapsed().as_millis()));
 
         // Exchanges 7-10 (native).
@@ -5800,7 +6079,6 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
             &timeline3,
             &[("e7", s7), ("e8", s8), ("e9", s9), ("e10", s10)],
         ));
-        utterances += live.peer.energy().await?.input_finals.len();
         // e3 and e6 must delegate exactly once; e9 ("summarise everything")
         // may be answered natively or delegated (model choice, recorded);
         // the other exchanges must not delegate.
@@ -5819,6 +6097,9 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
 
         evidence.stage(EvidenceStage::Closing)?;
         wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
+        // Same rule as the reopen cycles: the channel's utterances are
+        // counted once its last reply has settled.
+        utterances += live.peer.energy().await?.input_finals.len();
         live.record_uplink("S106").await?;
         let close3 = close_or_record(&mut live, &evidence, channel, "S106", &mut deterministic_failures).await?;
         stage_ms.push(("closed".to_owned(), started.elapsed().as_millis()));
@@ -5874,6 +6155,11 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         faults.extend(live.peer.faults().await?);
         if !faults.is_empty() {
             deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
+        }
+        for late in &late_channels {
+            if let Some(failure) = assert_late_summary_delivered(&evidence, "S106", *late)? {
+                deterministic_failures.push(failure);
+            }
         }
         println!(
             "GPT_LIVE_S106_OK total_ms={} stages={stage_ms:?} cycle1={cycle1:?} cycle2={cycle2:?} close3_ms={:?} notes_md_bytes={notes_bytes} utterances={utterances} median_ms={median:?} delegations={delegation_windows:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",

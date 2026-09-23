@@ -283,6 +283,17 @@ them.
   test's Cargo runs already used: the rules_rust rustc in the Bazel runfiles
   ships no bundled `gcc-ld`, and rustc 1.90+ defaults to the self-contained
   linker on x86_64-unknown-linux-gnu.
+- The cargo-equivalent unit and integration lanes give nested children the
+  workspace the pre-push hook's do: the copied workspace is a git repository
+  (xtask's workflow tests run `scripts/repo-cargo`, which needs
+  `git rev-parse`), the Cargo cache root is writable, and Bazel's
+  `TEST_SRCDIR`/`TEST_WORKSPACE`/`RUNFILES_*` are dropped so nested repo-root
+  lookups resolve `MEERKAT_WORKSPACE_ROOT` instead of the runfiles tree.
+- nextest reserves eight threads for
+  `load_one_wedged_member_does_not_page_or_delay_peers` (`.config/nextest.toml`,
+  default profile): the test measures peer admission latency (p99 < 3s) and
+  came out at 3.8s while sharing a 30-vCPU executor with 29 other test
+  processes; the bound is unchanged.
 - The BuildBuddy wasm-check lane runs clippy through the sandbox toolchain's
   own `cargo-clippy`. `cargo clippy` resolves that subcommand from
   `$CARGO_HOME/bin` (the executor image's rustup proxy) before `PATH`, which

@@ -230,6 +230,29 @@ configure_cargo_nextest() {
   export CARGO_NEXTEST="${cargo_nextest_bin}"
 }
 
+# Tests in the unit and integration lanes shell back into the workspace the
+# way the pre-push hook's do: xtask's workflow tests run
+# `scripts/repo-cargo run -p xtask ...`, which needs `git rev-parse` to work in
+# the workspace and a writable Cargo cache root, and every nested repo-root
+# lookup prefers Bazel's TEST_SRCDIR/TEST_WORKSPACE runfiles tree when those
+# variables are set. The copied workspace is the one those children must see:
+# make it a git repository, point the cache root into the test's scratch, and
+# drop the Bazel test variables so nested processes resolve
+# MEERKAT_WORKSPACE_ROOT like a plain Cargo run (run 35820182455 failed the
+# xtask workflow test with "fatal: not a git repository" in the runfiles tree).
+configure_nested_cargo_workspace() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git is required for the nested repo-cargo children of the unit and integration lanes" >&2
+    exit 127
+  fi
+  if [[ ! -d "${work_root}/.git" ]]; then
+    git -C "${work_root}" init -q
+  fi
+  export XDG_CACHE_HOME="${TEST_TMPDIR}/xdg-cache"
+  mkdir -p "${XDG_CACHE_HOME}"
+  unset TEST_SRCDIR TEST_WORKSPACE RUNFILES_DIR RUNFILES_MANIFEST_FILE
+}
+
 configure_wasm_pack() {
   local wasm_pack_bin
   wasm_pack_bin="$(find_runfile "*${wasm_pack_repo}/wasm-pack")"
@@ -315,6 +338,7 @@ case "${lane}" in
   test-unit)
     configure_rust "${host_rust_toolchain}"
     configure_cargo_nextest
+    configure_nested_cargo_workspace
     export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
     "${CARGO_NEXTEST}" nextest run --workspace \
       -E 'kind(lib)' --no-tests=fail --no-fail-fast \
@@ -323,6 +347,7 @@ case "${lane}" in
   integration-fast)
     configure_rust "${host_rust_toolchain}"
     configure_cargo_nextest
+    configure_nested_cargo_workspace
     export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
     "${CARGO_NEXTEST}" nextest run --workspace \
       --profile fast -E 'kind(test)' --no-tests=fail --no-fail-fast \

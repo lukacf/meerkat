@@ -3135,6 +3135,13 @@ async fn wait_executor_turn(
                 )
                 .into());
             }
+            println!(
+                "GPT_LIVE_EXECUTOR_TURN identity={} ownership={:?} terminal={:?} at_ms={}",
+                snapshot.worker_identity(),
+                snapshot.worker_ownership(),
+                snapshot.terminal(),
+                started.elapsed().as_millis()
+            );
             if snapshot.terminal() != Some(LiveDelegationWorkerTerminalKind::Completed) {
                 return Err(format!(
                     "the delegated executor turn did not complete: terminal={:?}",
@@ -3831,6 +3838,35 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         }
 
         live.record_workgraph_mode("S100", 3, &mut deterministic_failures).await?;
+        // Title rule: each WorkGraph item is named by its delegation window's
+        // user transcript, never by the assistant context or a joined final.
+        {
+            let service = live
+                .mobs
+                .workgraph_service_for_mob(&meerkat_mob::MobId::from(live.mob_id.as_str()))?
+                .ok_or("no mob WorkGraph service")?;
+            let items = service
+                .list(meerkat::WorkItemFilter {
+                    include_terminal: true,
+                    ..Default::default()
+                })
+                .await?;
+            let titles: Vec<String> = items.iter().map(|item| normalize_words(&item.title)).collect();
+            println!("GPT_LIVE_S100_WORKGRAPH_TITLES {titles:?}");
+            for (index, window) in spoken_inputs.iter().enumerate() {
+                if !titles.iter().any(|title| title == window) {
+                    deterministic_failures.push(format!(
+                        "no WorkGraph item title equals request {} window {window:?}; titles: {titles:?}",
+                        index + 1
+                    ));
+                }
+            }
+            for title in &titles {
+                if title.contains(ASSISTANT_CONTEXT_HEADING_START) {
+                    deterministic_failures.push(format!("a WorkGraph title carries the assistant context: {title:?}"));
+                }
+            }
+        }
 
         // Tolerant latency: median input_final -> first assistant audio.
         let mut latencies: Vec<i64> = [
@@ -4984,6 +5020,16 @@ const S104_SEED_TOKEN: &str = "Bartleby";
 /// Silence hold after each (re)open with summary: no greeting allowed.
 const S104_SILENCE_HOLD_MS: u64 = 4000;
 
+/// Delegation policy for S104: ExistingMember by default (the committed
+/// scenario); `GPT_LIVE_E2E_S104_POLICY=durable_fork` runs the production
+/// DurableFork policy as a variant (shared host composed for it).
+fn s104_policy() -> LiveDelegationExecutionPolicy {
+    match std::env::var("GPT_LIVE_E2E_S104_POLICY").as_deref() {
+        Ok("durable_fork") | Ok("DurableFork") => LiveDelegationExecutionPolicy::DurableFork,
+        _ => LiveDelegationExecutionPolicy::ExistingMember,
+    }
+}
+
 /// Wait until the concurrent bootstrap summary has been appended and every
 /// owned instructions-lane fragment acknowledged, or `bound` passes; returns
 /// the owner-append counters either way.
@@ -5062,7 +5108,7 @@ async fn run_s104_handoff_voice_typed_voice(
     let mut live = open_public_live_with(PublicLiveOpen {
         temp_prefix: "gpt-live-public-handoff-e2e-",
         operator_principal: "scenario-104-operator",
-        execution_policy: LiveDelegationExecutionPolicy::ExistingMember,
+        execution_policy: s104_policy(),
         bootstrap: None,
         // History is present before the first open, and the open requests a
         // concurrent bootstrap summary of it: the composition the MobKit
@@ -5083,7 +5129,7 @@ async fn run_s104_handoff_voice_typed_voice(
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: true,
-        shared_host: false,
+        shared_host: s104_policy() == LiveDelegationExecutionPolicy::DurableFork,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -5142,7 +5188,8 @@ async fn run_s104_handoff_voice_typed_voice(
         live.record_uplink("S104").await?;
         let timeline1 = live.peer.timeline().await?;
         println!(
-            "GPT_LIVE_S104_JOB fixture_start_ms={request_start_ms} delegation_created_ms={delegation_created_ms} heard={:?}",
+            "GPT_LIVE_S104_JOB policy={:?} fixture_start_ms={request_start_ms} delegation_created_ms={delegation_created_ms} heard={:?}",
+            live.execution_policy,
             SpokenTurn::from_timeline(&timeline1, request).map(|t| t.input_text)
         );
 
@@ -5204,7 +5251,12 @@ async fn run_s104_handoff_voice_typed_voice(
             all_text.contains(S104_RESULT_TOKEN),
             rows.spoken.iter().any(|row| row.contains(S104_TYPED_TOKEN))
         );
-        if rows.executor_inputs.is_empty() {
+        // Under DurableFork the executor input row lives in the fork session;
+        // the merged result in the source (the planted token below) is the
+        // evidence that merge_result_into_source ran after the close.
+        if live.execution_policy == LiveDelegationExecutionPolicy::ExistingMember
+            && rows.executor_inputs.is_empty()
+        {
             deterministic_failures.push("the job's executor input was not committed".to_owned());
         }
         if !all_text.contains(S104_RESULT_TOKEN) {

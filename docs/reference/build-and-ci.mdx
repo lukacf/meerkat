@@ -209,17 +209,34 @@ readable from `main` by every pull request); rust-cache holds only the
 registry, because per-lane target caches exceeded the repository's 10 GB
 cache limit in one pull request:
 
-| Job | Runs | Command |
-| --- | --- | --- |
-| `changes` | always | `scripts/ci-cargo-lanes.mjs`: classifies the changed paths into directly changed packages, bounded shards, the reverse-dependency closure, and conditional-lane flags |
-| `fmt-governance` | always | `make fmt-check docs-check semver-breaks-selftest verify-version-parity verify-lock-consistency verify-bazel-module-lock-inputs check-rust-release-config ci-lanes-selftest` plus the release doctor contract test |
-| `ratchets` | always (steps conditional) | schema, SDK codegen, event inventory, RPC/REST surface, and SDK wrapper freshness when generated-contract paths changed; `machine-check-drift` and `protocol-check-drift` when machine-authority paths changed |
-| `clippy` (one lane per shard) | Rust-relevant change | `repo-cargo clippy -p <changed packages> --no-deps --all-targets --all-features -- -D warnings` |
-| `unit` (one lane per shard) | Rust-relevant change | `repo-cargo nextest run -p <changed packages> --lib --bins --profile ci-pr` (the PR lane's named profile, identical to `fast`) |
-| `closure-check` | Rust-relevant change | `repo-cargo check -p <reverse-dependency closure> --all-targets --all-features` (catches downstream compile breaks the direct lanes miss) |
-| `wasm-check` | web-runtime, contracts, or workspace-wide change | `make wasm-check` |
-| `sdk-host` | `sdks/python`, `sdks/typescript`, or SDK tooling change | `make test-sdk-python test-sdk-typescript` |
-| `gate` (`CI gate`) | `!cancelled()` | fail-closed aggregate, 1200-second budget from run creation, schema-4 attestation on `main` pushes |
+What runs where (`pull_request` is budgeted; `push: main` is not; nightly and
+the release tag carry the rest):
+
+| Lane | `pull_request` | `push: main` | nightly | release tag |
+| --- | --- | --- | --- | --- |
+| `changes`: classify the diff with `scripts/ci-cargo-lanes.mjs` | yes | yes | - | - |
+| `fmt-governance`: fmt, docs, semver self-test, version parity, lock consistency, release config, classifier self-test | yes | yes | - | - |
+| `ratchets`: schema/SDK/RPC/REST freshness when contract paths changed; machine and protocol drift when machine authority changed | yes | yes | - | - |
+| `clippy` per shard of every changed package: `--no-deps --all-targets --all-features -D warnings` | yes | yes | whole workspace (`make lint`) | Bazel clippy lanes |
+| `unit` per shard: `nextest --lib --bins --profile ci-pr` for changed packages outside the meerkat-mob compile chain | yes | - | `make test-unit` | Bazel unit lanes |
+| `main-unit` per shard: `nextest --lib --bins` over the whole workspace, including the meerkat-mob chain (mob, mob-mcp, mob-pack, rpc, rest, mcp-server, rkat, web-runtime, integration-tests, machine-codegen, machine-dsl-tests, xtask) | deferred | yes | `make test-unit` | Bazel unit lanes |
+| `closure-check`: `cargo check --all-features` (lib and bin targets) over the reverse-dependency closure | yes | yes | - | - |
+| `wasm-check` | deferred | yes | browser contract suite | Bazel wasm-check |
+| `sdk-host`: Python + TypeScript SDK suites | deferred | yes | yes, plus Web SDK | Bazel SDK suites |
+| integration-fast, `e2e-fast`, dense Mob topology, bounded TLC, feature matrices, minimal builds, audit, `e2e-system`, release packaging | - | - | yes | BuildBuddy `full-fresh` graph |
+| `gate` (`CI gate`): fail-closed aggregate; 1200-second budget from run creation on pull requests; schema-4 attestation on `main` | yes | yes (no budget) | - | consumed by `require_ci_green` |
+
+Why the meerkat-mob chain is deferred: measured on 4-vCPU hosted runners,
+every unit lane that ever exceeded the budget compiled `meerkat-mob`'s 442k
+lines, either as its own lane (16 min compile plus 4.5 min of tests) or as a
+dependent crate rebuilding mob under its own feature unification (rkat, rpc:
+17 min). The chain is computed from cargo metadata, and the classifier's cost
+model (`1 + (lines + 8000 x dependency closure) / 35000` minutes, 16-minute
+ceiling per pull-request unit lane) is asserted by the self-test for every
+other crate. Clippy of a changed mob-chain crate still runs in the pull
+request (12 min measured for mob itself). A red `push: main` run shows as a
+failed `CI gate` check on the main commit and blocks the release gate
+(`require_ci_green` needs a successful exact-main run).
 
 The classifier fails closed. Any `.rs`, `Cargo.toml`, `Cargo.lock`,
 `.cargo/`, nextest, toolchain, build-wrapper, or `ci.yml` change yields at

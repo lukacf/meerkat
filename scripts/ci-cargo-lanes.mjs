@@ -32,6 +32,20 @@
 // bundled several such crates ran 18-25 minutes while the line-count
 // balanced shards of leaf crates ran 7-9). --max-shards bounds a
 // changed-package plan, --workspace-shards a whole-workspace plan.
+//
+// Budget model. A pull-request lane models at
+//   minutes = 1 + (lines + 8000 * dependency_closure) / 35000
+// (calibrated on hosted 4-vCPU runners: meerkat-mob 722k -> 21.6 modelled,
+// 21.8 measured; meerkat-runtime 453k -> 13.9 modelled, 11.7-12.2 measured)
+// and the pull-request unit plan must stay under PR_UNIT_BUDGET_MINUTES.
+// Every unit lane that ever exceeded the 1200 s push-to-terminal budget
+// compiled meerkat-mob's 442k lines: mob's own lane, and the lanes of crates
+// that depend on mob and rebuild it under their own feature unification
+// (rkat, rpc, rest, mcp-server, mob-mcp, mob-pack, xtask, ...). Those
+// crates' unit tests therefore run on the push-to-main run (no budget) and
+// on nightly, never in the pull-request unit lane; the chain is computed
+// from cargo metadata, not listed here. Clippy of a changed crate always
+// runs in the pull request (worst measured lane 12:24 for mob).
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -47,6 +61,16 @@ import {
 } from "./rust-test-selector.mjs";
 
 const NULL_SHA = "0000000000000000000000000000000000000000";
+// Cost model constants (see the header comment).
+const LINK_COST_PER_DEP = 8000;
+const COST_UNITS_PER_MINUTE = 35000;
+const LANE_SETUP_MINUTES = 1;
+export const PR_UNIT_BUDGET_MINUTES = 16;
+const HEAVY_ANCHOR = "meerkat-mob";
+
+function estimatedMinutes(cost) {
+  return Math.round((LANE_SETUP_MINUTES + cost / COST_UNITS_PER_MINUTE) * 10) / 10;
+}
 
 function parseArgs(argv) {
   const args = {
@@ -223,7 +247,7 @@ function shortName(name) {
 
 // Longest-processing-time first bin packing of packages into at most
 // `maxShards` lanes by Rust line count. Deterministic: ties break by name.
-function packShards(pkgs, weights, maxShards) {
+function packShards(pkgs, weights, maxShards, model = null) {
   const sorted = [...pkgs].sort((a, b) => weights.get(b) - weights.get(a) || a.localeCompare(b));
   const shardCount = Math.min(maxShards, sorted.length);
   const bins = Array.from({ length: shardCount }, () => ({ packages: [], weight: 0 }));
@@ -241,12 +265,24 @@ function packShards(pkgs, weights, maxShards) {
       const label = names.length === 1
         ? shortName(names[0])
         : `${shortName(heaviest)}+${names.length - 1}`;
-      return {
+      const shard = {
         name: label,
         packages: names,
         package_flags: names.map((name) => `-p ${name}`).join(" "),
         estimated_cost: bin.weight,
       };
+      if (model) {
+        // A lane compiles each dependency once, so the graph term uses the
+        // union of the shard's dependency closures, not their sum.
+        const union = new Set();
+        let lines = 0;
+        for (const name of names) {
+          lines += model.lines.get(name);
+          for (const dep of model.closures.get(name)) union.add(dep);
+        }
+        shard.estimated_minutes = estimatedMinutes(lines + LINK_COST_PER_DEP * union.size);
+      }
+      return shard;
     })
     .sort((a, b) => b.estimated_cost - a.estimated_cost || a.name.localeCompare(b.name));
 }
@@ -354,8 +390,7 @@ function plan(args) {
   // Estimated lane cost per package: Rust lines (the lib-test binary
   // compiles every inline test) plus a link/dependency-graph term per
   // workspace crate in the package's dependency closure.
-  const LINK_COST_PER_DEP = 8000;
-  const depClosureSize = (pkg) => {
+  const depClosure = (pkg) => {
     const seen = new Set();
     const queue = [pkg.id];
     while (queue.length) {
@@ -369,14 +404,32 @@ function plan(args) {
         }
       }
     }
-    return seen.size;
+    return new Set([...seen].map((id) => byId.get(id).name));
   };
+  const closures = new Map(packages.map((pkg) => [pkg.name, depClosure(pkg)]));
+  const lineCounts = new Map(packages.map((pkg) => [pkg.name, rustLineCount(resolve(root, packageDir(pkg)))]));
   const weights = new Map(
-    packages.map((pkg) => [
-      pkg.name,
-      rustLineCount(resolve(root, packageDir(pkg))) + LINK_COST_PER_DEP * depClosureSize(pkg),
-    ]),
+    packages.map((pkg) => [pkg.name, lineCounts.get(pkg.name) + LINK_COST_PER_DEP * closures.get(pkg.name).size]),
   );
+  const model = { lines: lineCounts, closures };
+  // Crates whose unit lane compiles meerkat-mob (mob itself and everything
+  // that depends on it) run their unit tests on push to main, not in the
+  // pull-request lane.
+  const heavyChain = new Set(
+    packages
+      .filter((pkg) => pkg.name === HEAVY_ANCHOR || closures.get(pkg.name).has(HEAVY_ANCHOR))
+      .map((pkg) => pkg.name),
+  );
+  result.unit_deferred_chain = [...heavyChain].sort();
+  result.package_model = Object.fromEntries(
+    allNames.map((name) => [name, {
+      lines: lineCounts.get(name),
+      dependency_closure: closures.get(name).size,
+      estimated_minutes: estimatedMinutes(weights.get(name)),
+      heavy_chain: heavyChain.has(name),
+    }]),
+  );
+  result.pr_unit_budget_minutes = PR_UNIT_BUDGET_MINUTES;
 
   if (workspaceReason) {
     result.rust_changed = true;
@@ -411,11 +464,9 @@ function plan(args) {
   }
 
   if (result.rust_changed) {
-    result.shards = packShards(
-      result.packages,
-      weights,
-      result.mode === "workspace" ? args.workspaceShards : args.maxShards,
-    );
+    const shardCap = result.mode === "workspace" ? args.workspaceShards : args.maxShards;
+    // Clippy lanes: every changed package.
+    result.shards = packShards(result.packages, weights, shardCap);
     if (result.shards.length === 0) {
       throw new Error("internal error: Rust-relevant change produced no lanes");
     }
@@ -423,11 +474,53 @@ function plan(args) {
     for (const name of result.packages) {
       if (!covered.has(name)) throw new Error(`internal error: package ${name} not covered by any shard`);
     }
+    // Pull-request unit lanes: the changed packages outside the heavy chain,
+    // packed so that no lane models over the budget; the rest is deferred to
+    // the push-to-main run and reported.
+    result.unit_deferred = result.packages.filter((name) => heavyChain.has(name));
+    result.unit_packages = result.packages.filter((name) => !heavyChain.has(name));
+    result.unit_shards = packWithinBudget(result.unit_packages, weights, shardCap, model);
+    for (const shard of result.unit_shards) {
+      if (shard.estimated_minutes > PR_UNIT_BUDGET_MINUTES) {
+        throw new Error(
+          `internal error: pull-request unit lane ${shard.name} models ${shard.estimated_minutes} min, over the ${PR_UNIT_BUDGET_MINUTES} min budget`,
+        );
+      }
+    }
+    // Push-to-main unit lanes: the whole workspace, no budget.
+    result.main_unit_shards = packShards(allNames, weights, args.workspaceShards, model);
+  } else {
+    result.unit_deferred = [];
+    result.unit_packages = [];
+    result.unit_shards = [];
+    result.main_unit_shards = [];
   }
 
   result.closure_flags = result.closure.map((name) => `-p ${name}`).join(" ");
   result.closure_beyond_packages = result.closure.filter((name) => !result.packages.includes(name));
   return result;
+}
+
+// Pack, then widen the shard count until every shard models under the
+// pull-request unit budget (a single package over budget cannot be split and
+// is reported by the caller).
+function packWithinBudget(pkgs, weights, maxShards, model) {
+  if (pkgs.length === 0) return [];
+  let count = Math.min(maxShards, pkgs.length);
+  for (;;) {
+    const shards = packShards(pkgs, weights, count, model);
+    const over = shards.some((shard) => shard.estimated_minutes > PR_UNIT_BUDGET_MINUTES && shard.packages.length > 1);
+    if (!over || count >= pkgs.length) return shards;
+    count += 1;
+  }
+}
+
+function matrixOf(shards) {
+  return JSON.stringify({
+    include: shards.length > 0
+      ? shards.map((shard) => ({ name: shard.name, packages: shard.package_flags }))
+      : [{ name: "none", packages: "" }],
+  });
 }
 
 function githubOutput(result) {
@@ -445,13 +538,16 @@ function githubOutput(result) {
   scalar("closure_count", String(result.closure.length));
   scalar("closure_flags", result.closure_flags);
   scalar("shard_count", String(result.shards.length));
-  // A matrix must never be empty when the lanes are conditioned on
-  // rust_changed; keep a placeholder so `fromJSON` stays well-formed and the
-  // consumer job's `if:` decides whether it runs.
-  const matrix = result.shards.length > 0
-    ? result.shards.map((shard) => ({ name: shard.name, packages: shard.package_flags }))
-    : [{ name: "none", packages: "" }];
-  scalar("shard_matrix", JSON.stringify({ include: matrix }));
+  // A matrix must never be empty when the lanes are conditioned on it; keep a
+  // placeholder so `fromJSON` stays well-formed and the consumer job's `if:`
+  // decides whether it runs.
+  scalar("shard_matrix", matrixOf(result.shards));
+  scalar("unit_shard_count", String(result.unit_shards.length));
+  scalar("unit_shard_matrix", matrixOf(result.unit_shards));
+  scalar("unit_deferred", result.unit_deferred.join(" "));
+  scalar("unit_deferred_count", String(result.unit_deferred.length));
+  scalar("main_unit_shard_count", String(result.main_unit_shards.length));
+  scalar("main_unit_shard_matrix", matrixOf(result.main_unit_shards));
   return `${lines.join("\n")}\n`;
 }
 
@@ -464,7 +560,7 @@ function main() {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   }
   process.stderr.write(
-    `ci-cargo-lanes: mode=${result.mode} packages=${result.packages.length} closure=${result.closure.length} shards=${result.shards.length} (${result.reason})\n`,
+    `ci-cargo-lanes: mode=${result.mode} packages=${result.packages.length} closure=${result.closure.length} clippy_shards=${result.shards.length} unit_shards=${result.unit_shards.length} unit_deferred=${result.unit_deferred.length} (${result.reason})\n`,
   );
 }
 

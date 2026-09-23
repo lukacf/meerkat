@@ -140,7 +140,11 @@ them.
   nextest, toolchain, build-wrapper, or `ci.yml` change yields at least one
   `clippy --no-deps --all-targets --all-features` lane and one
   `nextest --lib --bins --profile ci-pr` lane (`ci-pr` is the PR lane's
-  named profile and is identical to `fast`; nothing is excluded) over the
+  named profile and is identical to `fast`; nothing is excluded) for the
+  directly changed packages outside the meerkat-mob compile chain (mob and
+  the twelve crates that depend on it, computed from metadata; their unit
+  lanes need 17-22 minutes on a 4-vCPU runner, so they, the wasm32 check
+  and the SDK suites run on `push: main` with no budget instead), over the
   directly changed
   packages (packed into at most six parallel shards, eight for a
   whole-workspace plan, balanced by estimated build-and-link cost), a `cargo check

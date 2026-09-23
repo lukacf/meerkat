@@ -352,13 +352,19 @@ GitHub-hosted runners and sized to a 20-minute push-to-terminal budget:
   parity, lock consistency, `make ci-lanes-selftest`.
 - `ratchets`: generated-contract freshness when contract paths changed;
   `machine-check-drift`/`protocol-check-drift` when machine authority changed.
-- `clippy` and `unit`: one lane per shard of the directly changed packages
-  (`clippy --no-deps --all-targets --all-features -D warnings`,
-  `nextest --lib --bins --profile ci-pr`, the PR lane's named profile,
-  identical to `fast`).
-- `closure-check`: `cargo check --all-targets --all-features` over the
-  reverse-dependency closure of the changed packages.
-- `wasm-check` and `sdk-host` when their inputs changed.
+- `clippy`: one lane per shard of every directly changed package
+  (`clippy --no-deps --all-targets --all-features -D warnings`).
+- `unit`: `nextest --lib --bins --profile ci-pr` (identical to `fast`) for
+  the changed packages outside the meerkat-mob compile chain; crates that
+  compile `meerkat-mob` (mob, mob-mcp, mob-pack, rpc, rest, mcp-server,
+  rkat, web-runtime, integration-tests, machine-codegen, machine-dsl-tests,
+  xtask; computed from metadata) defer their unit tests to `push: main`
+  because their lanes need 17-22 min on 4 vCPU.
+- `closure-check`: `cargo check --all-features` (lib and bin targets) over
+  the reverse-dependency closure of the changed packages.
+- `push: main` only (no budget): `main-unit` over the whole workspace in
+  eight shards, `wasm-check`, `sdk-host`. A red main run is a failed
+  `CI gate` on the main commit and blocks `require_ci_green`.
 - `gate` (`CI gate`, the only required context): fail-closed aggregate,
   1200-second budget from run creation, schema-4 attestation (backend
   `github-hosted-cargo`) on successful `main` pushes. It runs under

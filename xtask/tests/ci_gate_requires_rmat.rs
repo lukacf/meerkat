@@ -67,6 +67,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "closure-check",
             "fmt-governance",
             "gate",
+            "main-unit",
             "ratchets",
             "sdk-host",
             "unit",
@@ -137,6 +138,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "ratchets",
         "clippy",
         "unit",
+        "main-unit",
         "closure-check",
         "wasm-check",
         "sdk-host",
@@ -149,14 +151,20 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "require_success \"Change classification\"",
         "require_ran \"Clippy\"",
         "require_ran \"Unit tests\"",
+        "require_ran \"Main unit tests\"",
         "require_ran \"Closure check\"",
         "a build-relevant change produced no lanes",
+        "neither a unit lane nor a deferred package list",
+        "unit tests deferred to the push-to-main run",
     ] {
         assert!(ci.contains(contract), "CI gate must enforce `{contract}`");
     }
     for lane in [
         "--no-deps --all-targets --all-features -- -D warnings",
         "--lib --bins --profile ci-pr",
+        "unit_shard_matrix",
+        "main_unit_shard_matrix",
+        "CLOSURE_CHECK_TARGETS: lib",
         "--all-features",
         "make fmt-check",
         "make docs-check",

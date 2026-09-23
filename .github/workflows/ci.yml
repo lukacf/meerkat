@@ -67,6 +67,11 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
   SCCACHE_GHA_ENABLED: "true"
   SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  # The server's own log; every compile lane uploads it, because with the
+  # IO-error fallback above a dead server means silent cold compiles (the
+  # mob unit lane of run 35864652602 compiled 15 minutes with 0 requests).
+  SCCACHE_ERROR_LOG: ${{ github.workspace }}/../sccache.log
+  SCCACHE_LOG: info
   # sccache objects are keyed by content, so one entry serves every lane and
   # branch; the GitHub cache scope lets pull requests read what main pushes
   # wrote. Debuginfo is off (above) so the objects stay small.
@@ -355,6 +360,13 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
+      - name: Verify the sccache server is up
+        shell: bash
+        run: |
+          set -euo pipefail
+          sccache --start-server || true
+          sccache --show-stats | grep -E 'Cache location|Compile requests'
+
       - name: Clippy (changed packages, all targets, all features)
         shell: bash
         env:
@@ -364,6 +376,15 @@ jobs:
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a clippy lane"; exit 1; }
           # shellcheck disable=SC2086
           ./scripts/repo-cargo clippy ${PACKAGES} --no-deps --all-targets --all-features -- -D warnings
+
+      - name: Upload sccache server log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: sccache-log-clippy-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/../sccache.log
+          if-no-files-found: ignore
+          retention-days: 3
 
   unit:
     name: Unit tests (${{ matrix.name }})
@@ -408,6 +429,13 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
+      - name: Verify the sccache server is up
+        shell: bash
+        run: |
+          set -euo pipefail
+          sccache --start-server || true
+          sccache --show-stats | grep -E 'Cache location|Compile requests'
+
       - name: Unit tests (changed packages, lib and bin targets)
         shell: bash
         env:
@@ -418,6 +446,15 @@ jobs:
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} --lib --bins --profile ci-pr \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
+
+      - name: Upload sccache server log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: sccache-log-unit-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/../sccache.log
+          if-no-files-found: ignore
+          retention-days: 3
 
   closure-check:
     name: Closure check (${{ needs.changes.outputs.closure_count }} crates)
@@ -454,6 +491,13 @@ jobs:
           cache-targets: "false"
           cache-on-failure: true
 
+      - name: Verify the sccache server is up
+        shell: bash
+        run: |
+          set -euo pipefail
+          sccache --start-server || true
+          sccache --show-stats | grep -E 'Cache location|Compile requests'
+
       - name: Check the reverse-dependency closure
         shell: bash
         env:
@@ -467,6 +511,15 @@ jobs:
           fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo check ${CLOSURE} "${targets[@]}" --all-features
+
+      - name: Upload sccache server log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: sccache-log-closure-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/../sccache.log
+          if-no-files-found: ignore
+          retention-days: 3
 
   wasm-check:
     name: wasm32 check

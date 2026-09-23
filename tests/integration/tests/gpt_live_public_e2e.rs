@@ -1438,7 +1438,7 @@ async fn e2e_scenario_97_gpt_live_public_client_context_vertical()
 -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat_live=debug,meerkat_rpc=debug,meerkat_runtime::meerkat_machine::runtime_control=debug,meerkat_mob_mcp::live_delegation=debug,meerkat_mob::runtime::delegation=debug",
+            "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat::live_close=info,meerkat_live=debug,meerkat_rpc=debug,meerkat_runtime::meerkat_machine::runtime_control=debug,meerkat_mob_mcp::live_delegation=debug,meerkat_mob::runtime::delegation=debug",
         )
         .with_test_writer()
         .try_init();
@@ -2311,6 +2311,16 @@ fn s99_recalls_phrase(text: &str, phrase: &str) -> bool {
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_99_gpt_live_public_concurrent_context()
 -> Result<(), Box<dyn std::error::Error>> {
+    // Own subscriber so a solo run logs the host's close steps
+    // (`meerkat::live_close=info`): the exact close is this scenario's
+    // most timing-sensitive step (10ba653c6: close requested 51 ms after an
+    // owned thinking append, 5 s ceiling elapsed, journal s99/67abce5e).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+        )
+        .with_test_writer()
+        .try_init();
     // The spoken query never contains the answer. Vary the phrase between
     // runs so provider guesses and fixture memorization cannot pass recall.
     let nonce = meerkat_core::SessionId::new();
@@ -6973,7 +6983,7 @@ async fn e2e_scenario_98_gpt_live_public_playback_settlement_and_reopen()
 async fn run_s98_real_audio_and_context() -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat_live=debug,meerkat_rpc=debug",
+            "oai_rt_rs::live=debug,meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::session_runtime=debug,meerkat::live_close=info,meerkat_live=debug,meerkat_rpc=debug",
         )
         .with_test_writer()
         .try_init();

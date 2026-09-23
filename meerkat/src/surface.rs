@@ -162,7 +162,6 @@ use meerkat_core::skills::{
 use std::collections::HashMap;
 #[cfg(feature = "mcp")]
 use std::collections::VecDeque;
-#[cfg(feature = "skills")]
 use std::sync::Arc;
 #[cfg(feature = "mcp")]
 use std::sync::{Mutex, OnceLock};

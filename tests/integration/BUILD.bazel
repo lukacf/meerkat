@@ -28,6 +28,20 @@ filegroup(
 
 
 
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
 rust_library(
     name = "meerkat_integration_tests",
     aliases = aliases(package_name = "tests/integration"),

@@ -380,24 +380,21 @@ impl RequestContext {
         &self,
         action: RequestAsyncAction,
     ) -> Option<SurfaceRequestPhase> {
-        self.install_cancel_action_inner(
-            action,
-            #[cfg(test)]
-            || {},
-        )
-        .await
+        self.install_cancel_action_inner(action, || {}).await
     }
 
+    /// `after_phase_observed` runs inside the authority critical section right
+    /// after the phase is read; production passes a no-op and tests use it to
+    /// interleave a cancellation attempt.
     async fn install_cancel_action_inner(
         &self,
         action: RequestAsyncAction,
-        #[cfg(test)] after_phase_observed: impl FnOnce(),
+        after_phase_observed: impl FnOnce(),
     ) -> Option<SurfaceRequestPhase> {
         let (phase, maybe_run) = self.authority.install_cancel_action(
             &self.key,
             &self.entry,
             &action,
-            #[cfg(test)]
             after_phase_observed,
         );
         if let Some(action) = maybe_run {
@@ -587,13 +584,12 @@ impl SurfaceRequestAuthorityShell {
         key: &str,
         entry: &RequestEntry,
         action: &RequestAsyncAction,
-        #[cfg(test)] after_phase_observed: impl FnOnce(),
+        after_phase_observed: impl FnOnce(),
     ) -> (Option<SurfaceRequestPhase>, Option<RequestAsyncAction>) {
         // Match cancel_request's authority -> action lock order. Observing the
         // phase and replacing the callback must linearize against cancellation.
         let inner = lock_or_recover(&self.inner);
         let phase = Self::phase_locked(&inner, key);
-        #[cfg(test)]
         after_phase_observed();
         let mut slot = lock_or_recover(&entry.cancel_action);
         *slot = Arc::clone(action);

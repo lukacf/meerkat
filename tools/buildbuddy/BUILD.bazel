@@ -150,6 +150,37 @@ sh_test(
     tags = CARGO_EQUIVALENT_TAGS,
 )
 
+# The Native unit and integration-fast lanes as the Cargo lanes the pre-push
+# hook runs (scripts/pre-push-unit.sh): nextest, one process per test. A Bazel
+# rust_test runs a whole binary in one process, and the suite relies on
+# process-per-test cleanup for state that is process-global by design (inproc
+# participant names, the realtime projection memory budget); the first real
+# Bazel-native unit lanes failed hundreds of tests on exactly that. A
+# nextest-parity per-test-process wrapper for the Bazel-native rust_test
+# targets is the follow-up cut from 0.8.41 (about half a day of work).
+NATIVE_CARGO_EQUIVALENT_TESTS = {
+    "unit_cargo_equivalent_test": "test-unit",
+    "integration_fast_cargo_equivalent_test": "integration-fast",
+}
+
+[
+    sh_test(
+        name = name,
+        srcs = ["full_lane_test.sh"],
+        args = [lane],
+        data = [
+            "//:workspace_runfiles",
+            "@cargo_nextest_darwin_arm64//:cargo-nextest",
+            "@cargo_nextest_linux_x86_64//:cargo-nextest",
+        ] + RUST_TOOLCHAIN_DATA,
+        exec_properties = CARGO_EQUIVALENT_EXEC_PROPERTIES,
+        size = "enormous",
+        timeout = "eternal",
+        tags = CARGO_EQUIVALENT_TAGS,
+    )
+    for name, lane in NATIVE_CARGO_EQUIVALENT_TESTS.items()
+]
+
 sh_test(
     name = "release_validate_cargo_equivalent_test",
     srcs = ["full_lane_test.sh"],

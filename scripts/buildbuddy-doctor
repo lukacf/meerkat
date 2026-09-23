@@ -706,6 +706,9 @@ fi
 if grep -Fq 'name = "e2e_system_tests"' BUILD.bazel &&
   grep -Fq 'workspace-unit-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'workspace-integration-fast-rbe' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'run_bazel_lane unit-cargo-equivalent-rbe' scripts/buildbuddy-ci-lane &&
+  grep -Fq 'run_bazel_lane integration-fast-cargo-equivalent-rbe' scripts/buildbuddy-ci-lane &&
+  grep -Fq 'name = "unit_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel &&
   grep -Fq 'e2e-fast-rbe' scripts/buildbuddy-ci-lane &&
   grep -Fq 'e2e-live-rbe' scripts/buildbuddy-ci-lane &&
   grep -Fq 'e2e-smoke-remote-rbe' scripts/buildbuddy-ci-lane &&

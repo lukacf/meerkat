@@ -289,6 +289,12 @@ them.
   `git rev-parse`), the Cargo cache root is writable, and Bazel's
   `TEST_SRCDIR`/`TEST_WORKSPACE`/`RUNFILES_*` are dropped so nested repo-root
   lookups resolve `MEERKAT_WORKSPACE_ROOT` instead of the runfiles tree.
+- The nextest unit/integration and SDK cargo-equivalent actions declare
+  `EstimatedCPU: 20` and `EstimatedMemory: 60GB`, so BuildBuddy places at most
+  one of them per 30-vCPU executor instead of packing them together (which
+  cost the peer-admission latency test its 3s p99, timed out a 10s
+  turn-boundary wait, and silently killed the xtask drift child).
+  `collect_drift_mismatches` now reports the child's exit status.
 - nextest reserves eight threads for
   `load_one_wedged_member_does_not_page_or_delay_peers` (`.config/nextest.toml`,
   default profile): the test measures peer admission latency (p99 < 3s) and

@@ -294,7 +294,10 @@ A diagnose report for the 2026-09-22 HomeCore shape reads, with counts only:
 `"action": "would_reanchor"`, `"divergence": {"kind": "live_prefix_diverges",
 "endpoint_row_count": 118, "live_row_count": 125, "first_divergent_row": 115}`,
 `"graph_edges_dropped": 8`, one dropped compaction intent, and the base store
-revision and blob digest it read. The apply report repeats those facts with
+revision and blob digest it read (`base_blob_sha256`, the digest of the
+committed WholeBlob document body; it is not an image blob id, see
+[Blob digests in meerkat and MobKit](#blob-digests-in-meerkat-and-mobkit)). The apply report
+repeats those facts with
 `"action": "reanchored"` and the new `committed_store_revision`; a second
 diagnose then reports `"action": "no_repair_needed"` with the decoded
 `live_row_count`. The expected divergence for that report is
@@ -316,6 +319,51 @@ document would change any row, or when a live actor still owns the session.
 Hosts embedding `PersistentSessionService` call
 `repair_whole_blob_audited_endpoint(session_id, apply, accept_shorter)` for
 the same procedure.
+
+## Blob Digests In Meerkat And MobKit
+
+Meerkat and MobKit both render image blob ids as `sha256:<64 lowercase hex
+digits>`, and both feed a media type, a `0x00` separator and the image into
+SHA-256. They hash different representations of the image, so the same PNG
+carries a different id in each system. Never compare a meerkat content blob id
+with a MobKit blob id, and never look one up in the other's store: the ids are
+indistinguishable by shape and the lookup simply misses.
+
+| | Meerkat `content_blob_id` | MobKit `compute_blob_id` |
+| --- | --- | --- |
+| Where | `meerkat-core/src/blob.rs`, `content_blob_id(media_type, data)` | `meerkat-mobkit/src/blob_store.rs`, `compute_blob_id(media_type, bytes)` |
+| Media type | canonicalized (`MediaType::canonical_str`: lowercase, parameters dropped) | as passed, byte for byte |
+| Payload hashed | the exact base64 string handed to `BlobStore::put_image` | the decoded raw bytes handed to `BinaryBlobStore::put_bytes` |
+| Recipe | `sha256(canonical_media_type \|\| 0x00 \|\| base64_text)` | `sha256(media_type \|\| 0x00 \|\| raw_bytes)` |
+| Minted by | every meerkat `BlobStore` (the required addressing for external backends), inline image externalization in the runtime input path, transcript-identity digests | `ObjectStoreBlobStore::put_bytes` for `mobkit/blob/*` objects and the HTTP `/blobs/{id}` serving path |
+| Verified by | `verify_stored_image_blob` and image hydration recompute `content_blob_id` from the returned payload and refuse a mismatch (`BlobIdentityMismatch`) | `is_valid_blob_id` checks only the `sha256:` shape; the object path is the hex under a two-character prefix directory |
+
+Why the same image differs: base64 text of a byte string is not that byte
+string, so the two SHA-256 inputs differ for every non-empty image. Meerkat
+chose the encoded form because an inline image in a transcript hydrates from
+its blob's own base64 and the two representations must share one identity.
+MobKit chose the decoded form because its byte-serving store never holds the
+base64 text.
+
+How to recognize which form you hold: the string does not tell you, the
+provenance does. An id that appears in a meerkat session document (an
+externalized image row, an audit edge, a hydration error, a `BlobIdentityMismatch`)
+is a meerkat content blob id. An id that appears in a MobKit blob object path,
+a `/blobs/{id}` URL, or `mobkit/blob/*` metadata is a MobKit blob id. MobKit's
+local object store also still reads a legacy layout whose ids were minted over
+the base64 text without media-type canonicalization; those legacy ids equal
+meerkat's only when the media type was already canonical.
+
+What is safe: compare meerkat ids with meerkat ids (an externalized row against
+its blob store entry, a hydration payload against its row) and MobKit ids with
+MobKit ids. Re-deriving one from the other requires the payload: decode the
+meerkat base64 and hash it under MobKit's recipe, or encode the MobKit bytes and
+hash them under meerkat's recipe. Do not hand-roll either derivation in new
+code; call the owning function.
+
+Unification of the two schemes onto one recipe is planned as its own release,
+with a digest migration for existing manifests and repair tooling that
+re-anchors stored ids. Until then the two schemes coexist as documented here.
 
 ## Operational Runbook
 

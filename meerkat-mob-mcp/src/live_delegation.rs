@@ -3929,6 +3929,18 @@ impl ExperimentalLiveDelegationCoordinator {
         blockers: Vec<String>,
         explicit_block: bool,
     ) {
+        // Lifecycle facts first: a stopped session or a channel that is no
+        // longer this worker's active binding cannot grant narration
+        // authority, and asking the machine anyway would only surface a
+        // guard rejection for a condition already known here.
+        if let Err(skip) = self
+            .runtime
+            .live_delegation_narration_eligibility(&subject.runtime_binding)
+            .await
+        {
+            tracing::debug!(%skip, ?kind, "live delegation narration skipped");
+            return;
+        }
         let authority = match self
             .runtime
             .authorize_live_delegation_narration(&subject.runtime_binding, &subject.operation, kind)
@@ -5449,7 +5461,14 @@ async fn realize_terminal(
     let admission = &retained.admission;
     let mob_terminal = match terminalized.terminal() {
         DelegationTurnTerminal::Completed(_) => LiveDelegationWorkerTerminalKind::Completed,
-        DelegationTurnTerminal::Failed(error) => live_worker_failure_terminal(error.failure()),
+        DelegationTurnTerminal::Failed(error) => {
+            tracing::warn!(
+                operation_id = %admission.operation().operation_id(),
+                %error,
+                "live delegation worker turn failed"
+            );
+            live_worker_failure_terminal(error.failure())
+        }
         _ => LiveDelegationWorkerTerminalKind::Failed,
     };
     let mob_result_text = match terminalized.terminal() {

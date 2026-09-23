@@ -1265,6 +1265,12 @@ struct ChannelState {
     close_projection_retention: Arc<()>,
     terminal_error_projection: Arc<Mutex<Option<(LiveAdapterErrorCode, String)>>>,
     playback_terminal_waiters: HashMap<LivePlaybackTerminalKey, PendingLivePlaybackTerminal>,
+    /// Adapter observations the transport could not project while the
+    /// channel's close was in flight because the session's turn boundary was
+    /// held by the member's running turn. The deferred close settlement takes
+    /// them with [`LiveAdapterHost::take_deferred_projections`] and applies
+    /// them once the boundary frees.
+    deferred_projections: Vec<LiveAdapterObservation>,
 }
 
 /// Keeps transport projection state reachable while an already-observed
@@ -2041,6 +2047,7 @@ impl LiveAdapterHost {
                 close_projection_retention: Arc::new(()),
                 terminal_error_projection: Arc::new(Mutex::new(None)),
                 playback_terminal_waiters: HashMap::new(),
+                deferred_projections: Vec::new(),
             },
         );
         inner.by_session.insert(session_id, channel_id.clone());
@@ -3328,6 +3335,57 @@ impl LiveAdapterHost {
         .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
     }
 
+    /// Retain an adapter observation whose projection the session refused
+    /// with a busy turn boundary while the channel's close was in flight. The
+    /// deferred close settlement applies it once the boundary frees.
+    pub async fn defer_projection_after_close(
+        &self,
+        channel_id: &LiveChannelId,
+        observation: LiveAdapterObservation,
+    ) -> Result<(), LiveAdapterHostError> {
+        let mut inner = self.inner.lock().await;
+        let channel = inner
+            .channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        channel.deferred_projections.push(observation);
+        Ok(())
+    }
+
+    /// Take every projection deferred by [`Self::defer_projection_after_close`]
+    /// for this channel, in arrival order. An unknown channel has none.
+    pub async fn take_deferred_projections(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Vec<LiveAdapterObservation> {
+        let mut inner = self.inner.lock().await;
+        inner
+            .channels
+            .get_mut(channel_id)
+            .map(|channel| std::mem::take(&mut channel.deferred_projections))
+            .unwrap_or_default()
+    }
+
+    /// A second handle over the same transport state, for owned work that
+    /// outlives the caller's borrow (the deferred close settlement replaying
+    /// deferred projections at the turn boundary). It shares channels, the
+    /// projection sink, and the tool dispatcher installed so far; a dispatcher
+    /// installed later on either handle is not visible to the other.
+    #[must_use]
+    pub fn owned_handle(&self) -> LiveAdapterHost {
+        LiveAdapterHost {
+            inner: Arc::clone(&self.inner),
+            projection_sink: Arc::clone(&self.projection_sink),
+            tool_dispatcher: std::sync::Mutex::new(
+                self.tool_dispatcher
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            ),
+            tool_timeout: self.tool_timeout,
+        }
+    }
+
     pub async fn retain_channel_close_projection(
         &self,
         session_id: &SessionId,
@@ -3440,7 +3498,7 @@ impl LiveAdapterHost {
                 .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?
         };
 
-        adapter.close().await?;
+        crate::traced_live_close_step(Some(&channel_id), "adapter_close", adapter.close()).await?;
 
         let mut inner = self.inner.lock().await;
         let channel = inner

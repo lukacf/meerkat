@@ -322,6 +322,29 @@ them.
   realm is `mobkit` under its state directory, since the `mob.<name>` id in
   session metadata is a mob scope rather than a store realm.
 
+- Closing a public GPT Live channel while an existing-member delegation is
+  still executing converges on the provider's closure confirmation instead of
+  waiting out the member's turn. A browser that disconnects gracefully (data
+  channel closed, audio track ended) leaves the WebRTC peer connected and the
+  host without any transport signal, so the host close was the only close; it
+  hung until the running turn released the session's turn boundary, because
+  the transport's observation pump was parked behind that boundary projecting
+  an assistant output the provider started after the disconnect, and the
+  provider drain would not settle until every projection had landed. Once the
+  owner revokes the channel's close custody, the channel's live projections no
+  longer wait behind a held turn boundary: a parked projection returns a typed
+  `Busy`, the transport hands the observation to the deferred close settlement
+  (`DeferLiveCloseSettlement`), and that owned task settles the playback row
+  at the boundary and then applies the deferred projections. The settlement
+  refuses (`Busy`, retried after a short pause) when it wins the boundary
+  while the member turn's boundary commit is still landing in the store:
+  synchronizing the live actor from the durable body at that instant would
+  drop the turn's rows and its checkpoint receipt and fail its finalization,
+  which is what the first version of the deferred settlement did. Every wait
+  on the close path now emits an `info` line on the stable tracing target
+  `meerkat::live_close` (step name plus elapsed time), and a delegation
+  narration is skipped with a typed reason when the session's lifecycle or the
+  channel binding rules it out, instead of surfacing a machine guard rejection.
 - WholeBlob persistence refuses to mint a document its own reader would
   refuse. `Session::to_persisted_artifact` and the runtime store's WholeBlob
   encoder now run the audited-endpoint check before serializing, so a live

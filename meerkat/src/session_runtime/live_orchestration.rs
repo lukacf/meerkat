@@ -66,6 +66,14 @@ pub const LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND: std::time::Duration =
 /// warning; the deferral stays recorded on the closed channel.
 pub const LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS: usize = 6;
 
+/// Pause between deferred settlement attempts that found the member turn's
+/// boundary commit still landing in the store (the settlement won the
+/// boundary the instant the turn released it). The checkpoint lands within
+/// milliseconds; the pause keeps the bounded attempts from being spent in
+/// that one window.
+pub const LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
 #[cfg(feature = "openai-live")]
 use crate::session_runtime::live_summary;
 
@@ -972,27 +980,54 @@ mod orchestrator {
     /// records its result first and this task follows. Each wait is bounded by
     /// [`super::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND`]; a session that is gone has
     /// nothing left to settle and resolves the deferral as well.
+    ///
+    /// Projections the transport deferred while the close was in flight
+    /// (`deferred_projections`, in arrival order) are applied once the
+    /// settlement has found the session consistent at the boundary: the
+    /// channel's projections wait for the boundary again from here on, and
+    /// the host keeps the closed channel reachable through `retention` until
+    /// they have landed. An assistant output whose handle the close already
+    /// retired is refused by the projection and reported, not retried.
+    ///
+    /// A settlement that wins the boundary while the member turn's boundary
+    /// commit is still landing in the store is `Busy` (see
+    /// `PersistentSessionService::resolve_live_assistant_playback_on_channel_close_within`);
+    /// the task pauses [`super::LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY`] and
+    /// tries again so the turn's rows and checkpoint receipt are never
+    /// synchronized away from under its finalization.
     pub(crate) async fn settle_live_close_playback_deferred<B: SessionAgentBuilder + 'static>(
         service: Arc<PersistentSessionService<B>>,
         runtime: Arc<MeerkatMachine>,
+        host: LiveAdapterHost,
+        deferred_projections: Vec<meerkat_core::live_adapter::LiveAdapterObservation>,
         session_id: SessionId,
         channel_id: LiveChannelId,
     ) {
+        let retention = host
+            .retain_channel_close_projection(&session_id, &channel_id)
+            .await
+            .ok();
+        service.restore_live_projection_turn_boundary_wait(&session_id, &channel_id);
+        let mut settled = false;
         for attempt in 1..=super::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS {
-            match service
-                .resolve_live_assistant_playback_on_channel_close_within(
+            match meerkat_live::traced_live_close_step(
+                Some(&channel_id),
+                "deferred_settlement",
+                service.resolve_live_assistant_playback_on_channel_close_within(
                     &session_id,
                     channel_id.clone(),
                     super::LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND,
-                )
-                .await
+                ),
+            )
+            .await
             {
                 Err(SessionError::Busy { .. }) => {
                     tracing::warn!(
                         %channel_id,
                         attempt,
-                        "deferred live close settlement still waits for the member turn boundary"
+                        "deferred live close settlement still waits for the member turn to commit"
                     );
+                    tokio::time::sleep(super::LIVE_CLOSE_DEFERRED_SETTLEMENT_RETRY_DELAY).await;
                     continue;
                 }
                 Ok(_) => {}
@@ -1004,19 +1039,49 @@ mod orchestrator {
                     );
                 }
             }
-            if let Err(error) = runtime
-                .resolve_live_close_settlement(&session_id, &channel_id)
-                .await
-            {
-                tracing::warn!(%error, %channel_id, "deferred live close settlement could not be resolved in the machine");
-            }
+            settled = true;
+            break;
+        }
+        if !settled {
+            tracing::warn!(
+                %channel_id,
+                attempts = super::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS,
+                deferred_projections = deferred_projections.len(),
+                "deferred live close settlement gave up waiting for the member turn boundary; the deferral stays recorded"
+            );
             return;
         }
-        tracing::warn!(
-            %channel_id,
-            attempts = super::LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS,
-            "deferred live close settlement gave up waiting for the member turn boundary; the deferral stays recorded"
-        );
+        for observation in deferred_projections {
+            match meerkat_live::traced_live_close_step(
+                Some(&channel_id),
+                "deferred_projection",
+                host.apply_observation(&channel_id, &observation),
+            )
+            .await
+            {
+                Ok(outcome) => tracing::info!(
+                    target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                    channel = %channel_id,
+                    ?observation,
+                    ?outcome,
+                    "deferred live projection applied at the member turn boundary"
+                ),
+                Err(error) => tracing::info!(
+                    target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                    channel = %channel_id,
+                    ?observation,
+                    %error,
+                    "deferred live projection was refused after the close"
+                ),
+            }
+        }
+        drop(retention);
+        if let Err(error) = runtime
+            .resolve_live_close_settlement(&session_id, &channel_id)
+            .await
+        {
+            tracing::warn!(%error, %channel_id, "deferred live close settlement could not be resolved in the machine");
+        }
     }
 
     impl<B: SessionAgentBuilder + 'static> LiveOrchestrator<'_, B> {
@@ -3337,15 +3402,34 @@ mod orchestrator {
                 .await
                 .ok_or(ExperimentalLiveChannelCloseError::BindingMismatch)?;
             let close_custody = if matches!(purpose, ExperimentalLiveClosePurpose::Explicit) {
-                self.runtime_adapter
-                    .revoke_bound_live_channel_close_custody(&session, channel)
-                    .await
-                    .map_err(|error| {
-                        ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
-                    })?
+                meerkat_live::traced_live_close_step(
+                    Some(channel),
+                    "revoke_bound_close_custody",
+                    self.runtime_adapter
+                        .revoke_bound_live_channel_close_custody(&session, channel),
+                )
+                .await
+                .map_err(|error| {
+                    ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
+                })?
             } else {
                 None
             };
+            if matches!(purpose, ExperimentalLiveClosePurpose::Explicit) {
+                // The owner has revoked the channel's custody: its live
+                // projections no longer wait behind the member's turn
+                // boundary. A projection parked there returns Busy and the
+                // transport defers it to the boundary, so the physical close
+                // below converges on provider confirmation alone.
+                self.service
+                    .release_live_projection_turn_boundary_waiters(&session, channel);
+                tracing::info!(
+                    target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                    channel = %channel,
+                    step = "release_projection_waiters",
+                    "live projections for the closing channel no longer wait behind the member turn boundary"
+                );
+            }
             if let Some(custody) = close_custody.as_ref() {
                 for recovery_channel in custody.recovery_channel_ids() {
                     if self
@@ -3378,10 +3462,13 @@ mod orchestrator {
             } else {
                 crate::experimental_gpt_live::ExperimentalLiveCloseConvergence::SingleSlice
             };
-            let physical = authority
-                .close_physical_if_bound_with(channel, &session, convergence)
-                .await
-                .map_err(ExperimentalLiveChannelCloseError::PhysicalAuthority)?;
+            let physical = meerkat_live::traced_live_close_step(
+                Some(channel),
+                "physical_close",
+                authority.close_physical_if_bound_with(channel, &session, convergence),
+            )
+            .await
+            .map_err(ExperimentalLiveChannelCloseError::PhysicalAuthority)?;
             if matches!(physical, ExperimentalLivePhysicalClose::NotBound) {
                 let already_closed = close_custody
                     .as_ref()
@@ -3413,21 +3500,27 @@ mod orchestrator {
             if !matches!(purpose, ExperimentalLiveClosePurpose::ContextRecovery)
                 && let meerkat_runtime::live_context_mirror::LiveContextDrainCompletion::Failed(
                     error,
-                ) = self
-                    .runtime_adapter
-                    .quiesce_live_context_outbox_for_channel(&session, channel)
-                    .await
+                ) = meerkat_live::traced_live_close_step(
+                    Some(channel),
+                    "quiesce_context_outbox",
+                    self.runtime_adapter
+                        .quiesce_live_context_outbox_for_channel(&session, channel),
+                )
+                .await
             {
                 tracing::warn!(%error, %channel, "closing with retained post-commit context delivery failure");
             }
             // Output publication drains before taking the terminal lease.
-            let _lease = self
-                .runtime_adapter
-                .acquire_live_open_lifecycle_lease(&session)
-                .await
-                .map_err(|error| {
-                    ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
-                })?;
+            let _lease = meerkat_live::traced_live_close_step(
+                Some(channel),
+                "lifecycle_lease",
+                self.runtime_adapter
+                    .acquire_live_open_lifecycle_lease(&session),
+            )
+            .await
+            .map_err(|error| {
+                ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
+            })?;
             let result = if self
                 .runtime_adapter
                 .live_session_for_active_channel(channel)
@@ -3435,8 +3528,12 @@ mod orchestrator {
                 .as_ref()
                 == Some(&session)
             {
-                self.close_live_channel(host, channel, Some(&session))
-                    .await?
+                meerkat_live::traced_live_close_step(
+                    Some(channel),
+                    "close_verb",
+                    self.close_live_channel(host, channel, Some(&session)),
+                )
+                .await?
             } else {
                 if self
                     .live_channel_status(host, channel, Some(&session))
@@ -3449,13 +3546,21 @@ mod orchestrator {
                     status: meerkat_contracts::LiveCloseStatus::Closed,
                 }
             };
-            physical
-                .report_terminal(host, &session, channel)
-                .await
-                .map_err(ExperimentalLiveChannelCloseError::TerminalProjection)?;
+            meerkat_live::traced_live_close_step(
+                Some(channel),
+                "report_terminal",
+                physical.report_terminal(host, &session, channel),
+            )
+            .await
+            .map_err(ExperimentalLiveChannelCloseError::TerminalProjection)?;
             self.runtime_adapter
                 .retire_live_assistant_output_handles(&session, channel);
-            authority.unbind_channel(channel, &session).await;
+            meerkat_live::traced_live_close_step(
+                Some(channel),
+                "unbind_channel",
+                authority.unbind_channel(channel, &session),
+            )
+            .await;
             Ok(Some(result))
         }
 
@@ -3490,7 +3595,13 @@ mod orchestrator {
             };
             Self::check_session_pin(channel_id, &session_id, expected_session)?;
 
-            let observation = match host.reserve_channel_close_observation(channel_id).await {
+            let observation = match meerkat_live::traced_live_close_step(
+                Some(channel_id),
+                "reserve_close_observation",
+                host.reserve_channel_close_observation(channel_id),
+            )
+            .await
+            {
                 Ok(observation) => observation,
                 Err(error) => {
                     return Err(self
@@ -3498,19 +3609,31 @@ mod orchestrator {
                         .await);
                 }
             };
-            host.prepare_channel_physical_close(&observation)
-                .await
-                .map_err(|error| LiveChannelVerbError::HostCommit {
-                    message: format!(
-                        "physical adapter close failed before generated terminal authority: {error}"
-                    ),
-                })?;
-            let target = host
-                .channel_close_commit_target(&observation)
-                .await
-                .map_err(|error| LiveChannelVerbError::HostCommit {
-                    message: error.to_string(),
-                })?;
+            meerkat_live::traced_live_close_step(
+                Some(channel_id),
+                "prepare_physical_close",
+                host.prepare_channel_physical_close(&observation),
+            )
+            .await
+            .map_err(|error| LiveChannelVerbError::HostCommit {
+                message: format!(
+                    "physical adapter close failed before generated terminal authority: {error}"
+                ),
+            })?;
+            let target = meerkat_live::traced_live_close_step(
+                Some(channel_id),
+                "commit_target",
+                host.channel_close_commit_target(&observation),
+            )
+            .await
+            .map_err(|error| LiveChannelVerbError::HostCommit {
+                message: error.to_string(),
+            })?;
+            // Projections the transport could not apply while this close was
+            // in flight (the member's turn boundary was held). They follow the
+            // playback settlement to the boundary on the owned task below.
+            let deferred_projections = host.take_deferred_projections(channel_id).await;
+            let deferred_host = host.owned_handle();
             let service = Arc::clone(self.service);
             let runtime = Arc::clone(self.runtime_adapter);
             let channel = channel_id.clone();
@@ -3527,12 +3650,15 @@ mod orchestrator {
                     // or a fork holding the boundary) is never waited for: the
                     // settlement is deferred to the turn boundary and the
                     // close proceeds.
-                    let settlement_deferred = match service
-                        .resolve_live_assistant_playback_on_channel_close(
+                    let settlement_deferred = match meerkat_live::traced_live_close_step(
+                        Some(&channel),
+                        "settlement",
+                        service.resolve_live_assistant_playback_on_channel_close(
                             &session_id,
                             channel.clone(),
-                        )
-                        .await
+                        ),
+                    )
+                    .await
                     {
                         Ok(_) => false,
                         Err(SessionError::Busy { .. }) => true,
@@ -3544,44 +3670,62 @@ mod orchestrator {
                             });
                         }
                     };
-                    let authority = runtime
-                        .resolve_live_close_result(&session_id, &observation)
-                        .await
-                        .map_err(|error| LiveChannelVerbError::ResultAuthority {
-                            message: format!("live close authority rejected result: {error}"),
-                        })?;
+                    let authority = meerkat_live::traced_live_close_step(
+                        Some(&channel),
+                        "resolve_close_result",
+                        runtime.resolve_live_close_result(&session_id, &observation),
+                    )
+                    .await
+                    .map_err(|error| LiveChannelVerbError::ResultAuthority {
+                        message: format!("live close authority rejected result: {error}"),
+                    })?;
                     let Some(close_commit_authority) = authority.channel_close_commit_authority()
                     else {
                         return Err(LiveChannelVerbError::CommitOmitted);
                     };
-                    target
-                        .commit(close_commit_authority)
-                        .await
-                        .map_err(|error| LiveChannelVerbError::HostCommit {
-                            message: error.to_string(),
-                        })?;
+                    meerkat_live::traced_live_close_step(
+                        Some(&channel),
+                        "commit_close",
+                        target.commit(close_commit_authority),
+                    )
+                    .await
+                    .map_err(|error| LiveChannelVerbError::HostCommit {
+                        message: error.to_string(),
+                    })?;
                     runtime.retire_live_assistant_output_handles(&session_id, &channel);
-                    if settlement_deferred {
-                        match runtime
-                            .defer_live_close_settlement(&session_id, &channel)
-                            .await
+                    if settlement_deferred || !deferred_projections.is_empty() {
+                        match meerkat_live::traced_live_close_step(
+                            Some(&channel),
+                            "defer_settlement",
+                            runtime.defer_live_close_settlement(&session_id, &channel),
+                        )
+                        .await
                         {
                             Ok(()) => {
                                 tokio::spawn(settle_live_close_playback_deferred(
                                     Arc::clone(&service),
                                     Arc::clone(&runtime),
+                                    deferred_host,
+                                    deferred_projections,
                                     session_id.clone(),
                                     channel.clone(),
                                 ));
                             }
                             Err(error) => {
+                                service.restore_live_projection_turn_boundary_wait(
+                                    &session_id,
+                                    &channel,
+                                );
                                 tracing::warn!(
                                     %error,
                                     %channel,
+                                    deferred_projections = deferred_projections.len(),
                                     "deferred live close settlement could not be recorded; the playback row settles at the next close"
                                 );
                             }
                         }
+                    } else {
+                        service.restore_live_projection_turn_boundary_wait(&session_id, &channel);
                     }
                     Ok(live_close_result_from_machine_authority(&authority))
                 }
@@ -3591,7 +3735,7 @@ mod orchestrator {
                 }
                 result
             });
-            commit
+            meerkat_live::traced_live_close_step(Some(channel_id), "owned_commit_task", commit)
                 .await
                 .map_err(|error| LiveChannelVerbError::HostCommit {
                     message: format!("live close realization task failed: {error}"),

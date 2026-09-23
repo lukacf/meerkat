@@ -55,6 +55,43 @@ pub use wire_input::{
     LiveInputChunkDecodeError, live_input_chunk_decode_rejection, live_input_chunk_from_wire,
 };
 
+/// Stable tracing target for every wait on the live close path.
+///
+/// Each awaited step of a channel close (custody revocation, provider close
+/// request, drain observation, transport retirement, generated commit, peer
+/// cleanup) emits one `info` line when the wait starts and one when it ends,
+/// carrying the step name and the elapsed time. Filter on this target to see
+/// where a close spends its time without enabling debug output elsewhere.
+pub const LIVE_CLOSE_TRACE_TARGET: &str = "meerkat::live_close";
+
+/// Await one step of a live close under [`LIVE_CLOSE_TRACE_TARGET`] tracing.
+pub async fn traced_live_close_step<T, F>(
+    channel_id: Option<&LiveChannelId>,
+    step: &'static str,
+    step_future: F,
+) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let channel = channel_id.map_or("-", LiveChannelId::as_str);
+    let started = std::time::Instant::now();
+    tracing::info!(
+        target: LIVE_CLOSE_TRACE_TARGET,
+        channel,
+        step,
+        "live close step started"
+    );
+    let output = step_future.await;
+    tracing::info!(
+        target: LIVE_CLOSE_TRACE_TARGET,
+        channel,
+        step,
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "live close step finished"
+    );
+    output
+}
+
 // E26 regression: `meerkat-live` must not depend on `meerkat-runtime`. The
 // dependency direction is: `meerkat-live` owns the live-adapter host
 // (`crate::host`) and the transport (`crate::transport`); surfaces compose

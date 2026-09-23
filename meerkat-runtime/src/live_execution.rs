@@ -3048,6 +3048,41 @@ pub enum LiveDelegationRecoveryPhase {
 pub use crate::meerkat_machine::dsl::LiveDelegationWorkerOwnership;
 pub use crate::meerkat_machine::dsl::{LiveDelegationNarrationKind, LiveDelegationScheduleState};
 
+/// Why a delegation narration is not attempted. These are lifecycle facts the
+/// machine would otherwise turn into a guard rejection of
+/// `AuthorizeLiveDelegationNarration`; the coordinator reads them first and
+/// skips the narration with a typed reason instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveDelegationNarrationSkip {
+    /// The session's runtime lifecycle phase is outside the phases in which
+    /// narration authority is granted (`Idle`, `Attached`, `Running`); for
+    /// example the runtime executor has stopped.
+    SessionLifecycle(String),
+    /// The channel is no longer the session's active live channel, or the
+    /// execution binding on the channel no longer matches the narrating
+    /// worker's binding.
+    ChannelInactive,
+    /// The session is no longer registered with the machine.
+    SessionGone,
+}
+
+impl std::fmt::Display for LiveDelegationNarrationSkip {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionLifecycle(phase) => {
+                write!(
+                    formatter,
+                    "session lifecycle phase {phase} grants no narration authority"
+                )
+            }
+            Self::ChannelInactive => {
+                formatter.write_str("channel is no longer the session's active live channel")
+            }
+            Self::SessionGone => formatter.write_str("session is no longer registered"),
+        }
+    }
+}
+
 /// Generated per-channel bound on concurrently running live delegation
 /// workers. The machine initial state carries the same value; the runtime
 /// test suite asserts the two never drift.

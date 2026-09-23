@@ -2372,10 +2372,13 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         channel: &LiveChannelId,
     ) -> Result<LiveCloseStatus, ExperimentalLiveChannelCloseError> {
         if let Some(authority) = authority
-            && let Some(result) = self
-                .orchestrator()
-                .close_experimental_live_channel(&self.host, authority, channel)
-                .await?
+            && let Some(result) = meerkat_live::traced_live_close_step(
+                Some(channel),
+                "close_experimental",
+                self.orchestrator()
+                    .close_experimental_live_channel(&self.host, authority, channel),
+            )
+            .await?
         {
             return Ok(result.status);
         }
@@ -2384,13 +2387,16 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             .live_session_for_active_channel(channel)
             .await
             .ok_or(ExperimentalLiveChannelCloseError::BindingMismatch)?;
-        let lifecycle_lease = self
-            .runtime_adapter
-            .acquire_live_open_lifecycle_lease(&session)
-            .await
-            .map_err(|error| {
-                ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
-            })?;
+        let lifecycle_lease = meerkat_live::traced_live_close_step(
+            Some(channel),
+            "lifecycle_lease",
+            self.runtime_adapter
+                .acquire_live_open_lifecycle_lease(&session),
+        )
+        .await
+        .map_err(|error| {
+            ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
+        })?;
         if self
             .runtime_adapter
             .live_session_for_active_channel(channel)
@@ -2400,14 +2406,22 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         {
             return Err(ExperimentalLiveChannelCloseError::BindingMismatch);
         }
-        let result = self
-            .orchestrator()
-            .close_live_channel(&self.host, channel, Some(&session))
-            .await?;
+        let result = meerkat_live::traced_live_close_step(
+            Some(channel),
+            "close_verb",
+            self.orchestrator()
+                .close_live_channel(&self.host, channel, Some(&session)),
+        )
+        .await?;
         self.runtime_adapter
             .retire_live_assistant_output_handles(&session, channel);
         if let Some(authority) = authority {
-            authority.unbind_channel(channel, &session).await;
+            meerkat_live::traced_live_close_step(
+                Some(channel),
+                "unbind_channel",
+                authority.unbind_channel(channel, &session),
+            )
+            .await;
         }
         drop(lifecycle_lease);
         Ok(result.status)
@@ -2462,36 +2476,46 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             .map_err(|error| {
                 ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
             })?;
-        match receipt {
-            meerkat_runtime::meerkat_machine::LiveChannelCloseReceipt::Pending(value) => {
-                self.runtime_adapter
-                    .validate_live_channel_custody_by_pending_receipt(
-                        &session_id,
-                        channel_id,
-                        value,
-                    )
-                    .await
+        let validated = async {
+            match receipt {
+                meerkat_runtime::meerkat_machine::LiveChannelCloseReceipt::Pending(value) => {
+                    self.runtime_adapter
+                        .validate_live_channel_custody_by_pending_receipt(
+                            &session_id,
+                            channel_id,
+                            value,
+                        )
+                        .await
+                }
+                meerkat_runtime::meerkat_machine::LiveChannelCloseReceipt::Activation(value) => {
+                    self.runtime_adapter
+                        .validate_live_channel_custody_by_activation_receipt(
+                            &session_id,
+                            channel_id,
+                            value,
+                        )
+                        .await
+                }
             }
-            meerkat_runtime::meerkat_machine::LiveChannelCloseReceipt::Activation(value) => {
-                self.runtime_adapter
-                    .validate_live_channel_custody_by_activation_receipt(
-                        &session_id,
-                        channel_id,
-                        value,
-                    )
-                    .await
-            }
-        }
-        .map_err(|error| {
-            ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
-        })?;
-        let close_custody = self
-            .runtime_adapter
-            .revoke_live_channel_close_custody(&session_id, channel_id, receipt)
+        };
+        meerkat_live::traced_live_close_step(Some(channel_id), "validate_close_custody", validated)
             .await
             .map_err(|error| {
                 ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
             })?;
+        let close_custody = meerkat_live::traced_live_close_step(
+            Some(channel_id),
+            "revoke_close_custody",
+            self.runtime_adapter.revoke_live_channel_close_custody(
+                &session_id,
+                channel_id,
+                receipt,
+            ),
+        )
+        .await
+        .map_err(|error| {
+            ExperimentalLiveChannelCloseError::LifecycleAuthority(error.to_string())
+        })?;
         if close_custody.session_id() != &session_id || close_custody.channel_id() != channel_id {
             return Err(ExperimentalLiveChannelCloseError::LifecycleAuthority(
                 "generated close custody did not match the exact channel binding".to_string(),
@@ -2510,22 +2534,40 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
             }
         }
         if close_custody.already_closed() {
-            let physical = authority
-                .close_physical_if_bound_with(
+            self.service
+                .release_live_projection_turn_boundary_waiters(&session_id, channel_id);
+            let physical = meerkat_live::traced_live_close_step(
+                Some(channel_id),
+                "physical_close_already_closed",
+                authority.close_physical_if_bound_with(
                     channel_id,
                     &session_id,
                     crate::experimental_gpt_live::ExperimentalLiveCloseConvergence::WithinBound,
-                )
-                .await
-                .map_err(ExperimentalLiveChannelCloseError::PhysicalAuthority)?;
-            physical
-                .report_terminal(&self.host, &session_id, channel_id)
-                .await
-                .map_err(ExperimentalLiveChannelCloseError::TerminalProjection)?;
-            authority.unbind_channel(channel_id, &session_id).await;
+                ),
+            )
+            .await
+            .map_err(ExperimentalLiveChannelCloseError::PhysicalAuthority)?;
+            meerkat_live::traced_live_close_step(
+                Some(channel_id),
+                "report_terminal",
+                physical.report_terminal(&self.host, &session_id, channel_id),
+            )
+            .await
+            .map_err(ExperimentalLiveChannelCloseError::TerminalProjection)?;
+            meerkat_live::traced_live_close_step(
+                Some(channel_id),
+                "unbind_channel",
+                authority.unbind_channel(channel_id, &session_id),
+            )
+            .await;
             return Ok(LiveCloseStatus::Closed);
         }
-        self.close_live_channel(Some(authority), channel_id).await
+        meerkat_live::traced_live_close_step(
+            Some(channel_id),
+            "close_live_channel",
+            self.close_live_channel(Some(authority), channel_id),
+        )
+        .await
     }
 }
 

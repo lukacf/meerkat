@@ -8957,6 +8957,57 @@ impl MeerkatMachine {
     /// Mint the one-use authority for a templated executor-state narration.
     /// The machine refuses kinds that do not match the generated schedule
     /// state and repeats of the last released kind.
+    /// Whether a delegation narration on this binding can be authorized at
+    /// all, on lifecycle grounds alone. `AuthorizeLiveDelegationNarration`
+    /// runs only in the `Idle`, `Attached` and `Running` phases and only on the
+    /// channel's current execution binding; a coordinator that reads this
+    /// first skips the narration with the typed reason instead of receiving a
+    /// guard rejection. The item's schedule state is not consulted here: that
+    /// refusal stays with the machine.
+    #[cfg(feature = "live")]
+    pub async fn live_delegation_narration_eligibility(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+    ) -> Result<(), crate::live_execution::LiveDelegationNarrationSkip> {
+        use crate::live_execution::LiveDelegationNarrationSkip;
+        use crate::meerkat_machine::dsl::MeerkatPhase;
+
+        let session_id = binding.session_id();
+        let state = self
+            .session_dsl_state(session_id)
+            .await
+            .map_err(|_| LiveDelegationNarrationSkip::SessionGone)?;
+        match state.lifecycle_phase {
+            MeerkatPhase::Idle | MeerkatPhase::Attached | MeerkatPhase::Running => {}
+            phase => {
+                return Err(LiveDelegationNarrationSkip::SessionLifecycle(format!(
+                    "{phase:?}"
+                )));
+            }
+        }
+        let channel = binding.channel_id().to_string();
+        let channel_is_active = state
+            .live_active_channel_by_session
+            .get(&session_id.to_string())
+            .is_some_and(|active| *active == channel);
+        let binding_matches = state.live_execution_runtime_id_by_channel.get(&channel)
+            == Some(&crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                binding.runtime_id(),
+            ))
+            && state
+                .live_execution_fence_by_channel
+                .get(&channel)
+                .is_some_and(|fence| fence.0 == binding.fence_token())
+            && state
+                .live_execution_generation_by_channel
+                .get(&channel)
+                .is_some_and(|generation| generation.0 == binding.generation());
+        if !channel_is_active || !binding_matches {
+            return Err(LiveDelegationNarrationSkip::ChannelInactive);
+        }
+        Ok(())
+    }
+
     pub async fn authorize_live_delegation_narration(
         &self,
         binding: &crate::live_execution::LiveDelegationRuntimeBinding,

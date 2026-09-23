@@ -187,7 +187,8 @@ pub use context_budget::{
 pub use digest_observability::{
     DIGEST_SITE_LABELS, digest_site_bytes, global_session_content_digest_bytes,
     global_session_encode_bytes, record_session_encode_bytes, rewrite_record_body_decodes,
-    session_content_digest_bytes, session_content_digest_computations,
+    rewrite_record_body_decodes_on_this_thread, session_content_digest_bytes,
+    session_content_digest_computations,
 };
 pub use error::{AgentError, ToolError};
 pub use event::{

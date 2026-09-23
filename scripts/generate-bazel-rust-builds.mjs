@@ -1194,6 +1194,28 @@ function workspaceLintRustcFlags() {
   return { flags, skipped };
 }
 
+// Cargo's unit and integration lanes run under nextest: one process per test.
+// A Bazel rust_test runs a whole binary in one process on every core, and
+// the first real unit lane failed dozens of tests on state that is
+// process-global by design (inproc participant names, the realtime open
+// projection memory budget, observability counters). Running each binary
+// single-threaded is the nearest libtest equivalent of that isolation; the
+// binaries still run in parallel with each other on the executors.
+const SINGLE_THREADED_TEST_ENV = [`        "RUST_TEST_THREADS": "1",`];
+// Unit binaries with hundreds of tokio tests, measured serially.
+const LARGE_UNIT_TEST_PACKAGES = new Set([
+  "meerkat",
+  "meerkat-core",
+  "meerkat-live",
+  "meerkat-mcp-server",
+  "meerkat-mob",
+  "meerkat-mob-mcp",
+  "meerkat-rest",
+  "meerkat-rpc",
+  "meerkat-runtime",
+  "xtask",
+]);
+
 const WORKSPACE_LINTS_BZL = "workspace_lints.bzl";
 const WORKSPACE_LINTS_LOAD = `load("//:${WORKSPACE_LINTS_BZL}", "WORKSPACE_LINT_RUSTC_FLAGS")`;
 
@@ -1868,7 +1890,7 @@ for (const pkg of localPackages.values()) {
       if (needsPackageRunfiles(target) || extraData.includes(currentPackageRunfiles) || usesTrybuild) {
         data.unshift(":package_runfiles");
       }
-      const env = [`        "RUST_MIN_STACK": "8388608",`];
+      const env = [`        "RUST_MIN_STACK": "8388608",`, ...SINGLE_THREADED_TEST_ENV];
       attrs.splice(attrs.length - 1, 0, `    tags = ${listExpr([...new Set(tags)].sort())},`);
       if (key === "meerkat" && target.name === "agent_builder_policy_canary") {
         attrs.splice(attrs.length - 1, 0, `    size = "large",`);
@@ -1884,7 +1906,9 @@ for (const pkg of localPackages.values()) {
         // the remote executors.
         attrs.splice(attrs.length - 1, 0, `    size = "medium",`);
       } else if (tags.includes("fast")) {
-        attrs.splice(attrs.length - 1, 0, `    size = "small",`);
+        // Single-threaded (see SINGLE_THREADED_TEST_ENV): the 60s "small"
+        // budget no longer fits a binary that used to spread over 30 cores.
+        attrs.splice(attrs.length - 1, 0, `    size = "medium",`);
       }
       if (usesTrybuild) {
         data.push("//:workspace_runfiles");
@@ -2111,8 +2135,19 @@ for (const pkg of localPackages.values()) {
           (label) => label !== currentPackageRunfiles,
         ),
       ];
-      const unitEnv = [`        "RUST_MIN_STACK": "8388608",`];
-      const unitSize = key === "meerkat-mob" ? "large" : key === "xtask" ? "medium" : "small";
+      const unitEnv = [`        "RUST_MIN_STACK": "8388608",`, ...SINGLE_THREADED_TEST_ENV];
+      // Single-threaded, so the heavy binaries need the 900s budget: the
+      // first real unit lane timed the facade and live crates out at 60s
+      // while their tests hung behind sandbox failures, and mob/rpc/rest run
+      // hundreds of tokio tests each.
+      const unitSize = LARGE_UNIT_TEST_PACKAGES.has(key) ? "large" : "medium";
+      const unitFeatures = crateFeaturesFor(key, pkg);
+      // WebRTC tests bind UDP sockets and run ICE over loopback; the unit
+      // lane's default sandbox has no network at all, so they failed and the
+      // binary hung until the timeout (2026-09-23 unit lane, meerkat and
+      // meerkat-live). Give exactly those binaries the network the
+      // cargo-equivalent tests already have.
+      const unitNeedsNetwork = unitFeatures.some((feature) => /(^|-)webrtc$/.test(feature));
       if (key === "xtask") {
         const rustfmt = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin";
         const rustfmtLib = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib";
@@ -2164,6 +2199,7 @@ for (const pkg of localPackages.values()) {
         `    rustc_env = {\n${unitRustcEnv.join("\n")}\n    },`,
         `    tags = ${listExpr(["fast", "unit"])},`,
         `    size = ${q(unitSize)},`,
+        ...(unitNeedsNetwork ? [`    exec_properties = {"test.network": "external"},`] : []),
         `    data = ${listExpr([...new Set(unitData)].sort())},`,
         `    env = {\n${unitEnv.join("\n")}\n    },`,
         `    proc_macro_deps = ${unitProcExpr},`,

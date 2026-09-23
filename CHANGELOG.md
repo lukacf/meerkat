@@ -262,6 +262,21 @@ them.
   use their own ids. Nine tests sharing `flow-mob`/`test_mob` collided on the
   process-global supervisor participant name when the binary ran them in
   parallel.
+- Bazel `rust_test` binaries run single-threaded (`RUST_TEST_THREADS=1`) and
+  are sized for it (`medium` by default, `large` for the heavy unit crates).
+  Cargo's unit and integration lanes run under nextest, one process per test;
+  a Bazel binary runs every test in one process on every core, and the first
+  real unit lane failed dozens of tests on state that is process-global by
+  design (inproc participant names across `meerkat-rest`, `meerkat-rpc`,
+  `meerkat-mob`, the realtime open projection memory budget, observability
+  counters). Unit binaries whose features enable WebRTC (`meerkat`,
+  `meerkat-live`) get `test.network: external`: their tests bind UDP sockets
+  and hung in the network-less default sandbox.
+- The `agent_builder_policy_canary` build-script compiles pass
+  `-Clinker=cc -Clink-self-contained=no` on Linux, the linker policy the
+  test's Cargo runs already used: the rules_rust rustc in the Bazel runfiles
+  ships no bundled `gcc-ld`, and rustc 1.90+ defaults to the self-contained
+  linker on x86_64-unknown-linux-gnu.
 - The BuildBuddy wasm-check lane runs clippy through the sandbox toolchain's
   own `cargo-clippy`. `cargo clippy` resolves that subcommand from
   `$CARGO_HOME/bin` (the executor image's rustup proxy) before `PATH`, which

@@ -833,10 +833,30 @@ function targetScanSource(target) {
   return sources.join("\n");
 }
 
-function workspaceDataLabels(target) {
-  const source = targetScanSource(target);
+// Every source file of a library crate. A unit test compiles the whole
+// crate, so a `#[cfg(test)]` module anywhere in `src/**` (meerkat-store's
+// sqlite_store tests copy meerkat-runtime's released-corpus fixture) can name
+// runfiles the crate root never mentions; the crate root alone missed them on
+// the first real unit lane.
+function crateScanSource(target, packageRoot) {
+  const sources = [targetScanSource(target)];
+  for (const file of rustSourceFiles(packageRoot, false)) {
+    if (file === target.src_path) continue;
+    sources.push(readFileSync(file, "utf8"));
+  }
+  return sources.join("\n");
+}
+
+function workspaceDataLabels(target, source = targetScanSource(target)) {
   const labels = new Set();
-  if (source.includes("workspace_root") || source.includes("rev-parse")) {
+  if (
+    source.includes("workspace_root") ||
+    source.includes("rev-parse") ||
+    // scripts/repo-cargo exports this for every Cargo run; a test that reads
+    // it falls back to a cwd holding the root Cargo.toml when it is unset,
+    // which is the runfiles root once workspace_metadata is in its data.
+    source.includes("MEERKAT_WORKSPACE_ROOT")
+  ) {
     labels.add("//:workspace_metadata");
     labels.add("//:workspace_cargo_manifests");
   }
@@ -1964,7 +1984,9 @@ for (const pkg of localPackages.values()) {
       const currentPackageRunfiles = `//${relative(root, dir)}:package_runfiles`;
       const unitData = [
         ":package_runfiles",
-        ...workspaceDataLabels(target).filter((label) => label !== currentPackageRunfiles),
+        ...workspaceDataLabels(target, crateScanSource(target, dir)).filter(
+          (label) => label !== currentPackageRunfiles,
+        ),
       ];
       const unitEnv = [`        "RUST_MIN_STACK": "8388608",`];
       const unitSize = key === "meerkat-mob" ? "large" : key === "xtask" ? "medium" : "small";

@@ -135,6 +135,7 @@ rust_test(
     ],
     size = "small",
     data = [
+        "//meerkat-contracts:package_runfiles",
         ":package_runfiles",
     ],
     env = {

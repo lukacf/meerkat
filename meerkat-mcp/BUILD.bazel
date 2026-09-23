@@ -207,6 +207,8 @@ rust_test(
     ],
     size = "small",
     data = [
+        "//:workspace_cargo_manifests",
+        "//:workspace_metadata",
         ":package_runfiles",
     ],
     env = {

@@ -138,6 +138,11 @@ rust_test(
     ],
     size = "small",
     data = [
+        "//:repo_governance_files",
+        "//meerkat-comms:package_runfiles",
+        "//meerkat-core:package_runfiles",
+        "//meerkat-rpc:package_runfiles",
+        "//meerkat:package_runfiles",
         ":package_runfiles",
     ],
     env = {

@@ -130,6 +130,13 @@ rust_test(
     ],
     size = "small",
     data = [
+        "//:workspace_cargo_manifests",
+        "//:workspace_metadata",
+        "//meerkat-core:cargo_manifest",
+        "//meerkat-runtime:cargo_manifest",
+        "//meerkat-runtime:package_runfiles",
+        "//meerkat-sqlite:cargo_manifest",
+        "//meerkat-store:cargo_manifest",
         ":package_runfiles",
     ],
     env = {

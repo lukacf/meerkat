@@ -150,7 +150,11 @@ rust_test(
     ],
     size = "small",
     data = [
+        "//meerkat-contracts:cargo_manifest",
+        "//meerkat-contracts:package_runfiles",
         "//meerkat-live:cargo_manifest",
+        "//meerkat-rpc:cargo_manifest",
+        "//meerkat-rpc:package_runfiles",
         "//meerkat-runtime:cargo_manifest",
         ":package_runfiles",
     ],

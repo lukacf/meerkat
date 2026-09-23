@@ -164,6 +164,16 @@ rust_test(
     ],
     size = "small",
     data = [
+        "//:repo_governance_files",
+        "//meerkat-anthropic:package_runfiles",
+        "//meerkat-client:package_runfiles",
+        "//meerkat-contracts:package_runfiles",
+        "//meerkat-llm-core:package_runfiles",
+        "//meerkat-machine-schema:package_runfiles",
+        "//meerkat-mob:package_runfiles",
+        "//meerkat-runtime:package_runfiles",
+        "//meerkat-session:package_runfiles",
+        "//meerkat:package_runfiles",
         ":package_runfiles",
     ],
     env = {

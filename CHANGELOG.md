@@ -112,6 +112,11 @@ them.
   longer names the exact current preparation on the session's active channel.
   The summary job records this verdict instead of misreporting it as
   `Capture`.
+- `make -C examples verify` runs the deterministic examples gate (Rust,
+  standalone codemob/mdm, SDK, shell, web, realtime lanes);
+  `scripts/example-locks.py check|refresh` validates and refreshes the
+  standalone example `Cargo.lock` files, wired into `verify-lock-consistency`
+  and the release hook.
 
 ### Changed
 
@@ -230,7 +235,67 @@ them.
   replies through the same oneshot, so a slow durable source (5 to 8 s on
   large members) no longer exceeds the actor's inline step budget or queues
   every later mob command behind one voice status poll.
-
+- Standalone terminal closure (examples audit, #1149): an epochless standalone
+  session (`RuntimeBuildMode::StandaloneEphemeral`) now releases its generated
+  lifecycle from `Running` to `Idle` after a coherent terminal turn effect
+  through the new generated `CloseStandaloneTurn` transition
+  (`RuntimeTurnStateHandle::close_standalone_turn`), so a standalone
+  `Agent::run` can be followed by another run after completion, failure, or an
+  observed cancellation. The close preserves terminal evidence and
+  model/tool-routing state, mints no durable commit receipt, and never takes
+  runtime commit ownership (`SessionOwned` publication stays with Commit/Fail).
+  Cancelling a run whose execution future was dropped now reports the observed
+  execution end to the turn authority (`Cancelling` alone is not terminal), and
+  run-failed effect rejection covers every limit terminal route.
+- Runtime-backed skill-body materialization: per-turn `skill_refs` on
+  runtime-backed create and continue requests lower into typed `SkillContext`
+  blocks prepended once to the first conversational user message (appended as
+  a skill-only user message for peer/system-only turns), preserving the
+  admitted appends, injected context, and media, and never adding a nonleading
+  System instruction. A run-start hook denial commits neither the activation
+  nor the turn's admitted messages. Before, runtime-backed turns did not
+  deliver the resolved skill bodies to the provider.
+- Cancellation-action installation: `SurfaceRequestExecutor`'s
+  `install_cancel_action` observes the request phase and replaces the callback
+  inside the cancellation authority's critical section (same lock order as
+  `cancel_request`), so a cancellation can no longer slip between phase
+  observation and installation and leave a stale noop action; an install on an
+  already cancelled request replays the new action outside the authority lock.
+- Durable no-turn RPC materialization:
+  `meerkat_rpc::SessionRuntime::create_or_resume_session_without_turn`
+  commits (or resumes through canonical durable recovery) an idle session via
+  the persistent service without a provider turn, holding the registration
+  fence until exact rollback including MCP cleanup finishes on failure or
+  cancellation, preserving a durable predecessor, releasing owned capacity, and
+  rejecting forbidden build overrides on cold resume. Backed by
+  `meerkat::surface::materialize_prepared_session_actor_unattached_with_actor_slot`,
+  `meerkat::session_runtime::recovery::inject_recovery_resources`, and
+  `RecoveryContext::recovered_create_request_with_bindings`.
+- WASM comms readiness/timing: `meerkat_comms` inbox claims use
+  `meerkat_core::time_compat::Instant` instead of `std::time::Instant`;
+  `meerkat_runtime::comms_drain` treats a `Duration::MAX` idle timeout as an
+  unbounded persistent drain instead of arming a platform timer that overflows
+  JS timers and expires immediately on wasm32; `meerkat_mob` member activation
+  no longer excludes wasm32 from the `runtime-adapter` path, so browser mobs
+  take the adapter-backed activation and publish comms readiness
+  (`sdks/web/tests/wasm_mob_comms.test.mjs`).
+- Exact schedule-tool catalogs: `meerkat_schedule` tools declare
+  `ToolCatalogCapabilities { exact_catalog: true, may_require_catalog_control_plane: false }`
+  so hosts composing catalogs see the exact schedule tool set
+  (`meerkat-schedule/tests/exact_catalog.rs`).
+- Typed manifest records: `meerkat_runtime::meerkat_machine_types` declares the
+  eight live-context internal inputs (`BeginLiveContextPreparation`,
+  `RecordLiveContextObservation`, `RecordLiveContextBootstrapAckCut`,
+  `ObserveLiveContextDeliveryReadiness`, `GenerateLiveContextPreparation`,
+  `AuthorizeLiveContextBootstrapAppend`, `ResolveLiveContextBootstrapAppend`,
+  `FailLiveContextPreparation`) and `CloseStandaloneTurn` as typed manifest
+  records, so the runtime alphabet/schema parity suites pass again.
+- Release-pin contract: `xtask`'s release workflow asset test names all seven
+  Rust-using release jobs, including `build_binaries_windows_cross`, and
+  asserts each uses the pinned `setup-rust-ci` action exactly once.
+- `meerkat_machine` DSL: the live-context observation counter bound is spelled
+  with the existing `u64::MAX` vocabulary instead of a decimal literal; the
+  canonical TLC lane, generated authority, and render contracts are unchanged.
 
 ### Breaking
 - `SessionError` gains the variant `WholeBlobAuditedEndpointDivergence { id }`
@@ -267,6 +332,19 @@ them.
   `SOURCE_TURN_BOUNDARY_WAIT`.
 - `LIVE_CONTEXT_BOOTSTRAP_FRAMING` is reworded (consumers matching the old
   text must update).
+- Generated `MeerkatMachine` vocabulary gains the input
+  `CloseStandaloneTurn { session_id, run_id, terminal_phase }`
+  (`inputs::CloseStandaloneTurn`, `MeerkatMachineInput::CloseStandaloneTurn`,
+  `InputKind::CloseStandaloneTurn`, `TransitionId::CloseStandaloneTurn`):
+  discriminants and `PartialOrd` positions of the later variants of
+  `MeerkatMachineInput::*`, `InputKind::*`, and `TransitionId::*` move, and
+  exhaustive matches must add the arm. Behaviour: epochless standalone
+  sessions now release lifecycle `Running` to `Idle` on a coherent terminal
+  turn instead of staying `Running`.
+- New public items: `meerkat_rpc::SessionRuntime::create_or_resume_session_without_turn`,
+  `meerkat::surface::materialize_prepared_session_actor_unattached_with_actor_slot`,
+  `meerkat::session_runtime::recovery::inject_recovery_resources`, and
+  `RecoveryContext::recovered_create_request_with_bindings`.
 
 ### Changed
 

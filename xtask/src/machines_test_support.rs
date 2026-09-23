@@ -229,7 +229,13 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
         .collect::<Vec<_>>();
 
     if mismatches.is_empty() {
-        bail!("machine-check-drift failed without parsable mismatches:\n{combined}");
+        // Name the exit status: a child killed by a signal (an OOM kill is
+        // silent) leaves no message, and the remote unit lane reported exactly
+        // that on 2026-09-23 with nothing to distinguish it from a real error.
+        bail!(
+            "machine-check-drift failed ({}) without parsable mismatches:\n{combined}",
+            output.status
+        );
     }
 
     Ok(mismatches)

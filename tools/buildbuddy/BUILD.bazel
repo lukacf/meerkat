@@ -63,6 +63,19 @@ CARGO_EQUIVALENT_EXEC_PROPERTIES = {
     "test.network": "external",
 }
 
+# The nextest unit and integration actions each run one test process per
+# vCPU, and the SDK actions run cold Cargo and wasm-pack builds. Without a
+# resource estimate BuildBuddy packs several onto one c3d-standard-30
+# (30 vCPU, 120 GB); on 2026-09-23 that cost the peer-admission latency test
+# its 3s p99 (3.8s, 3.2s), timed out a 10s turn-boundary wait, and silently
+# killed the xtask drift child. Asking for more than half an executor's CPU
+# and memory gives each of these actions a machine to itself while staying
+# schedulable, which is how the pre-push hook runs them.
+HEAVY_CARGO_EQUIVALENT_EXEC_PROPERTIES = CARGO_EQUIVALENT_EXEC_PROPERTIES | {
+    "EstimatedCPU": "20",
+    "EstimatedMemory": "60GB",
+}
+
 CARGO_EQUIVALENT_TAGS = [
     "buildbuddy",
     "cargo-equivalent",
@@ -173,7 +186,7 @@ NATIVE_CARGO_EQUIVALENT_TESTS = {
             "@cargo_nextest_darwin_arm64//:cargo-nextest",
             "@cargo_nextest_linux_x86_64//:cargo-nextest",
         ] + RUST_TOOLCHAIN_DATA,
-        exec_properties = CARGO_EQUIVALENT_EXEC_PROPERTIES,
+        exec_properties = HEAVY_CARGO_EQUIVALENT_EXEC_PROPERTIES,
         size = "enormous",
         timeout = "eternal",
         tags = CARGO_EQUIVALENT_TAGS,
@@ -231,7 +244,7 @@ SDK_SUITE_CARGO_EQUIVALENT_TESTS = {
             "@wasm_pack_darwin_arm64//:wasm-pack",
             "@wasm_pack_linux_x86_64//:wasm-pack",
         ] + RUST_TOOLCHAIN_DATA + WASM_RUST_TOOLCHAIN_DATA + SDK_TOOL_DATA,
-        exec_properties = CARGO_EQUIVALENT_EXEC_PROPERTIES,
+        exec_properties = HEAVY_CARGO_EQUIVALENT_EXEC_PROPERTIES,
         size = "enormous",
         timeout = "eternal",
         tags = CARGO_EQUIVALENT_TAGS,

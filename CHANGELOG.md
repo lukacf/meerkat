@@ -175,6 +175,32 @@ them.
   only ever held while the skipped `changed-paths` mode reported unrun lanes
   as passed). Branch protection is unchanged: `CI gate` stays the only
   required context.
+- GPT Live (gpt-live-1) summary seeding. A live open that carries history
+  (`LiveContextBootstrapMode::Concurrent`) now starts the summary job before
+  the provider session is created and waits for it up to
+  `LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND` (2,500 ms; per policy with
+  `LiveContextSummaryPolicy::with_pre_open_bound`). A summary that is ready and
+  exactly current rides the startup `session.input` as one developer-role item
+  together with the `LIVE_STARTUP_RECENT_TURNS` most recent canonical turns
+  (budgeted to the provider's 128-item / 8,192-token limits, oldest turns
+  dropped first, typed `LiveStartupInputTruncation` logged), the startup
+  `instructions` carry the continuing-conversation clause
+  (`LIVE_CONTEXT_BOOTSTRAP_FRAMING`, reworded), and nothing is sent on any
+  append lane at open. A summary that misses the bound, fails, or is no longer
+  current opens without it and is delivered once, after the user has spoken on
+  the channel (generated guard `user_has_spoken_on_channel` on
+  `AuthorizeLiveContextBootstrapAppend`, set by a user provider turn start or
+  a client delegation admission; never on a timer), on the lane chosen by
+  `LiveContextSummaryPolicy::with_late_summary_lane`: default
+  `LiveLateSummaryLane::Thinking` (the provider's documented quiet lane, recall
+  2/2 measured) or `LiveLateSummaryLane::Instructions` (the framed instructions
+  append used before, recall 4/10 measured). Measured against gpt-live-1 on
+  2026-09-23, a summary appended while the model was idle after open was
+  spoken aloud 3/3 on the thinking lane and 2/9 on the instructions lane;
+  both are now impossible by construction. Ordinary and causal-tail context
+  rows behind a pending bootstrap wait for the same gate. Local playback
+  suppression during the post-open hold is unchanged. (behaviour change, not
+  measured by the semver gate)
 - GPT Live (gpt-live-1) history carrier. A context summary that is ready
   when the provider session is created (`LiveContextBootstrapMode::BeforeOpen`,
   and every reopen whose summary is ready before the provider session is
@@ -768,6 +794,25 @@ them.
   `list_attention` on the host realm, create the goal again in the mob
   realm, and pause the host-realm binding.
 - `MobError::MemberRestoreFailed` gains the field
+- `meerkat::session_runtime::live_summary::LiveContextSummaryPolicy` gains
+  `with_pre_open_bound`, `pre_open_bound`, `with_late_summary_lane` and
+  `late_summary_lane`; new public items `LiveLateSummaryLane` (variants
+  `Thinking`, `Instructions`) and `LIVE_CONTEXT_PRE_OPEN_SUMMARY_BOUND`.
+- `meerkat::experimental_gpt_live::ExperimentalLivePendingOpen` gains the
+  provided method `set_late_summary_lane(&mut self, LiveLateSummaryLane)`
+  (implementors relying on the default keep compiling; the default ignores the
+  lane). New public constants `LIVE_STARTUP_RECENT_TURNS` and
+  `LIVE_LATE_SUMMARY_PREFIX`; `LIVE_CONTEXT_BOOTSTRAP_FRAMING` text changed.
+- `meerkat_openai::public_live::PublicLiveOpenConfig::with_context_summary`
+  now keeps history items selected with `with_history` as the recent tail
+  behind the developer item (previously it replaced them); new public
+  `PublicLiveOpenConfig::startup_input_truncation`, `LiveStartupInputTruncation`,
+  `LIVE_STARTUP_INPUT_MAX_ITEMS`, `LIVE_STARTUP_INPUT_TOKEN_BUDGET`.
+- `MeerkatMachine` DSL state gains `live_conversation_started_channels`
+  (generated `MeerkatMachineState` struct literals must name it);
+  `AuthorizeLiveContextBootstrapAppend` gains the guard
+  `user_has_spoken_on_channel`; `ObserveLiveProviderTurnStarted` and
+  `AdmitLiveDelegation` record the channel in that set.
   `hold: Option<DurableResumeHold>` (`MobError` struct literals and exhaustive
   struct patterns on `MemberRestoreFailed` must name it or use `..`): meerkat's
   typed durable resume hold when the recorded restore failure was one, so a

@@ -3752,6 +3752,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_execution_generation_by_channel: Map<String, Generation>,
             live_execution_phase_by_channel: Map<String, Enum<LiveExecutionChannelPhase>>,
             live_revoked_execution_channels: Set<String>,
+            // Channels on which the user has spoken (a user provider turn
+            // started, or a client delegation was admitted). Startup history
+            // that missed the provider open is delivered only after this
+            // fact: the provider treats context appended into silence as a
+            // cue to speak.
+            live_conversation_started_channels: Set<String>,
             live_cancelled_recovery_channels: Set<String>,
             live_execution_profile_by_channel: Map<String, String>,
             live_execution_mode_by_channel: Map<String, Enum<LiveExecutionMode>>,
@@ -4359,6 +4365,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_execution_generation_by_channel = EmptyMap,
             live_execution_phase_by_channel = EmptyMap,
             live_revoked_execution_channels = EmptySet,
+            live_conversation_started_channels = EmptySet,
             live_cancelled_recovery_channels = EmptySet,
             live_execution_profile_by_channel = EmptyMap,
             live_execution_mode_by_channel = EmptyMap,
@@ -24303,6 +24310,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_provider_turn_by_channel.insert(channel_id, provider_turn_ref);
                 self.live_provider_interaction_by_turn.insert(provider_turn_ref, interaction_id);
                 self.live_provider_turn_channel_by_ref.insert(provider_turn_ref, channel_id);
+                self.live_conversation_started_channels.insert(channel_id);
             }
             to Idle
             emit LiveProviderTurnStarted {
@@ -24496,6 +24504,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 !self.live_delegation_reconciliation_by_operation.contains_key(operation_id)
             }
             update {
+                self.live_conversation_started_channels.insert(channel_id);
                 self.live_delegation_operation_by_interaction.insert(interaction_id, operation_id);
                 self.live_delegation_channel_by_operation.insert(operation_id, channel_id);
                 self.live_delegation_schedule_state_by_operation.insert(
@@ -27665,6 +27674,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_experimental_execution_channels.contains(channel_id)
                 && !self.live_revoked_execution_channels.contains(channel_id)
                 && !self.live_context_pending_append_by_channel.contains_key(channel_id)
+            }
+            guard "user_has_spoken_on_channel" {
+                self.live_conversation_started_channels.contains(channel_id)
             }
             update {
                 self.live_context_bootstrap_append_by_channel.insert(channel_id, append_id);

@@ -426,7 +426,18 @@ fn seeded_turn_text(index: usize) -> String {
     text
 }
 
+/// The environment's producer blocks until released, so every open in these
+/// tests misses the pre-open bound; keep the bound short so the open stays
+/// fast and the late path (delivery after the first user turn) is exercised.
+const TEST_PRE_OPEN_BOUND: Duration = Duration::from_millis(50);
+
 async fn build_environment() -> DeferredSummaryEnvironment {
+    build_environment_with_pre_open_bound(TEST_PRE_OPEN_BOUND).await
+}
+
+async fn build_environment_with_pre_open_bound(
+    pre_open_bound: Duration,
+) -> DeferredSummaryEnvironment {
     use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -610,7 +621,8 @@ async fn build_environment() -> DeferredSummaryEnvironment {
                 Duration::from_secs(5),
             )
             .expect("bounded host summary policy")
-            .with_bootstrap_mode(LiveContextBootstrapMode::Concurrent),
+            .with_bootstrap_mode(LiveContextBootstrapMode::Concurrent)
+            .with_pre_open_bound(pre_open_bound),
         );
     let member_host = Arc::new(member_host);
 
@@ -683,6 +695,46 @@ impl DeferredSummaryEnvironment {
             "concurrent open returned in {elapsed:?} with {materializations} head materialization(s) on the open path"
         );
         (opened, elapsed, materializations)
+    }
+
+    /// The user's first utterance on the channel, as the provider reports it:
+    /// a user turn start pushed through the sideband, lowered by the
+    /// lifecycle activator into the runtime. A held summary is released by
+    /// this fact and by nothing else.
+    async fn user_speaks(
+        &self,
+        sideband: &ControlledAmbiguousSideband,
+        opened: &crate::session_runtime::live_orchestration::ExperimentalLivePendingChannel,
+    ) {
+        let binding = self
+            .authority
+            .transport
+            .active_binding(&self.session_id)
+            .await
+            .expect("active provider binding");
+        let turn = LiveSidebandTurnRef::__from_provider_observation(
+            opened.channel_id(),
+            "first-user-turn".into(),
+            "provider-first-user-turn".into(),
+        )
+        .expect("user turn ref");
+        sideband.push(LiveSidebandObservation::new(
+            binding.clone(),
+            LiveSidebandObservationKind::TurnStarted {
+                turn: turn.clone(),
+                role: LiveSidebandTurnRole::User,
+            },
+        ));
+        // The utterance completes: ordinary context appends defer while a
+        // provider turn is active, and these flows drain the tail afterwards.
+        sideband.push(LiveSidebandObservation::new(
+            binding,
+            LiveSidebandObservationKind::TurnFinished {
+                turn,
+                role: LiveSidebandTurnRole::User,
+                transcript: "first spoken input".into(),
+            },
+        ));
     }
 
     async fn preparation_status(
@@ -851,9 +903,9 @@ async fn concurrent_open_does_not_pay_for_a_slow_committed_body_read() {
     let delay = Duration::from_millis(1500);
     env.store.set_gate(MaterializeGate::Delay(delay));
     let (opened, elapsed, materializations) = env.open().await;
-    assert_eq!(
-        materializations, 0,
-        "the open path must not materialize the committed body"
+    assert!(
+        materializations <= 1,
+        "the open path itself never materializes the committed body; only the pre-open summary task reads it, at most once: {materializations}"
     );
     assert!(
         elapsed < delay,
@@ -881,7 +933,10 @@ async fn concurrent_open_returns_before_the_summary_source_is_read_and_covers_th
     env.store
         .set_gate(MaterializeGate::HoldExcept(tokio::task::try_id()));
     let (opened, _, materializations) = env.open().await;
-    assert_eq!(materializations, 0);
+    assert!(
+        materializations <= 1,
+        "only the pre-open summary task reads the committed body, at most once: {materializations}"
+    );
     assert_eq!(
         env.preparation_status(&opened).await,
         LiveContextPreparationStatus::Preparing(LiveContextPreparationStage::Capturing),
@@ -935,6 +990,20 @@ async fn concurrent_open_returns_before_the_summary_source_is_read_and_covers_th
     .expect("queue the later row behind the bootstrap");
     assert!(sideband.context_commands.lock().await.is_empty());
     env.producer.release.notify_one();
+    // Generated, but held: nothing reaches the provider until the user has
+    // spoken on the channel; a summary appended into silence is spoken aloud.
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        env.runtime.drain_live_context_outbox(&env.session_id),
+    )
+    .await
+    .expect("drain never waits on the held summary")
+    .expect("drain with the summary held");
+    assert!(
+        sideband.context_commands.lock().await.is_empty(),
+        "no append before the user speaks"
+    );
+    env.user_speaks(&sideband, &opened).await;
     env.wait_for_preparation(&opened, |status| {
         *status == LiveContextPreparationStatus::ProviderAcknowledged
     })
@@ -950,14 +1019,14 @@ async fn concurrent_open_returns_before_the_summary_source_is_read_and_covers_th
     assert!(
         matches!(
             commands.first(),
-            Some(LiveSidebandProviderCommand::AppendInstructionsContext { text, .. })
-                if text.starts_with(LIVE_CONTEXT_BOOTSTRAP_FRAMING)
+            Some(LiveSidebandProviderCommand::AppendThinkingContext { text, .. })
+                if text.starts_with(LIVE_LATE_SUMMARY_PREFIX)
                     && text.contains(&format!(
                         "Factual context summary covering {} canonical rows.",
                         env.seeded_rows
                     ))
         ),
-        "the historical summary travels first"
+        "the historical summary travels first, on the quiet lane, after the first user turn"
     );
     assert!(
         commands.iter().skip(1).any(|command| matches!(
@@ -1013,7 +1082,10 @@ async fn held_summary_source_failure_surfaces_as_typed_bootstrap_failure() {
     env.store
         .set_gate(MaterializeGate::HoldExcept(tokio::task::try_id()));
     let (opened, _, materializations) = env.open().await;
-    assert_eq!(materializations, 0);
+    assert!(
+        materializations <= 1,
+        "only the pre-open summary task reads the committed body, at most once: {materializations}"
+    );
     assert_eq!(
         env.preparation_status(&opened).await,
         LiveContextPreparationStatus::Preparing(LiveContextPreparationStage::Capturing)
@@ -1098,9 +1170,9 @@ async fn concurrent_open_with_a_turn_mid_flight_stays_body_free_and_summarizes_t
         tokio::time::timeout(Duration::from_secs(60), env.open())
             .await
             .expect("the open never waits on the parked turn");
-    assert_eq!(
-        materializations, 0,
-        "a mid-flight turn must not make the open materialize the committed body"
+    assert!(
+        materializations <= 1,
+        "a mid-flight turn must not make the open itself materialize the committed body; the pre-open summary task reads it at most once: {materializations}"
     );
     assert!(
         elapsed < HELD_TURN_RELEASE,
@@ -1161,6 +1233,20 @@ async fn concurrent_open_with_a_turn_mid_flight_stays_body_free_and_summarizes_t
     .expect("queue the turn rows behind the bootstrap");
     assert!(sideband.context_commands.lock().await.is_empty());
     env.producer.release.notify_one();
+    // Generated, but held: nothing reaches the provider until the user has
+    // spoken on the channel; a summary appended into silence is spoken aloud.
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        env.runtime.drain_live_context_outbox(&env.session_id),
+    )
+    .await
+    .expect("drain never waits on the held summary")
+    .expect("drain with the summary held");
+    assert!(
+        sideband.context_commands.lock().await.is_empty(),
+        "no append before the user speaks"
+    );
+    env.user_speaks(&sideband, &opened).await;
     env.wait_for_preparation(&opened, |status| {
         *status == LiveContextPreparationStatus::ProviderAcknowledged
     })
@@ -1176,14 +1262,14 @@ async fn concurrent_open_with_a_turn_mid_flight_stays_body_free_and_summarizes_t
     assert!(
         matches!(
             commands.first(),
-            Some(LiveSidebandProviderCommand::AppendInstructionsContext { text, .. })
-                if text.starts_with(LIVE_CONTEXT_BOOTSTRAP_FRAMING)
+            Some(LiveSidebandProviderCommand::AppendThinkingContext { text, .. })
+                if text.starts_with(LIVE_LATE_SUMMARY_PREFIX)
                     && text.contains(&format!(
                         "Factual context summary covering {} canonical rows.",
                         env.seeded_rows
                     ))
         ),
-        "the historical summary travels first"
+        "the historical summary travels first, on the quiet lane, after the first user turn"
     );
     assert!(
         commands.iter().skip(1).any(|command| matches!(
@@ -1196,6 +1282,86 @@ async fn concurrent_open_with_a_turn_mid_flight_stays_body_free_and_summarizes_t
     );
     drop(commands);
     assert_eq!(env.producer.observed().len(), 1);
+    env.member_host
+        .close_experimental_live_pending_channel(
+            env.authority.as_ref(),
+            opened.channel_id(),
+            opened.pending_receipt(),
+        )
+        .await
+        .expect("close active channel");
+}
+
+/// A summary that is ready within the pre-open bound rides the startup
+/// `session.input` as a developer item: no preparation lease, no append on
+/// any lane at open, and the bound summary provenance names the boundary.
+#[tokio::test]
+async fn concurrent_open_seeds_a_ready_summary_as_startup_input_and_appends_nothing() {
+    let _reservation = OPEN_RESERVATION.lock().await;
+    let env = build_environment_with_pre_open_bound(Duration::from_secs(10)).await;
+    // Release the producer before the open: the summary is ready immediately.
+    env.producer.release.notify_one();
+    env.store.set_gate(MaterializeGate::Pass);
+    let (opened, _, _) = env.open().await;
+    assert_eq!(
+        env.preparation_status(&opened).await,
+        LiveContextPreparationStatus::NotRequested,
+        "a seeded summary needs no preparation lease"
+    );
+    let observed = env.producer.observed();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].cursor, env.seeded_rows as u64);
+    let seed = env
+        .authority
+        .latest_initial_seed
+        .lock()
+        .await
+        .clone()
+        .and_then(|seed| seed.upgrade())
+        .expect("seed custody");
+    // The scripted broker of this environment keeps the staged `Summary`
+    // seed (the real public broker turns it into `SeededSummary` at open;
+    // its create body is covered by the end-to-end broker test).
+    let seeded_text = match &seed.lock().await.as_ref().expect("initial seed").context {
+        GptLiveSeedContext::Summary { summary, .. }
+        | GptLiveSeedContext::SeededSummary(summary) => summary.text().to_string(),
+        other => panic!(
+            "the summary must be seeded at creation, got seed context {}",
+            other.kind()
+        ),
+    };
+    assert_eq!(
+        seeded_text,
+        format!(
+            "Factual context summary covering {} canonical rows.",
+            env.seeded_rows
+        )
+    );
+    let provenance = env
+        .authority
+        .transport
+        .bound_context_summary(opened.channel_id(), &env.session_id)
+        .await
+        .expect("seeded summary provenance");
+    assert_eq!(
+        provenance.canonical_message_cursor(),
+        env.seeded_rows as u64
+    );
+    let sideband = tokio::time::timeout(Duration::from_secs(20), env.activate_media(&opened))
+        .await
+        .expect("media activation");
+    env.runtime.notify_committed_live_context(&env.session_id);
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        env.runtime.drain_live_context_outbox(&env.session_id),
+    )
+    .await
+    .expect("drain")
+    .expect("drain");
+    assert!(
+        sideband.context_commands.lock().await.is_empty(),
+        "nothing is appended on any lane at open when the summary was seeded"
+    );
     env.member_host
         .close_experimental_live_pending_channel(
             env.authority.as_ref(),

@@ -463,6 +463,14 @@ struct State {
     /// Owned instructions-lane appends the provider acknowledged (matched an
     /// owned client event id and was accepted).
     instructions_acknowledged: usize,
+    /// Owned thinking-lane appends the provider acknowledged.
+    thinking_acknowledged: usize,
+    /// Owned thinking appends reassembled per channel and append token
+    /// (`meerkat-thinking-<token>-<index>`), in first-seen order.
+    thinking_appends: Vec<(u32, String, String)>,
+    /// Shape of each channel's `session.start` seed (host-side capture,
+    /// recorded when the create request is built, before `SessionAttached`).
+    session_input_seeds: Vec<(u32, SessionInputSeed)>,
     /// Owned instructions-lane attempts (one per wire fragment) and how many
     /// reassembled appends opened a framed summary.
     instructions_append_attempts: usize,
@@ -489,13 +497,26 @@ fn instructions_append_token(client_event_id: &str) -> Option<&str> {
 }
 
 /// What the owner injected into the provider so far, by lane.
+/// What the host put into one channel's `session.start` body: the number
+/// of history input items, how many of them are developer items (the seeded
+/// summary), and whether the startup instructions frame that history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionInputSeed {
+    pub input_items: usize,
+    pub developer_items: usize,
+    pub frames_history: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct OwnerAppends {
     pub thinking_attempts: usize,
     pub instructions_attempts: usize,
     /// Instructions-lane fragments the provider acknowledged as owned and
     /// accepted.
     pub instructions_acknowledged: usize,
+    /// Thinking-lane fragments the provider acknowledged as owned and
+    /// accepted.
+    pub thinking_acknowledged: usize,
     /// Instructions attempts that open a bootstrap summary (carry its framing).
     pub framed_summaries: usize,
 }
@@ -588,6 +609,9 @@ impl Journal {
                 session_attached_ms: Vec::new(),
                 instructions_append_texts: Vec::new(),
                 instructions_acknowledged: 0,
+                thinking_acknowledged: 0,
+                thinking_appends: Vec::new(),
+                session_input_seeds: Vec::new(),
                 thinking_append_attempts: 0,
                 thinking_append_texts: Vec::new(),
                 instructions_append_attempts: 0,
@@ -741,12 +765,64 @@ impl Journal {
                     .session_attached_ms
                     .push((event.channel_ordinal, event.elapsed_ms));
             }
-            if let thinking_capture::EventKind::ThinkingAppendAttempt { text, .. } = &event.event {
+            if let thinking_capture::EventKind::SessionInputSeeded {
+                input_items,
+                developer_items,
+                frames_history,
+            } = &event.event
+            {
+                let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+                state.session_input_seeds.push((
+                    event.channel_ordinal,
+                    SessionInputSeed {
+                        input_items: *input_items,
+                        developer_items: *developer_items,
+                        frames_history: *frames_history,
+                    },
+                ));
+            }
+            if let thinking_capture::EventKind::ThinkingAppendAttempt {
+                client_event_id,
+                text,
+            } = &event.event
+            {
                 let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
                 state.thinking_append_attempts += 1;
                 if state.thinking_append_texts.len() < thinking_capture::Capture::MAX_EVENTS {
                     state.thinking_append_texts.push(text.clone());
                 }
+                // Fragments of one thinking append share the token in their
+                // client event id (`meerkat-thinking-<token>-<index>`).
+                let token = client_event_id
+                    .strip_prefix("meerkat-thinking-")
+                    .and_then(|rest| rest.rsplit_once('-'))
+                    .map(|(token, _)| token.to_owned())
+                    .unwrap_or_else(|| client_event_id.clone());
+                let channel = event.channel_ordinal;
+                let position = state
+                    .thinking_appends
+                    .iter()
+                    .position(|(c, t, _)| *c == channel && *t == token);
+                match position {
+                    Some(index) => state.thinking_appends[index].2.push_str(text),
+                    None => {
+                        if state.thinking_appends.len() < thinking_capture::Capture::MAX_EVENTS {
+                            state.thinking_appends.push((channel, token, text.clone()));
+                        }
+                    }
+                }
+            }
+            if let thinking_capture::EventKind::ThinkingAppended {
+                matched_owned: true,
+                accepted: true,
+                ..
+            } = &event.event
+            {
+                self.0
+                    .state
+                    .lock()
+                    .map_err(|_| Fault::Poisoned)?
+                    .thinking_acknowledged += 1;
             }
             if let thinking_capture::EventKind::InstructionsAppendAttempt {
                 client_event_id,
@@ -832,6 +908,29 @@ impl Journal {
             .map(|(_, ms)| *ms))
     }
 
+    /// The `session.start` seed the host built for `channel`, if captured.
+    pub fn session_input_seed(&self, channel: u32) -> Result<Option<SessionInputSeed>, Fault> {
+        self.flush_wire()?;
+        let state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+        Ok(state
+            .session_input_seeds
+            .iter()
+            .find(|(c, _)| *c == channel)
+            .map(|(_, seed)| *seed))
+    }
+
+    /// Reassembled text of the first owned thinking append on `channel`
+    /// (the late bootstrap summary rides there by default).
+    pub fn first_owned_thinking_append(&self, channel: u32) -> Result<Option<String>, Fault> {
+        self.flush_wire()?;
+        let state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+        Ok(state
+            .thinking_appends
+            .iter()
+            .find(|(c, _, _)| *c == channel)
+            .map(|(_, _, text)| text.clone()))
+    }
+
     /// Texts of every owned instructions-lane append attempt so far.
     pub fn instructions_append_attempt_texts(&self) -> Result<Vec<String>, Fault> {
         self.flush_wire()?;
@@ -852,6 +951,7 @@ impl Journal {
             thinking_attempts: state.thinking_append_attempts,
             instructions_attempts: state.instructions_append_attempts,
             instructions_acknowledged: state.instructions_acknowledged,
+            thinking_acknowledged: state.thinking_acknowledged,
             framed_summaries: state.framed_summary_attempts,
         })
     }

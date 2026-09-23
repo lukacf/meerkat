@@ -2338,7 +2338,6 @@ mod orchestrator {
                     if policy.bootstrap_mode()
                         == super::live_summary::LiveContextBootstrapMode::Concurrent =>
                 {
-                    pending.enable_concurrent_context()?;
                     let (projection, boundary) = self
                         .live_open_concurrent_summary_projection_for_session(
                             session_id,
@@ -2359,7 +2358,35 @@ mod orchestrator {
                     None,
                 ),
             };
-            if let Some(summary) = projection.summary.as_ref() {
+            // A concurrent boundary starts its summary before the provider
+            // open and waits a bounded time: a ready, current summary rides
+            // the startup input; otherwise the open proceeds without it.
+            let boundary_cursor = boundary
+                .as_ref()
+                .map(|boundary| boundary.canonical_message_cursor());
+            let pre_open = match (summary, boundary) {
+                (Some(policy), Some(boundary)) => Some(
+                    self.pre_open_concurrent_summary(
+                        session_id,
+                        turning_mode,
+                        policy,
+                        pending.as_mut(),
+                        &mut projection,
+                        boundary,
+                    )
+                    .await?,
+                ),
+                _ => None,
+            };
+            if let Some(policy) = summary {
+                pending.set_late_summary_lane(policy.late_summary_lane());
+            }
+            if let Some(summary) = projection.summary.as_ref()
+                && !matches!(
+                    pre_open,
+                    Some(super::live_summary::LivePreOpenSummary::Seeded)
+                )
+            {
                 pending.set_context_summary(summary.clone())?;
             }
             pending.apply_execution_identity(&mut projection);
@@ -2401,17 +2428,28 @@ mod orchestrator {
                     error.to_string(),
                 ));
             }
-            let staged = match boundary.as_ref() {
-                Some(boundary) => self
-                    .runtime_adapter
-                    .stage_experimental_live_execution_with_preparation(
-                        session_id,
-                        &channel_id,
-                        boundary.canonical_message_cursor(),
-                    )
-                    .await
-                    .map(|(stage, lease)| (stage, Some(lease))),
-                None => self
+            let staged = match (&pre_open, boundary_cursor) {
+                // The summary missed the bound: the boundary stays a
+                // preparation obligation delivered after the first user turn.
+                (Some(super::live_summary::LivePreOpenSummary::Late(_)), Some(reserved_cursor)) => {
+                    self.runtime_adapter
+                        .stage_experimental_live_execution_with_preparation(
+                            session_id,
+                            &channel_id,
+                            reserved_cursor,
+                        )
+                        .await
+                        .map(|(stage, lease)| (stage, Some(lease)))
+                }
+                // Seeded at open: the boundary's rows are covered by the
+                // startup input exactly like a before-open summary.
+                (Some(super::live_summary::LivePreOpenSummary::Seeded), Some(seeded_cursor)) => {
+                    self.runtime_adapter
+                        .stage_experimental_live_execution(session_id, &channel_id, seeded_cursor)
+                        .await
+                        .map(|stage| (stage, None))
+                }
+                _ => self
                     .runtime_adapter
                     .stage_experimental_live_execution(
                         session_id,
@@ -2438,9 +2476,18 @@ mod orchestrator {
                     return Err(super::ExperimentalLiveChannelOpenError::Authority(binding));
                 }
             };
-            if let (Some(boundary), Some(lease)) = (boundary, preparation_lease)
+            if let (
+                Some(super::live_summary::LivePreOpenSummary::Late(pregeneration)),
+                Some(lease),
+                Some(reserved_cursor),
+            ) = (pre_open, preparation_lease, boundary_cursor)
                 && let Err(error) = self
-                    .start_live_context_preparation(pending.as_mut(), lease, boundary)
+                    .start_live_context_preparation_from_pregeneration(
+                        pending.as_mut(),
+                        lease,
+                        pregeneration,
+                        reserved_cursor,
+                    )
                     .await
             {
                 authority.unbind_channel(&channel_id, session_id).await;
@@ -2477,24 +2524,153 @@ mod orchestrator {
             })
         }
 
-        /// Hand the admitted boundary to its preparation job. The job owns the
-        /// source read and the `Capturing` to `Generating` transition; nothing
-        /// here materializes the transcript.
+        /// Start the summary for an admitted concurrent boundary before the
+        /// provider session exists and wait for it up to the policy's
+        /// pre-open bound. A summary that is ready and still exactly current
+        /// (no row committed after the boundary) is seeded into the projection
+        /// so it rides the startup `session.input` as a developer item, the
+        /// documented history carrier, and no append is sent at open. Any
+        /// other outcome (bound elapsed, generation failed, rows committed
+        /// meanwhile) opens without it; the generation keeps running and the
+        /// preparation job adopts it, delivering the summary after the first
+        /// user turn on the channel.
         #[cfg(feature = "openai-live")]
-        pub(crate) async fn start_live_context_preparation(
+        pub(crate) async fn pre_open_concurrent_summary(
+            &self,
+            session_id: &SessionId,
+            turning_mode: RealtimeTurningMode,
+            policy: &super::live_summary::LiveContextSummaryPolicy,
+            pending: &mut dyn crate::experimental_gpt_live::ExperimentalLivePendingOpen,
+            projection: &mut RealtimeSessionOpenProjection,
+            boundary: super::live_summary::LiveContextSummaryBoundary,
+        ) -> Result<super::live_summary::LivePreOpenSummary, super::ExperimentalLiveChannelOpenError>
+        {
+            use super::live_summary::{LiveContextSummaryPregeneration, LivePreOpenSummary};
+            let boundary_cursor = boundary.canonical_message_cursor();
+            let pregeneration = LiveContextSummaryPregeneration::spawn(boundary);
+            let bound = policy.pre_open_bound();
+            let ready = if bound.is_zero() {
+                None
+            } else {
+                tokio::time::timeout(bound, pregeneration.wait_ready())
+                    .await
+                    .ok()
+            };
+            match ready {
+                Some(Ok(summary)) => match self
+                    .seeded_open_config(
+                        session_id,
+                        turning_mode,
+                        &summary,
+                        boundary_cursor,
+                        &projection.open_config,
+                    )
+                    .await
+                {
+                    Ok(Some(open_config)) => {
+                        tracing::info!(
+                            %session_id,
+                            bound_ms = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX),
+                            "live context summary ready before the provider open; seeding it as startup input"
+                        );
+                        pending.set_context_summary(summary.clone())?;
+                        projection.open_config = open_config;
+                        projection.seed_status = LiveSeedProjectionStatus::Summarized;
+                        projection.summary = Some(summary);
+                        return Ok(LivePreOpenSummary::Seeded);
+                    }
+                    Ok(None) => tracing::info!(
+                        %session_id,
+                        "live context summary ready but rows were committed after its boundary; delivering it after the first user turn"
+                    ),
+                    Err(error) => tracing::warn!(
+                        %session_id,
+                        %error,
+                        "live context summary currency check failed; delivering it after the first user turn"
+                    ),
+                },
+                Some(Err(failure)) => tracing::warn!(
+                    %session_id,
+                    ?failure,
+                    "live context summary failed before the provider open; opening without it"
+                ),
+                None => tracing::info!(
+                    %session_id,
+                    bound_ms = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX),
+                    "live context summary not ready within the pre-open bound; opening without it"
+                ),
+            }
+            pending.enable_concurrent_context()?;
+            Ok(LivePreOpenSummary::Late(pregeneration))
+        }
+
+        /// The open config for seeding a ready summary, or `None` when the
+        /// summary cannot be seeded: a row was committed after its boundary
+        /// (the late path reasserts such rows quietly as the causal tail,
+        /// while seeding would drain them as ordinary appends at open), or
+        /// the source no longer validates. The body-free concurrent config
+        /// carries no seed rows and a zero cursor, so the seeded open is
+        /// re-projected from the current snapshot exactly like a before-open
+        /// summary, taking over its projection lease, and the summary must
+        /// validate against that projection before the open commits to it.
+        #[cfg(feature = "openai-live")]
+        async fn seeded_open_config(
+            &self,
+            session_id: &SessionId,
+            turning_mode: RealtimeTurningMode,
+            summary: &super::live_summary::LiveContextSummary,
+            boundary_cursor: u64,
+            body_free: &RealtimeSessionOpenConfig,
+        ) -> Result<Option<RealtimeSessionOpenConfig>, RealtimeSessionOpenProjectionError> {
+            let current = self
+                .service
+                .export_realtime_refresh_session_snapshot(session_id)
+                .await?;
+            let identity = self.service.live_session_llm_identity(session_id).await?;
+            if current.messages().len() as u64 != boundary_cursor {
+                return Ok(None);
+            }
+            summary.validate_current(&current, &identity)?;
+            let Some(lease) = body_free.take_open_projection_lease() else {
+                return Ok(None);
+            };
+            let tools = self.service.live_visible_tool_defs(session_id).await?;
+            let generation = current
+                .transcript_rewrite_generation()
+                .map_err(super::live_summary::LiveContextSummaryError::from)?;
+            let config = RealtimeSessionOpenConfig::for_open_from_messages(
+                turning_mode,
+                identity,
+                tools,
+                current.messages_for_model_boundary(),
+                current.messages(),
+            )?
+            .with_open_projection_lease(lease)
+            .with_user_content_identities(current.realtime_user_content_identities())
+            .with_user_content_tombstones(current.realtime_user_content_tombstones())
+            .with_transcript_rewrite_generation(generation);
+            summary.validate_projection(session_id, &config)?;
+            Ok(Some(config))
+        }
+
+        /// Hand an adopted pre-open generation to its preparation job once
+        /// the channel and lease exist.
+        #[cfg(feature = "openai-live")]
+        pub(crate) async fn start_live_context_preparation_from_pregeneration(
             &self,
             pending: &mut dyn crate::experimental_gpt_live::ExperimentalLivePendingOpen,
             lease: meerkat_runtime::live_execution::LiveContextPreparationLease,
-            boundary: super::live_summary::LiveContextSummaryBoundary,
+            pregeneration: super::live_summary::LiveContextSummaryPregeneration,
+            reserved_cursor: u64,
         ) -> Result<(), super::ExperimentalLiveChannelOpenError> {
-            if lease.reserved_cursor() != boundary.canonical_message_cursor() {
+            if lease.reserved_cursor() != reserved_cursor {
                 return Err(
                     super::live_summary::LiveContextSummaryError::ConflictingProjection.into(),
                 );
             }
             pending.retain_context_preparation_job(
-                super::live_summary::LiveContextSummaryJob::spawn(
-                    boundary,
+                super::live_summary::LiveContextSummaryJob::spawn_from_pregeneration(
+                    pregeneration,
                     lease,
                     Arc::clone(self.runtime_adapter),
                 ),

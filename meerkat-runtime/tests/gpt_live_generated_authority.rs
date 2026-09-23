@@ -679,6 +679,39 @@ fn activate_bootstrap(authority: &mut mm::MeerkatMachineAuthority) {
     .expect("audio activates while summary is still preparing");
 }
 
+/// The user speaks on the bound channel: one provider user turn, started and
+/// completed. Startup history that missed the provider open is released by
+/// this fact (or a client delegation admission) and by nothing else; the
+/// identities are unique per call so a test may speak more than once.
+fn user_speaks(authority: &mut mm::MeerkatMachineAuthority) {
+    static SPOKEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let ordinal = SPOKEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let turn = format!("bootstrap-user-turn-{ordinal}");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::ObserveLiveProviderTurnStarted {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: format!("bootstrap-user-interaction-{ordinal}"),
+            provider_turn_ref: turn.clone(),
+        },
+    )
+    .expect("the user's first turn starts on the active channel");
+    apply(
+        authority,
+        mm::MeerkatMachineInput::CompleteLiveInteraction {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            provider_turn_ref: turn,
+        },
+    )
+    .expect("the user's first turn completes");
+}
+
 fn authorize_bootstrap(authority: &mut mm::MeerkatMachineAuthority, reserved_cursor: u64) {
     apply(
         authority,
@@ -689,6 +722,8 @@ fn authorize_bootstrap(authority: &mut mm::MeerkatMachineAuthority, reserved_cur
         },
     )
     .expect("one captured source starts generation");
+    // Delivery waits for the conversation to exist: the user has spoken.
+    user_speaks(authority);
     apply(
         authority,
         mm::MeerkatMachineInput::AuthorizeLiveContextBootstrapAppend {

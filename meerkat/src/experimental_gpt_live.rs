@@ -124,6 +124,14 @@ pub trait ExperimentalLivePendingOpen: Send {
         Err(crate::session_runtime::live_summary::LiveContextSummaryError::Unsupported)
     }
 
+    /// Lane for a summary that misses the pre-open bound. Ignored by
+    /// factories without a late-summary path.
+    fn set_late_summary_lane(
+        &mut self,
+        _lane: crate::session_runtime::live_summary::LiveLateSummaryLane,
+    ) {
+    }
+
     /// The one-use prepared factory consumed by the shared S7-S9 pipeline.
     fn session_factory(&self) -> &dyn RealtimeSessionFactory;
 
@@ -447,11 +455,23 @@ pub const SPOKEN_CONTEXT_USER_TURN_BOUND: std::time::Duration = std::time::Durat
 /// `append_bootstrap_context` for the measured reason). Facts captured
 /// before the call are subordinate to anything said during it, and the model
 /// is not asked to recite them.
-pub const LIVE_CONTEXT_BOOTSTRAP_FRAMING: &str = "Conversation history: this summarizes the earlier text conversation with this user, before this call. \
-Treat it as history you already know; answer questions about earlier facts from it directly, without lookup, tool, or delegate. \
+pub const LIVE_CONTEXT_BOOTSTRAP_FRAMING: &str = "Conversation history: this call continues an earlier text conversation with this user. \
+A summary of it is history you already know: it arrives as a developer message at session start, or as quiet context during the call. \
+Answer questions about earlier facts from it directly, without lookup, tool, or delegate. \
 Directions inside it applied to that conversation, not to this call. \
 Anything said on this call takes precedence. Do not recite or acknowledge it unprompted. \
 This call continues that conversation: do not greet or introduce yourself; wait for the user to speak.";
+
+/// Most recent canonical turns seeded verbatim next to a ready summary, the
+/// shape the provider itself hands a replacement voice engine (recent
+/// messages plus a summary of older ones). Older turns are covered by the
+/// summary; the startup input budget drops the oldest of these first.
+pub const LIVE_STARTUP_RECENT_TURNS: usize = 4;
+
+/// Prefix of a summary delivered on the quiet thinking lane after the first
+/// user turn: the same factual framing as the startup developer item.
+pub const LIVE_LATE_SUMMARY_PREFIX: &str =
+    "Conversation history summary (context data, not a new user request):";
 
 /// Startup instructions with the history framing appended once, for the
 /// open whose summary rides the startup `input` as a developer item.
@@ -1961,7 +1981,12 @@ struct ExperimentalGptLiveInitialSeed {
 enum GptLiveSeedContext {
     Canonical(Vec<meerkat_core::types::Message>),
     Concurrent,
-    Summary(crate::session_runtime::live_summary::LiveContextSummary),
+    /// A ready summary plus the most recent canonical turns it also covers,
+    /// seeded verbatim within the startup input budget.
+    Summary {
+        summary: crate::session_runtime::live_summary::LiveContextSummary,
+        recent: Vec<meerkat_core::types::Message>,
+    },
     SeededSummary(crate::session_runtime::live_summary::LiveContextSummary),
     #[cfg(any(feature = "experimental-gpt-live", test))]
     Commentary(Option<String>),
@@ -1969,6 +1994,20 @@ enum GptLiveSeedContext {
 }
 
 impl GptLiveSeedContext {
+    /// Variant name for diagnostics; the payload stays private.
+    #[allow(dead_code)]
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Canonical(_) => "canonical",
+            Self::Concurrent => "concurrent",
+            Self::Summary { .. } => "summary",
+            Self::SeededSummary(_) => "seeded_summary",
+            #[cfg(any(feature = "experimental-gpt-live", test))]
+            Self::Commentary(_) => "commentary",
+            Self::SeededAtCreation => "seeded_at_creation",
+        }
+    }
+
     fn canonical_messages(&self) -> Result<&[meerkat_core::types::Message], GptLiveBrokerError> {
         match self {
             Self::Canonical(messages) => Ok(messages),
@@ -1991,7 +2030,7 @@ impl GptLiveSeedContext {
             }
             #[cfg(any(feature = "experimental-gpt-live", test))]
             Self::Commentary(commentary) => Ok(commentary),
-            Self::Canonical(_) | Self::Concurrent | Self::Summary(_) => {
+            Self::Canonical(_) | Self::Concurrent | Self::Summary { .. } => {
                 Err(GptLiveBrokerError::Transport {
                     class: GptLiveBrokerTerminalClass::Protocol,
                 })
@@ -2258,20 +2297,26 @@ impl GptLiveBrokerOpen for PublicLiveBrokerFactory {
             return Err(GptLiveBrokerError::InvalidResponsesProfile);
         }
         let config = PublicLiveOpenConfig::new(offer_sdp, voice)?;
-        // A summary that is ready now rides the startup `input` as a
-        // developer item and is framed once here in the startup
-        // instructions. A concurrent bootstrap carries its framing on the
-        // instructions-lane append that delivers the late summary, exactly
-        // as before, so the startup instructions stay the caller's own.
+        // History is startup data. A ready summary rides the startup
+        // `input` as a developer item together with the most recent canonical
+        // turns, and the continuing-conversation clause goes once into the
+        // startup instructions. A concurrent open whose summary is not ready
+        // carries the same clause (the summary arrives after the user's first
+        // turn) and sends nothing on any append lane at open.
         let (mut config, frames_history) = match &seed.context {
-            GptLiveSeedContext::Concurrent => (config.with_pending_context(), false),
-            GptLiveSeedContext::Summary(summary) => {
+            GptLiveSeedContext::Concurrent => (config.with_pending_context(), true),
+            GptLiveSeedContext::Summary { summary, recent } => {
                 summary.validate_provider_source().await.map_err(|_| {
                     GptLiveBrokerError::Transport {
                         class: GptLiveBrokerTerminalClass::Protocol,
                     }
                 })?;
-                (config.with_context_summary(summary.text()), true)
+                (
+                    config
+                        .with_history(recent)
+                        .with_context_summary(summary.text()),
+                    true,
+                )
             }
             _ => (
                 config.with_history(seed.context.canonical_messages()?),
@@ -2288,7 +2333,9 @@ impl GptLiveBrokerOpen for PublicLiveBrokerFactory {
             .into_parts();
         seed.context =
             match std::mem::replace(&mut seed.context, GptLiveSeedContext::SeededAtCreation) {
-                GptLiveSeedContext::Summary(summary) => GptLiveSeedContext::SeededSummary(summary),
+                GptLiveSeedContext::Summary { summary, .. } => {
+                    GptLiveSeedContext::SeededSummary(summary)
+                }
                 _ => GptLiveSeedContext::SeededAtCreation,
             };
         Ok((answer_sdp, Arc::new(session)))
@@ -2773,6 +2820,8 @@ struct RegisteredExperimentalGptLiveChannel {
     context_summary_provenance:
         Option<crate::session_runtime::live_summary::LiveContextSummaryProvenance>,
     context_preparation_job: Option<crate::session_runtime::live_summary::LiveContextSummaryJob>,
+    /// Lane for a summary delivered after the first user turn.
+    late_summary_lane: crate::session_runtime::live_summary::LiveLateSummaryLane,
 }
 
 /// Opaque one-use provider custody prepared from one exact per-open admission.
@@ -2829,6 +2878,7 @@ impl ExperimentalGptLivePendingChannel {
                 execution_profile_id: execution_profile.profile_id().to_string(),
                 context_summary_provenance: None,
                 context_preparation_job: None,
+                late_summary_lane: Default::default(),
             },
             initial_seed,
             adapter_taken: AtomicBool::new(false),
@@ -3078,7 +3128,16 @@ impl RealtimeSessionFactory for ExperimentalGptLivePendingChannel {
         // profile instructions; only canonical conversation messages cross
         // this context seam.
         let context = match (&self.context_summary, self.concurrent_context) {
-            (Some(summary), false) => GptLiveSeedContext::Summary(summary.clone()),
+            (Some(summary), false) => GptLiveSeedContext::Summary {
+                summary: summary.clone(),
+                recent: conversation_messages
+                    .iter()
+                    .rev()
+                    .take(LIVE_STARTUP_RECENT_TURNS)
+                    .rev()
+                    .cloned()
+                    .collect(),
+            },
             (None, true) => GptLiveSeedContext::Concurrent,
             (None, false) => GptLiveSeedContext::Canonical(conversation_messages),
             (Some(_), true) => {
@@ -4217,6 +4276,13 @@ impl ExperimentalLivePendingOpen for ExperimentalGptLivePreparedOpen {
         Ok(())
     }
 
+    fn set_late_summary_lane(
+        &mut self,
+        lane: crate::session_runtime::live_summary::LiveLateSummaryLane,
+    ) {
+        self.pending.registration.late_summary_lane = lane;
+    }
+
     fn retain_context_preparation_job(
         &mut self,
         job: crate::session_runtime::live_summary::LiveContextSummaryJob,
@@ -4640,6 +4706,13 @@ impl ExperimentalGptLiveWebrtcTransport {
                     .cloned()
             })
             .ok_or(ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+        let late_summary_lane = self
+            .registered_by_channel
+            .lock()
+            .await
+            .get(authority.channel_id())
+            .map(|registration| registration.late_summary_lane)
+            .unwrap_or_default();
         let binding = self
             .active_binding(authority.session_id())
             .await
@@ -4648,36 +4721,31 @@ impl ExperimentalGptLiveWebrtcTransport {
         let (authority, sideband) = authority
             .into_sideband_append_authority(binding, &text)
             .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
-        // The late summary travels on the trusted instructions lane with its
-        // framing, the status quo. Measured against gpt-live-1 on 2026-09-23
-        // (public e2e S104 silence hold after open, S99 recall), lane by
-        // lane:
-        // - thinking lane, bare summary, framing once in the startup
-        //   instructions: recall worked (S99 2/2) but the model spoke
-        //   unprompted 3/3, reciting the summary about 1 s after the append;
-        //   the provider documents the lane as quiet, the model does not
-        //   treat a short factual append that way;
-        // - instructions lane with this framing (this code): unprompted
-        //   speech 2/9 historically, 0/1 in the same session;
-        // - developer item in the startup `input` (summary ready before
-        //   open, `PublicLiveOpenConfig::with_context_summary`): the
-        //   documented history carrier and not a speech trigger; not
-        //   exercised by the concurrent scenarios.
-        // Spawning the summary job before the provider open so a concurrent
-        // summary could also ride `input` was considered and not done (the
-        // preparation lease and Capturing state follow the open). The
-        // generated authority is bound to the exact summary digest above;
-        // the framing is wire presentation and keeps the summary subordinate
-        // to what was said live.
-        // The framing is its own fragment and the summary starts at the next
-        // fragment boundary (measured: with a 500-byte cut through the first
-        // summary sentence, recall of a planted phrase was 3/7; see the
-        // fragmenter in meerkat-openai `context_fragments`).
-        let command = LiveSidebandCommand::append_framed_instructions_context(
-            sideband,
-            LIVE_CONTEXT_BOOTSTRAP_FRAMING,
-            text,
-        )
+        // The late summary is delivered only after the first user turn on the
+        // channel (generated guard `user_has_spoken_on_channel` on
+        // `AuthorizeLiveContextBootstrapAppend`, mirrored by the runtime
+        // readiness wait), on the lane the open policy chose. Measured
+        // against gpt-live-1 on 2026-09-23 with the append landing while the
+        // model was idle after open: thinking lane, bare summary, recall 2/2
+        // but spoken unprompted 3/3; framed instructions append, recall 4/10
+        // (1/4 with the framing in its own fragment), spoken unprompted 2/9
+        // historically. Nothing is appended into silence any more; the lane
+        // stays a typed policy choice so both can be measured after speech.
+        let command = match late_summary_lane {
+            crate::session_runtime::live_summary::LiveLateSummaryLane::Thinking => {
+                LiveSidebandCommand::append_thinking_context(
+                    sideband,
+                    format!("{LIVE_LATE_SUMMARY_PREFIX}\n{text}"),
+                )
+            }
+            crate::session_runtime::live_summary::LiveLateSummaryLane::Instructions => {
+                LiveSidebandCommand::append_framed_instructions_context(
+                    sideband,
+                    LIVE_CONTEXT_BOOTSTRAP_FRAMING,
+                    text,
+                )
+            }
+        }
         .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
         let attempt = command.attempt();
         let (resolution_tx, resolution_rx) = oneshot::channel();
@@ -8484,6 +8552,7 @@ mod tests {
                     execution_profile_id: self.execution_profile.profile_id().to_string(),
                     context_summary_provenance: None,
                     context_preparation_job: None,
+                    late_summary_lane: Default::default(),
                 },
                 initial_seed,
                 adapter_taken: AtomicBool::new(false),
@@ -9833,14 +9902,18 @@ mod tests {
                     body["session"]["instructions"],
                     format!("Catalog guidance.\n\n{LIVE_CONTEXT_BOOTSTRAP_FRAMING}")
                 );
+                // The developer item leads; the most recent canonical turns
+                // the summary covers follow it verbatim, within the budget.
                 let input = body["session"]["input"].as_array().expect("startup input");
-                assert_eq!(input.len(), 1, "{body}");
+                assert_eq!(input.len(), 2, "{body}");
                 assert_eq!(input[0]["role"], "developer");
                 let text = input[0]["content"][0]["text"].as_str().unwrap();
                 assert_eq!(input[0]["content"][0]["type"], "input_text");
                 assert!(text.ends_with("Earlier discussion covered the project."));
                 assert!(!text.contains("Earlier conversation detail"));
                 assert!(text.contains("context data, not a new user request"));
+                assert_eq!(input[1]["role"], "user");
+                assert_eq!(input[1]["content"][0]["text"], history_text);
             } else {
                 assert_eq!(body["session"]["instructions"], "Catalog guidance.");
                 assert_eq!(
@@ -10086,6 +10159,7 @@ mod tests {
                 execution_profile_id: crate::GPT_LIVE_CLIENT_CONTEXT_PROFILE_ID.to_string(),
                 context_summary_provenance: None,
                 context_preparation_job: None,
+                late_summary_lane: Default::default(),
             },
             initial_seed: Arc::clone(&initial_seed),
             adapter_taken: AtomicBool::new(false),
@@ -12272,6 +12346,7 @@ mod tests {
                 execution_profile_id: crate::GPT_LIVE_FUNCTION_BRIDGE_PROFILE_ID.to_string(),
                 context_summary_provenance: None,
                 context_preparation_job: None,
+                late_summary_lane: Default::default(),
             },
         );
         let activator = Arc::new(InspectingFailingActivator {
@@ -15691,6 +15766,7 @@ mod tests {
                     std::time::Duration::from_secs(5),
                 )
                 .expect("bounded host summary policy")
+                .with_pre_open_bound(std::time::Duration::ZERO)
                 .with_bootstrap_mode(if concurrent {
                     crate::session_runtime::live_summary::LiveContextBootstrapMode::Concurrent
                 } else {
@@ -15924,6 +16000,37 @@ mod tests {
             );
             assert!(sideband.context_commands.lock().await.is_empty());
             barrier.release.notify_one();
+            // The user speaks: the held summary is released by this fact alone.
+            {
+                let binding = authority
+                    .transport
+                    .active_binding(&session_id)
+                    .await
+                    .expect("active provider binding");
+                let turn = LiveSidebandTurnRef::__from_provider_observation(
+                    &old_channel,
+                    "first-user-turn".into(),
+                    "provider-first-user-turn".into(),
+                )
+                .expect("user turn ref");
+                sideband.push(LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnStarted {
+                        turn: turn.clone(),
+                        role: LiveSidebandTurnRole::User,
+                    },
+                ));
+                // The utterance completes: ordinary appends defer while a
+                // provider turn is active, and the tail drains afterwards.
+                sideband.push(LiveSidebandObservation::new(
+                    binding,
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn,
+                        role: LiveSidebandTurnRole::User,
+                        transcript: "first spoken input".into(),
+                    },
+                ));
+            }
             tokio::time::timeout(std::time::Duration::from_secs(2), &mut delivery)
                 .await
                 .unwrap()
@@ -16202,6 +16309,59 @@ mod tests {
                     .unwrap();
             }
             assert!(sideband.context_commands.lock().await.is_empty());
+            // The user speaks: the held summary is released by this fact alone.
+            {
+                let binding = authority
+                    .transport
+                    .active_binding(&session_id)
+                    .await
+                    .expect("active provider binding");
+                let turn = LiveSidebandTurnRef::__from_provider_observation(
+                    &old_channel,
+                    "first-user-turn".into(),
+                    "provider-first-user-turn".into(),
+                )
+                .expect("user turn ref");
+                sideband.push(LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnStarted {
+                        turn: turn.clone(),
+                        role: LiveSidebandTurnRole::User,
+                    },
+                ));
+                // The utterance completes: ordinary appends defer while a
+                // provider turn is active, and the tail drains afterwards.
+                sideband.push(LiveSidebandObservation::new(
+                    binding,
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn,
+                        role: LiveSidebandTurnRole::User,
+                        transcript: "first spoken input".into(),
+                    },
+                ));
+            }
+            // The utterance is a real canonical user row; wait for it so the
+            // row count below is a baseline the quiet delivery must not move.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let (current, _) = service
+                        .export_live_context_summary_snapshot(&session_id)
+                        .await
+                        .unwrap();
+                    if current.messages().iter().any(|message| {
+                        matches!(
+                            message,
+                            meerkat_core::Message::User(user)
+                                if user.text_content() == "first spoken input"
+                        )
+                    }) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the spoken utterance commits before the summary is released");
             let rows_before_delivery = service
                 .export_live_context_summary_snapshot(&session_id)
                 .await
@@ -16267,11 +16427,28 @@ mod tests {
                         | SummaryTestCase::ConcurrentReplacement
                 )
             ) {
+                let command_kinds: Vec<&str> = commands
+                    .iter()
+                    .map(|command| match command {
+                        LiveSidebandProviderCommand::AppendThinkingContext { text, .. } => {
+                            if text.starts_with(LIVE_LATE_SUMMARY_PREFIX) {
+                                "thinking:summary"
+                            } else {
+                                "thinking"
+                            }
+                        }
+                        LiveSidebandProviderCommand::AppendInstructionsContext { .. } => {
+                            "instructions"
+                        }
+                        LiveSidebandProviderCommand::AppendSessionContext { .. } => "session",
+                        _ => "delegation",
+                    })
+                    .collect();
                 assert!(
-                    matches!(commands.first(), Some(LiveSidebandProviderCommand::AppendInstructionsContext { text, .. })
-                    if text.starts_with(LIVE_CONTEXT_BOOTSTRAP_FRAMING)
+                    matches!(commands.first(), Some(LiveSidebandProviderCommand::AppendThinkingContext { text, .. })
+                    if text.starts_with(LIVE_LATE_SUMMARY_PREFIX)
                         && text.contains("Factual context summary")),
-                    "the historical summary travels first, on the instructions lane, behind its precedence framing"
+                    "the historical summary travels first, on the quiet lane, after the first user turn; got {command_kinds:?}"
                 );
                 assert!(commands.iter().skip(1).any(|command| matches!(
                     command, LiveSidebandProviderCommand::AppendSessionContext { text, .. }
@@ -16433,6 +16610,47 @@ mod tests {
                         LiveContextPreparationStage::Generating
                     )
                 );
+                // The user speaks: the held summary is released by this fact alone.
+                {
+                    let binding = authority
+                        .transport
+                        .active_binding(&session_id)
+                        .await
+                        .expect("active provider binding");
+                    let turn = LiveSidebandTurnRef::__from_provider_observation(
+                        &channel,
+                        "first-user-turn".into(),
+                        "provider-first-user-turn".into(),
+                    )
+                    .expect("user turn ref");
+                    authority
+                        .latest_sideband
+                        .lock()
+                        .await
+                        .as_ref()
+                        .expect("replacement sideband")
+                        .push(LiveSidebandObservation::new(
+                            binding.clone(),
+                            LiveSidebandObservationKind::TurnStarted {
+                                turn: turn.clone(),
+                                role: LiveSidebandTurnRole::User,
+                            },
+                        ));
+                    authority
+                        .latest_sideband
+                        .lock()
+                        .await
+                        .as_ref()
+                        .expect("replacement sideband")
+                        .push(LiveSidebandObservation::new(
+                            binding,
+                            LiveSidebandObservationKind::TurnFinished {
+                                turn,
+                                role: LiveSidebandTurnRole::User,
+                                transcript: "first spoken input".into(),
+                            },
+                        ));
+                }
                 producer.recovery_release.notify_one();
                 tokio::time::timeout(std::time::Duration::from_secs(3), async {
                     loop {
@@ -17069,7 +17287,7 @@ mod tests {
                 GptLiveSeedContext::Canonical(messages) => {
                     serde_json::to_string(messages).expect("seed")
                 }
-                GptLiveSeedContext::Summary(summary) => summary.text().to_string(),
+                GptLiveSeedContext::Summary { summary, .. } => summary.text().to_string(),
                 _ => panic!("replacement has not been sent yet"),
             };
             assert!(rendered.contains("prior unmeasured voice dialogue"));

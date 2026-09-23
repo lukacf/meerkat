@@ -86,6 +86,12 @@ export CARGO_INCREMENTAL=0
 export CARGO_TERM_COLOR=always
 
 cd "${work_root}"
+# Parity with scripts/repo-cargo: source-level tests (meerkat's
+# brain_swap_surface_parity reads other crates' files) resolve the workspace
+# from this variable, falling back to the cwd only when it is the workspace.
+# Cargo runs test binaries from the crate directory, whose Cargo.toml made the
+# fallback pick `<workspace>/meerkat` and fail every read on the 09-16 lane.
+export MEERKAT_WORKSPACE_ROOT="${work_root}"
 
 run_feature_matrix_lane() {
   local feature_lane="$1"

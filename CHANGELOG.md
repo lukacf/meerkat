@@ -788,6 +788,30 @@ them.
   with the existing `u64::MAX` vocabulary instead of a decimal literal; the
   canonical TLC lane, generated authority, and render contracts are unchanged.
 
+### Upgrade notes
+
+- Hosts that create WorkGraph goals, attention bindings or reassignments for
+  mob members must do so through `meerkat_mob::mob_scoped_workgraph_service`
+  (realm `mob.<mob_id>`); a member-bound target in any other realm is now
+  refused with `WorkGraphError::AttentionTargetRealmMismatch` instead of being
+  stored where the member never reads it. Member-bound bindings written to a
+  host realm by earlier releases are not visible to members and must be
+  re-created in the mob realm (MobKit performs this migration at runtime
+  start).
+- A durable session refused with `DurableResumeHold::AuditedEndpointDivergence`
+  is repaired with `rkat session repair-wholeblob <session-id> --json` (then
+  `--apply --json`) against the runtime store, addressed either as
+  `--runtime-store <file>` for a flat layout or `--state-root <dir> --realm
+  <realm>`; the 0.8.40 CLI has no such subcommand.
+- Known behaviours observed in the real-API voice smoke on this release, not
+  changed here: the public GPT Live model can answer into a pause of a long
+  user utterance and delegate on the partial request (S101, S103); a
+  delegation result commentary can start its readout while the user is
+  speaking; after a goodbye turn the provider may end the session several
+  seconds after `session.close`, so an explicit `live/close` issued in that
+  window converges only when the provider stream ends (inside the 20 s close
+  bound).
+
 ### Breaking
 - `WorkGraphError` gains the variant `AttentionTargetRealmMismatch { owner_key,
   mob_id, required_realm_id, realm_id }` (exhaustive matches must add the

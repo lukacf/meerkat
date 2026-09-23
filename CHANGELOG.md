@@ -301,6 +301,20 @@ them.
 
 ### Fixed
 
+- `meerkat-mob` test scaffolding: the durable-fork boundary tests
+  (`durable_fork_delegation_waits_for_a_busy_source_turn_boundary_then_forks`,
+  `durable_fork_delegation_reports_source_busy_after_the_bounded_wait`) modelled
+  the running source turn with a mutex the test itself held, installed after
+  the spawn. The autonomous source's own spawn kickoff turn was still queued
+  on a starved host, so its runtime lap took that mutex as a real turn
+  boundary and the fork (or the forked child's provisioning, behind the mock's
+  single service-wide gate) waited on a turn that never returns, timing out
+  at a fixed 10 s bound; on a fast host the lap had already run with a no-op
+  guard and the tests never observed a real turn at all. The gate is now
+  installed before the spawn so the kickoff turn is the running turn, the
+  tests wait for the mock to enter it before delegating, release it through
+  the mock's keep-alive path, and bound the fork by three times the same
+  host's spawn wall clock floored at 10 s.
 - `meerkat-mob` actor isolation tests no longer fail under CPU starvation
   (observed on 4 vCPU GitHub-hosted runners). The mock comms trust gate can
   be narrowed to exact generated trust authority sources, and the

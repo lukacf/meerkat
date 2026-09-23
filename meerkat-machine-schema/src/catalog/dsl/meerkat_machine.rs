@@ -1770,6 +1770,7 @@ pub enum LiveDelegationNarrationKind {
     Blocked,
     Completed,
     SourceBusy,
+    Failed,
 }
 
 /// Generated phase of one channel's provider-affecting authority.
@@ -8688,7 +8689,71 @@ macro_rules! meerkat_catalog_machine_dsl {
                     == self.live_delegation_channel_by_operation.get_cloned(operation_id))
             && for_all(channel_id in self.live_delegation_active_worker_count_by_channel.keys(),
                 self.live_delegation_active_worker_count_by_channel.get_copied(channel_id).get("value")
-                    <= self.live_delegation_channel_worker_cap)
+                    <= self.live_delegation_channel_worker_cap
+                && (self.live_delegation_active_worker_count_by_channel.get_copied(channel_id).get("value") == 0
+                    || exists(operation_id in self.live_delegation_schedule_state_by_operation.keys(),
+                        self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id)
+                        && (self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationScheduleState::Claimed)
+                            || self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationScheduleState::Running)))))
+            // A worker slot is held exactly by the operations whose schedule
+            // state is Claimed or Running: a live worker phase (start
+            // authorized, running, or cancel authorized) implies one of those
+            // states, those states imply a worker phase that has not settled
+            // (a cancellation that failed leaves the worker to record its own
+            // terminal), and on a still-bound channel their slot count is
+            // positive. A counter that drifted from the scheduled workers is
+            // therefore visible.
+            && for_all(operation_id in self.live_delegation_schedule_state_by_operation.keys(),
+                (!(self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationWorkerPhase::StartAuthorized)
+                    || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationWorkerPhase::Running)
+                    || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationWorkerPhase::CancelAuthorized))
+                    || self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationScheduleState::Claimed)
+                    || self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationScheduleState::Running))
+                && (!(self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationScheduleState::Claimed)
+                    || self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationScheduleState::Running))
+                    || ((self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                            == Some(LiveDelegationWorkerPhase::StartAuthorized)
+                        || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                            == Some(LiveDelegationWorkerPhase::Running)
+                        || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                            == Some(LiveDelegationWorkerPhase::CancelAuthorized)
+                        || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
+                            == Some(LiveDelegationWorkerPhase::Failed))
+                        && (!self.live_execution_runtime_id_by_channel.contains_key(
+                                self.live_delegation_channel_by_operation.get_cloned(operation_id).get("value"))
+                            || (self.live_delegation_active_worker_count_by_channel.contains_key(
+                                    self.live_delegation_channel_by_operation.get_cloned(operation_id).get("value"))
+                                && self.live_delegation_active_worker_count_by_channel.get_copied(
+                                    self.live_delegation_channel_by_operation.get_cloned(operation_id).get("value")).get("value")
+                                    >= 1)))))
+            // An abandoned interaction never leaves a live delegation behind:
+            // its operation was refused at reconciliation, reached a worker
+            // terminal, carries a cancellation reason, ended Cancelled or
+            // Failed, or never bound a worker at all (a queued item that the
+            // shell cancels on the same channel close).
+            && for_all(operation_id in self.live_delegation_interaction_by_operation.keys(),
+                !self.live_abandoned_interactions.contains(
+                    self.live_delegation_interaction_by_operation.get_cloned(operation_id).get("value"))
+                || self.live_delegation_reconciliation_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationReconciliation::MaterialConflict)
+                || self.live_delegation_reconciliation_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationReconciliation::Missing)
+                || self.live_delegation_worker_terminal_by_operation.contains_key(operation_id)
+                || self.live_delegation_cancellation_reason_by_operation.contains_key(operation_id)
+                || self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationScheduleState::Cancelled)
+                || self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                    == Some(LiveDelegationScheduleState::Failed)
+                || !self.live_delegation_worker_identity_by_operation.contains_key(operation_id))
         }
 
         invariant live_delegation_operation_has_exact_join_identity {
@@ -25309,6 +25374,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                     operation_id,
                     LiveDelegationWorkerPhase::Retired
                 );
+                // The revoked worker's schedule state settles with its
+                // recorded terminal, exactly as a live terminal record does.
+                self.live_delegation_schedule_state_by_operation.insert(
+                    operation_id,
+                    if terminal == LiveDelegationWorkerTerminalKind::Completed {
+                        LiveDelegationScheduleState::Completed
+                    } else { if terminal == LiveDelegationWorkerTerminalKind::Blocked {
+                        LiveDelegationScheduleState::Blocked
+                    } else { if terminal == LiveDelegationWorkerTerminalKind::Cancelled {
+                        LiveDelegationScheduleState::Cancelled
+                    } else {
+                        LiveDelegationScheduleState::Failed
+                    }}}
+                );
                 self.live_delegation_late_terminal_operations.insert(operation_id);
                 self.live_delegation_result_eligible_operations.remove(operation_id);
             }
@@ -25697,6 +25776,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (kind == LiveDelegationNarrationKind::SourceBusy
                     && self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
                         == Some(LiveDelegationScheduleState::Created))
+                || (kind == LiveDelegationNarrationKind::Failed
+                    && (self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                            == Some(LiveDelegationScheduleState::Failed)
+                        || self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                            == Some(LiveDelegationScheduleState::Cancelled)))
             }
             guard "narration_advances" {
                 self.live_delegation_last_narration_by_operation.get_copied(operation_id) != Some(kind)

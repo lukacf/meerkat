@@ -188,13 +188,11 @@ async fn fixture_with_policy(
         std::fs::create_dir(workspace.0.join(name)).expect("factory root");
     }
     let (client, entered, cancelled) = ScriptedClient::new();
-    // The mob's shared WorkGraph is scoped to the mob realm, exactly as a
-    // host wires it: members build in `mob.<id>` and the grant must match.
+    // The host hands the mob state a WorkGraph service scoped to its own
+    // realm (`default` here, the RPC runtime realm in `rkat serve`). The mob
+    // runtime rescopes that service's store to `mob.<id>`, where members
+    // build, so the fixture never pre-scopes it.
     let mob_name = format!("parallel-{}", uuid::Uuid::new_v4());
-    let mob_realm = meerkat_core::mob_realm_id(&format!("implicit-{mob_name}"))
-        .expect("mob realm")
-        .as_str()
-        .to_string();
     let factory = meerkat::AgentFactory::new(workspace.0.join("factory"))
         .user_config_root(workspace.0.join("user"))
         .runtime_root(workspace.0.join("runtime"))
@@ -204,14 +202,9 @@ async fn fixture_with_policy(
         .comms(true);
     let mut builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
     builder.default_llm_client = Some(client.clone());
-    let workgraph = with_workgraph.then(|| {
-        meerkat::WorkGraphService::with_scope(
-            Arc::new(meerkat::MemoryWorkGraphStore::new()),
-            mob_realm.clone(),
-            meerkat::WorkNamespace::default(),
-        )
-    });
-    if let Some(service) = workgraph.as_ref() {
+    let host_workgraph = with_workgraph
+        .then(|| meerkat::WorkGraphService::new(Arc::new(meerkat::MemoryWorkGraphStore::new())));
+    if let Some(service) = host_workgraph.as_ref() {
         meerkat::surface::set_default_workgraph_namespace_grant(
             &builder,
             Some(service.namespace_grant().clone()),
@@ -235,12 +228,34 @@ async fn fixture_with_policy(
     let runtime = service.runtime_adapter().expect("runtime");
     let mobs = Arc::new(
         crate::MobMcpState::new(service.clone(), meerkat_mob::MobControlPrincipal::Owner)
-            .with_workgraph_service(workgraph.clone()),
+            .with_workgraph_service(host_workgraph.clone()),
     );
     let mob_id = mobs
         .mob_create_definition(meerkat_mob::MobDefinition::implicit(&mob_name, "gpt-5.5"))
         .await
         .expect("mob");
+    // Tests drive dependencies through the same mob-scoped service the forks'
+    // tools use.
+    let workgraph = mobs
+        .workgraph_service_for_mob(&mob_id)
+        .expect("mob workgraph scope");
+    if let Some(service) = workgraph.as_ref() {
+        assert_eq!(
+            service.default_realm_id(),
+            meerkat_core::mob_realm_id(mob_id.as_str())
+                .expect("mob realm")
+                .as_str(),
+            "voice items live in the mob realm the forks build in"
+        );
+        assert_ne!(
+            service.default_realm_id(),
+            host_workgraph
+                .as_ref()
+                .expect("host workgraph")
+                .default_realm_id(),
+            "the host service was scoped elsewhere"
+        );
+    }
     let identity = AgentIdentity::from("voice-source");
     let mut spec = meerkat_mob::SpawnMemberSpec::new("delegate", identity.as_str());
     spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
@@ -257,8 +272,11 @@ async fn fixture_with_policy(
             .with_execution_policy(policy),
     );
     let control = Arc::new(ExactProjectionControl::default());
+    // The channel is bound on the generated experimental (client-context)
+    // path, exactly as a public GPT Live open leaves it: result delivery
+    // authority requires that binding, so releases reach the control plane.
     let binding = runtime
-        .__test_open_live_delegation_channel(&session_id)
+        .__test_open_live_context_channel(&session_id, 0)
         .await
         .expect("binding");
     let provider_binding = provider_binding_from_runtime(&binding);
@@ -402,6 +420,27 @@ impl Fixture {
         self.control.narrations.lock().await.clone()
     }
 
+    async fn events(&self) -> Vec<ExactProjectionControlEvent> {
+        self.control.events.lock().await.clone()
+    }
+
+    /// Close a voice item the way a fork's `workgraph_close` tool call does.
+    async fn close_item_as(&self, title: &str, status: meerkat::WorkStatus) {
+        let item = self.voice_item_titled(title).await;
+        self.workgraph
+            .as_ref()
+            .expect("workgraph")
+            .close(meerkat::CloseWorkItemRequest {
+                id: item.id,
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                status,
+            })
+            .await
+            .expect("close voice item");
+    }
+
     async fn voice_items(&self) -> Vec<meerkat::WorkItem> {
         self.workgraph
             .as_ref()
@@ -439,12 +478,26 @@ impl Fixture {
         .await;
     }
 
+    /// Close the fixture channel once every completed result has left the
+    /// coordinator. A close with a result still queued for the provider
+    /// merges that result into the source member as a new turn (the
+    /// post-close path), which these scheduling tests do not drive.
     async fn close(self) {
         assert_eq!(
             self.handle.resolve_bridge_session_id(&self.identity).await,
             Some(self.session_id.clone()),
             "the source member keeps its session through voice scheduling"
         );
+        wait_until(WAIT, || async {
+            self.coordinator.retained.lock().await.is_empty()
+                && self
+                    .coordinator
+                    .result_delivery_tasks
+                    .lock()
+                    .await
+                    .is_empty()
+        })
+        .await;
         self.coordinator
             .cancel_channel_binding(&self.provider_binding)
             .await;
@@ -540,6 +593,29 @@ async fn two_delegations_run_in_parallel_and_both_complete() {
         ),
         "{narrations:?}"
     );
+
+    // The Completed sentence and the result it introduces are released under
+    // one hold of the channel's delegation append lane: nothing from the
+    // other worker lands between them.
+    let events = fx.events().await;
+    for (index, event) in events.iter().enumerate() {
+        if let ExactProjectionControlEvent::Narration(
+            LiveDelegationNarrationKind::Completed,
+            text,
+        ) = event
+        {
+            let key = if text.contains("find the fastest train to Oslo") {
+                "first-delegation"
+            } else {
+                "second-delegation"
+            };
+            assert_eq!(
+                events.get(index + 1),
+                Some(&ExactProjectionControlEvent::Release(key.to_string())),
+                "{events:?}"
+            );
+        }
+    }
 
     let items = fx.voice_items().await;
     assert_eq!(items.len(), 2);
@@ -873,12 +949,224 @@ async fn without_a_workgraph_store_delegations_run_strictly_serially_and_never_s
     fx.close().await;
 }
 
-// The DurableFork path on fix/voice-continuing-conversation f77099a23 hangs
-// when the source member is mid-turn (the fork under the held turn boundary
-// never returns), so the SourceBusy result this test drives is unreachable
-// until that fix lands. Un-ignore after rebasing onto it.
+/// A worker that closes its own item as failed (the briefing's "cannot be
+/// done" path) ends Failed: the failure is spoken, nothing is released as a
+/// result, and the item stays Failed.
 #[tokio::test]
-#[ignore = "blocked on the voice branch fork-under-held-guard hang; SourceBusy never surfaces on f77099a23"]
+async fn failed_worker_is_narrated_as_failed_and_releases_no_result() {
+    let mut fx = fixture(true).await;
+    let operation = fx.delegate("doomed", "book a table on the moon").await;
+    let call = fx.next_call().await;
+    assert!(call.user_text.contains("book a table on the moon"));
+    fx.close_item_as("book a table on the moon", meerkat::WorkStatus::Failed)
+        .await;
+    fx.client.release(call.index);
+    wait_until(WAIT, || async {
+        fx.schedule_state(&operation).await
+            == Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Failed)
+    })
+    .await;
+    wait_until(WAIT, || async {
+        fx.narrations()
+            .await
+            .iter()
+            .any(|(kind, _)| *kind == LiveDelegationNarrationKind::Failed)
+    })
+    .await;
+    let narrations = fx.narrations().await;
+    assert_eq!(
+        kinds(&narrations),
+        vec![
+            LiveDelegationNarrationKind::Claimed,
+            LiveDelegationNarrationKind::Failed,
+        ],
+        "{narrations:?}"
+    );
+    assert_eq!(
+        narrations[1].1,
+        "Voice request \"book a table on the moon\" could not be completed."
+    );
+    assert!(fx.control.releases.lock().await.is_empty());
+    fx.wait_for_retired(1).await;
+    assert_eq!(
+        fx.voice_item_titled("book a table on the moon")
+            .await
+            .status,
+        meerkat::WorkStatus::Failed
+    );
+    fx.assert_nothing_cancelled();
+    fx.close().await;
+}
+
+/// A blocked item whose dependency ends without completing never becomes
+/// ready in the WorkGraph (only a Completed blocker satisfies an edge). The
+/// scheduler replaces the item and restarts the same operation with a
+/// preface naming what did not finish, instead of leaving it waiting until
+/// the channel closes.
+#[tokio::test]
+async fn blocked_worker_restarts_with_a_preface_when_its_blocker_fails() {
+    let mut fx = fixture(true).await;
+    let first = fx.delegate("first", "collect the quarterly numbers").await;
+    let second = fx
+        .delegate("second", "write the summary from the numbers")
+        .await;
+    let first_call = fx.next_call().await;
+    let second_call = fx.next_call().await;
+    let first_call_index = if first_call.user_text.contains("quarterly") {
+        first_call.index
+    } else {
+        second_call.index
+    };
+    let second_call_index = 1 - first_call_index;
+
+    let workgraph = fx.workgraph.clone().expect("workgraph");
+    let first_item = fx.voice_item_titled("collect the quarterly numbers").await;
+    let second_item = fx
+        .voice_item_titled("write the summary from the numbers")
+        .await;
+    workgraph
+        .link(meerkat::LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            kind: meerkat::WorkEdgeKind::Blocks,
+            from_id: first_item.id.clone(),
+            to_id: second_item.id.clone(),
+        })
+        .await
+        .expect("blocks edge");
+    let second_item = fx
+        .voice_item_titled("write the summary from the numbers")
+        .await;
+    workgraph
+        .release(meerkat::ReleaseWorkItemRequest {
+            id: second_item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: second_item.revision,
+        })
+        .await
+        .expect("release behind the blocker");
+    fx.client.release(second_call_index);
+    wait_until(WAIT, || async {
+        fx.schedule_state(&second).await
+            == Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Blocked)
+    })
+    .await;
+    fx.expect_no_call().await;
+
+    // The dependency fails instead of completing.
+    fx.close_item_as("collect the quarterly numbers", meerkat::WorkStatus::Failed)
+        .await;
+    fx.client.release(first_call_index);
+    let restarted = fx.next_call().await;
+    assert_eq!(restarted.index, 2);
+    assert!(
+        restarted
+            .user_text
+            .contains("ended without a result (failed or cancelled)"),
+        "{}",
+        restarted.user_text
+    );
+    assert!(
+        restarted
+            .user_text
+            .contains("\"collect the quarterly numbers\""),
+        "{}",
+        restarted.user_text
+    );
+    assert!(
+        restarted
+            .user_text
+            .contains("write the summary from the numbers")
+    );
+    assert_eq!(
+        fx.schedule_state(&second).await,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Running)
+    );
+    fx.client.release(2);
+    fx.wait_for_completed(std::slice::from_ref(&second)).await;
+    wait_until(WAIT, || async {
+        fx.schedule_state(&first).await
+            == Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Failed)
+    })
+    .await;
+    fx.assert_nothing_cancelled();
+
+    // The original blocked item was replaced: it closed Cancelled with the
+    // failed blocker as evidence, and the replacement completed.
+    wait_until(WAIT, || async {
+        fx.voice_items()
+            .await
+            .iter()
+            .filter(|item| item.title == "write the summary from the numbers")
+            .any(|item| item.status == meerkat::WorkStatus::Completed)
+    })
+    .await;
+    let summaries = fx
+        .voice_items()
+        .await
+        .into_iter()
+        .filter(|item| item.title == "write the summary from the numbers")
+        .collect::<Vec<_>>();
+    assert_eq!(summaries.len(), 2, "{summaries:?}");
+    let replaced = summaries
+        .iter()
+        .find(|item| item.id == second_item.id)
+        .expect("original item");
+    assert_eq!(replaced.status, meerkat::WorkStatus::Cancelled);
+    assert!(replaced.evidence_refs.iter().any(|evidence| {
+        evidence.kind == "live_delegation_result"
+            && evidence
+                .summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("blockers ended without completing"))
+    }));
+    let replacement = summaries
+        .iter()
+        .find(|item| item.id != second_item.id)
+        .expect("replacement item");
+    assert_eq!(replacement.status, meerkat::WorkStatus::Completed);
+    assert!(replacement.evidence_refs.iter().any(|evidence| {
+        evidence.kind == "superseded_voice_item" && evidence.id == second_item.id.to_string()
+    }));
+    wait_until(WAIT, || async {
+        fx.narrations().await.iter().any(|(kind, text)| {
+            *kind == LiveDelegationNarrationKind::Completed
+                && text.contains("write the summary from the numbers")
+        })
+    })
+    .await;
+    let narrations = fx.narrations().await;
+    let second_narrations = narrations
+        .iter()
+        .filter(|(_, text)| text.contains("write the summary from the numbers"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds(&second_narrations),
+        vec![
+            LiveDelegationNarrationKind::Claimed,
+            LiveDelegationNarrationKind::Blocked,
+            LiveDelegationNarrationKind::Claimed,
+            LiveDelegationNarrationKind::Completed,
+        ],
+        "{narrations:?}"
+    );
+    assert!(
+        narrations.iter().any(|(kind, text)| {
+            *kind == LiveDelegationNarrationKind::Failed
+                && text.contains("collect the quarterly numbers")
+        }),
+        "{narrations:?}"
+    );
+    fx.close().await;
+}
+
+// The source member is mid-turn when the delegation arrives. The bounded
+// fork wait ends in the typed `LiveDelegationStartFailure::SourceBusy`; the
+// coordinator requeues the exact operation, narrates SourceBusy, and starts
+// the fork once the source turn has ended.
+#[tokio::test]
 async fn busy_source_member_defers_the_fork_narrates_and_retries_without_dropping_it() {
     let mut fx = fixture(true).await;
     // The source member is mid-turn when the delegation arrives, so the

@@ -1277,7 +1277,14 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "LiveDelegationNarrationKind",
-                &["Queued", "Claimed", "Blocked", "Completed", "SourceBusy"],
+                &[
+                    "Queued",
+                    "Claimed",
+                    "Blocked",
+                    "Completed",
+                    "SourceBusy",
+                    "Failed",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "LiveExecutionChannelPhase",

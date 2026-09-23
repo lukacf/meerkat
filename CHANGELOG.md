@@ -219,16 +219,34 @@ them.
   because the source member was still mid-turn (`SourceBusy`) is requeued
   through the same input and retried; the request is never dropped.
   Executor state (queued, started, waiting on another request, waiting for
-  the source member's turn, finished) reaches the voice model only through
-  generated narration authority
+  the source member's turn, finished, failed) reaches the voice model only
+  through generated narration authority
   (`AuthorizeLiveDelegationNarration`, `LiveDelegationNarrationAuthority`,
   `ExperimentalGptLiveControlPlane::narrate_delegation`,
-  `LiveSidebandCommand::narrate_delegation`) with constant templates; without
-  a WorkGraph store the channel degrades to a strict serial queue.
-  `MeerkatMachine` gains `live_delegation_schedule_state`,
-  `requeue_live_delegation`, `cancel_queued_live_delegation`, and
-  `authorize_live_delegation_narration`; `MobMcpState::workgraph_service`
-  exposes the host WorkGraph service.
+  `LiveSidebandCommand::narrate_delegation`) with constant templates; a
+  request that cannot start or whose worker ends failed is spoken as failed
+  (`LiveDelegationNarrationKind::Failed`) instead of vanishing. A blocked
+  request whose dependency ends failed or cancelled (the WorkGraph treats
+  only a completed blocker as satisfied) restarts with a replacement item and
+  a preface naming what did not finish. Without a WorkGraph store the
+  channel degrades to a strict serial queue. The canonical transcript commit
+  for a delegation happens when the item is dispatched and waits at most the
+  source turn bound (`MobSessionService::
+  commit_live_delegation_final_transcript_at_turn_boundary`,
+  `PersistentSessionService::
+  commit_live_user_transcript_final_with_machine_at_turn_boundary`,
+  `meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary`), so a member that
+  is mid-turn is narrated as busy and retried instead of stalling the
+  channel. The mob runtime rescopes the host's WorkGraph service to the mob
+  realm (`meerkat_mob::mob_scoped_workgraph_service`,
+  `MobMcpState::workgraph_service_for_mob`) so voice items and the forks'
+  `workgraph_*` tools address one namespace under any host realm; the RPC mob
+  state supplies the host store (`SessionRuntime::workgraph_store`) even when
+  no runtime realm identity is active. `MeerkatMachine` gains
+  `live_delegation_schedule_state`, `requeue_live_delegation`,
+  `cancel_queued_live_delegation`, and `authorize_live_delegation_narration`;
+  `MobMcpState::workgraph_service` exposes the host WorkGraph service as the
+  host scoped it.
 
 ### Fixed
 
@@ -328,6 +346,40 @@ them.
   `ResolveLiveDelegationCancellation` is now accepted after the terminal
   (`ResolveLiveDelegationCancellationAfterTerminal`) as evidence about an
   already-settled worker.
+- A live delegation arriving while the backing member is mid-turn no longer
+  stalls the channel's observation loop. The canonical final-transcript
+  commit waited without bound for the member's turn-finalization gate,
+  inline in the loop that consumes provider observations, so transcript
+  deltas and lifecycle facts stopped flowing until the member's turn ended
+  and the user heard nothing. The commit now runs when the item is
+  dispatched, off that loop, waits at most
+  `DelegationExecutionService::SOURCE_TURN_BOUNDARY_WAIT`, and a source still
+  mid-turn is narrated as busy and retried with nothing committed.
+- Mob members that resolve WorkGraph tools on now build under `rkat serve`.
+  Member builds used the host's default WorkGraph grant, scoped to the
+  runtime realm, which the factory refuses against the member's `mob.<id>`
+  build realm; live delegation therefore silently ran its serial fallback
+  there. The provisioner hands every member build the mob-scoped service and
+  its grant.
+- A live delegation whose WorkGraph item refuses the scheduler's claim (a
+  sibling fork linked it between read and claim, or a transient store error)
+  is deferred and retried (`WORKGRAPH_START_ATTEMPTS` bounded) instead of
+  being retired unspoken; a busy-source deferral no longer stops the
+  scheduling pass for the channel's other ready items.
+- A channel close no longer both speaks and merges the same delegation
+  result: the pending delivery task settles first and only a result that
+  never crossed the provider boundary merges into the source member. The
+  "finished" sentence and the result it introduces are released under one
+  hold of the channel's delegation append lane, so another worker's
+  narration or result cannot land between them.
+- The generated machine's revoked-worker restart reconciliation
+  (`ReconcileRevokedLiveDelegationWorkerAfterRestartFresh`) settles the
+  operation's schedule state with its recorded terminal; it previously left
+  the state Running behind a retired worker. The invariant
+  `live_delegation_items_are_channel_bound_and_capped` now ties Claimed and
+  Running schedule states to live worker phases and to a positive slot count
+  on a bound channel, and requires an abandoned interaction's delegation to
+  be refused, terminal, cancelled, or never bound to a worker.
 - A live delegation arriving while the backing member is mid-turn no longer
   fails with `ForkSourceUnavailable { cause: Running }`. The persistent fork
   owner waits, bounded, for the member's turn-finalization boundary and forks
@@ -515,7 +567,9 @@ them.
   move); `LiveDelegationWorkerTerminalKind` gains `Blocked`
   (`LiveDelegationWorkerTerminalKind::*` in the schema catalog, the kernel,
   the runtime DSL bridge, and `meerkat_runtime::live_execution`); the enums
-  `LiveDelegationScheduleState` and `LiveDelegationNarrationKind` are added.
+  `LiveDelegationScheduleState` and `LiveDelegationNarrationKind` (variants
+  `Queued`, `Claimed`, `Blocked`, `Completed`, `SourceBusy`, `Failed`) are
+  added.
   Arrival of a new delegation no longer drives `SupersedeLiveInteraction`;
   the input remains for explicit cancellation.
 - `meerkat-live`: `LiveSidebandProviderCommand` gains the variant
@@ -527,6 +581,15 @@ them.
   `ExperimentalGptLiveNarrationDispatch` and
   `ExperimentalGptLiveNarrationWaiter` are added.
 - `DelegationMemberOptions` gains the public field `grant_workgraph_tools`.
+- `MobSessionService` gains the REQUIRED method
+  `commit_live_delegation_final_transcript_at_turn_boundary` (no default:
+  every implementation must add it, forwarding to the persistent owner where
+  it wraps one). New public items: `meerkat_core::
+  LiveFinalTranscriptCommitAtTurnBoundary`, `PersistentSessionService::
+  commit_live_user_transcript_final_with_machine_at_turn_boundary`,
+  `meerkat_mob::mob_scoped_workgraph_service`,
+  `MobMcpState::workgraph_service_for_mob`, and (meerkat-rpc)
+  `SessionRuntime::workgraph_store`.
 - `GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS` is reworded: it now tells
   the voice model that several delegated requests run at once and that the
   executor reports each one's state (consumers matching the old text must

@@ -6,7 +6,7 @@
 //! Nothing here inspects transcript or result text: every scheduling
 //! decision reads WorkGraph status, edges, and readiness facts only.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use meerkat::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
@@ -130,6 +130,9 @@ pub(super) fn narration_text(
         LiveDelegationNarrationKind::SourceBusy => format!(
             "Voice request \"{title}\" is waiting for the assistant to finish its current turn before it starts."
         ),
+        LiveDelegationNarrationKind::Failed => {
+            format!("Voice request \"{title}\" could not be completed.")
+        }
     }
 }
 
@@ -169,6 +172,60 @@ pub(super) fn task_with_waited_results(task: &str, waited: &[(String, String)]) 
     text
 }
 
+/// Task preface for a worker restarted after the requests it waited for
+/// ended without a result (failed or cancelled). The worker proceeds with
+/// what it has instead of waiting forever on a dependency that will never
+/// complete.
+pub(super) fn task_after_failed_blockers(task: &str, failed: &[(WorkItemId, String)]) -> String {
+    if failed.is_empty() {
+        return task.to_string();
+    }
+    let mut text = String::from(
+        "The voice requests this one waited for ended without a result (failed or cancelled):\n",
+    );
+    for (_, title) in failed {
+        text.push_str(&format!(
+            "- \"{}\"\n",
+            truncate_chars(title, NARRATION_TITLE_CHARS)
+        ));
+    }
+    text.push_str("Proceed without their results; say plainly what is missing if it matters.\n\n");
+    text.push_str(task);
+    text
+}
+
+/// Evidence summary recorded on a voice item that is replaced because the
+/// items it depended on ended without completing.
+fn failed_blockers_evidence_summary(failed: &[(WorkItemId, String)]) -> String {
+    let names = failed
+        .iter()
+        .map(|(id, title)| {
+            format!(
+                "{id} (\"{}\")",
+                truncate_chars(title, NARRATION_TITLE_CHARS)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    truncate_chars(
+        &format!("replaced after its blockers ended without completing: {names}"),
+        EVIDENCE_SUMMARY_CHARS,
+    )
+}
+
+/// One channel's scheduling facts, read from a single WorkGraph snapshot.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct ChannelReadiness {
+    /// Items the WorkGraph reports ready to claim.
+    pub ready: HashSet<WorkItemId>,
+    /// Open items whose every unresolved `blocks` edge comes from an item
+    /// that ended Failed or Cancelled. The WorkGraph never reports these
+    /// ready (only a Completed blocker satisfies an edge), so the scheduler
+    /// restarts them with a replacement item and a preface naming what did
+    /// not finish. Keyed by item, in edge order.
+    pub blockers_failed: HashMap<WorkItemId, Vec<(WorkItemId, String)>>,
+}
+
 /// Text queued on the source member when a fork finishes after its voice
 /// channel closed: the result still merges into the canonical conversation.
 pub(super) fn post_close_merge_text(title: &str, result: &str) -> String {
@@ -205,11 +262,61 @@ impl VoiceWorkGraph {
         delegation_ref: &str,
         transcript: &str,
     ) -> Result<VoiceWorkItem, String> {
+        self.create_item_with_evidence(channel_id, session_id, delegation_ref, transcript, None)
+            .await
+    }
+
+    /// Replace `item`, whose blockers ended without completing, with a fresh
+    /// item carrying the same request and no dependency edges. The old item
+    /// closes Cancelled with the failed blockers recorded as evidence; the
+    /// new item references it. The generated machine operation is unchanged:
+    /// only the WorkGraph binding of the delegation moves.
+    pub(super) async fn replace_after_failed_blockers(
+        &self,
+        item: &VoiceWorkItem,
+        failed: &[(WorkItemId, String)],
+        channel_id: &LiveChannelId,
+        session_id: &meerkat_core::SessionId,
+        delegation_ref: &str,
+        transcript: &str,
+    ) -> Result<VoiceWorkItem, String> {
+        self.close(
+            &item.id,
+            WorkStatus::Cancelled,
+            Some(&failed_blockers_evidence_summary(failed)),
+        )
+        .await?;
+        self.create_item_with_evidence(
+            channel_id,
+            session_id,
+            delegation_ref,
+            transcript,
+            Some(WorkEvidenceRef {
+                kind: "superseded_voice_item".to_string(),
+                id: item.id.to_string(),
+                label: Some("replaced voice item".to_string()),
+                summary: Some(failed_blockers_evidence_summary(failed)),
+                confirmation_kind: None,
+                confirming_owner_key: None,
+                execution_binding_id: None,
+            }),
+        )
+        .await
+    }
+
+    async fn create_item_with_evidence(
+        &self,
+        channel_id: &LiveChannelId,
+        session_id: &meerkat_core::SessionId,
+        delegation_ref: &str,
+        transcript: &str,
+        extra_evidence: Option<WorkEvidenceRef>,
+    ) -> Result<VoiceWorkItem, String> {
         let title = truncate_chars(transcript, WORK_TITLE_CHARS);
         let mut labels = BTreeSet::new();
         labels.insert(VOICE_WORK_LABEL.to_string());
         labels.insert(channel_work_label(channel_id));
-        let evidence_refs = vec![
+        let mut evidence_refs = vec![
             WorkEvidenceRef {
                 kind: "live_delegation".to_string(),
                 id: delegation_ref.to_string(),
@@ -238,6 +345,7 @@ impl VoiceWorkGraph {
                 execution_binding_id: None,
             },
         ];
+        evidence_refs.extend(extra_evidence);
         let item = self
             .service
             .create(CreateWorkItemRequest {
@@ -259,21 +367,68 @@ impl VoiceWorkGraph {
             .map_err(|error| format!("voice work item {id} read failed: {error}"))
     }
 
-    /// Ready item ids for one channel's queue, read from one snapshot.
-    pub(super) async fn ready_item_ids(
+    /// Scheduling facts for one channel's queue, read from one snapshot of
+    /// every voice item (blockers may belong to another channel).
+    pub(super) async fn channel_readiness(
         &self,
         channel_id: &LiveChannelId,
-    ) -> Result<HashSet<WorkItemId>, String> {
+    ) -> Result<ChannelReadiness, String> {
         let snapshot = self
             .service
             .snapshot(WorkGraphSnapshotFilter {
-                labels: vec![VOICE_WORK_LABEL.to_string(), channel_work_label(channel_id)],
-                include_terminal: false,
+                labels: vec![VOICE_WORK_LABEL.to_string()],
+                include_terminal: true,
                 ..WorkGraphSnapshotFilter::default()
             })
             .await
             .map_err(|error| format!("voice work readiness snapshot failed: {error}"))?;
-        Ok(snapshot.ready_item_ids.into_iter().collect())
+        let channel_label = channel_work_label(channel_id);
+        let items_by_id = snapshot
+            .items
+            .iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<BTreeMap<_, _>>();
+        let ready = snapshot
+            .ready_item_ids
+            .iter()
+            .filter(|id| {
+                items_by_id
+                    .get(*id)
+                    .is_some_and(|item| item.labels.contains(&channel_label))
+            })
+            .cloned()
+            .collect::<HashSet<_>>();
+        let mut blockers_failed = HashMap::new();
+        for item in snapshot
+            .items
+            .iter()
+            .filter(|item| item.labels.contains(&channel_label) && item.status == WorkStatus::Open)
+        {
+            let unresolved = snapshot
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.to_id == item.id)
+                .filter_map(|edge| items_by_id.get(&edge.from_id).copied())
+                .filter(|blocker| blocker.status != WorkStatus::Completed)
+                .collect::<Vec<_>>();
+            if !unresolved.is_empty()
+                && unresolved.iter().all(|blocker| {
+                    matches!(blocker.status, WorkStatus::Failed | WorkStatus::Cancelled)
+                })
+            {
+                blockers_failed.insert(
+                    item.id.clone(),
+                    unresolved
+                        .into_iter()
+                        .map(|blocker| (blocker.id.clone(), blocker.title.clone()))
+                        .collect(),
+                );
+            }
+        }
+        Ok(ChannelReadiness {
+            ready,
+            blockers_failed,
+        })
     }
 
     /// Claim `item` for the exact worker about to run it.
@@ -450,6 +605,10 @@ mod tests {
                 false
             ),
             "Voice request \"book the \"late\" flight\" is waiting for the assistant to finish its current turn before it starts."
+        );
+        assert_eq!(
+            narration_text(LiveDelegationNarrationKind::Failed, title, 0, &[], false),
+            "Voice request \"book the \"late\" flight\" could not be completed."
         );
     }
 

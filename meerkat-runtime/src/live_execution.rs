@@ -3161,6 +3161,7 @@ impl LiveDelegationNarrationAuthority {
                     LiveDelegationNarrationKind::Blocked => "blocked",
                     LiveDelegationNarrationKind::Completed => "completed",
                     LiveDelegationNarrationKind::SourceBusy => "source-busy",
+                    LiveDelegationNarrationKind::Failed => "failed",
                 }
             ),
         )

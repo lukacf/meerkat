@@ -2744,6 +2744,7 @@ pub enum LiveDelegationNarrationKind {
     Blocked,
     Completed,
     SourceBusy,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

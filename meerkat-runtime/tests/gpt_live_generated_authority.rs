@@ -2006,8 +2006,12 @@ fn open_turn_result_delivery_terminalizes_delivered_and_provider_rejected() {
     }
 }
 
+/// Arrival never supersedes: a newer user turn while an earlier delegation's
+/// worker is still running leaves that worker's result eligible for speech.
+/// Only a result already released for delivery when the newer turn starts is
+/// suppressed (see the late-result test below).
 #[test]
-fn newer_user_turn_suppresses_old_result_while_worker_is_still_running() {
+fn newer_user_turn_does_not_suppress_a_running_workers_result() {
     const NEW_INTERACTION: &str = "33333333-3333-4333-8333-333333333333";
     const NEW_PROVIDER_TURN: &str = "opaque-provider-turn-newer-before-result";
     const RESULT_DIGEST: &str = "worker-pending-old-result-digest";
@@ -2067,13 +2071,13 @@ fn newer_user_turn_suppresses_old_result_while_worker_is_still_running() {
             provider_turn_ref: NEW_PROVIDER_TURN.to_string(),
         },
     )
-    .expect("newer user turn suppresses speech for the still-running old operation");
+    .expect("newer user turn starts while the old operation's worker keeps running");
     assert!(
-        authority
+        !authority
             .state()
             .live_result_speech_suppressed_operations
             .contains(&operation_id()),
-        "suppression is machine-owned before worker completion or result release"
+        "a later request never suppresses a running worker's result"
     );
 
     apply(
@@ -2134,24 +2138,27 @@ fn newer_user_turn_suppresses_old_result_while_worker_is_still_running() {
     )
     .expect("old result acknowledgement remains a truthful delivered terminal");
 
-    assert!(resolution.effects().iter().any(|effect| matches!(
-        effect,
-        mm::MeerkatMachineEffect::LiveDelegationResultDeliveryResolved {
-            observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
-            speech_disposition:
-                mm::LiveDelegationResultSpeechDisposition::SuppressedByNewerUserTurn,
-            retry_allowed: false,
-            recovery_required: false,
-            ..
-        }
-    )));
+    assert!(
+        resolution.effects().iter().any(|effect| matches!(
+            effect,
+            mm::MeerkatMachineEffect::LiveDelegationResultDeliveryResolved {
+                observation: mm::LiveDelegationResultDeliveryObservation::Delivered,
+                speech_disposition: mm::LiveDelegationResultSpeechDisposition::Eligible,
+                retry_allowed: false,
+                recovery_required: false,
+                ..
+            }
+        )),
+        "{:?}",
+        resolution.effects()
+    );
     assert_eq!(
         authority
             .state()
             .live_delegation_worker_terminal_by_operation
             .get(&operation_id()),
         Some(&mm::LiveDelegationWorkerTerminalKind::Completed),
-        "speech suppression cannot rewrite durable executor completion"
+        "the newer turn cannot rewrite durable executor completion"
     );
     assert_eq!(
         authority
@@ -2159,22 +2166,7 @@ fn newer_user_turn_suppresses_old_result_while_worker_is_still_running() {
             .live_result_delivery_observation_by_operation
             .get(&operation_id()),
         Some(&mm::LiveDelegationResultDeliveryObservation::Delivered),
-        "suppressed speech still projects truthful provider delivery"
-    );
-    assert!(
-        apply(
-            &mut authority,
-            mm::MeerkatMachineInput::ObserveLiveAssistantTurnStarted {
-                channel_id: CHANNEL.to_string(),
-                runtime_id: runtime_id(),
-                fence_token: fence(),
-                generation: generation(),
-                assistant_turn_ref: "stale-worker-result-assistant".to_string(),
-                candidate_interaction_id: "assistant-only-interaction".to_string(),
-            },
-        )
-        .is_err(),
-        "old delivered result cannot admit spoken output after the newer user turn"
+        "the delivered result projects truthful provider delivery"
     );
 }
 
@@ -5992,6 +5984,73 @@ fn queued_cancellation_refuses_running_workers_and_closes_the_item_for_schedulin
         schedule_state(&authority, 1),
         Some(mm::LiveDelegationScheduleState::Running)
     );
+}
+
+#[test]
+fn failed_narration_is_released_once_for_failed_or_cancelled_items_only() {
+    let mut authority = opened_authority();
+    bind_only(&mut authority);
+    admit_parallel_delegation(&mut authority, 1);
+    admit_parallel_delegation(&mut authority, 2);
+    assert!(
+        narrate(&mut authority, 1, mm::LiveDelegationNarrationKind::Failed).is_err(),
+        "a queued item is never narrated as failed"
+    );
+    // A queued item the shell retires (unstartable) is cancelled, then spoken.
+    apply(
+        &mut authority,
+        mm::MeerkatMachineInput::CancelQueuedLiveDelegation {
+            channel_id: CHANNEL.to_string(),
+            runtime_id: runtime_id(),
+            fence_token: fence(),
+            generation: generation(),
+            interaction_id: channel_interaction(1),
+            operation_id: channel_operation(1),
+        },
+    )
+    .expect("queued item cancels");
+    let failed = narrate(&mut authority, 1, mm::LiveDelegationNarrationKind::Failed)
+        .expect("a cancelled queued item narrates as failed");
+    assert!(failed.effects().iter().any(|effect| matches!(
+        effect,
+        mm::MeerkatMachineEffect::LiveDelegationNarrationAuthorized {
+            kind: mm::LiveDelegationNarrationKind::Failed,
+            operation_id,
+            ..
+        } if operation_id == &channel_operation(1)
+    )));
+    assert!(
+        narrate(&mut authority, 1, mm::LiveDelegationNarrationKind::Failed).is_err(),
+        "the failure is spoken once"
+    );
+    // A worker whose turn ends Failed is spoken as failed, never as completed.
+    start_parallel_worker(&mut authority, 2);
+    assert!(
+        narrate(&mut authority, 2, mm::LiveDelegationNarrationKind::Failed).is_err(),
+        "a running item is never narrated as failed"
+    );
+    record_parallel_terminal(
+        &mut authority,
+        2,
+        &channel_worker(2),
+        mm::LiveDelegationWorkerTerminalKind::Failed,
+    );
+    assert_eq!(
+        schedule_state(&authority, 2),
+        Some(mm::LiveDelegationScheduleState::Failed)
+    );
+    assert!(
+        narrate(
+            &mut authority,
+            2,
+            mm::LiveDelegationNarrationKind::Completed
+        )
+        .is_err(),
+        "a failed worker is never narrated as finished"
+    );
+    narrate(&mut authority, 2, mm::LiveDelegationNarrationKind::Failed)
+        .expect("failed worker narrates as failed");
+    assert_eq!(active_worker_count(&authority), 0);
 }
 
 #[test]

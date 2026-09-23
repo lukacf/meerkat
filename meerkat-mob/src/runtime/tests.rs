@@ -1774,6 +1774,11 @@ struct MockSessionService {
     /// sessions, so archive stays terminal (no revival from an archived
     /// snapshot).
     archived_session_ids: RwLock<HashSet<SessionId>>,
+    /// Sessions whose committed WholeBlob document the current decoder
+    /// refuses: `materialize_session_resume_verdict` answers with meerkat's
+    /// typed `WholeBlobAuditedEndpointDivergence` for them, exactly as the
+    /// persistent owner does when recovery reads a wedged document.
+    resume_verdict_divergence_sessions: RwLock<HashSet<SessionId>>,
     /// Sessions whose create_session (re-materialization) should fail.
     create_fail_sessions: RwLock<HashSet<SessionId>>,
     /// Optional custom failure detail per failing session (presence implies
@@ -1956,6 +1961,7 @@ impl MockSessionService {
             archived_sent_intents: RwLock::new(HashMap::new()),
             archived_peer_lifecycle_max_in_flight: RwLock::new(HashMap::new()),
             archived_session_ids: RwLock::new(HashSet::new()),
+            resume_verdict_divergence_sessions: RwLock::new(HashSet::new()),
             create_fail_sessions: RwLock::new(HashSet::new()),
             create_fail_details: RwLock::new(HashMap::new()),
             create_fail_attempts: RwLock::new(HashMap::new()),
@@ -2617,6 +2623,23 @@ impl MockSessionService {
     /// Make the next `count` durable resume-authority observations report
     /// no current authority (the durable store unreadable), without touching
     /// session reads.
+    /// Script the durable document of `session_id` as refused by the
+    /// audited-endpoint guard until [`Self::clear_resume_verdict_divergence`].
+    async fn set_resume_verdict_divergence(&self, session_id: &SessionId) {
+        self.resume_verdict_divergence_sessions
+            .write()
+            .await
+            .insert(session_id.clone());
+    }
+
+    /// The operator repaired the document: resumes read it again.
+    async fn clear_resume_verdict_divergence(&self, session_id: &SessionId) {
+        self.resume_verdict_divergence_sessions
+            .write()
+            .await
+            .remove(session_id);
+    }
+
     fn set_resume_authority_absent_remaining(&self, count: u64) {
         self.resume_authority_absent_remaining
             .store(count, Ordering::Release);
@@ -4073,6 +4096,19 @@ impl MobSessionService for MockSessionService {
         ))
     }
 
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        Err(SessionError::Unsupported(
+            "mock session service does not support live delegation canonical projection".into(),
+        ))
+    }
+
     async fn start_turn_with_admission_notification(
         &self,
         session_id: &SessionId,
@@ -4103,6 +4139,16 @@ impl MobSessionService for MockSessionService {
         session_id: &SessionId,
     ) -> Result<super::session_service::SessionResumeVerdict, SessionError> {
         self.resume_prepare_calls.fetch_add(1, Ordering::Relaxed);
+        if self
+            .resume_verdict_divergence_sessions
+            .read()
+            .await
+            .contains(session_id)
+        {
+            return Err(SessionError::WholeBlobAuditedEndpointDivergence {
+                id: session_id.clone(),
+            });
+        }
         if let Some(prepared) = self
             .prepared_resume_sessions
             .write()
@@ -11087,6 +11133,25 @@ impl MobSessionService for PersistedListingSessionService {
             .await
     }
 
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        self.inner
+            .commit_live_delegation_final_transcript_at_turn_boundary(
+                machine,
+                session_id,
+                provisional,
+                final_event,
+                bound,
+            )
+            .await
+    }
+
     async fn materialize_session_resume_verdict(
         &self,
         session_id: &SessionId,
@@ -11474,6 +11539,25 @@ impl MobSessionService for InactiveReadSessionService {
     ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
         self.inner
             .commit_live_delegation_final_transcript(machine, session_id, provisional, final_event)
+            .await
+    }
+
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        self.inner
+            .commit_live_delegation_final_transcript_at_turn_boundary(
+                machine,
+                session_id,
+                provisional,
+                final_event,
+                bound,
+            )
             .await
     }
 
@@ -48077,6 +48161,19 @@ impl MobSessionService for RealCommsSessionService {
         ))
     }
 
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        Err(SessionError::Unsupported(
+            "real-comms test service does not support live delegation canonical projection".into(),
+        ))
+    }
+
     async fn materialize_session_resume_verdict(
         &self,
         session_id: &SessionId,
@@ -49392,6 +49489,20 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         _provisional: meerkat_core::ProvisionalLiveHandoff,
         _final_event: meerkat_core::RealtimeTranscriptEvent,
     ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        Err(SessionError::Unsupported(
+            "runtime-backed real-comms test service has no store-sealed live delegation projection"
+                .into(),
+        ))
+    }
+
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
         Err(SessionError::Unsupported(
             "runtime-backed real-comms test service has no store-sealed live delegation projection"
                 .into(),
@@ -56279,6 +56390,7 @@ async fn test_missing_bridge_session_stops_member_from_looking_runnable_after_st
             member_id,
             session_id,
             reason,
+            ..
         } => {
             assert_eq!(member_id, AgentIdentity::from("w-1"));
             assert_eq!(session_id, Some(bridge_session_id));
@@ -56338,6 +56450,7 @@ async fn test_submit_work_marks_missing_bridge_session_broken_without_prior_stat
             member_id,
             session_id,
             reason,
+            ..
         } => {
             assert_eq!(member_id, AgentIdentity::from("w-1"));
             assert_eq!(session_id, Some(bridge_session_id.clone()));
@@ -56941,6 +57054,7 @@ async fn test_revival_failure_is_typed_terminal_without_retry_loop() {
             member_id,
             session_id,
             reason,
+            ..
         } => {
             assert_eq!(member_id, AgentIdentity::from("w-1"));
             assert_eq!(session_id, Some(bridge_session_id.clone()));
@@ -57073,6 +57187,7 @@ async fn test_revival_already_active_without_live_session_is_typed_terminal() {
             member_id,
             session_id,
             reason,
+            ..
         } => {
             assert_eq!(member_id, AgentIdentity::from("w-1"));
             assert_eq!(session_id, Some(bridge_session_id.clone()));

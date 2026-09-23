@@ -25,8 +25,8 @@ use meerkat_core::{
 };
 #[cfg(feature = "live")]
 use meerkat_live::{
-    LiveSidebandAppendAuthority, LiveSidebandDelegationRef, LiveSidebandReleaseAuthority,
-    ProviderWebrtcBinding,
+    LiveSidebandAppendAuthority, LiveSidebandDelegationRef, LiveSidebandNarrationAuthority,
+    LiveSidebandReleaseAuthority, ProviderWebrtcBinding,
 };
 use sha2::{Digest, Sha256};
 #[cfg(feature = "live")]
@@ -271,6 +271,34 @@ struct LiveDelegationRecoveryOperation {
     abandoned: bool,
     late: bool,
     result_eligible: bool,
+    /// Generated schedule state. Older images predate parallel scheduling
+    /// and derive it from the worker phase and terminal on restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    schedule_state: Option<crate::meerkat_machine::dsl::LiveDelegationScheduleState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_narration: Option<crate::meerkat_machine::dsl::LiveDelegationNarrationKind>,
+}
+
+impl LiveDelegationRecoveryOperation {
+    /// Schedule state for this durable worker record, deriving one for
+    /// images written before the schedule state existed.
+    fn effective_schedule_state(&self) -> crate::meerkat_machine::dsl::LiveDelegationScheduleState {
+        use crate::meerkat_machine::dsl::{
+            LiveDelegationScheduleState as Schedule, LiveDelegationWorkerPhase as Phase,
+        };
+        if let Some(state) = self.schedule_state {
+            return state;
+        }
+        match (self.phase, self.terminal) {
+            (Phase::StartAuthorized, _) => Schedule::Claimed,
+            (Phase::Running | Phase::CancelAuthorized, None) => Schedule::Running,
+            (Phase::Failed, None) => Schedule::Failed,
+            (_, Some(DslLiveDelegationWorkerTerminalKind::Completed)) => Schedule::Completed,
+            (_, Some(DslLiveDelegationWorkerTerminalKind::Cancelled)) => Schedule::Cancelled,
+            (_, Some(DslLiveDelegationWorkerTerminalKind::Blocked)) => Schedule::Blocked,
+            (_, Some(DslLiveDelegationWorkerTerminalKind::Failed) | None) => Schedule::Failed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -526,6 +554,14 @@ impl LiveBridgeRecoveryImage {
                 result_eligible: state
                     .live_delegation_result_eligible_operations
                     .contains(operation_id),
+                schedule_state: state
+                    .live_delegation_schedule_state_by_operation
+                    .get(operation_id)
+                    .copied(),
+                last_narration: state
+                    .live_delegation_last_narration_by_operation
+                    .get(operation_id)
+                    .copied(),
             });
         }
         delegations.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
@@ -735,6 +771,33 @@ impl LiveBridgeRecoveryImage {
             state
                 .live_delegation_interaction_by_operation
                 .insert(operation.clone(), delegation.interaction_id.clone());
+            state
+                .live_delegation_channel_by_operation
+                .insert(operation.clone(), delegation.channel_id.clone());
+            let schedule_state = delegation.effective_schedule_state();
+            state
+                .live_delegation_schedule_state_by_operation
+                .insert(operation.clone(), schedule_state);
+            if let Some(kind) = delegation.last_narration {
+                state
+                    .live_delegation_last_narration_by_operation
+                    .insert(operation.clone(), kind);
+            }
+            // Worker slots exist only on a channel that is still bound; a
+            // cold image never restores one, so the count stays absent.
+            if matches!(
+                schedule_state,
+                crate::meerkat_machine::dsl::LiveDelegationScheduleState::Claimed
+                    | crate::meerkat_machine::dsl::LiveDelegationScheduleState::Running
+            ) && state
+                .live_execution_runtime_id_by_channel
+                .contains_key(&delegation.channel_id)
+            {
+                *state
+                    .live_delegation_active_worker_count_by_channel
+                    .entry(delegation.channel_id.clone())
+                    .or_insert(0) += 1;
+            }
             state
                 .live_delegation_provider_turn_by_operation
                 .insert(operation.clone(), delegation.provider_turn_ref.clone());
@@ -2955,11 +3018,16 @@ impl From<LiveDelegationCancellationOutcome> for DslLiveDelegationCancellationOu
 }
 
 /// Mechanical terminal observation for one exact delegated worker.
+///
+/// `Blocked` is a worker whose bounded turn ended after it handed its
+/// WorkGraph item back with unresolved dependencies. It is never result
+/// eligible; the coordinator requeues the operation once the item is ready.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveDelegationWorkerTerminalKind {
     Completed,
     Cancelled,
     Failed,
+    Blocked,
 }
 
 /// Durable generated worker phase exposed only for restart observation.
@@ -2978,6 +3046,163 @@ pub enum LiveDelegationRecoveryPhase {
 }
 
 pub use crate::meerkat_machine::dsl::LiveDelegationWorkerOwnership;
+pub use crate::meerkat_machine::dsl::{LiveDelegationNarrationKind, LiveDelegationScheduleState};
+
+/// Why a delegation narration is not attempted. These are lifecycle facts the
+/// machine would otherwise turn into a guard rejection of
+/// `AuthorizeLiveDelegationNarration`; the coordinator reads them first and
+/// skips the narration with a typed reason instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveDelegationNarrationSkip {
+    /// The session's runtime lifecycle phase is outside the phases in which
+    /// narration authority is granted (`Idle`, `Attached`, `Running`); for
+    /// example the runtime executor has stopped.
+    SessionLifecycle(String),
+    /// The channel is no longer the session's active live channel, or the
+    /// execution binding on the channel no longer matches the narrating
+    /// worker's binding.
+    ChannelInactive,
+    /// The session is no longer registered with the machine.
+    SessionGone,
+}
+
+impl std::fmt::Display for LiveDelegationNarrationSkip {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionLifecycle(phase) => {
+                write!(
+                    formatter,
+                    "session lifecycle phase {phase} grants no narration authority"
+                )
+            }
+            Self::ChannelInactive => {
+                formatter.write_str("channel is no longer the session's active live channel")
+            }
+            Self::SessionGone => formatter.write_str("session is no longer registered"),
+        }
+    }
+}
+
+/// Generated per-channel bound on concurrently running live delegation
+/// workers. The machine initial state carries the same value; the runtime
+/// test suite asserts the two never drift.
+pub const LIVE_DELEGATION_CHANNEL_WORKER_CAP: u64 = 4;
+
+/// Runtime-sealed authority to place one templated executor-state narration
+/// for an exact delegation into the live conversation. It carries no result
+/// text and cannot be converted into result release or delivery authority.
+#[derive(Clone)]
+pub struct LiveDelegationNarrationAuthority {
+    session_id: SessionId,
+    operation: ExactOperationIdentity<LiveUserTurnCorrelation>,
+    kind: LiveDelegationNarrationKind,
+    #[cfg(feature = "live")]
+    provider_dispatch_consumed: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for LiveDelegationNarrationAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveDelegationNarrationAuthority")
+            .field("session_id", &self.session_id)
+            .field("operation_id", self.operation.operation_id())
+            .field(
+                "channel_id",
+                self.operation.domain_correlation().channel_id(),
+            )
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
+impl LiveDelegationNarrationAuthority {
+    pub(crate) fn from_generated_effect(
+        session_id: &SessionId,
+        operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
+        kind: LiveDelegationNarrationKind,
+        effect: &MeerkatMachineEffect,
+    ) -> Result<Option<Self>, LiveExecutionAuthorityError> {
+        let MeerkatMachineEffect::LiveDelegationNarrationAuthorized {
+            channel_id,
+            interaction_id,
+            operation_id,
+            provider_turn_correlation,
+            kind: authorized_kind,
+        } = effect
+        else {
+            return Ok(None);
+        };
+        let correlation = operation.domain_correlation();
+        if channel_id != correlation.channel_id().as_str()
+            || interaction_id != &correlation.interaction_id().to_string()
+            || operation_id != &DslOperationId::from_domain(operation.operation_id())
+            || provider_turn_correlation != correlation.provider().user_turn_id()
+            || *authorized_kind != kind
+        {
+            return Err(LiveExecutionAuthorityError::CorrelationMismatch);
+        }
+        Ok(Some(Self {
+            session_id: session_id.clone(),
+            operation: operation.clone(),
+            kind,
+            #[cfg(feature = "live")]
+            provider_dispatch_consumed: Arc::new(AtomicBool::new(false)),
+        }))
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> &ExactOperationIdentity<LiveUserTurnCorrelation> {
+        &self.operation
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> LiveDelegationNarrationKind {
+        self.kind
+    }
+
+    /// Convert into the one-shot provider sideband narration authority. The
+    /// delegation reference must be the exact provider delegation this
+    /// operation was admitted for.
+    #[cfg(feature = "live")]
+    pub fn into_sideband_narration_authority(
+        &self,
+        binding: ProviderWebrtcBinding,
+        delegation: &LiveSidebandDelegationRef,
+    ) -> Result<LiveSidebandNarrationAuthority, LiveExecutionAuthorityError> {
+        let correlation = self.operation.domain_correlation();
+        if self.session_id != *binding.session_id()
+            || correlation.channel_id() != binding.channel_id()
+        {
+            return Err(LiveExecutionAuthorityError::ProviderBindingMismatch);
+        }
+        if !delegation.__matches_adapter_key(correlation.provider().delegation_item_id()) {
+            return Err(LiveExecutionAuthorityError::ProviderDelegationMismatch);
+        }
+        self.provider_dispatch_consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| LiveExecutionAuthorityError::ProviderDispatchAlreadyConverted)?;
+        LiveSidebandNarrationAuthority::__from_generated_narration_authority(
+            binding,
+            format!(
+                "{}:{}",
+                self.operation.operation_id(),
+                match self.kind {
+                    LiveDelegationNarrationKind::Queued => "queued",
+                    LiveDelegationNarrationKind::Claimed => "claimed",
+                    LiveDelegationNarrationKind::Blocked => "blocked",
+                    LiveDelegationNarrationKind::Completed => "completed",
+                    LiveDelegationNarrationKind::SourceBusy => "source-busy",
+                    LiveDelegationNarrationKind::Failed => "failed",
+                }
+            ),
+        )
+        .ok_or(LiveExecutionAuthorityError::CorrelationMismatch)
+    }
+}
 
 /// Read-only durable projection of one ClientContext worker operation.
 ///
@@ -3084,6 +3309,7 @@ impl From<LiveDelegationWorkerTerminalKind> for DslLiveDelegationWorkerTerminalK
             LiveDelegationWorkerTerminalKind::Completed => Self::Completed,
             LiveDelegationWorkerTerminalKind::Cancelled => Self::Cancelled,
             LiveDelegationWorkerTerminalKind::Failed => Self::Failed,
+            LiveDelegationWorkerTerminalKind::Blocked => Self::Blocked,
         }
     }
 }

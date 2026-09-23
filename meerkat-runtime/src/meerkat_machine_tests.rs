@@ -130,14 +130,15 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
             .live_active_interaction_by_channel
             .insert(dsl_channel.clone(), interaction_id.to_string());
         state
-            .live_delegation_interaction_by_channel
-            .insert(dsl_channel.clone(), interaction_id.to_string());
+            .live_delegation_operation_by_interaction
+            .insert(interaction_id.to_string(), dsl_operation.clone());
         state
-            .live_delegation_operation_by_channel
-            .insert(dsl_channel.clone(), dsl_operation.clone());
-        state
-            .live_delegation_provider_turn_by_channel
-            .insert(dsl_channel, "provider-turn".to_string());
+            .live_delegation_channel_by_operation
+            .insert(dsl_operation.clone(), dsl_channel);
+        state.live_delegation_schedule_state_by_operation.insert(
+            dsl_operation.clone(),
+            mm_dsl::LiveDelegationScheduleState::Created,
+        );
         state
             .live_delegation_interaction_by_operation
             .insert(dsl_operation.clone(), interaction_id.to_string());
@@ -476,6 +477,13 @@ async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
                 .provider()
                 .user_turn_id()
                 .to_string(),
+        );
+        state
+            .live_delegation_channel_by_operation
+            .insert(operation_id.clone(), channel.to_string());
+        state.live_delegation_schedule_state_by_operation.insert(
+            operation_id.clone(),
+            mm_dsl::LiveDelegationScheduleState::Completed,
         );
         state
             .live_delegation_worker_identity_by_operation

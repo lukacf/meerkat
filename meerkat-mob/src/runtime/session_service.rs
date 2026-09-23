@@ -925,6 +925,26 @@ pub trait MobSessionService:
         final_event: meerkat_core::RealtimeTranscriptEvent,
     ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError>;
 
+    /// [`Self::commit_live_delegation_final_transcript`] that waits at most
+    /// `bound` for the canonical session's turn-finalization boundary and
+    /// reports `SourceBusy` instead of blocking behind a running member turn.
+    ///
+    /// REQUIRED, deliberately without a default, for the same reason as
+    /// [`Self::fork_persisted_session_at_turn_boundary`]: the persistent owner
+    /// hands the boundary it waited for straight into its commit, and every
+    /// wrapper must forward this method as one contract. A default that
+    /// acquired the boundary here and then called the unbounded commit would
+    /// self-deadlock on the owner's non-reentrant gate. The bound covers only
+    /// the boundary wait; a commit that won the boundary always completes.
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError>;
+
     /// Validate the exact current durable member's bridge policy and isolated
     /// client capability before any live channel/provider open.
     #[cfg(feature = "openai-live")]
@@ -1777,6 +1797,20 @@ where
         ))
     }
 
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        Err(SessionError::Unsupported(
+            "live delegation canonical projection requires a runtime-backed persistent session service"
+                .into(),
+        ))
+    }
+
     #[cfg(feature = "openai-live")]
     async fn validate_live_bridge_member_eligibility(
         &self,
@@ -2264,6 +2298,39 @@ where
         _provisional: meerkat_core::ProvisionalLiveHandoff,
         _final_event: meerkat_core::RealtimeTranscriptEvent,
     ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+        Err(SessionError::Unsupported(
+            "live delegation canonical projection requires the openai-live feature".into(),
+        ))
+    }
+
+    #[cfg(feature = "openai-live")]
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        self.commit_live_user_transcript_final_with_machine_at_turn_boundary(
+            machine,
+            session_id,
+            provisional,
+            Some(final_event),
+            bound,
+        )
+        .await
+    }
+
+    #[cfg(not(feature = "openai-live"))]
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
         Err(SessionError::Unsupported(
             "live delegation canonical projection requires the openai-live feature".into(),
         ))

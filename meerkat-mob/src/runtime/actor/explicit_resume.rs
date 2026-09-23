@@ -227,6 +227,7 @@ impl MobActor {
                     crate::runtime::handle::RestoreFailureDiagnostic {
                         bridge_session_id: Some(work.rebuild.bridge_session_id.clone()),
                         reason,
+                        hold: None,
                     },
                 );
                 self.explicit_resume_member_settled(work, ExplicitResumeMemberCompletion::Accepted)
@@ -497,6 +498,7 @@ impl MobActor {
                             crate::runtime::handle::RestoreFailureDiagnostic {
                                 bridge_session_id: Some(work.rebuild.bridge_session_id.clone()),
                                 reason,
+                                hold: None,
                             },
                         );
                     }

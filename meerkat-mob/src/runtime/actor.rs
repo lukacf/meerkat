@@ -10937,12 +10937,14 @@ impl MobActor {
                     reason: lifecycle
                         .error
                         .unwrap_or_else(|| "member restore failed".to_string()),
+                    hold: None,
                 },
             );
             return Err(MobError::MemberRestoreFailed {
                 member_id: agent_identity.clone(),
                 session_id: diag.bridge_session_id,
                 reason: diag.reason,
+                hold: diag.hold,
             });
         }
         Ok(())
@@ -12234,6 +12236,7 @@ impl MobActor {
                             super::handle::RestoreFailureDiagnostic {
                                 bridge_session_id: Some(closed.session_id.clone()),
                                 reason: format!("{} [{}]", closed.reason, closed.refusal_code),
+                                hold: None,
                             },
                         );
                     }
@@ -12789,6 +12792,7 @@ impl MobActor {
             super::handle::RestoreFailureDiagnostic {
                 bridge_session_id: Some(bridge_session_id.clone()),
                 reason: reason.clone(),
+                hold: None,
             },
         );
         tracing::error!(
@@ -12922,6 +12926,7 @@ impl MobActor {
                     super::handle::RestoreFailureDiagnostic {
                         bridge_session_id: Some(bridge_session_id.clone()),
                         reason: classify_reason.clone(),
+                        hold: None,
                     },
                 );
                 tracing::error!(
@@ -12935,6 +12940,7 @@ impl MobActor {
                     member_id: agent_identity.clone(),
                     session_id: Some(bridge_session_id),
                     reason: classify_reason,
+                    hold: None,
                 })
             }
             mob_dsl::MemberRevivalVerdictKind::ReviveAuthorized => {
@@ -12963,6 +12969,7 @@ impl MobActor {
                         Ok(())
                     }
                     Err(error) => {
+                        let hold = error.durable_resume_hold();
                         let failure_reason = format!(
                             "machine-authorized placed revival of '{agent_identity}' on host '{}' failed: {error}",
                             host.as_str()
@@ -12979,6 +12986,7 @@ impl MobActor {
                             super::handle::RestoreFailureDiagnostic {
                                 bridge_session_id: Some(bridge_session_id.clone()),
                                 reason: failure_reason.clone(),
+                                hold,
                             },
                         );
                         tracing::error!(
@@ -12992,6 +13000,7 @@ impl MobActor {
                             member_id: agent_identity.clone(),
                             session_id: Some(bridge_session_id),
                             reason: failure_reason,
+                            hold,
                         })
                     }
                 }

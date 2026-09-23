@@ -79,6 +79,10 @@ pub struct DelegationMemberOptions {
     pub override_profile: Option<Profile>,
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     pub objective_id: Option<ObjectiveId>,
+    /// Expose the realm-scoped WorkGraph tools to the helper even when its
+    /// resolved profile does not enable them. Live delegation workers track
+    /// their own item in the mob's shared WorkGraph and need this grant.
+    pub grant_workgraph_tools: bool,
 }
 
 /// Process-local parent comms material used to establish reciprocal trust.
@@ -826,6 +830,9 @@ impl DelegationExecutionService {
         spec.override_profile = member.override_profile;
         spec.tool_access_policy = member.tool_access_policy;
         spec.objective_id = member.objective_id;
+        if member.grant_workgraph_tools {
+            spec.tool_category_overrides.workgraph = meerkat_core::ToolCategoryOverride::Enable;
+        }
         spec.tool_dispatch_admission = live_admission
             .as_ref()
             .map(meerkat_runtime::live_execution::LiveDelegationExecutionAdmission::tool_dispatch_admission);

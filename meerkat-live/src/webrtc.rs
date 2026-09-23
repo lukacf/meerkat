@@ -1603,9 +1603,13 @@ impl LiveWebrtcState {
                 None => peer_tasks.start_published_cleanup(),
             }
             .expect("published cleanup was installed before start");
-            let removed_current = PublishedPeerCleanupCoordinator::wait_for_outcome_with_ceiling(
-                outcome_rx,
-                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            let removed_current = crate::traced_live_close_step(
+                Some(channel_id),
+                "peer_cleanup_outcome",
+                PublishedPeerCleanupCoordinator::wait_for_outcome_with_ceiling(
+                    outcome_rx,
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                ),
             )
             .await
             .into_result()?;
@@ -1764,6 +1768,12 @@ fn install_published_peer_disconnect_handler(context: PeerDisconnectContext) {
     let callback_context = context.clone();
     peer.on_peer_connection_state_change(Box::new(move |state| {
         if peer_state_requires_disconnect_cleanup(state) {
+            tracing::info!(
+                target: crate::LIVE_CLOSE_TRACE_TARGET,
+                channel = %callback_context.channel_id,
+                ?state,
+                "peer connection reached a state that requires disconnect cleanup"
+            );
             spawn_peer_disconnect_cleanup(callback_context.clone());
         }
         Box::pin(async {})
@@ -1814,17 +1824,26 @@ async fn cleanup_peer_after_disconnect(context: PeerDisconnectContext) {
     // A callback from a stale replaced peer owns only that physical peer. It
     // must not terminalize the newer semantic channel binding.
     if is_current {
-        let _ = close_channel_with_generated_feedback(
-            context.host.as_ref(),
-            context.close_feedback.as_ref(),
-            &context.channel_id,
+        let _ = crate::traced_live_close_step(
+            Some(&context.channel_id),
+            "remote_disconnect_generated_close",
+            close_channel_with_generated_feedback(
+                context.host.as_ref(),
+                context.close_feedback.as_ref(),
+                &context.channel_id,
+            ),
         )
         .await;
     }
 
     install_cleanup_from_disconnect_context(&context, &peer, answer_observation_sequence);
     if let Some(outcome_rx) = context.peer_tasks.start_published_cleanup() {
-        let _ = PublishedPeerCleanupCoordinator::wait_for_outcome(outcome_rx).await;
+        let _ = crate::traced_live_close_step(
+            Some(&context.channel_id),
+            "remote_disconnect_peer_cleanup",
+            PublishedPeerCleanupCoordinator::wait_for_outcome(outcome_rx),
+        )
+        .await;
     }
 }
 
@@ -2009,6 +2028,11 @@ fn install_data_channel_handler(context: DataChannelPumpContext) {
             }));
 
             channel.on_close(Box::new(move || {
+                tracing::info!(
+                    target: crate::LIVE_CLOSE_TRACE_TARGET,
+                    channel = %disconnect_context.channel_id,
+                    "data channel closed by the peer"
+                );
                 spawn_peer_disconnect_cleanup(disconnect_context.clone());
                 Box::pin(async {})
             }));

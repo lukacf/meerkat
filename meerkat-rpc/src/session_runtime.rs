@@ -1170,6 +1170,25 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        machine: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: meerkat_core::RealtimeTranscriptEvent,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::commit_live_delegation_final_transcript_at_turn_boundary(
+            &self.service,
+            machine,
+            session_id,
+            provisional,
+            final_event,
+            bound,
+        )
+        .await
+    }
+
     #[cfg(feature = "openai-live")]
     async fn capture_live_bridge_execution_snapshot(
         &self,
@@ -5186,6 +5205,12 @@ impl SessionRuntime {
     /// The store scope comes from the typed realm owner — never an invented
     /// `"default"` slug. A runtime without realm identity has no WorkGraph
     /// scope and fails closed.
+    /// The WorkGraph store behind this runtime, for consumers that scope
+    /// their own realm (the mob runtime rescopes it to `mob.<id>`).
+    pub fn workgraph_store(&self) -> Arc<dyn meerkat::WorkGraphStore> {
+        Arc::clone(&self.workgraph_store)
+    }
+
     pub fn workgraph_service(&self) -> Result<meerkat::WorkGraphService, RpcError> {
         let realm_id = self
             .realm_id()

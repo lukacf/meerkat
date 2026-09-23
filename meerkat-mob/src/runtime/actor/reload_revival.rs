@@ -638,6 +638,7 @@ impl MobActor {
                         member_id: work.entry.agent_identity.clone(),
                         session_id: Some(work.session_id.clone()),
                         reason,
+                        hold: None,
                     });
                 }
                 None => {
@@ -651,6 +652,7 @@ impl MobActor {
             member_id: work.entry.agent_identity.clone(),
             session_id: Some(work.session_id.clone()),
             reason: "durable profile material is unavailable".to_string(),
+            hold: None,
         })??;
         self.authorize_spawn_profile_material(
             &work.entry.agent_identity,
@@ -778,17 +780,34 @@ impl MobActor {
             ))
             .cloned()
         {
+            // A typed durable resume hold (a WholeBlob document that needs the
+            // sanctioned audited-endpoint repair, a held tail, a refused
+            // recovery, quarantined evidence) is the caller's classification
+            // fact: the session is intact and withheld, and only the hold
+            // class says what clears it. Rewriting it into restore-failure
+            // prose hid the HomeCore 2026-09-22 wedge behind a string every
+            // host could only retry. The diagnostic keeps the machine's
+            // record AND the hold, so every later `MemberRestoreFailed`
+            // minted for this Broken member carries it; this reply keeps
+            // meerkat's typed refusal itself.
+            let hold = error.durable_resume_hold();
             self.restore_diagnostics.write().await.insert(
                 work.entry.agent_identity.clone(),
                 super::super::handle::RestoreFailureDiagnostic {
                     bridge_session_id: Some(work.session_id.clone()),
                     reason: reason.clone(),
+                    hold,
                 },
             );
+            if hold.is_some() {
+                work.reply(Err(error));
+                return;
+            }
             work.reply(Err(MobError::MemberRestoreFailed {
                 member_id: work.entry.agent_identity.clone(),
                 session_id: Some(work.session_id.clone()),
                 reason,
+                hold: None,
             }));
             return;
         }

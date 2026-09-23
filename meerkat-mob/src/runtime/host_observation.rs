@@ -3675,6 +3675,22 @@ mod tests {
             ))
         }
 
+        async fn commit_live_delegation_final_transcript_at_turn_boundary(
+            &self,
+            _machine: &meerkat_runtime::MeerkatMachine,
+            _session_id: &SessionId,
+            _provisional: meerkat_core::ProvisionalLiveHandoff,
+            _final_event: meerkat_core::RealtimeTranscriptEvent,
+            _bound: std::time::Duration,
+        ) -> Result<
+            meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary,
+            meerkat_core::service::SessionError,
+        > {
+            Err(meerkat_core::service::SessionError::Unsupported(
+                "boundary-observation test service does not support live delegation canonical projection".into(),
+            ))
+        }
+
         async fn materialize_session_resume_verdict(
             &self,
             session_id: &meerkat_core::SessionId,

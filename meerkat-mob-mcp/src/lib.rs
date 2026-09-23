@@ -999,6 +999,28 @@ impl MobMcpState {
         self
     }
 
+    /// The host-supplied WorkGraph service, scoped as the host scoped it.
+    #[must_use]
+    pub fn workgraph_service(&self) -> Option<&meerkat::WorkGraphService> {
+        self.workgraph_service.as_ref()
+    }
+
+    /// The shared WorkGraph as `mob_id`'s members see it: the host service's
+    /// store rescoped to the realm `mob.<id>`. Live delegation schedules its
+    /// voice work items through this so the forks' `workgraph_*` tools, which
+    /// build in that realm, address the same items. `None` when the host has
+    /// no WorkGraph service or its backend is disabled.
+    pub fn workgraph_service_for_mob(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Option<meerkat::WorkGraphService>, MobError> {
+        self.workgraph_service
+            .as_ref()
+            .map(|service| meerkat_mob::mob_scoped_workgraph_service(service, mob_id))
+            .transpose()
+            .map(Option::flatten)
+    }
+
     pub fn with_default_llm_client(mut self, client: Option<Arc<dyn LlmClient>>) -> Self {
         self.default_llm_client = client;
         self
@@ -4557,6 +4579,19 @@ impl MobSessionService for LocalSessionService {
         ))
     }
 
+    async fn commit_live_delegation_final_transcript_at_turn_boundary(
+        &self,
+        _machine: &meerkat_runtime::MeerkatMachine,
+        _session_id: &SessionId,
+        _provisional: meerkat_core::ProvisionalLiveHandoff,
+        _final_event: meerkat_core::RealtimeTranscriptEvent,
+        _bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        Err(SessionError::Unsupported(
+            "live delegation canonical projection requires a runtime-backed persistent session service".into(),
+        ))
+    }
+
     async fn materialize_session_resume_verdict(
         &self,
         session_id: &SessionId,
@@ -7740,6 +7775,19 @@ mod tests {
             _provisional: meerkat_core::ProvisionalLiveHandoff,
             _final_event: meerkat_core::RealtimeTranscriptEvent,
         ) -> Result<meerkat_core::FinalLiveUserTranscriptCommitEvidence, SessionError> {
+            Err(SessionError::Unsupported(
+                "mock session service does not support live delegation canonical projection".into(),
+            ))
+        }
+
+        async fn commit_live_delegation_final_transcript_at_turn_boundary(
+            &self,
+            _machine: &meerkat_runtime::MeerkatMachine,
+            _session_id: &SessionId,
+            _provisional: meerkat_core::ProvisionalLiveHandoff,
+            _final_event: meerkat_core::RealtimeTranscriptEvent,
+            _bound: std::time::Duration,
+        ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
             Err(SessionError::Unsupported(
                 "mock session service does not support live delegation canonical projection".into(),
             ))

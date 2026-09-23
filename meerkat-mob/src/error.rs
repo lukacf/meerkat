@@ -506,6 +506,13 @@ pub enum MobError {
     },
 
     /// The member failed to restore durable session state and is broken until repaired.
+    ///
+    /// `hold` is meerkat's typed durable resume hold when the restore failure
+    /// WAS a hold (a WholeBlob document that needs the sanctioned
+    /// audited-endpoint repair, a held tail, a refused recovery, quarantined
+    /// evidence): the session is intact and withheld, and the hold class says
+    /// what clears it. Hosts classify on it (or on
+    /// [`MobError::durable_resume_hold`]) instead of parsing `reason`.
     #[error(
         "member {member_id} failed to restore {}: {reason}",
         format_member_restore_target(.session_id.as_ref())
@@ -514,6 +521,7 @@ pub enum MobError {
         member_id: AgentIdentity,
         session_id: Option<meerkat_core::types::SessionId>,
         reason: String,
+        hold: Option<meerkat_core::service::DurableResumeHold>,
     },
 
     /// The member's runtime registration is durability-degraded: a durable
@@ -1292,6 +1300,20 @@ impl MobError {
                 error.structured_data()
             }
             Self::SessionError(error) => error.structured_data(),
+            // A restore failure that IS a typed resume hold projects the hold
+            // under meerkat's own key, so a wire caller classifies the Broken
+            // member exactly as it classifies meerkat's -32013 refusal.
+            Self::MemberRestoreFailed {
+                session_id,
+                hold: Some(hold),
+                ..
+            } => Some(serde_json::json!({
+                "kind": "mob_member_restore_failed",
+                meerkat_core::service::SessionError::DURABLE_RESUME_HOLD_KEY: hold.as_str(),
+                "session_id": session_id.as_ref().map(ToString::to_string),
+                "content_retained": true,
+                "retryable": false,
+            })),
             Self::ForkMemberProvisionFailed {
                 member_id,
                 fork_session_id,
@@ -1428,6 +1450,29 @@ impl MobError {
                 .provider_auth_failure()
                 .map(|failure| failure.structured_data()),
             _ => None,
+        }
+    }
+
+    /// meerkat's typed durable resume hold carried by this error, if any:
+    /// the session is intact and withheld (a held tail, a refused recovery,
+    /// quarantined evidence, or a WholeBlob document that needs the
+    /// sanctioned audited-endpoint repair), not faulted. Read typed off the
+    /// in-process `SessionError` carrier, through the shared retirement /
+    /// lifecycle failure wrappers a joined observer receives, or off the
+    /// structured `durable_resume_hold` wire token; never off display text.
+    /// Hosts classify on this instead of parsing prose (MobKit parks the
+    /// member with the exact repair commands on `AuditedEndpointDivergence`).
+    pub fn durable_resume_hold(&self) -> Option<meerkat_core::service::DurableResumeHold> {
+        match self {
+            Self::SessionError(error) => error.durable_resume_hold(),
+            Self::MemberRestoreFailed { hold, .. } => *hold,
+            Self::SharedRetirementFailure(error) | Self::SharedLifecycleFailure(error) => {
+                error.durable_resume_hold()
+            }
+            other => other
+                .structured_data()
+                .as_ref()
+                .and_then(meerkat_core::service::SessionError::durable_resume_hold_from_data),
         }
     }
 
@@ -1948,6 +1993,7 @@ mod tests {
                 member_id: AgentIdentity::from("m"),
                 session_id: Some(meerkat_core::types::SessionId::new()),
                 reason: "restore failed".to_string(),
+                hold: None,
             },
             MobError::KickoffWaitTimedOut {
                 pending_member_ids: vec![AgentIdentity::from("m")],

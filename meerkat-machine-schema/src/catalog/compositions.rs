@@ -771,6 +771,21 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 input_variant: iv_id("AbandonLiveInteraction"),
             },
             EntryInput {
+                name: entry_input_id("requeue_live_delegation"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("RequeueLiveDelegation"),
+            },
+            EntryInput {
+                name: entry_input_id("cancel_queued_live_delegation"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("CancelQueuedLiveDelegation"),
+            },
+            EntryInput {
+                name: entry_input_id("authorize_live_delegation_narration"),
+                machine: mi_id("meerkat"),
+                input_variant: iv_id("AuthorizeLiveDelegationNarration"),
+            },
+            EntryInput {
                 name: entry_input_id("complete_live_interaction"),
                 machine: mi_id("meerkat"),
                 input_variant: iv_id("CompleteLiveInteraction"),

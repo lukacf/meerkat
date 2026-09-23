@@ -3140,12 +3140,14 @@ mod tests {
         let payload = serde_json::to_string(&payload).expect("released payload serializes");
         let payload = serde_json::value::RawValue::from_string(payload).expect("payload is json");
 
-        let before = crate::rewrite_record_body_decodes();
+        // Thread-scoped: the process-wide count moves whenever a parallel
+        // test decodes a record body, which is not what this asserts.
+        let before = crate::digest_observability::rewrite_record_body_decodes_on_this_thread();
         let decoded = transcript_rewrite_commits_from_payload(&payload)
             .expect("payload decodes")
             .expect("payload is a transcript rewrite");
         assert_eq!(
-            crate::rewrite_record_body_decodes(),
+            crate::digest_observability::rewrite_record_body_decodes_on_this_thread(),
             before,
             "reading a commit must not materialize either transcript body"
         );

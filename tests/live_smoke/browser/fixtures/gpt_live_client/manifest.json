@@ -298,6 +298,39 @@
       "sample_rate_hz": 24000,
       "trailing_silence_ms": 1580,
       "notes": "S101 job 2 12 s after job 1's delegation; phrased as an explicit second delegation so the model does not answer it natively while job 1 runs. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, ash), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "fork_a",
+      "file": "fork-a.wav",
+      "voice": "echo",
+      "text": "Pick a whole number between ten and ninety, sleep eight seconds first, then write just that number into a file called number.txt in the workspace, and tell me the number.",
+      "sha256": "ac0818f98e2128dd15009ee140412b1d29fb6aa0947682650af8632f51424873",
+      "duration_ms": 11771,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1646,
+      "notes": "S105 request A: forks the first worker and writes artifact A after an 8 s pause so request B overlaps it. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, echo), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "fork_b",
+      "file": "fork-b.wav",
+      "voice": "echo",
+      "text": "Hand the executor a second job right away, don't wait for the first: double the number from that file into a second text file, then read me both numbers.",
+      "sha256": "b11bbf77cc5668b3a8698cf1bdc43f86dab2109d56a9b74b29b05f8a8b42ee45",
+      "duration_ms": 9868,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S105 request B 4 s after A's delegation (parallel variant), phrased as an explicit second handoff so the model does not answer it natively while A runs; artifact B is found by content (twice A). Minted with `voice_fixtures mint` (gpt-4o-mini-tts, echo), VAD-normalised, 1500 ms trailing-silence floor."
+    },
+    {
+      "name": "fork_recall",
+      "file": "fork-recall.wav",
+      "voice": "echo",
+      "text": "So, what are the two numbers now?",
+      "sha256": "0a6aea47deefb0f2a54b62d67cca7a463a9aa377154323f43dac67a4b07f2932",
+      "duration_ms": 3389,
+      "sample_rate_hz": 24000,
+      "trailing_silence_ms": 1580,
+      "notes": "S105 voice recall after the typed correction; the answer window should reflect the corrected numbers. Minted with `voice_fixtures mint` (gpt-4o-mini-tts, echo), VAD-normalised, 1500 ms trailing-silence floor."
     }
   ]
 }

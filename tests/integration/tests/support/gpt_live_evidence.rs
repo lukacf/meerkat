@@ -61,6 +61,9 @@ pub enum Stage {
     SilenceHold,
     // S101 busy backend.
     BusyJobs,
+    // S105 fork and merge.
+    ForkRequests,
+    ForkCorrection,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

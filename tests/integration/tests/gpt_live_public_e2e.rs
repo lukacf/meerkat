@@ -5351,32 +5351,8 @@ async fn run_s104_handoff_voice_typed_voice(
 }
 
 // ===========================================================================
-// Scenarios 105, 106: scaffolding, blocked on runtime fixes
+// Scenario 106: scaffolding, blocked on runtime fixes
 // ===========================================================================
-
-/// Scenario 105 (fork and merge, voice echo): DurableFork policy; request A
-/// forks M1 and writes artifact A; request B (after A completes) doubles the
-/// number from A into a new file; a typed correction of the number; a voice
-/// recall. Deterministic: two forks, each retired after its delegation
-/// closes (mob/events member retirement); executor input for B equals the
-/// transcript; artifact B holds twice the value; the typed correction is
-/// reflected in the voice answer window. Tolerant: cache_read > 0 on the
-/// second fork when the executor provider reports usage. The parallel
-/// variant (A and B 4 s apart) follows the scheduler.
-///
-/// Blocked: a typed turn while a live channel has a delegation in flight
-/// fails with "no captured live actor authority" (S104 finding 3), and the
-/// executor-input equality check needs fix/delegation-input-settles.
-/// Not registered in e2e_lanes or the Turbo S list.
-#[tokio::test]
-#[ignore = "blocked: fix/delegation-input-settles and the typed-turn live actor authority fix; scaffolding only"]
-async fn e2e_scenario_105_gpt_live_public_fork_and_merge() -> Result<(), Box<dyn std::error::Error>>
-{
-    Err(
-        "S105 is scaffolding: implement after the delegation input and typed-turn fixes land"
-            .into(),
-    )
-}
 
 /// Scenario 106 (long haul, voice shimmer, ~8 min): ten exchanges with a 20 s
 /// silence hold after exchange 2 (zero inbound speech during the hold), an
@@ -5715,6 +5691,416 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
         if !deterministic_failures.is_empty() {
             return Err(format!(
                 "S101 deterministic checks failed:\n  - {}",
+                deterministic_failures.join("\n  - ")
+            )
+            .into());
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+    let browser_flush = live.peer.stop_evidence().await;
+    let outcome = if result.is_ok() && browser_flush.is_ok() {
+        evidence.stage(EvidenceStage::Finished)?;
+        evidence::Outcome::Passed
+    } else {
+        evidence::Outcome::Failed
+    };
+    let retained = evidence.finish(outcome);
+    live.peer.close().await;
+    live.server_task.abort();
+    result?;
+    retained?;
+    browser_flush?;
+    Ok(())
+}
+
+// ===========================================================================
+// Scenario 105: fork and merge, parallel variant (DurableFork)
+// ===========================================================================
+
+/// Request B starts this long after request A's delegation.created.
+const S105_B_OFFSET_MS: u64 = 4000;
+/// Typed correction during the live channel; its numbers are the oracle for
+/// the voice recall.
+fn s105_typed_prompt(doubled_file: &str) -> String {
+    format!(
+        "Correction: the number in number.txt must be 21 and {doubled_file} must be 42. \
+         Update both files now with the shell tool and reply with one short sentence."
+    )
+}
+
+/// Spawn and retirement counts of live-delegation forks from `mob/events`.
+#[derive(Debug, Default)]
+struct ForkLifecycle {
+    spawned: Vec<String>,
+    retired: Vec<String>,
+}
+
+fn fork_lifecycle(events: &Value) -> ForkLifecycle {
+    let mut lifecycle = ForkLifecycle::default();
+    for event in events["events"].as_array().into_iter().flatten() {
+        let kind = event.pointer("/kind/type").and_then(Value::as_str);
+        let Some(identity) = event
+            .pointer("/kind/agent_identity")
+            .and_then(Value::as_str)
+            .filter(|identity| identity.starts_with("live-delegation-"))
+        else {
+            continue;
+        };
+        match kind {
+            Some("member_spawned") => lifecycle.spawned.push(identity.to_owned()),
+            Some("member_retired") => lifecycle.retired.push(identity.to_owned()),
+            _ => {}
+        }
+    }
+    lifecycle
+}
+
+fn s105_first_int(text: &str) -> Option<i64> {
+    let digits: String = text
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// Scenario 105 (parallel variant): DurableFork policy. Request A forks a
+/// worker that writes a number into number.txt; request B, 4 s after A's
+/// delegation, forks a second worker that doubles the number from that file
+/// into doubled.txt; then a typed correction of both numbers and a voice
+/// recall.
+///
+/// Deterministic: two client delegations, both Completed; two live-delegation
+/// forks spawned and both retired after their delegations closed
+/// (mob/events); each delegation's WorkGraph item title equals the
+/// arrival-anchored user final (the executor input for B equals the
+/// transcript); a second file holds twice number.txt before the correction
+/// (found by content: spoken file names are rendered loosely by the
+/// recognizer);
+/// the typed turn commits; the recall is answered natively; graceful close;
+/// WorkGraph parallel mode. Tolerant: the recall window carries the corrected
+/// numbers; cache_read on the second fork is not observable over RPC here
+/// (skipped, as the design allows).
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_105_gpt_live_public_fork_and_merge_parallel()
+-> Result<(), Box<dyn std::error::Error>> {
+    let evidence = Journal::create_for("S105", "doubled".to_owned())?;
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let result = timeout(
+        Duration::from_secs(720),
+        run_s105_fork_and_merge_parallel(evidence.clone()),
+    )
+    .await;
+    let finished = evidence.finish(match &result {
+        Ok(Ok(())) => evidence::Outcome::Passed,
+        Ok(Err(_)) => evidence::Outcome::Failed,
+        Err(_) => evidence::Outcome::TimedOut,
+    });
+    result.map_err(|_| "S105 overall deadline expired")??;
+    finished?;
+    Ok(())
+}
+
+async fn run_s105_fork_and_merge_parallel(
+    evidence: Journal,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+        )
+        .with_test_writer()
+        .try_init();
+    require_api_key()?;
+    let started = Instant::now();
+    evidence.stage(EvidenceStage::Opening)?;
+    let mut live = open_public_live_with(PublicLiveOpen {
+        temp_prefix: "gpt-live-public-fork-e2e-",
+        operator_principal: "scenario-105-operator",
+        execution_policy: LiveDelegationExecutionPolicy::DurableFork,
+        bootstrap: None,
+        seed_prompt: None,
+        evidence: Some(evidence.clone()),
+        unmeasured_playback: true,
+        executor_instructions: Some(vec![
+            "You are the executor behind a voice assistant. Your current working directory is the \
+             scratch workspace; do every file operation there with the shell tool. Write numbers as \
+             plain digits with nothing else in the file. When asked to use the number from a file \
+             that does not exist yet, re-check for it every second for up to thirty seconds before \
+             giving up. Answer in one short spoken sentence stating the numbers."
+                .to_owned(),
+        ]),
+        extra_members: Vec::new(),
+        instructions_preface: None,
+        summary_bootstrap: false,
+        shared_host: true,
+    })
+    .await?;
+    let connected_ms = started.elapsed().as_millis();
+    let workspace = live._temp.path().join("project");
+    let _server_guard = AbortScenarioServer(live.server_task.clone());
+    let _failure_guard = evidence::FailureGuard(evidence.clone());
+    let channel = evidence.current_channel()?;
+    let mut tolerant_failures = Vec::new();
+    let mut deterministic_failures: Vec<String> = Vec::new();
+    let result = async {
+        evidence.stage(EvidenceStage::Connected)?;
+
+        // A, then B 4 s after A's delegation.
+        evidence.stage(EvidenceStage::ForkRequests)?;
+        let a = live
+            .peer
+            .play_at(&PlayAt::new("fork_a", Anchor::Now, 0).overlap_bound_ms(60_000))
+            .await?;
+        let a_start_ms = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(30), "request A fixture_start", |t| {
+                fixture_start_entry(t, a).map(|e| e.t_ms)
+            })
+            .await?;
+        let a_delegation_ms = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(60), "request A delegation_created", |t| {
+                timeline_find(t, TimelineKind::DelegationCreated, a_start_ms).map(|e| e.t_ms)
+            })
+            .await?;
+        let b = live
+            .peer
+            .play_at(&PlayAt::new("fork_b", Anchor::Now, S105_B_OFFSET_MS).overlap_bound_ms(60_000))
+            .await?;
+        live.record_time_to_talk("S105", &mut tolerant_failures).await?;
+        let timeline = live
+            .peer
+            .wait_for_timeline(Duration::from_secs(90), "two delegation_created entries", |t| {
+                (t.iter().filter(|e| e.kind == TimelineKind::DelegationCreated).count() >= 2)
+                    .then(|| t.to_vec())
+            })
+            .await?;
+        let b_start_ms = fixture_start_entry(&timeline, b).map(|e| e.t_ms).unwrap_or(0);
+        let runtime = live.shared()?.0.runtime.clone();
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let mut max_concurrent = 0usize;
+        let mut terminal_at: std::collections::BTreeMap<String, (u128, String)> =
+            std::collections::BTreeMap::new();
+        loop {
+            let snapshots = runtime
+                .live_delegation_recovery_snapshots(&live.session_id)
+                .await?;
+            max_concurrent = max_concurrent.max(snapshots.iter().filter(|s| s.terminal().is_none()).count());
+            for snapshot in snapshots.iter().filter(|s| s.terminal().is_some()) {
+                terminal_at
+                    .entry(snapshot.operation_id().to_string())
+                    .or_insert_with(|| (started.elapsed().as_millis(), format!("{:?}", snapshot.terminal())));
+            }
+            if snapshots.len() >= 2 && terminal_at.len() >= 2 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "the two forked turns did not both reach terminality within 180 s: {terminal_at:?}; {}",
+                    delegated_executor_diagnostic(&mut live.rpc, &live.mob_id).await
+                )
+                .into());
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+        println!(
+            "GPT_LIVE_S105_FORKS a_delegation_ms={a_delegation_ms} b_start_ms={b_start_ms} max_concurrent={max_concurrent} terminal={terminal_at:?}"
+        );
+        for (operation, (at_ms, terminal)) in &terminal_at {
+            if !terminal.contains("Completed") {
+                deterministic_failures.push(format!("fork {operation} ended {terminal} at {at_ms} ms"));
+            }
+        }
+        // Artifacts before the correction. Artifact B is found by content
+        // (a second text file holding twice A), never by a spoken file name
+        // the recognizer may render differently.
+        let number = std::fs::read_to_string(workspace.join("number.txt")).ok();
+        let n = number.as_deref().and_then(s105_first_int);
+        let others: Vec<(String, Option<i64>)> = std::fs::read_dir(&workspace)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.path().is_file())
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|name| name != "number.txt" && !name.starts_with('.'))
+                    .map(|name| {
+                        let value = std::fs::read_to_string(workspace.join(&name))
+                            .ok()
+                            .as_deref()
+                            .and_then(s105_first_int);
+                        (name, value)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let doubled_file = others
+            .iter()
+            .find(|(_, value)| matches!((n, value), (Some(n), Some(d)) if *d == 2 * n))
+            .map(|(name, _)| name.clone());
+        let d = n.filter(|_| doubled_file.is_some()).map(|n| 2 * n);
+        println!("GPT_LIVE_S105_ARTIFACTS number={number:?} others={others:?} doubled_file={doubled_file:?}");
+        if d.is_none() {
+            deterministic_failures.push(format!(
+                "no second file holds twice number.txt before the correction: number={number:?} others={others:?}"
+            ));
+        }
+        // Each delegation's WorkGraph item title equals the arrival-anchored
+        // user final (the executor input equals the transcript).
+        let finals = live.peer.energy().await?.input_finals;
+        let service = live
+            .mobs
+            .workgraph_service_for_mob(&meerkat_mob::MobId::from(live.mob_id.as_str()))?
+            .ok_or("no mob WorkGraph service")?;
+        let items = service
+            .list(meerkat::WorkItemFilter {
+                include_terminal: true,
+                ..Default::default()
+            })
+            .await?;
+        let titles: Vec<String> = items.iter().map(|item| normalize_words(&item.title)).collect();
+        let delegated_finals: Vec<String> = finals
+            .iter()
+            .filter(|f| f.closed_by.as_deref() == Some("delegation"))
+            .map(|f| normalize_words(&f.text))
+            .collect();
+        println!("GPT_LIVE_S105_INPUTS delegated_finals={delegated_finals:?} workgraph_titles={titles:?}");
+        for final_text in &delegated_finals {
+            if !titles.iter().any(|title| title == final_text) {
+                deterministic_failures.push(format!(
+                    "no WorkGraph item title equals the user's final transcript {final_text:?}; titles: {titles:?}"
+                ));
+            }
+        }
+        if delegated_finals.len() < 2 {
+            deterministic_failures.push(format!(
+                "expected two delegation-closed user finals, got {delegated_finals:?}"
+            ));
+        }
+        // Both forks retired after their delegations closed.
+        let retire_deadline = Instant::now() + Duration::from_secs(60);
+        let lifecycle = loop {
+            let events = live
+                .rpc
+                .call("mob/events", json!({"mob_id":live.mob_id,"after_cursor":0,"limit":400,"strict":true}), 30)
+                .await?;
+            let lifecycle = fork_lifecycle(&events);
+            if (lifecycle.spawned.len() >= 2 && lifecycle.retired.len() >= 2)
+                || Instant::now() >= retire_deadline
+            {
+                break lifecycle;
+            }
+            sleep(Duration::from_millis(500)).await;
+        };
+        println!("GPT_LIVE_S105_LIFECYCLE spawned={:?} retired={:?}", lifecycle.spawned, lifecycle.retired);
+        if lifecycle.spawned.len() != 2 || lifecycle.retired.len() != 2 {
+            deterministic_failures.push(format!(
+                "expected two live-delegation forks spawned and retired, got spawned={:?} retired={:?}",
+                lifecycle.spawned, lifecycle.retired
+            ));
+        }
+        live.record_workgraph_mode("S105", 2, &mut deterministic_failures).await?;
+
+        // Typed correction while live, then the voice recall.
+        evidence.stage(EvidenceStage::ForkCorrection)?;
+        wait_for_settled(&mut live, Duration::from_secs(3), Duration::from_secs(60)).await?;
+        let typed_started = Instant::now();
+        let typed = live
+            .rpc
+            .call_raw(
+                "turn/start",
+                json!({"session_id":live.session_id,
+                    "prompt":s105_typed_prompt(doubled_file.as_deref().unwrap_or("the doubled-number file"))}),
+                180,
+            )
+            .await?;
+        let typed_ok = typed["error"].is_null();
+        println!("GPT_LIVE_S105_TYPED ok={typed_ok} ms={} error={}", typed_started.elapsed().as_millis(), typed["error"]);
+        if !typed_ok {
+            deterministic_failures.push(format!("the typed correction failed: {}", typed["error"]));
+        }
+        let number_after = std::fs::read_to_string(workspace.join("number.txt")).ok();
+        let doubled_after = doubled_file
+            .as_ref()
+            .and_then(|name| std::fs::read_to_string(workspace.join(name)).ok());
+        println!("GPT_LIVE_S105_ARTIFACTS_AFTER number={number_after:?} doubled={doubled_after:?}");
+        record_tolerant(
+            &evidence,
+            channel,
+            "S105",
+            "typed_correction_updated_the_files",
+            number_after.as_deref().and_then(s105_first_int) == Some(21)
+                && doubled_after.as_deref().and_then(s105_first_int) == Some(42),
+            format!("number={number_after:?} doubled={doubled_after:?}"),
+            &mut tolerant_failures,
+        )?;
+        let events_before_recall = live.peer.events().await?.len();
+        let (recall, answer, _, _) = native_question(
+            &mut live,
+            "S105",
+            "voice recall (fork_recall)",
+            PlayAt::new("fork_recall", Anchor::AssistantQuiet, 300)
+                .quiet_ms(1200)
+                .require_speech(false)
+                .overlap_bound_ms(60_000),
+        )
+        .await?;
+        evidence.record(recall.latency_record(channel, 3, None))?;
+        let lower = normalize_words(&answer);
+        record_tolerant(
+            &evidence,
+            channel,
+            "S105",
+            "recall_reflects_typed_correction",
+            (lower.contains("42") || lower.contains("forty two"))
+                && (lower.contains("21") || lower.contains("twenty one")),
+            format!("answer={:?}", answer.trim()),
+            &mut tolerant_failures,
+        )?;
+        let events = live.peer.events().await?;
+        if events[events_before_recall..].iter().any(is_client_delegation) {
+            deterministic_failures.push("the voice recall must be answered natively, not delegated".to_owned());
+        }
+        record_tolerant(
+            &evidence,
+            channel,
+            "S105",
+            "second_fork_cache_read_skipped",
+            true,
+            "provider usage rows are not observable over RPC in this harness; skipped as designed".to_owned(),
+            &mut tolerant_failures,
+        )?;
+
+        evidence.stage(EvidenceStage::Closing)?;
+        live.record_uplink("S105").await?;
+        let close = close_or_record(&mut live, &evidence, channel, "S105", &mut deterministic_failures).await?;
+        let timeline = live.peer.timeline().await?;
+        let report = live.peer.energy().await?;
+        evidence.record(EvidenceRecord::Energy {
+            channel,
+            windows: report.downsampled_windows(3000),
+        })?;
+        evidence.record(EvidenceRecord::Timeline {
+            channel,
+            entries: timeline.clone(),
+        })?;
+        let mut faults = evidence.faults()?;
+        faults.extend(live.peer.faults().await?);
+        if !faults.is_empty() {
+            deterministic_failures.push(format!("browser observed architecture faults: {faults:?}"));
+        }
+        println!(
+            "GPT_LIVE_S105_OK total_ms={} connected_ms={connected_ms} max_concurrent={max_concurrent} number={n:?} doubled={d:?} forks_spawned={} forks_retired={} close_ms={:?} tolerant_failures={tolerant_failures:?} faults={faults:?}",
+            started.elapsed().as_millis(),
+            lifecycle.spawned.len(),
+            lifecycle.retired.len(),
+            close.map(|c| c.ms)
+        );
+        println!("GPT_LIVE_S105_TIMELINE\n{}", format_timeline(&timeline));
+        if !deterministic_failures.is_empty() {
+            return Err(format!(
+                "S105 deterministic checks failed:\n  - {}",
                 deterministic_failures.join("\n  - ")
             )
             .into());

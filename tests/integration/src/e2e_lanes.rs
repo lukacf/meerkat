@@ -227,6 +227,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s102_gpt_live_public_who_are_you, 102);
             scenario(e2e_smoke_s103_gpt_live_public_interrupt_and_recover, 103);
             scenario(e2e_smoke_s104_gpt_live_public_handoff_voice_typed_voice, 104);
+            scenario(e2e_smoke_s105_gpt_live_public_fork_and_merge_parallel, 105);
             scenario(e2e_smoke_s107_gpt_live_public_stuck_close_convergence, 107);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
@@ -4309,6 +4310,28 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
+        105 => Some(&Spec {
+            id: Some(105),
+            lane: Lane::Smoke,
+            title: "GPT Live public real-audio fork and merge, parallel variant (DurableFork, artifact doubling, typed correction)",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_105_gpt_live_public_fork_and_merge_parallel",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
         107 => Some(&Spec {
             id: Some(107),
             lane: Lane::Smoke,
@@ -6665,6 +6688,10 @@ mod tests {
             (
                 104,
                 "e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice",
+            ),
+            (
+                105,
+                "e2e_scenario_105_gpt_live_public_fork_and_merge_parallel",
             ),
             (
                 107,

@@ -416,9 +416,12 @@ async fn goal_create_is_atomic_and_attention_status_is_service_owned() {
 
 #[tokio::test]
 async fn attention_reassign_supersedes_old_binding_and_targets_owner_key() {
+    // The owner key below names a member of mob `team-a`, and member-bound
+    // attention only exists in that mob's realm (`mob.team-a`); any other
+    // realm is refused, see `owner_bound_goal_in_a_foreign_realm_is_refused_typed`.
     let service = WorkGraphService::with_scope(
         std::sync::Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new()),
-        "realm-reassign",
+        "mob.team-a",
         WorkNamespace::new("goals").expect("namespace"),
     );
     let session_id =
@@ -436,7 +439,7 @@ async fn attention_reassign_supersedes_old_binding_and_targets_owner_key() {
             external_refs: Vec::new(),
             evidence_refs: Vec::new(),
             status: None,
-            realm_id: Some("realm-reassign".to_string()),
+            realm_id: Some("mob.team-a".to_string()),
             namespace: Some(WorkNamespace::new("goals").expect("namespace")),
             title: "Move goal attention to a durable owner".to_string(),
             description: None,
@@ -451,7 +454,7 @@ async fn attention_reassign_supersedes_old_binding_and_targets_owner_key() {
     let authority_projection = service
         .attention_projection(AttentionProjectionRequest {
             binding_id: goal.attention.binding_id.clone(),
-            realm_id: Some("realm-reassign".to_string()),
+            realm_id: Some("mob.team-a".to_string()),
             namespace: Some(WorkNamespace::new("goals").expect("namespace")),
         })
         .await
@@ -462,7 +465,7 @@ async fn attention_reassign_supersedes_old_binding_and_targets_owner_key() {
     let reassigned = service
         .reassign_attention(AttentionReassignRequest {
             binding_id: goal.attention.binding_id.clone(),
-            realm_id: Some("realm-reassign".to_string()),
+            realm_id: Some("mob.team-a".to_string()),
             namespace: Some(WorkNamespace::new("goals").expect("namespace")),
             expected_revision: goal.attention.machine_state.revision,
             authority_projection,
@@ -492,7 +495,7 @@ async fn attention_reassign_supersedes_old_binding_and_targets_owner_key() {
     let fetched_previous = service
         .attention_binding(AttentionBindingRequest {
             binding_id: goal.attention.binding_id,
-            realm_id: Some("realm-reassign".to_string()),
+            realm_id: Some("mob.team-a".to_string()),
             namespace: Some(WorkNamespace::new("goals").expect("namespace")),
         })
         .await
@@ -502,7 +505,7 @@ async fn attention_reassign_supersedes_old_binding_and_targets_owner_key() {
 
     let owner_bindings = service
         .list_attention(AttentionListRequest {
-            realm_id: Some("realm-reassign".to_string()),
+            realm_id: Some("mob.team-a".to_string()),
             namespace: Some(WorkNamespace::new("goals").expect("namespace")),
             target: Some(WorkAttentionTarget::LoweredOwner { owner_key }),
             status: Some(WorkAttentionStatus::Active),
@@ -3330,4 +3333,178 @@ async fn break_glass_reassign_requires_principal_and_reason() {
             "expected InvalidInput, got {error:?}"
         );
     }
+}
+
+fn owner_bound_goal_request(realm_id: &str, owner_key: WorkOwnerKey) -> GoalCreateRequest {
+    GoalCreateRequest {
+        failed_child_join_policy: Default::default(),
+        cancelled_child_join_policy: Default::default(),
+        priority: Default::default(),
+        labels: Default::default(),
+        due_at: None,
+        not_before: None,
+        snoozed_until: None,
+        external_refs: Vec::new(),
+        evidence_refs: Vec::new(),
+        status: None,
+        realm_id: Some(realm_id.to_string()),
+        namespace: Some(WorkNamespace::new("goals").expect("namespace")),
+        title: "Keep the reviewer focused".to_string(),
+        description: None,
+        target: GoalAttentionTarget::Owner { owner_key },
+        mode: WorkAttentionMode::Coordinate,
+        completion_policy: WorkCompletionPolicy::SelfAttest,
+        delegated_authority: AttentionDelegatedAuthority::AddEvidence,
+        projection_policy: AttentionProjectionPolicy::default(),
+    }
+}
+
+/// A binding that names a mob member is only resolved by that member in the
+/// mob realm (`mob.<mob_id>`). Creating or reassigning it in any other realm
+/// is refused at the call with a typed error instead of being stored where
+/// the member never looks.
+#[tokio::test]
+async fn owner_bound_goal_in_a_foreign_realm_is_refused_typed() {
+    let store: std::sync::Arc<dyn meerkat_workgraph::WorkGraphStore> =
+        std::sync::Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new());
+    let member = WorkOwnerKey::mob_agent("match3-mob", "reviewer").expect("member owner key");
+    let host_realm = "host-realm";
+    let mob_realm = meerkat_core::mob_realm_id("match3-mob").expect("mob realm");
+    let host = WorkGraphService::with_scope(
+        std::sync::Arc::clone(&store),
+        host_realm,
+        WorkNamespace::new("goals").expect("namespace"),
+    );
+
+    let refused = host
+        .create_goal(owner_bound_goal_request(host_realm, member.clone()))
+        .await
+        .expect_err("a member-bound goal in the host realm must be refused");
+    match refused {
+        WorkGraphError::AttentionTargetRealmMismatch {
+            owner_key,
+            mob_id,
+            required_realm_id,
+            realm_id,
+        } => {
+            assert_eq!(owner_key, member.canonical());
+            assert_eq!(mob_id, "match3-mob");
+            assert_eq!(required_realm_id, mob_realm.as_str());
+            assert_eq!(realm_id, host_realm);
+        }
+        other => panic!("expected AttentionTargetRealmMismatch, got {other:?}"),
+    }
+    let listed = host
+        .list_attention(AttentionListRequest {
+            realm_id: None,
+            namespace: None,
+            target: None,
+            status: None,
+        })
+        .await
+        .expect("list attention");
+    assert!(
+        listed.attention.is_empty(),
+        "a refused binding must not be stored: {:?}",
+        listed.attention
+    );
+
+    // Non-member owners are not realm-bound: the host realm keeps working.
+    host.create_goal(owner_bound_goal_request(
+        host_realm,
+        WorkOwnerKey::agent("solo-agent").expect("agent owner key"),
+    ))
+    .await
+    .expect("a plain agent owner binds in any realm");
+
+    // The mob realm accepts the member binding, and reassigning it to another
+    // member of the same mob stays in that realm.
+    let mob = WorkGraphService::with_scope(
+        std::sync::Arc::clone(&store),
+        mob_realm.as_str(),
+        WorkNamespace::new("goals").expect("namespace"),
+    );
+    let goal = mob
+        .create_goal(owner_bound_goal_request(mob_realm.as_str(), member.clone()))
+        .await
+        .expect("member-bound goal in the mob realm");
+    let projection = mob
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("projection")
+        .projection;
+    let reassigned = mob
+        .reassign_attention(AttentionReassignRequest {
+            binding_id: goal.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: goal.attention.machine_state.revision,
+            target: GoalAttentionTarget::Owner {
+                owner_key: WorkOwnerKey::mob_agent("match3-mob", "tester")
+                    .expect("member owner key"),
+            },
+            authority_projection: projection,
+        })
+        .await
+        .expect("reassign within the mob realm");
+
+    // Reassigning a mob-realm binding to a member of a different mob names a
+    // realm the binding does not live in and is refused the same way.
+    let successor_projection = mob
+        .attention_projection(AttentionProjectionRequest {
+            binding_id: reassigned.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+        })
+        .await
+        .expect("successor projection")
+        .projection;
+    let cross_mob = mob
+        .reassign_attention(AttentionReassignRequest {
+            binding_id: reassigned.attention.binding_id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: reassigned.attention.machine_state.revision,
+            target: GoalAttentionTarget::Owner {
+                owner_key: WorkOwnerKey::mob_agent("other-mob", "reviewer")
+                    .expect("member owner key"),
+            },
+            authority_projection: successor_projection,
+        })
+        .await
+        .expect_err("a member of another mob lives in another realm");
+    assert!(
+        matches!(
+            cross_mob,
+            WorkGraphError::AttentionTargetRealmMismatch { ref mob_id, .. } if mob_id == "other-mob"
+        ),
+        "unexpected error: {cross_mob:?}"
+    );
+}
+
+#[test]
+fn mob_agent_owner_keys_round_trip_and_reject_other_shapes() {
+    let key = WorkOwnerKey::mob_agent("alpha", "reviewer").expect("member owner key");
+    let member = key.as_mob_agent().expect("mob agent shape");
+    assert_eq!(member.mob_id, "alpha");
+    assert_eq!(member.agent_identity, "reviewer");
+    assert_eq!(member.realm_id().expect("realm"), "mob.alpha");
+    assert!(WorkOwnerKey::mob_agent("", "reviewer").is_err());
+    assert!(WorkOwnerKey::mob_agent("alpha", "re/viewer").is_err());
+    assert!(
+        WorkOwnerKey::agent("mob/alpha/agent/reviewer/2")
+            .expect("agent key")
+            .as_mob_agent()
+            .is_none()
+    );
+    assert!(
+        WorkOwnerKey::mob("alpha")
+            .expect("mob key")
+            .as_mob_agent()
+            .is_none()
+    );
 }

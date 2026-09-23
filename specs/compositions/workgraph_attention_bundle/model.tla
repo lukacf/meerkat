@@ -1627,7 +1627,7 @@ workgraph_ClassifyPublicErrorInvalidArgumentsAbsent(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Absent"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
        /\ workgraph_phase' = "Absent"
        /\ UnchangedFrame_e8333ccf3574a1f1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1646,7 +1646,7 @@ workgraph_ClassifyPublicErrorInvalidArgumentsOpen(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Open"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
        /\ workgraph_phase' = "Open"
        /\ UnchangedFrame_e8333ccf3574a1f1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1665,7 +1665,7 @@ workgraph_ClassifyPublicErrorInvalidArgumentsInProgress(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "InProgress"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
        /\ workgraph_phase' = "InProgress"
        /\ UnchangedFrame_e8333ccf3574a1f1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1684,7 +1684,7 @@ workgraph_ClassifyPublicErrorInvalidArgumentsBlocked(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Blocked"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
        /\ workgraph_phase' = "Blocked"
        /\ UnchangedFrame_e8333ccf3574a1f1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1703,7 +1703,7 @@ workgraph_ClassifyPublicErrorInvalidArgumentsCompleted(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Completed"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
        /\ workgraph_phase' = "Completed"
        /\ UnchangedFrame_e8333ccf3574a1f1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1722,7 +1722,7 @@ workgraph_ClassifyPublicErrorInvalidArgumentsCancelled(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Cancelled"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
        /\ workgraph_phase' = "Cancelled"
        /\ UnchangedFrame_e8333ccf3574a1f1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1741,7 +1741,7 @@ workgraph_ClassifyPublicErrorInvalidArgumentsFailed(arg_kind) ==
        /\ packet.payload.kind = arg_kind
        /\ ~HigherPriorityReady("workgraph_authority")
        /\ workgraph_phase = "Failed"
-       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis"))
+       /\ (IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch")))
        /\ workgraph_phase' = "Failed"
        /\ UnchangedFrame_e8333ccf3574a1f1
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -7449,13 +7449,13 @@ EntryPacketAdmissible_workgraph(packet) ==
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((packet.payload.kind = "InvalidTransition"))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((packet.payload.kind = "InvalidTransition"))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((packet.payload.kind = "InvalidTransition"))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis")))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis")))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis")))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis")))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis")))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis")))
-    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (packet.payload.kind = "InvalidTimestampMillis")))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Blocked") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Completed") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Cancelled") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
+    \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Failed") /\ ((IF (packet.payload.kind = "InvalidInput") THEN TRUE ELSE (IF (packet.payload.kind = "InvalidTimestampMillis") THEN TRUE ELSE (packet.payload.kind = "AttentionTargetRealmMismatch"))))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Absent") /\ ((packet.payload.kind = "UnsupportedBackend"))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "Open") /\ ((packet.payload.kind = "UnsupportedBackend"))
     \/ /\ (packet.variant = "ClassifyWorkGraphPublicError") /\ (workgraph_phase = "InProgress") /\ ((packet.payload.kind = "UnsupportedBackend"))

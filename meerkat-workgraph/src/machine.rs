@@ -1382,6 +1382,9 @@ fn work_graph_error_kind(error: &WorkGraphError) -> wg_dsl::WorkGraphErrorKind {
             wg_dsl::WorkGraphErrorKind::NamespaceAssignmentRequired
         }
         WorkGraphError::UnsupportedBackend(_) => wg_dsl::WorkGraphErrorKind::UnsupportedBackend,
+        WorkGraphError::AttentionTargetRealmMismatch { .. } => {
+            wg_dsl::WorkGraphErrorKind::AttentionTargetRealmMismatch
+        }
     }
 }
 

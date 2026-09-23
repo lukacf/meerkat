@@ -760,6 +760,8 @@ pub enum WorkGraphErrorKind {
     Store,
     #[serde(rename = "UnsupportedBackend")]
     UnsupportedBackend,
+    #[serde(rename = "AttentionTargetRealmMismatch")]
+    AttentionTargetRealmMismatch,
 }
 impl WorkGraphErrorKind {
     pub fn as_str(&self) -> &'static str {
@@ -774,6 +776,7 @@ impl WorkGraphErrorKind {
             Self::NamespaceAssignmentRequired => "NamespaceAssignmentRequired",
             Self::Store => "Store",
             Self::UnsupportedBackend => "UnsupportedBackend",
+            Self::AttentionTargetRealmMismatch => "AttentionTargetRealmMismatch",
         }
     }
 }
@@ -791,6 +794,7 @@ impl std::convert::TryFrom<&str> for WorkGraphErrorKind {
             "NamespaceAssignmentRequired" => Ok(Self::NamespaceAssignmentRequired),
             "Store" => Ok(Self::Store),
             "UnsupportedBackend" => Ok(Self::UnsupportedBackend),
+            "AttentionTargetRealmMismatch" => Ok(Self::AttentionTargetRealmMismatch),
             other => Err(format!("invalid WorkGraphErrorKind value `{other}`")),
         }
     }

@@ -301,6 +301,22 @@ them.
 
 ### Fixed
 
+- A WorkGraph attention binding that names a mob member is refused, typed, when
+  it is requested in any realm other than that mob's realm. Since members build
+  in and resolve attention from `mob.<mob_id>` (the mob runtime rescopes the
+  host's WorkGraph service there), a member-bound goal created through a
+  host-realm service was accepted and stored where the member never looks: the
+  member's turns ran with its baseline tools and no attention overlay, with no
+  error anywhere. `WorkGraphService::create_goal`, `bind_goal_attention`,
+  `reassign_attention`, and `break_glass_reassign_attention` now return
+  `WorkGraphError::AttentionTargetRealmMismatch` (tool code
+  `invalid_arguments`, public class `InvalidArguments`) for an
+  `Owner { owner_key }` target of the `mob/<mob_id>/agent/<identity>` shape
+  whose realm is not `mob.<mob_id>`; hosts create member-bound goals through
+  `meerkat_mob::mob_scoped_workgraph_service`. The mob runtime test
+  `test_workgraph_owner_attention_survives_respawn_and_scopes_member_turn`
+  created its goal in a host realm and failed on every run since the
+  rescoping landed; it now creates the goal in the mob realm.
 - The WholeBlob audited-endpoint divergence now reaches hosts typed on the
   resume and reload paths, not only on a direct document read. Every resume
   runs durable-tail recovery first, and recovery reads the committed document
@@ -620,6 +636,14 @@ them.
   canonical TLC lane, generated authority, and render contracts are unchanged.
 
 ### Breaking
+- `WorkGraphError` gains the variant `AttentionTargetRealmMismatch { owner_key,
+  mob_id, required_realm_id, realm_id }` (exhaustive matches must add the
+  arm); the generated `WorkGraphErrorKind` gains `AttentionTargetRealmMismatch`
+  (`WorkGraphErrorKind::*` discriminants and `PartialOrd` positions are
+  unchanged for existing variants; exhaustive matches must add the arm). New
+  public items: `WorkOwnerKey::mob_agent`, `WorkOwnerKey::as_mob_agent`,
+  `MobAgentOwner` (with `MobAgentOwner::realm_id`), and
+  `mob_agent_owner_id_parts`, re-exported from `meerkat`.
 - `MobError::MemberRestoreFailed` gains the field
   `hold: Option<DurableResumeHold>` (`MobError` struct literals and exhaustive
   struct patterns on `MemberRestoreFailed` must name it or use `..`): meerkat's

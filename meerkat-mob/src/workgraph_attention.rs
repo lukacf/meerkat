@@ -18,22 +18,7 @@ pub fn lower_agent_identity_owner_key(
     mob_id: &MobId,
     identity: &AgentIdentity,
 ) -> Result<meerkat::WorkOwnerKey, meerkat::WorkGraphError> {
-    reject_owner_key_segment("mob_id", mob_id.as_str())?;
-    reject_owner_key_segment("agent_identity", identity.as_str())?;
-    meerkat::WorkOwnerKey::agent(format!(
-        "mob/{}/agent/{}",
-        mob_id.as_str(),
-        identity.as_str()
-    ))
-}
-
-fn reject_owner_key_segment(label: &str, value: &str) -> Result<(), meerkat::WorkGraphError> {
-    if value.is_empty() || value.contains('/') {
-        return Err(meerkat::WorkGraphError::InvalidInput(format!(
-            "mob attention owner key {label} must be non-empty and must not contain '/'"
-        )));
-    }
-    Ok(())
+    meerkat::WorkOwnerKey::mob_agent(mob_id.as_str(), identity.as_str())
 }
 
 #[cfg(test)]

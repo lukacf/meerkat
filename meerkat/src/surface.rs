@@ -426,16 +426,7 @@ fn attention_target_matches_session(
 }
 
 fn mob_agent_owner_key_parts(owner_id: &str) -> Option<(&str, &str)> {
-    let rest = owner_id.strip_prefix("mob/")?;
-    let (mob_id, agent_identity) = rest.split_once("/agent/")?;
-    if mob_id.is_empty()
-        || agent_identity.is_empty()
-        || mob_id.contains('/')
-        || agent_identity.contains('/')
-    {
-        return None;
-    }
-    Some((mob_id, agent_identity))
+    crate::mob_agent_owner_id_parts(owner_id)
 }
 
 fn compose_turn_tool_overlay(
@@ -1875,8 +1866,16 @@ mod tests {
     }
 
     async fn owner_scoped_workgraph_service() -> crate::WorkGraphService {
-        let service =
-            crate::WorkGraphService::new(std::sync::Arc::new(crate::MemoryWorkGraphStore::new()));
+        // The goal binds a member of mob `alpha`; member-bound attention lives
+        // only in that mob's realm, which is also where the mob runtime
+        // resolves it from (`mob_scoped_workgraph_service`).
+        let service = crate::WorkGraphService::with_scope(
+            std::sync::Arc::new(crate::MemoryWorkGraphStore::new()),
+            meerkat_core::mob_realm_id("alpha")
+                .expect("mob realm")
+                .as_str(),
+            crate::WorkNamespace::default(),
+        );
         service
             .create_goal(crate::GoalCreateRequest {
                 failed_child_join_policy: Default::default(),

@@ -208,6 +208,7 @@ impl WorkGraphService {
         validate_completion_policy(&request.completion_policy)?;
         let (realm_id, namespace) =
             self.scope(request.realm_id.clone(), request.namespace.clone())?;
+        validate_attention_target_realm(&request.target, &realm_id)?;
         let create_request = CreateWorkItemRequest {
             realm_id: Some(realm_id.clone()),
             namespace: Some(namespace.clone()),
@@ -267,6 +268,7 @@ impl WorkGraphService {
     ) -> Result<GoalCreateResult, WorkGraphError> {
         let now = self.store.get_store_time_utc().await?;
         let (realm_id, namespace) = self.scope(request.realm_id, request.namespace)?;
+        validate_attention_target_realm(&request.target, &realm_id)?;
         let item = self
             .store
             .get_item(&realm_id, &namespace, &request.item_id)
@@ -564,6 +566,7 @@ impl WorkGraphService {
         break_glass_audit: Option<serde_json::Value>,
     ) -> Result<AttentionReassignResult, WorkGraphError> {
         let now = self.store.get_store_time_utc().await?;
+        validate_attention_target_realm(target, &realm_id)?;
         let current = self
             .attention_binding(AttentionBindingRequest {
                 binding_id,
@@ -2045,6 +2048,33 @@ fn reject_reserved_evidence_refs(evidence_refs: &[WorkEvidenceRef]) -> Result<()
             "reserved completion evidence kind {} must be added through goal_confirm",
             evidence.kind
         )));
+    }
+    Ok(())
+}
+
+/// A binding whose target is a mob member is only ever resolved by that
+/// member's turns in the mob realm (`mob.<mob_id>`): the mob runtime rescopes
+/// its WorkGraph service there and the member's attention overlay lookup lists
+/// bindings in that realm alone. Accepting the binding in any other realm
+/// would store it where the member never looks, so it is refused at the call.
+fn validate_attention_target_realm(
+    target: &GoalAttentionTarget,
+    realm_id: &str,
+) -> Result<(), WorkGraphError> {
+    let GoalAttentionTarget::Owner { owner_key } = target else {
+        return Ok(());
+    };
+    let Some(member) = owner_key.as_mob_agent() else {
+        return Ok(());
+    };
+    let required_realm_id = member.realm_id()?;
+    if required_realm_id != realm_id {
+        return Err(WorkGraphError::AttentionTargetRealmMismatch {
+            owner_key: owner_key.canonical(),
+            mob_id: member.mob_id.to_string(),
+            required_realm_id,
+            realm_id: realm_id.to_string(),
+        });
     }
     Ok(())
 }

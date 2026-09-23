@@ -2363,6 +2363,7 @@ mod orchestrator {
                 (Some(policy), Some(boundary)) => Some(
                     self.pre_open_concurrent_summary(
                         session_id,
+                        turning_mode,
                         policy,
                         pending.as_mut(),
                         &mut projection,
@@ -2532,6 +2533,7 @@ mod orchestrator {
         pub(crate) async fn pre_open_concurrent_summary(
             &self,
             session_id: &SessionId,
+            turning_mode: RealtimeTurningMode,
             policy: &super::live_summary::LiveContextSummaryPolicy,
             pending: &mut dyn crate::experimental_gpt_live::ExperimentalLivePendingOpen,
             projection: &mut RealtimeSessionOpenProjection,
@@ -2551,21 +2553,28 @@ mod orchestrator {
             };
             match ready {
                 Some(Ok(summary)) => match self
-                    .live_summary_is_exactly_current(session_id, &summary, boundary_cursor)
+                    .seeded_open_config(
+                        session_id,
+                        turning_mode,
+                        &summary,
+                        boundary_cursor,
+                        &projection.open_config,
+                    )
                     .await
                 {
-                    Ok(true) => {
+                    Ok(Some(open_config)) => {
                         tracing::info!(
                             %session_id,
                             bound_ms = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX),
                             "live context summary ready before the provider open; seeding it as startup input"
                         );
                         pending.set_context_summary(summary.clone())?;
+                        projection.open_config = open_config;
                         projection.seed_status = LiveSeedProjectionStatus::Summarized;
                         projection.summary = Some(summary);
                         return Ok(LivePreOpenSummary::Seeded);
                     }
-                    Ok(false) => tracing::info!(
+                    Ok(None) => tracing::info!(
                         %session_id,
                         "live context summary ready but rows were committed after its boundary; delivering it after the first user turn"
                     ),
@@ -2590,27 +2599,53 @@ mod orchestrator {
             Ok(LivePreOpenSummary::Late(pregeneration))
         }
 
-        /// A summary is exactly current for seeding when the source still
-        /// validates and no row was committed after its boundary. Rows
-        /// committed meanwhile would otherwise drain as ordinary appends at
-        /// open; the late path reasserts them quietly as the causal tail.
+        /// The open config for seeding a ready summary, or `None` when the
+        /// summary cannot be seeded: a row was committed after its boundary
+        /// (the late path reasserts such rows quietly as the causal tail,
+        /// while seeding would drain them as ordinary appends at open), or
+        /// the source no longer validates. The body-free concurrent config
+        /// carries no seed rows and a zero cursor, so the seeded open is
+        /// re-projected from the current snapshot exactly like a before-open
+        /// summary, taking over its projection lease, and the summary must
+        /// validate against that projection before the open commits to it.
         #[cfg(feature = "openai-live")]
-        async fn live_summary_is_exactly_current(
+        async fn seeded_open_config(
             &self,
             session_id: &SessionId,
+            turning_mode: RealtimeTurningMode,
             summary: &super::live_summary::LiveContextSummary,
             boundary_cursor: u64,
-        ) -> Result<bool, RealtimeSessionOpenProjectionError> {
+            body_free: &RealtimeSessionOpenConfig,
+        ) -> Result<Option<RealtimeSessionOpenConfig>, RealtimeSessionOpenProjectionError> {
             let current = self
                 .service
                 .export_realtime_refresh_session_snapshot(session_id)
                 .await?;
             let identity = self.service.live_session_llm_identity(session_id).await?;
             if current.messages().len() as u64 != boundary_cursor {
-                return Ok(false);
+                return Ok(None);
             }
             summary.validate_current(&current, &identity)?;
-            Ok(true)
+            let Some(lease) = body_free.take_open_projection_lease() else {
+                return Ok(None);
+            };
+            let tools = self.service.live_visible_tool_defs(session_id).await?;
+            let generation = current
+                .transcript_rewrite_generation()
+                .map_err(super::live_summary::LiveContextSummaryError::from)?;
+            let config = RealtimeSessionOpenConfig::for_open_from_messages(
+                turning_mode,
+                identity,
+                tools,
+                current.messages_for_model_boundary(),
+                current.messages(),
+            )?
+            .with_open_projection_lease(lease)
+            .with_user_content_identities(current.realtime_user_content_identities())
+            .with_user_content_tombstones(current.realtime_user_content_tombstones())
+            .with_transcript_rewrite_generation(generation);
+            summary.validate_projection(session_id, &config)?;
+            Ok(Some(config))
         }
 
         /// Hand an adopted pre-open generation to its preparation job once

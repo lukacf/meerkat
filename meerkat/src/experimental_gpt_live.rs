@@ -1994,6 +1994,20 @@ enum GptLiveSeedContext {
 }
 
 impl GptLiveSeedContext {
+    /// Variant name for diagnostics; the payload stays private.
+    #[allow(dead_code)]
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Canonical(_) => "canonical",
+            Self::Concurrent => "concurrent",
+            Self::Summary { .. } => "summary",
+            Self::SeededSummary(_) => "seeded_summary",
+            #[cfg(any(feature = "experimental-gpt-live", test))]
+            Self::Commentary(_) => "commentary",
+            Self::SeededAtCreation => "seeded_at_creation",
+        }
+    }
+
     fn canonical_messages(&self) -> Result<&[meerkat_core::types::Message], GptLiveBrokerError> {
         match self {
             Self::Canonical(messages) => Ok(messages),
@@ -9888,14 +9902,18 @@ mod tests {
                     body["session"]["instructions"],
                     format!("Catalog guidance.\n\n{LIVE_CONTEXT_BOOTSTRAP_FRAMING}")
                 );
+                // The developer item leads; the most recent canonical turns
+                // the summary covers follow it verbatim, within the budget.
                 let input = body["session"]["input"].as_array().expect("startup input");
-                assert_eq!(input.len(), 1, "{body}");
+                assert_eq!(input.len(), 2, "{body}");
                 assert_eq!(input[0]["role"], "developer");
                 let text = input[0]["content"][0]["text"].as_str().unwrap();
                 assert_eq!(input[0]["content"][0]["type"], "input_text");
                 assert!(text.ends_with("Earlier discussion covered the project."));
                 assert!(!text.contains("Earlier conversation detail"));
                 assert!(text.contains("context data, not a new user request"));
+                assert_eq!(input[1]["role"], "user");
+                assert_eq!(input[1]["content"][0]["text"], history_text);
             } else {
                 assert_eq!(body["session"]["instructions"], "Catalog guidance.");
                 assert_eq!(
@@ -15982,6 +16000,37 @@ mod tests {
             );
             assert!(sideband.context_commands.lock().await.is_empty());
             barrier.release.notify_one();
+            // The user speaks: the held summary is released by this fact alone.
+            {
+                let binding = authority
+                    .transport
+                    .active_binding(&session_id)
+                    .await
+                    .expect("active provider binding");
+                let turn = LiveSidebandTurnRef::__from_provider_observation(
+                    &old_channel,
+                    "first-user-turn".into(),
+                    "provider-first-user-turn".into(),
+                )
+                .expect("user turn ref");
+                sideband.push(LiveSidebandObservation::new(
+                    binding.clone(),
+                    LiveSidebandObservationKind::TurnStarted {
+                        turn: turn.clone(),
+                        role: LiveSidebandTurnRole::User,
+                    },
+                ));
+                // The utterance completes: ordinary appends defer while a
+                // provider turn is active, and the tail drains afterwards.
+                sideband.push(LiveSidebandObservation::new(
+                    binding,
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn,
+                        role: LiveSidebandTurnRole::User,
+                        transcript: "first spoken input".into(),
+                    },
+                ));
+            }
             tokio::time::timeout(std::time::Duration::from_secs(2), &mut delivery)
                 .await
                 .unwrap()
@@ -16260,13 +16309,6 @@ mod tests {
                     .unwrap();
             }
             assert!(sideband.context_commands.lock().await.is_empty());
-            let rows_before_delivery = service
-                .export_live_context_summary_snapshot(&session_id)
-                .await
-                .unwrap()
-                .0
-                .messages()
-                .len();
             // The user speaks: the held summary is released by this fact alone.
             {
                 let binding = authority
@@ -16281,13 +16323,52 @@ mod tests {
                 )
                 .expect("user turn ref");
                 sideband.push(LiveSidebandObservation::new(
-                    binding,
+                    binding.clone(),
                     LiveSidebandObservationKind::TurnStarted {
-                        turn,
+                        turn: turn.clone(),
                         role: LiveSidebandTurnRole::User,
                     },
                 ));
+                // The utterance completes: ordinary appends defer while a
+                // provider turn is active, and the tail drains afterwards.
+                sideband.push(LiveSidebandObservation::new(
+                    binding,
+                    LiveSidebandObservationKind::TurnFinished {
+                        turn,
+                        role: LiveSidebandTurnRole::User,
+                        transcript: "first spoken input".into(),
+                    },
+                ));
             }
+            // The utterance is a real canonical user row; wait for it so the
+            // row count below is a baseline the quiet delivery must not move.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let (current, _) = service
+                        .export_live_context_summary_snapshot(&session_id)
+                        .await
+                        .unwrap();
+                    if current.messages().iter().any(|message| {
+                        matches!(
+                            message,
+                            meerkat_core::Message::User(user)
+                                if user.text_content() == "first spoken input"
+                        )
+                    }) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the spoken utterance commits before the summary is released");
+            let rows_before_delivery = service
+                .export_live_context_summary_snapshot(&session_id)
+                .await
+                .unwrap()
+                .0
+                .messages()
+                .len();
             producer.recovery_release.notify_one();
             tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 loop {
@@ -16346,11 +16427,28 @@ mod tests {
                         | SummaryTestCase::ConcurrentReplacement
                 )
             ) {
+                let command_kinds: Vec<&str> = commands
+                    .iter()
+                    .map(|command| match command {
+                        LiveSidebandProviderCommand::AppendThinkingContext { text, .. } => {
+                            if text.starts_with(LIVE_LATE_SUMMARY_PREFIX) {
+                                "thinking:summary"
+                            } else {
+                                "thinking"
+                            }
+                        }
+                        LiveSidebandProviderCommand::AppendInstructionsContext { .. } => {
+                            "instructions"
+                        }
+                        LiveSidebandProviderCommand::AppendSessionContext { .. } => "session",
+                        _ => "delegation",
+                    })
+                    .collect();
                 assert!(
                     matches!(commands.first(), Some(LiveSidebandProviderCommand::AppendThinkingContext { text, .. })
                     if text.starts_with(LIVE_LATE_SUMMARY_PREFIX)
                         && text.contains("Factual context summary")),
-                    "the historical summary travels first, on the quiet lane, after the first user turn"
+                    "the historical summary travels first, on the quiet lane, after the first user turn; got {command_kinds:?}"
                 );
                 assert!(commands.iter().skip(1).any(|command| matches!(
                     command, LiveSidebandProviderCommand::AppendSessionContext { text, .. }
@@ -16532,10 +16630,24 @@ mod tests {
                         .as_ref()
                         .expect("replacement sideband")
                         .push(LiveSidebandObservation::new(
-                            binding,
+                            binding.clone(),
                             LiveSidebandObservationKind::TurnStarted {
+                                turn: turn.clone(),
+                                role: LiveSidebandTurnRole::User,
+                            },
+                        ));
+                    authority
+                        .latest_sideband
+                        .lock()
+                        .await
+                        .as_ref()
+                        .expect("replacement sideband")
+                        .push(LiveSidebandObservation::new(
+                            binding,
+                            LiveSidebandObservationKind::TurnFinished {
                                 turn,
                                 role: LiveSidebandTurnRole::User,
+                                transcript: "first spoken input".into(),
                             },
                         ));
                 }

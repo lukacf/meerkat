@@ -2006,7 +2006,14 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
         let cursor = boundary.canonical_message_cursor();
         let outcome = self
             .orchestrator()
-            .pre_open_concurrent_summary(session, policy, pending, projection, boundary)
+            .pre_open_concurrent_summary(
+                session,
+                RealtimeTurningMode::ProviderManaged,
+                policy,
+                pending,
+                projection,
+                boundary,
+            )
             .await?;
         Ok((Some(outcome), Some(cursor)))
     }

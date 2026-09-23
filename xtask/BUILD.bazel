@@ -32,6 +32,20 @@ filegroup(
 
 
 
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
 rust_library(
     name = "xtask",
     aliases = aliases(package_name = "xtask"),

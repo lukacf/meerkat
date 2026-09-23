@@ -30,6 +30,20 @@ filegroup(
 
 
 
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
 alias(
     name = "meerkat_anthropic_agent_factory_build",
     actual = "//meerkat-anthropic:meerkat_anthropic_agent_factory_build",

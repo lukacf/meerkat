@@ -1121,6 +1121,25 @@ const packageRunfileLabels = [
   ),
 ].sort();
 
+// The workspace runfiles the cargo-equivalent lanes copy must carry every
+// package's BUILD.bazel and the tools/buildbuddy scripts too: the root glob
+// cannot see inside Bazel packages and excludes BUILD files, but the xtask
+// static-lane tests and the facade policy canary read
+// `<crate>/BUILD.bazel`, `tools/buildbuddy/BUILD.bazel` and
+// `tools/buildbuddy/*_lane_test.sh` through the workspace root (release
+// lane 35928492478 failed on exactly those reads). Each generated package
+// exports its BUILD file as `:build_file`; tools/buildbuddy declares its own.
+const workspaceBuildFileLabels = [
+  ...new Set(
+    [...localPackages.values(), ...inTreePathPackages]
+      .map((pkg) => relative(root, packageDir(pkg)))
+      .filter((dir) => dir !== "")
+      .map((dir) => `//${dir}:build_file`),
+  ),
+  "//tools/buildbuddy:build_file",
+  "//tools/buildbuddy:lane_scripts",
+].sort();
+
 // The root Cargo.toml `[workspace.lints]` table as rustc lint flags, in
 // Cargo's order (lower `priority` first, so later flags override). Cargo
 // passes exactly these to rustc for every member that declares
@@ -1387,7 +1406,7 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `            "**/BUILD.bazel",`,
     `        ],`,
     `        allow_empty = True,`,
-    `    ) + ${listExpr(packageRunfileLabels, 8)},`,
+    `    ) + ${listExpr([...packageRunfileLabels, ...workspaceBuildFileLabels].sort(), 8)},`,
     `    visibility = ["//visibility:public"],`,
     `)`,
     ``,
@@ -2456,6 +2475,13 @@ for (const pkg of localPackages.values()) {
       `filegroup(`,
       `    name = "package_runfiles",`,
       `    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),`,
+      `    visibility = ["//visibility:public"],`,
+      `)`,
+      "",
+      `# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.`,
+      `filegroup(`,
+      `    name = "build_file",`,
+      `    srcs = ["BUILD.bazel"],`,
       `    visibility = ["//visibility:public"],`,
       `)`,
       "",

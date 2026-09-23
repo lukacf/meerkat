@@ -2560,6 +2560,15 @@ where
     /// actor removes it before each checkpoint await and installs only the
     /// exact returned successor.
     pub(crate) latest_run_checkpoint_receipt: Option<crate::RunCheckpointReceipt>,
+    /// Rows `[0, floor)` are committed in the durable store exactly as they
+    /// stand in memory (the document loaded at build, the rows a compaction
+    /// rewrite installed, or a committed successor the runtime handed over).
+    /// Pre-compaction media externalization never touches them: a committed
+    /// inline row's persisted form is pinned by the store's prefix proof, and
+    /// mutating it on the actor would make the next commit disagree with the
+    /// head row (`TranscriptContinuityViolation`). Rows at or beyond the floor
+    /// are process-local until their own checkpoint externalizes them.
+    pub(crate) durable_row_floor: usize,
     /// Optional blob store used to hydrate image refs at execution seams.
     pub(crate) blob_store: Option<Arc<dyn crate::BlobStore>>,
     /// Original error detail preserved from `terminalize_fatal_error` so
@@ -2710,6 +2719,7 @@ pub(crate) struct CompactionRollbackState {
     pub(crate) rollback_session: Session,
     pub(crate) rollback_last_input_tokens: u64,
     pub(crate) rollback_compaction_cadence: SessionCompactionCadence,
+    pub(crate) rollback_durable_row_floor: usize,
 }
 
 pub(crate) enum CompactionTransactionPhase {

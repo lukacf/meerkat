@@ -195,35 +195,48 @@ struct MachineAcceptedModelFallbackActivation {
 /// compaction retry policy.
 struct EphemeralCompactionRewriteGuard<'a> {
     session: &'a mut crate::Session,
+    durable_row_floor: &'a mut usize,
     cadence: &'a mut crate::compact::SessionCompactionCadence,
     rollback_session: Option<crate::Session>,
+    rollback_durable_row_floor: Option<usize>,
     rollback_cadence: Option<crate::compact::SessionCompactionCadence>,
 }
 
 impl<'a> EphemeralCompactionRewriteGuard<'a> {
     fn install(
         session: &'a mut crate::Session,
+        durable_row_floor: &'a mut usize,
         replacement: crate::Session,
         cadence: &'a mut crate::compact::SessionCompactionCadence,
         rollback_cadence: crate::compact::SessionCompactionCadence,
     ) -> Self {
         let rollback_session = std::mem::replace(session, replacement);
+        // The rewritten rows become the committed prefix at the rewrite
+        // commit; the floor follows them and is restored with the session.
+        let rollback_durable_row_floor =
+            std::mem::replace(durable_row_floor, session.messages().len());
         Self {
             session,
+            durable_row_floor,
             cadence,
             rollback_session: Some(rollback_session),
+            rollback_durable_row_floor: Some(rollback_durable_row_floor),
             rollback_cadence: Some(rollback_cadence),
         }
     }
 
     fn commit(mut self) {
         self.rollback_session = None;
+        self.rollback_durable_row_floor = None;
         self.rollback_cadence = None;
     }
 
     fn rollback_index_error_preserving_attempt(mut self) {
         if let Some(session) = self.rollback_session.take() {
             *self.session = session;
+        }
+        if let Some(floor) = self.rollback_durable_row_floor.take() {
+            *self.durable_row_floor = floor;
         }
         // A completed indexing error is a real compaction attempt. Leave the
         // live attempted cadence in place so the normal guard prevents an
@@ -266,6 +279,9 @@ impl Drop for EphemeralCompactionRewriteGuard<'_> {
     fn drop(&mut self) {
         if let Some(session) = self.rollback_session.take() {
             *self.session = session;
+        }
+        if let Some(floor) = self.rollback_durable_row_floor.take() {
+            *self.durable_row_floor = floor;
         }
         if let Some(cadence) = self.rollback_cadence.take() {
             *self.cadence = cadence;
@@ -846,6 +862,7 @@ where
         self.apply_llm_request_policy(pending.request_policy);
         self.active_model_profile = Some(pending.target_profile);
         self.session = pending.next_session;
+        self.durable_row_floor = self.session.messages().len();
         tracing::warn!(model = %self.client.model(), provider = %self.client.provider().as_str(), "model fallback committed");
         let _ = crate::event_tap::tap_emit(
             &self.event_tap,
@@ -1409,6 +1426,7 @@ where
             self.apply_llm_request_policy(switch.request_policy);
             self.active_model_profile = Some(switch.target_profile);
             self.session = next_session;
+            self.durable_row_floor = self.session.messages().len();
             let _ = crate::event_tap::tap_emit(
                 &self.event_tap,
                 self.default_event_tx.as_ref(),
@@ -2763,6 +2781,7 @@ where
                             rollback_session: self.session.clone(),
                             rollback_last_input_tokens: self.last_input_tokens,
                             rollback_compaction_cadence: self.compaction_cadence.clone(),
+                            rollback_durable_row_floor: self.durable_row_floor,
                         };
                         // Cadence for every failure path below, including a
                         // runtime handoff refusal: the attempt is recorded
@@ -2795,10 +2814,15 @@ where
                         // refused. This is the same in-place scan the checkpoint
                         // performs, so the checkpoint pass becomes a
                         // byte-identical no-op for these rows.
+                        // Only rows at or beyond the durable floor: committed
+                        // rows keep the persisted form the store's prefix
+                        // proof pins (see `durable_row_floor`).
+                        let externalize_from =
+                            self.durable_row_floor.min(self.session.messages().len());
                         let externalized = match self.blob_store.as_ref() {
                             Some(blob_store) => self
                                 .session
-                                .externalize_media(blob_store.as_ref(), 0)
+                                .externalize_media(blob_store.as_ref(), externalize_from)
                                 .await
                                 .map_err(|error| {
                                     format!("inline media could not be externalized before compaction: {error}")
@@ -2975,6 +2999,7 @@ where
                                 match self.memory_store.clone() {
                                         None => {
                                             self.session = compacted_session;
+                                            self.durable_row_floor = self.session.messages().len();
                                             (true, true)
                                         }
                                         Some(memory_store) => match memory_store
@@ -3004,6 +3029,7 @@ where
                                                 let rewrite_guard =
                                                     EphemeralCompactionRewriteGuard::install(
                                                         &mut self.session,
+                                                        &mut self.durable_row_floor,
                                                         compacted_session,
                                                         &mut self.compaction_cadence,
                                                         rollback_state
@@ -3081,6 +3107,7 @@ where
                                                                 };
                                                                 if adopted {
                                                                     self.session = compacted_session;
+                                                                    self.durable_row_floor = self.session.messages().len();
                                                                     if self
                                                                         .in_flight_compaction_stage
                                                                         .as_ref()
@@ -3626,6 +3653,7 @@ where
             }
         }
         self.session = next_session;
+        self.durable_row_floor = self.session.messages().len();
         if let Some(transaction) = self.compaction_transaction.as_mut() {
             transaction.phase = crate::agent::CompactionTransactionPhase::RuntimeCommitted {
                 bookkeeping_complete: true,
@@ -3825,6 +3853,7 @@ where
             restored_cadence.last_compaction_attempt_boundary_index =
                 attempted_cadence.last_compaction_attempt_boundary_index;
             self.session = restored_session;
+            self.durable_row_floor = rollback.rollback_durable_row_floor;
             self.last_input_tokens = rollback.rollback_last_input_tokens;
             self.compaction_cadence = restored_cadence;
             if let Some(transaction) = self.compaction_transaction.as_mut() {
@@ -9882,6 +9911,7 @@ mod tests {
                     rollback_session,
                     rollback_last_input_tokens,
                     rollback_compaction_cadence: rollback_compaction_cadence.clone(),
+                    rollback_durable_row_floor: 0,
                 },
             )),
             projections: vec![projection.clone()],
@@ -9967,6 +9997,7 @@ mod tests {
                     rollback_session,
                     rollback_last_input_tokens: agent.last_input_tokens,
                     rollback_compaction_cadence: agent.compaction_cadence.clone(),
+                    rollback_durable_row_floor: 0,
                 },
             )),
             projections: vec![first.clone(), second.clone()],
@@ -10068,6 +10099,7 @@ mod tests {
             rollback_session: agent.session().clone(),
             rollback_last_input_tokens: agent.last_input_tokens,
             rollback_compaction_cadence: agent.compaction_cadence.clone(),
+            rollback_durable_row_floor: 0,
         };
         let first = append_abort_test_projection(agent.session_mut(), "commit-first");
         let second = append_abort_test_projection(agent.session_mut(), "commit-second");
@@ -10152,6 +10184,7 @@ mod tests {
             rollback_session: agent.session().clone(),
             rollback_last_input_tokens: agent.last_input_tokens,
             rollback_compaction_cadence: agent.compaction_cadence.clone(),
+            rollback_durable_row_floor: 0,
         };
         let first = append_abort_test_projection(agent.session_mut(), "exact-first");
         let second = append_abort_test_projection(agent.session_mut(), "exact-second");
@@ -12283,6 +12316,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pre_compaction_externalization_leaves_committed_inline_rows_and_their_prefix_digest_untouched()
+     {
+        // A legacy committed row may still carry inline media (the 0.8.10
+        // conversion lane preserved inline storage). The store's prefix proof
+        // pins that row in its committed form, so pre-compaction
+        // externalization starts at the durable floor: the committed row stays
+        // inline and digests as the store pinned it, while the live image row
+        // appended in-process is externalized before the edge binds it.
+        let mut session = crate::Session::new();
+        session.push(Message::User(UserMessage::text("older committed context")));
+        session.push(Message::BlockAssistant(
+            crate::types::BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ),
+        ));
+        session.push(Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Text {
+                text: "legacy committed image".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: "L".repeat(2_048),
+                },
+            },
+        ])));
+        session.push(Message::BlockAssistant(
+            crate::types::BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "seen".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ),
+        ));
+        let committed_rows: Vec<Message> = session.messages().to_vec();
+        // The legacy image row and its reply are the committed rows the
+        // compactor retains; pin their committed form and digest.
+        let committed_legacy_pair: Vec<Message> = committed_rows[2..4].to_vec();
+        let committed_legacy_digest =
+            crate::session::transcript_messages_digest(&committed_legacy_pair).unwrap();
+        let blob_store = Arc::new(StoringBlobStore::new());
+        let client = Arc::new(FailingCompactionLlmClient::new());
+        let curator = Arc::new(SubstitutingCurator::new());
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .compactor(Arc::new(RetainingTailCompactor {
+                boundaries_seen: Mutex::new(0),
+            }))
+            .compaction_curator(curator.clone())
+            .with_blob_store(blob_store.clone())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent
+            .session_mut()
+            .push(Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "look at this".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: "A".repeat(4_096),
+                    },
+                },
+            ])));
+        agent.run("first".into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("curated compaction should commit and continue the turn");
+        let events: Vec<crate::event::AgentEvent> =
+            std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, crate::event::AgentEvent::CompactionCompleted { .. })),
+            "compaction must complete; failures: {:?}",
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    crate::event::AgentEvent::CompactionFailed { reason } =>
+                        Some(format!("{reason:?}")),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        );
+        let messages = agent.session().messages();
+        // The compactor retained everything from the first image row, so the
+        // committed legacy pair sits right after the summary, byte-identical
+        // to the rows the store pinned (inline form kept).
+        let retained_legacy_pair: Vec<Message> = messages[1..3].to_vec();
+        assert_eq!(
+            retained_legacy_pair, committed_legacy_pair,
+            "committed rows must be retained exactly as committed"
+        );
+        assert_eq!(
+            crate::session::transcript_messages_digest(&retained_legacy_pair).unwrap(),
+            committed_legacy_digest,
+            "the committed rows must digest exactly as the store pinned them"
+        );
+        let live = messages
+            .iter()
+            .find(|message| {
+                matches!(
+                    message,
+                    Message::User(user) if user.text_content().contains("look at this")
+                )
+            })
+            .expect("live image row retained");
+        assert!(
+            matches!(
+                live,
+                Message::User(user) if user.content.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Image { data: ImageData::Blob { .. }, .. }
+                ))
+            ),
+            "the live image row must be blob-backed before the edge binds it"
+        );
+        assert_eq!(agent.session().audited_endpoint_divergence().unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn failed_pre_compaction_externalization_skips_the_attempt_with_a_typed_failure() {
         // The blob store refuses every put at the compaction boundary, so the
         // pre-compaction externalization fails. The attempt must be skipped
@@ -12300,18 +12461,6 @@ mod tests {
                 StopReason::EndTurn,
             ),
         ));
-        session.push(Message::User(UserMessage::with_blocks(vec![
-            ContentBlock::Text {
-                text: "look at this".to_string(),
-            },
-            ContentBlock::Image {
-                media_type: "image/png".to_string(),
-                data: ImageData::Inline {
-                    data: "A".repeat(4_096),
-                },
-            },
-        ])));
-        let rows_before = session.messages().len();
         let client = Arc::new(FailingCompactionLlmClient::new());
         let curator = Arc::new(SubstitutingCurator::new());
         let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
@@ -12322,6 +12471,20 @@ mod tests {
             .with_blob_store(Arc::new(FailingPutBlobStore))
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
+        agent
+            .session_mut()
+            .push(Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "look at this".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: "A".repeat(4_096),
+                    },
+                },
+            ])));
+        let rows_before = agent.session().messages().len();
         agent.run("first".into()).await.unwrap();
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
         agent
@@ -12468,26 +12631,6 @@ mod tests {
                 StopReason::EndTurn,
             ),
         ));
-        session.push(Message::User(UserMessage::with_blocks(vec![
-            ContentBlock::Text {
-                text: "look at this".to_string(),
-            },
-            ContentBlock::Image {
-                media_type: "image/png".to_string(),
-                data: ImageData::Inline {
-                    data: "A".repeat(4_096),
-                },
-            },
-        ])));
-        session.push(Message::BlockAssistant(
-            crate::types::BlockAssistantMessage::new(
-                vec![AssistantBlock::Text {
-                    text: "noted".to_string(),
-                    meta: None,
-                }],
-                StopReason::EndTurn,
-            ),
-        ));
         let blob_store = Arc::new(StoringBlobStore::new());
         let client = Arc::new(FailingCompactionLlmClient::new());
         let curator = Arc::new(SubstitutingCurator::new());
@@ -12499,6 +12642,30 @@ mod tests {
             .with_blob_store(blob_store.clone())
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
+        // The image turn arrives in-process, above the durable floor, exactly
+        // like the production turn that carried the image.
+        agent
+            .session_mut()
+            .push(Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "look at this".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: "A".repeat(4_096),
+                    },
+                },
+            ])));
+        agent.session_mut().push(Message::BlockAssistant(
+            crate::types::BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "noted".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ),
+        ));
         agent.run("first".into()).await.unwrap();
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
         agent

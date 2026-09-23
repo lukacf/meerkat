@@ -690,6 +690,7 @@ impl AgentBuilder {
                 session.id().clone(),
             ))
         });
+        let durable_row_floor = session.messages().len();
         let mut agent = Agent {
             config: resolved_config,
             client,
@@ -726,6 +727,7 @@ impl AgentBuilder {
             checkpointer: self.checkpointer,
             model_routing_handoff_staging: self.model_routing_handoff_staging,
             latest_run_checkpoint_receipt: None,
+            durable_row_floor,
             blob_store: self.blob_store,
             event_tap: self
                 .event_tap

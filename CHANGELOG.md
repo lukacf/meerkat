@@ -169,8 +169,13 @@ them.
   preserved the graph-proved audited endpoint (`LivePrefixDiverges` at the
   image row) and every later read of the document was refused; a session in
   that state could not be reloaded (HomeCore parent-1, 2026-09-22). The
-  checkpoint pass is now a byte-identical no-op for those rows. A failed
-  externalization skips that compaction attempt with a typed
+  checkpoint pass is now a byte-identical no-op for those rows. The
+  externalization starts at the agent's durable row floor (the document loaded
+  at build, the rows a compaction rewrite installed, or a committed successor
+  the runtime handed over): committed rows keep the persisted form the store's
+  prefix proof pins, so a legacy inline committed row is never mutated on the
+  actor (that would make the next commit disagree with the head row). A
+  failed externalization skips that compaction attempt with a typed
   `CompactionFailed` reason instead of proceeding.
 - `rkat session repair-wholeblob` opens only the realm's runtime database.
   It no longer goes through the realm persistence bundle, which ensured a

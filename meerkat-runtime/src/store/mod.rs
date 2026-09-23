@@ -7,6 +7,7 @@
 pub mod memory;
 #[cfg(feature = "sqlite-store")]
 pub mod sqlite;
+pub mod whole_blob_repair;
 mod whole_blob_rewrite;
 
 pub use meerkat_core::{HeadCanonicalProvisionalTailAuthority, WholeBlobProvisionalTailAuthority};
@@ -830,9 +831,31 @@ impl std::io::Write for WholeBlobSessionWriter {
     }
 }
 
+/// The current-envelope ingress guard's refusal text (meerkat-core session
+/// ingress). Matching it classifies a refused committed body as the typed
+/// audited-endpoint divergence rather than a generic read failure.
+pub const AUDITED_ENDPOINT_INGRESS_REFUSAL: &str =
+    "live transcript does not preserve the graph-proved audited endpoint";
+
 fn encode_whole_blob_session(
     session: &meerkat_core::Session,
 ) -> Result<(Arc<Vec<u8>>, String), RuntimeStoreError> {
+    // Same writer-side refusal as `Session::to_persisted_artifact`: never mint
+    // a WholeBlob body the current-envelope decoder would refuse.
+    if let Some(divergence) = session.audited_endpoint_divergence().map_err(|error| {
+        RuntimeStoreError::SessionPersistenceAuthorityConflict {
+            runtime_id: session.id().to_string(),
+            detail: format!("audited endpoint could not be verified before encoding: {error}"),
+        }
+    })? {
+        return Err(RuntimeStoreError::AuditedEndpointDivergence {
+            runtime_id: session.id().to_string(),
+            detail: format!(
+                "{}{divergence}",
+                meerkat_core::AUDITED_ENDPOINT_WRITE_REFUSAL_PREFIX
+            ),
+        });
+    }
     let mut writer = WholeBlobSessionWriter {
         bytes: Vec::new(),
         hasher: Sha256::new(),
@@ -1265,9 +1288,15 @@ impl CommittedWholeBlobSnapshot {
     ) -> Result<Self, RuntimeStoreError> {
         let decoded =
             meerkat_core::Session::decode_whole_blob_document(bytes.as_ref()).map_err(|error| {
-                RuntimeStoreError::ReadFailed(format!(
-                    "WholeBlob body is not a valid current Session: {error}"
-                ))
+                let detail = format!("WholeBlob body is not a valid current Session: {error}");
+                if detail.contains(AUDITED_ENDPOINT_INGRESS_REFUSAL) {
+                    RuntimeStoreError::AuditedEndpointDivergence {
+                        runtime_id: authority.session_id().to_string(),
+                        detail,
+                    }
+                } else {
+                    RuntimeStoreError::ReadFailed(detail)
+                }
             })?;
         if decoded.row_sha256_token() != authority.blob_sha256() {
             return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
@@ -2405,6 +2434,14 @@ pub enum RuntimeStoreError {
     /// checkpoint, canonical head, frozen legacy BLOB, or mutation shape.
     #[error("session persistence authority conflict for runtime '{runtime_id}': {detail}")]
     SessionPersistenceAuthorityConflict { runtime_id: String, detail: String },
+    /// A WholeBlob document's live transcript no longer preserves its
+    /// graph-proved audited endpoint. On write this is the fail-closed writer
+    /// guard (nothing was persisted); on read it is the committed document the
+    /// current decoder refuses, which needs the sanctioned audited-endpoint
+    /// repair. Rows are intact either way. Typed so hosts distinguish "session
+    /// needs repair" from I/O failure.
+    #[error("WholeBlob audited endpoint divergence for runtime '{runtime_id}': {detail}")]
+    AuditedEndpointDivergence { runtime_id: String, detail: String },
     /// A detached producer attempted to persist an ops snapshot after the
     /// matching epoch was atomically retired by unregister.
     #[error("Ops lifecycle epoch {epoch_id} for runtime {runtime_id} is retired")]
@@ -7786,6 +7823,23 @@ pub trait RuntimeSessionAuthorityOps: Send + Sync {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<CommittedWholeBlobSnapshot>, RuntimeStoreError>;
+    /// Load the committed WholeBlob body bytes and their store authority
+    /// WITHOUT decoding them into a `Session`.
+    ///
+    /// This is the recovery seam for a committed document the current-envelope
+    /// decoder refuses; ordinary readers must keep using
+    /// [`Self::load_committed_whole_blob_snapshot`], whose decode is the
+    /// authority check. Stores that cannot serve raw bytes report
+    /// `Unsupported`.
+    async fn load_committed_whole_blob_bytes(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<(Arc<Vec<u8>>, WholeBlobStoreAuthority)>, RuntimeStoreError> {
+        let _ = runtime_id;
+        Err(RuntimeStoreError::Unsupported(
+            "this runtime store cannot serve raw committed WholeBlob bytes".to_string(),
+        ))
+    }
 
     async fn commit_prepared_whole_blob_snapshot_cas(
         &self,

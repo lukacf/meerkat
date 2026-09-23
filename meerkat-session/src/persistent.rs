@@ -118,6 +118,26 @@ fn activation_store_error_to_session_error(error: RuntimeStoreError) -> SessionE
     }
 }
 
+/// Map a committed-WholeBlob read failure to the typed session error hosts
+/// classify on: the audited-endpoint divergence means "this session needs the
+/// sanctioned repair", everything else stays an internal agent error.
+fn whole_blob_read_error_to_session_error(
+    session_id: &SessionId,
+    role: &str,
+    error: RuntimeStoreError,
+) -> SessionError {
+    match error {
+        RuntimeStoreError::AuditedEndpointDivergence { .. } => {
+            SessionError::WholeBlobAuditedEndpointDivergence {
+                id: session_id.clone(),
+            }
+        }
+        other => SessionError::Agent(AgentError::InternalError(format!(
+            "failed to load {role} for session {session_id}: {other}"
+        ))),
+    }
+}
+
 /// Re-read budget for observation loads racing a head-canonical writer:
 /// counted attempts, never wall clock (issue #1104).
 const OBSERVATION_LOAD_ATTEMPTS: usize = 8;
@@ -930,11 +950,7 @@ async fn load_committed_whole_blob_session(
     let snapshot = runtime_store
         .load_committed_whole_blob_snapshot(&LogicalRuntimeId::for_session(session_id))
         .await
-        .map_err(|error| {
-            SessionError::Agent(AgentError::InternalError(format!(
-                "failed to load {role} for session {session_id}: {error}"
-            )))
-        })?;
+        .map_err(|error| whole_blob_read_error_to_session_error(session_id, role, error))?;
     snapshot
         .map(|snapshot| {
             if snapshot.authority().session_id() != session_id
@@ -9020,6 +9036,66 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             )));
         }
         Ok(BoundaryPersistencePlan { commits })
+    }
+
+    /// Diagnose, and with `apply` repair, a WholeBlob session whose committed
+    /// document the current decoder refuses because its live rows no longer
+    /// preserve the graph-proved audited endpoint (the "reload_required on
+    /// every send" wedge).
+    ///
+    /// The repair re-anchors the committed document on its live rows: no
+    /// message is dropped or changed; the audited transcript graph, its
+    /// rewrite prefix authority and the pending compaction projection intents
+    /// are removed from the document metadata, and the store authority
+    /// advances through the ordinary compare-and-swap. The pending outbox row
+    /// is left for the runtime's normal finalization. It refuses while a live
+    /// actor still owns the session, because that actor's in-memory state,
+    /// not the committed document, is then the authority.
+    pub async fn repair_whole_blob_audited_endpoint(
+        &self,
+        session_id: &SessionId,
+        apply: bool,
+        accept_shorter: bool,
+    ) -> Result<
+        meerkat_runtime::store::whole_blob_repair::WholeBlobAuditedEndpointRepairReport,
+        AgentError,
+    > {
+        // Two independent liveness witnesses, both must be absent: the live
+        // checkpointer the actor holds, and the registry entry with a live
+        // actor witness (the same inputs `live_session_present_for_realtime_open`
+        // reads). Either one means an in-memory actor, not the committed
+        // document, is the authority for this session right now.
+        let live_checkpointer = self
+            .live_checkpointers
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .is_some();
+        let live_registry_entry = self
+            .inner
+            .live_session_actor_witness(session_id)
+            .await
+            .is_some_and(|witness| witness.is_live());
+        if live_checkpointer || live_registry_entry {
+            return Err(AgentError::InternalError(format!(
+                "session {session_id} still has a live actor (checkpointer: {live_checkpointer}, registry: {live_registry_entry}); stop or evict it before repairing its committed WholeBlob document"
+            )));
+        }
+        let runtime_id = LogicalRuntimeId::for_session(session_id);
+        meerkat_runtime::store::whole_blob_repair::repair_whole_blob_audited_endpoint(
+            self.runtime_store.as_ref(),
+            &runtime_id,
+            apply,
+            accept_shorter,
+        )
+        .await
+        .map_err(|error| {
+            AgentError::InternalError(format!(
+                "WholeBlob audited-endpoint repair failed for session {session_id}: {error}"
+            ))
+        })
     }
 
     pub async fn checkpoint_committed_runtime_session_snapshot(
@@ -19786,6 +19862,55 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    /// Item 4: the audited-endpoint repair refuses while EITHER liveness
+    /// witness says an actor owns the session (checkpointer or a live registry
+    /// entry), and runs once the actor is discarded.
+    #[tokio::test]
+    async fn whole_blob_repair_refuses_while_a_live_actor_owns_the_session() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            CapturingBuildBuilder::new(),
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create WholeBlob live actor");
+        let session_id = created.session_id;
+        assert!(
+            service
+                .live_session_actor_witness(&session_id)
+                .await
+                .is_some_and(|witness| witness.is_live()),
+            "a freshly created session has a live registry witness"
+        );
+        let refused = service
+            .repair_whole_blob_audited_endpoint(&session_id, false, false)
+            .await
+            .expect_err("repair must refuse while the actor is live");
+        assert!(
+            refused.to_string().contains("still has a live actor"),
+            "unexpected refusal: {refused}"
+        );
+        service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live actor");
+        let report = service
+            .repair_whole_blob_audited_endpoint(&session_id, false, false)
+            .await
+            .expect("diagnose runs once no actor owns the session");
+        assert_eq!(
+            report.action,
+            meerkat_runtime::store::whole_blob_repair::WholeBlobRepairAction::NoRepairNeeded,
+            "a healthy committed document needs no repair"
+        );
     }
 
     #[tokio::test]

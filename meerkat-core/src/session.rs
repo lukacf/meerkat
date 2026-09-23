@@ -1062,6 +1062,144 @@ fn compact_transcript_history_metadata_for_snapshot(
     Ok(Some(std::sync::Arc::new(state)))
 }
 
+/// Stable prefix of the writer-side refusal so store shells can classify it
+/// into a typed error without parsing the divergence text.
+pub const AUDITED_ENDPOINT_WRITE_REFUSAL_PREFIX: &str =
+    "refusing to persist a WholeBlob document whose ";
+
+/// Why a live transcript does not preserve its graph-proved audited endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditedEndpointDivergenceKind {
+    /// The live transcript has fewer rows than the audited endpoint.
+    LiveShorterThanEndpoint,
+    /// The live prefix covering the endpoint row count digests differently.
+    LivePrefixDiverges,
+}
+
+/// Exact facts about a live transcript that fails the audited-endpoint
+/// relation, for the writer-side guard, operator diagnostics, and recovery.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AuditedEndpointDivergence {
+    pub kind: AuditedEndpointDivergenceKind,
+    /// Row count of the graph head materialization.
+    pub endpoint_row_count: usize,
+    /// Row count of the live transcript.
+    pub live_row_count: usize,
+    /// First row index (within the endpoint span) whose canonical form differs
+    /// from the endpoint row, when the live prefix is long enough to compare.
+    pub first_divergent_row: Option<usize>,
+    /// Graph head revision (canonical digest of the endpoint rows).
+    pub endpoint_revision: String,
+    /// Canonical digest of the live rows covering the endpoint row count, when
+    /// the live transcript is long enough to have one.
+    pub live_prefix_revision: Option<String>,
+}
+
+impl std::fmt::Display for AuditedEndpointDivergence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            AuditedEndpointDivergenceKind::LiveShorterThanEndpoint => write!(
+                f,
+                "live transcript ({} rows) is shorter than the graph-proved audited endpoint ({} rows, revision {})",
+                self.live_row_count, self.endpoint_row_count, self.endpoint_revision
+            ),
+            AuditedEndpointDivergenceKind::LivePrefixDiverges => write!(
+                f,
+                "live transcript does not preserve the graph-proved audited endpoint: {} live rows, endpoint {} rows (revision {}), live prefix revision {}, first divergent row {}",
+                self.live_row_count,
+                self.endpoint_row_count,
+                self.endpoint_revision,
+                self.live_prefix_revision.as_deref().unwrap_or("<none>"),
+                self.first_divergent_row
+                    .map_or_else(|| "<none>".to_string(), |index| index.to_string())
+            ),
+        }
+    }
+}
+
+/// How a live transcript relates to a graph-proved audited endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditedEndpointRelation {
+    /// Live rows are the endpoint rows byte for byte plus an append-only suffix.
+    ExactAppend,
+    /// Live prefix differs in bytes but digests to the endpoint revision (an
+    /// image-representation or bookkeeping-only difference) plus a suffix.
+    CanonicalAppend,
+    /// The live transcript does not preserve the endpoint.
+    Diverged(AuditedEndpointDivergence),
+}
+
+/// The ONE implementation of the audited-endpoint relation. The ingress guard
+/// (`TranscriptHistoryState::derive_live_row_lineage_after_final_semantic_replay`)
+/// and the writer-side guard (`Session::audited_endpoint_divergence`) both
+/// call this, so they cannot drift.
+pub fn audited_endpoint_relation(
+    endpoint_revision: &str,
+    endpoint_rows: &[Message],
+    live: &[Message],
+) -> Result<AuditedEndpointRelation, TranscriptEditError> {
+    let endpoint_row_count = endpoint_rows.len();
+    if live.len() < endpoint_row_count {
+        return Ok(AuditedEndpointRelation::Diverged(
+            AuditedEndpointDivergence {
+                kind: AuditedEndpointDivergenceKind::LiveShorterThanEndpoint,
+                endpoint_row_count,
+                live_row_count: live.len(),
+                first_divergent_row: first_canonically_divergent_row(endpoint_rows, live),
+                endpoint_revision: endpoint_revision.to_string(),
+                live_prefix_revision: None,
+            },
+        ));
+    }
+    let live_prefix = &live[..endpoint_row_count];
+    if live_prefix == endpoint_rows {
+        return Ok(AuditedEndpointRelation::ExactAppend);
+    }
+    let live_prefix_revision = transcript_messages_digest(live_prefix)
+        .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
+    if live_prefix_revision == endpoint_revision {
+        return Ok(AuditedEndpointRelation::CanonicalAppend);
+    }
+    Ok(AuditedEndpointRelation::Diverged(
+        AuditedEndpointDivergence {
+            kind: AuditedEndpointDivergenceKind::LivePrefixDiverges,
+            endpoint_row_count,
+            live_row_count: live.len(),
+            first_divergent_row: first_canonically_divergent_row(endpoint_rows, live_prefix),
+            endpoint_revision: endpoint_revision.to_string(),
+            live_prefix_revision: Some(live_prefix_revision),
+        },
+    ))
+}
+
+/// Compute the audited-endpoint divergence between a validated transcript
+/// graph and a live message vector, without needing a `Session`. `None` means
+/// the live rows preserve the endpoint.
+pub fn audited_endpoint_divergence(
+    state: &TranscriptHistoryState,
+    live: &[Message],
+) -> Result<Option<AuditedEndpointDivergence>, TranscriptEditError> {
+    let endpoint = state.materialize_revision(state.head())?;
+    Ok(
+        match audited_endpoint_relation(state.head(), &endpoint.messages, live)? {
+            AuditedEndpointRelation::ExactAppend | AuditedEndpointRelation::CanonicalAppend => None,
+            AuditedEndpointRelation::Diverged(divergence) => Some(divergence),
+        },
+    )
+}
+
+fn first_canonically_divergent_row(endpoint: &[Message], live: &[Message]) -> Option<usize> {
+    endpoint
+        .iter()
+        .zip(live)
+        .position(|(endpoint_row, live_row)| {
+            canonicalize_message_for_digest(endpoint_row)
+                != canonicalize_message_for_digest(live_row)
+        })
+        .or_else(|| (endpoint.len() != live.len()).then_some(endpoint.len().min(live.len())))
+}
+
 impl ValidatedTranscriptHistory {
     /// Seal one compact transcript graph reconstructed from exact
     /// HeadCanonical rows and persisted graph edges.
@@ -1611,9 +1749,48 @@ impl Session {
     /// process-global Session cache is populated: durable store authority, not
     /// process memory, owns exact byte identity.
     pub fn to_persisted_artifact(&self) -> Result<SerializedSessionArtifact, serde_json::Error> {
+        // Writer-side twin of the current-envelope ingress guard: a document
+        // whose live rows no longer preserve the graph-proved audited endpoint
+        // would be refused at every later read, so refuse to mint it at all.
+        // Failing here keeps the actor's in-memory state intact and turns a
+        // permanently wedged session into one loud checkpoint failure.
+        if let Some(divergence) = self
+            .audited_endpoint_divergence()
+            .map_err(<serde_json::Error as serde::ser::Error>::custom)?
+        {
+            return Err(<serde_json::Error as serde::ser::Error>::custom(format!(
+                "{AUDITED_ENDPOINT_WRITE_REFUSAL_PREFIX}{divergence}"
+            )));
+        }
         let mut writer = SessionArtifactWriter::new();
         serde_json::to_writer(&mut writer, self)?;
         Ok(writer.finish())
+    }
+
+    /// Report how the live transcript relates to the graph-proved audited
+    /// endpoint, or `None` when they agree (or when no audited graph exists).
+    ///
+    /// This is exactly the relation the current-envelope ingress guard
+    /// enforces: the live rows must be the final endpoint materialization
+    /// followed by an append-only suffix, byte-equal or canonically equal.
+    pub fn audited_endpoint_divergence(
+        &self,
+    ) -> Result<Option<AuditedEndpointDivergence>, TranscriptEditError> {
+        let Some(history) = self.validated_transcript_history_state()? else {
+            return Ok(None);
+        };
+        audited_endpoint_divergence(history.state(), self.messages())
+    }
+
+    /// Replace the live rows without any audit or lineage bookkeeping.
+    ///
+    /// Test-only seam that manufactures the exact divergence the writer-side
+    /// guard and the sanctioned recovery must handle; production code cannot
+    /// reach it.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn replace_messages_unaudited_for_test(&mut self, messages: Vec<Message>) {
+        self.messages.replace(messages);
     }
 
     /// Decode one current Session envelope without a full-byte pre-hash or a

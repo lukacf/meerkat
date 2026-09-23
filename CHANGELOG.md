@@ -37,6 +37,36 @@ them.
 
 ### Added
 
+- `Session::audited_endpoint_divergence` and the free function
+  `audited_endpoint_divergence(state, live_rows)` report, as a typed
+  `AuditedEndpointDivergence` (kind, endpoint and live row counts, first
+  divergent row, both revisions), exactly the relation the current-envelope
+  ingress guard enforces between a live transcript and its graph-proved
+  audited endpoint. `RuntimeSessionAuthorityOps::load_committed_whole_blob_bytes`
+  serves a committed WholeBlob body and its store authority without decoding
+  it, `meerkat_runtime::store::whole_blob_repair::repair_whole_blob_audited_endpoint`
+  diagnoses and (with `apply`) re-anchors a refused document on its live rows
+  through the ordinary compare-and-swap, `PersistentSessionService::
+  repair_whole_blob_audited_endpoint` exposes that to hosts (MobKit reload can
+  call it once per wedged session), and `rkat sessions repair-wholeblob <id>
+  [--apply] [--json]` exposes it to operators. The repair never drops or
+  changes a message; it removes the audited transcript graph, its rewrite
+  prefix authority and the pending compaction projection intents from the
+  document metadata, leaves the store-owned outbox row for the runtime's
+  normal finalization, and reports what it dropped. A live transcript shorter
+  than its audited endpoint (the one shape where re-anchoring drops audited
+  content) is refused on apply unless `accept_shorter` / `--accept-shorter`
+  is given, and the report then records both row counts.
+- `SessionError::WholeBlobAuditedEndpointDivergence` (code
+  `SESSION_WHOLEBLOB_AUDITED_ENDPOINT_DIVERGENCE`, JSON-RPC -32013, HTTP 409,
+  resume hold `audited_endpoint_divergence`) and
+  `RuntimeStoreError::AuditedEndpointDivergence` type the refusal on both the
+  read side (a committed WholeBlob body the current decoder refuses) and the
+  write side (the writer guard), so hosts distinguish "session needs the
+  sanctioned repair" from an I/O failure. `DurableResumeHold` gains
+  `AuditedEndpointDivergence`. `audited_endpoint_relation` is the one shared
+  implementation of the audited-endpoint relation behind both the ingress
+  guard and the writer guard.
 - Public GPT Live open authority accepts `session_instructions_preface`
   (`PublicGptLiveOpenAuthorityConfig`), a per-session
   `PublicGptLiveInstructionsPreface` provider resolved at open for the canonical
@@ -125,6 +155,16 @@ them.
 
 ### Fixed
 
+- WholeBlob persistence refuses to mint a document its own reader would
+  refuse. `Session::to_persisted_artifact` and the runtime store's WholeBlob
+  encoder now run the audited-endpoint check before serializing, so a live
+  transcript that no longer preserves the graph-proved audited endpoint fails
+  the checkpoint loudly (the actor keeps its in-memory state and the error
+  names the first divergent row) instead of committing a body that turns
+  every later `completed_boundary_commit`, send and `reload_member` into
+  "WholeBlob body is not a valid current Session: live transcript does not
+  preserve the graph-proved audited endpoint". Sessions already wedged in that
+  state are recovered with the sanctioned repair above.
 - Public GPT Live client delegations no longer start the executor on a
   truncated request, and the spoken request is one canonical user row. The
   provider emits `session.delegation.created {offset_ms}` at the model's
@@ -193,6 +233,13 @@ them.
 
 
 ### Breaking
+- `SessionError` gains the variant `WholeBlobAuditedEndpointDivergence { id }`
+  (`SessionError::*` exhaustive matches must add the arm) and
+  `DurableResumeHold` gains `AuditedEndpointDivergence` (`DurableResumeHold::*`);
+  `RuntimeStoreError` (`#[non_exhaustive]`) gains `AuditedEndpointDivergence`.
+  `PersistentSessionService::repair_whole_blob_audited_endpoint` and
+  `meerkat_runtime::store::whole_blob_repair::repair_whole_blob_audited_endpoint`
+  take an `accept_shorter: bool` parameter.
 
 - `PublicGptLiveOpenAuthorityConfig` gains the public field
   `session_instructions_preface: Option<Arc<dyn PublicGptLiveInstructionsPreface>>`

@@ -229,6 +229,65 @@ hand. Stop writers, preserve the complete store for diagnostics, and restore
 an independently verified complete generation or escalate the store for
 provider-specific recovery.
 
+## Repair A WholeBlob Session Wedged On Its Audited Endpoint
+
+Symptom: after a turn completes, `completed_boundary_commit` fails with
+`Store read failed: WholeBlob body is not a valid current Session: live
+transcript does not preserve the graph-proved audited endpoint`, every later
+send answers `reload_required`, and a reload fails on the same error at
+durable-tail recovery. The committed document's live rows no longer match the
+final materialization of its audited transcript graph, so the current-envelope
+decoder refuses it on every read.
+
+Current writers refuse to mint such a document (the checkpoint fails instead,
+naming the first divergent row), and readers surface the typed
+`SESSION_WHOLEBLOB_AUDITED_ENDPOINT_DIVERGENCE` session error (resume hold
+`audited_endpoint_divergence`) so hosts can tell "needs repair" from I/O
+failure. For a session that is already wedged, repair it once:
+
+1. Stop or evict the member first. The service refuses while any live actor
+   owns the session (a live checkpointer or a live registry entry), because
+   that actor's in-memory state, not the committed document, is then the
+   authority. Under MobKit, stop the member (or let the identity retire) and
+   confirm no `reload_member` retry loop is running against it.
+2. Point `rkat` at the runtime store that holds the session. `rkat` resolves
+   the realm from the context root and `--state-root`; for a MobKit gateway
+   pass the gateway's state root and realm explicitly, for example
+   `rkat --state-root /var/lib/homecore/.rkat/realms --realm <realm-id>
+   sessions repair-wholeblob <session-id>`. The diagnose run prints the
+   runtime id and store revision it read, so a wrong root or realm shows up as
+   "no committed WholeBlob body" before anything is written.
+3. Diagnose, then apply:
+
+```bash
+# Diagnose: prints the refusal, the divergence (row counts, revisions, first
+# divergent row), and what a repair would drop. Writes nothing.
+rkat sessions repair-wholeblob <session-id>
+
+# Repair: re-anchor the committed document on its live rows.
+rkat sessions repair-wholeblob <session-id> --apply --json
+```
+
+The expected divergence for the HomeCore report is `LivePrefixDiverges`
+(live rows at least as many as the endpoint, a prefix row differing). A
+`LiveShorterThanEndpoint` divergence is the one shape where re-anchoring on
+the live rows drops content the audited endpoint proves existed; `--apply`
+refuses it unless you pass `--accept-shorter`, and the report then records
+both row counts as the audit trail of that decision.
+
+The repair keeps every message byte for byte. It removes the audited
+transcript graph, its rewrite prefix authority and the pending compaction
+projection intents from the document metadata, commits the result through the
+store's compare-and-swap against the observed authority (a concurrent writer
+makes it report a conflict rather than overwrite), and leaves the store-owned
+compaction outbox row so the runtime's ordinary finalization still indexes the
+discarded content. Audit history restarts at the next rewrite. The repair
+refuses when the live rows themselves do not decode, when the re-anchored
+document would change any row, or when a live actor still owns the session.
+Hosts embedding `PersistentSessionService` call
+`repair_whole_blob_audited_endpoint(session_id, apply, accept_shorter)` for
+the same procedure.
+
 ## Operational Runbook
 
 For an unreadable or refused realm:

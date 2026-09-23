@@ -9520,6 +9520,77 @@ ORDER BY runtime_id";
     }
 
     impl SqliteRuntimeStore {
+        /// Install committed WholeBlob body bytes verbatim plus PENDING
+        /// compaction projection outbox rows, bypassing every writer-side
+        /// guard, so recovery tests can start from exactly the durable state
+        /// production left behind (a body the current decoder refuses and an
+        /// outbox row the runtime still has to finalize). The authority
+        /// advances exactly as a real commit would.
+        #[cfg(any(test, feature = "test-support"))]
+        #[doc(hidden)]
+        pub async fn inject_wedged_whole_blob_for_test(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_id: &meerkat_core::types::SessionId,
+            bytes: Vec<u8>,
+            pending_intents: Vec<meerkat_core::CompactionProjectionIntent>,
+        ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "inject_wedged_whole_blob_for_test",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            let session_id = session_id.clone();
+            tokio::task::spawn_blocking(move || {
+                use sha2::Digest as _;
+                let blob_sha256 = format!("row-sha256:{:x}", sha2::Sha256::digest(&bytes));
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let current = load_whole_blob_store_authority(&tx, &runtime_id)?;
+                let next_revision = current
+                    .as_ref()
+                    .map_or(1, |authority| authority.store_revision().saturating_add(1));
+                let next_revision_i64 = i64::try_from(next_revision).map_err(|_| {
+                    RuntimeStoreError::WriteFailed("store revision exceeds i64".to_string())
+                })?;
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(blob_sha256) DO NOTHING
+                    ",
+                    params![blob_sha256, bytes],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_whole_blob_authority
+                        (runtime_id, authority_version, session_id, store_revision, blob_sha256)
+                    VALUES (?1, 1, ?2, ?3, ?4)
+                    ON CONFLICT(runtime_id) DO UPDATE SET
+                        authority_version = excluded.authority_version,
+                        session_id = excluded.session_id,
+                        store_revision = excluded.store_revision,
+                        blob_sha256 = excluded.blob_sha256
+                    ",
+                    params![
+                        runtime_id_text(&runtime_id),
+                        session_id.to_string(),
+                        next_revision_i64,
+                        blob_sha256
+                    ],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                insert_compaction_projection_outbox_intents(&tx, &runtime_id, &pending_intents)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                WholeBlobStoreAuthority::issued(session_id, next_revision, blob_sha256)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
         /// Open the compatibility whole-BLOB runtime store.
         ///
         /// New SQLite realm composition should choose
@@ -12149,6 +12220,49 @@ ORDER BY runtime_id";
             tokio::task::spawn_blocking(move || {
                 let conn = open_runtime_connection(&path)?;
                 list_runtime_session_catalog_entries_in_conn(&conn, filter)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn load_committed_whole_blob_bytes(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<(Arc<Vec<u8>>, WholeBlobStoreAuthority)>, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "load_committed_whole_blob_bytes",
+            )?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = conn
+                    .transaction()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                let observed = match load_whole_blob_store_authority(&tx, &runtime_id)? {
+                    None => None,
+                    Some(authority) => {
+                        let bytes = tx
+                            .query_row(
+                                "SELECT session_snapshot FROM runtime_whole_blob_bodies WHERE blob_sha256 = ?1",
+                                params![authority.blob_sha256()],
+                                |row| Ok(row.get::<_, JsonColumnBytes>(0)?.into_bytes()),
+                            )
+                            .optional()
+                            .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?
+                            .ok_or_else(|| {
+                                session_authority_conflict(
+                                    &runtime_id,
+                                    "WholeBlob authority references a missing body",
+                                )
+                            })?;
+                        Some((Arc::new(bytes), authority))
+                    }
+                };
+                tx.rollback()
+                    .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
+                Ok(observed)
             })
             .await
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?

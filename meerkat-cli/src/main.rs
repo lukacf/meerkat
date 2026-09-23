@@ -2471,6 +2471,26 @@ enum SessionCommands {
         /// Session ID
         id: String,
     },
+    /// Diagnose, and with --apply repair, a WholeBlob session whose committed
+    /// document is refused because its live rows no longer preserve the
+    /// graph-proved audited endpoint (every send reports reload_required).
+    /// The repair keeps every message and re-anchors the audit graph.
+    RepairWholeblob {
+        /// Session ID
+        id: String,
+        /// Commit the re-anchored document (default: diagnose only)
+        #[arg(long)]
+        apply: bool,
+        /// Allow --apply when the live transcript is SHORTER than the audited
+        /// endpoint (the one shape where re-anchoring drops audited content).
+        /// The report echoes both row counts. HomeCore's expected shape is the
+        /// longer-or-equal LivePrefixDiverges, which never needs this.
+        #[arg(long, requires = "apply")]
+        accept_shorter: bool,
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Export a persisted session as an ATIF trajectory.
     ExportAtif {
@@ -3752,6 +3772,12 @@ async fn cli_main() -> anyhow::Result<ExitCode> {
                 labels,
             } => list_sessions(limit, offset, labels, &cli_scope).await,
             SessionCommands::Show { id } => show_session(&id, &cli_scope).await,
+            SessionCommands::RepairWholeblob {
+                id,
+                apply,
+                accept_shorter,
+                json,
+            } => repair_wholeblob_session(&id, apply, accept_shorter, json, &cli_scope).await,
             SessionCommands::ExportAtif { id, output } => {
                 let destination = export_session_atif(&id, output, &cli_scope).await?;
                 println!("Wrote ATIF trajectory to {}", destination.display());
@@ -14104,6 +14130,85 @@ async fn export_session_atif(
 }
 
 /// Show session details from the realm-scoped persistent backend.
+async fn repair_wholeblob_session(
+    id: &str,
+    apply: bool,
+    accept_shorter: bool,
+    json: bool,
+    scope: &RuntimeScope,
+) -> anyhow::Result<()> {
+    #[cfg(not(feature = "session-store"))]
+    {
+        let _ = (id, apply, accept_shorter, json, scope);
+        anyhow::bail!("session repair requires the session-store feature");
+    }
+    #[cfg(feature = "session-store")]
+    {
+        let session_id = resolve_scoped_session_id(id, scope)?;
+        let (config, _) = load_config(scope).await?;
+        let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
+        let report = service
+            .repair_whole_blob_audited_endpoint(&session_id, apply, accept_shorter)
+            .await?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        println!(
+            "session {} (runtime {}) base store_revision {} blob {}",
+            report.session_id,
+            report.runtime_id,
+            report.base_store_revision,
+            report.base_blob_sha256
+        );
+        match &report.decode_error {
+            None => println!("committed document decodes; nothing to repair"),
+            Some(error) => println!("decode refused: {error}"),
+        }
+        if let Some(divergence) = &report.divergence {
+            println!("divergence: {divergence}");
+        }
+        for error in &report.read_errors {
+            println!("read error: {error}");
+        }
+        println!(
+            "live rows {}; graph edges to drop {}; pending compaction intents to drop {}",
+            report.live_row_count,
+            report.graph_edges_dropped,
+            report.dropped_intents.len()
+        );
+        for intent in &report.dropped_intents {
+            println!(
+                "  intent parent {} -> revision {}",
+                intent.parent_revision, intent.revision
+            );
+        }
+        if let Some(accepted) = &report.accepted_shorter {
+            println!(
+                "accepted a live transcript of {} rows shorter than its {}-row audited endpoint (operator override)",
+                accepted.live_row_count, accepted.endpoint_row_count
+            );
+        }
+        match &report.action {
+            meerkat_runtime::store::whole_blob_repair::WholeBlobRepairAction::NoRepairNeeded => {}
+            meerkat_runtime::store::whole_blob_repair::WholeBlobRepairAction::WouldReanchor => {
+                println!("would re-anchor on the live rows; re-run with --apply to commit");
+            }
+            meerkat_runtime::store::whole_blob_repair::WholeBlobRepairAction::Reanchored => {
+                println!(
+                    "re-anchored: committed store_revision {} blob {}",
+                    report.committed_store_revision.unwrap_or_default(),
+                    report.committed_blob_sha256.as_deref().unwrap_or("<none>")
+                );
+            }
+            meerkat_runtime::store::whole_blob_repair::WholeBlobRepairAction::Refused(reason) => {
+                anyhow::bail!("repair refused: {reason}");
+            }
+        }
+        Ok(())
+    }
+}
+
 async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     #[cfg(not(feature = "session-store"))]
     {

@@ -9,6 +9,7 @@ use super::validate::{
     validate_released_0810_transcript_rewrite_record, validate_transcript_history_state,
     validate_transcript_rewrite_record,
 };
+use crate::session::AuditedEndpointRelation;
 use crate::session::{
     TranscriptEditError, TranscriptRewriteReason, TranscriptRewriteSelection,
     transcript_messages_digest,
@@ -2232,25 +2233,26 @@ impl TranscriptHistoryState {
                 "compact transcript graph has no final endpoint witness".to_string(),
             )
         })?;
+        // One relation, shared with the writer-side guard
+        // (`crate::session::audited_endpoint_divergence`): the live rows must
+        // be the head materialization plus an append-only suffix, byte-equal
+        // or canonically digest-equal. The two guards cannot drift because
+        // this is the only implementation of that relation.
         let endpoint = self.materialize_revision(self.head())?;
-        if live.len() < endpoint.messages.len() {
-            return Ok(None);
+        match crate::session::audited_endpoint_relation(self.head(), &endpoint.messages, live)? {
+            AuditedEndpointRelation::ExactAppend => {
+                let advance = TranscriptParentAdvance::ExactAppend {
+                    appended: live[endpoint.messages.len()..].to_vec(),
+                };
+                row_prefix_after_parent_advance(endpoint_witness.row_prefix(), &advance).map(Some)
+            }
+            AuditedEndpointRelation::CanonicalAppend => {
+                SessionMessageRowPrefixAccumulator::from_messages(live)
+                    .map(Some)
+                    .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))
+            }
+            AuditedEndpointRelation::Diverged(_) => Ok(None),
         }
-        if live[..endpoint.messages.len()] == endpoint.messages {
-            let advance = TranscriptParentAdvance::ExactAppend {
-                appended: live[endpoint.messages.len()..].to_vec(),
-            };
-            return row_prefix_after_parent_advance(endpoint_witness.row_prefix(), &advance)
-                .map(Some);
-        }
-        let live_prefix_revision = transcript_messages_digest(&live[..endpoint.messages.len()])
-            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))?;
-        if live_prefix_revision != self.head() {
-            return Ok(None);
-        }
-        SessionMessageRowPrefixAccumulator::from_messages(live)
-            .map(Some)
-            .map_err(|error| TranscriptEditError::HistoryStateMalformed(error.to_string()))
     }
 
     #[must_use]

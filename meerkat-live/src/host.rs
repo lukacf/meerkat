@@ -1026,6 +1026,7 @@ impl LiveProjectionError {
             | SessionError::DurableTailHeldForRecovery { .. }
             | SessionError::DurableTailRecoveryRefused { .. }
             | SessionError::DurableEvidenceQuarantined { .. }
+            | SessionError::WholeBlobAuditedEndpointDivergence { .. }
             | SessionError::ExternalWriteFenceConflict { .. }
             | SessionError::ExternalWriteFenceBackoff { .. }
             | SessionError::FailedWithData { .. } => Self::Session { code, message },
@@ -1808,6 +1809,7 @@ impl LiveToolDispatchError {
             | SessionError::DurableTailHeldForRecovery { .. }
             | SessionError::DurableTailRecoveryRefused { .. }
             | SessionError::DurableEvidenceQuarantined { .. }
+            | SessionError::WholeBlobAuditedEndpointDivergence { .. }
             | SessionError::ExternalWriteFenceConflict { .. }
             | SessionError::ExternalWriteFenceBackoff { .. }
             | SessionError::FailedWithData { .. } => Self::Session { code, message },

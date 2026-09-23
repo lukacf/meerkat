@@ -63,6 +63,7 @@ test-support = []
 # nothing and reports success over zero tests. Storage evidence must not depend
 # on which sibling crates happen to share the build graph.
 meerkat-runtime = { path = ".", features = ["test-support", "sqlite-store"] }
+meerkat-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tempfile = { workspace = true }

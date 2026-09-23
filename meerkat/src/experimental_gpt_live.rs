@@ -2421,6 +2421,7 @@ impl ProviderWebrtcBroker for ExperimentalGptLiveWebrtcBroker {
             correlations: Mutex::new(SidebandCorrelations::default()),
             synthetic_tx,
             synthetic_rx: Mutex::new(synthetic_rx),
+            closing: AtomicBool::new(false),
         });
         let resolver = Box::new(ExperimentalGptLivePendingBoundReady {
             sideband: Arc::clone(&sideband),
@@ -4473,7 +4474,7 @@ impl ExperimentalGptLiveWebrtcTransport {
         };
         if let Some(active) = active {
             let _ = active.sideband.close().await;
-            retire_sideband_actors(active).await;
+            retire_sideband_actors(active, SidebandActorRetirement::Graceful).await;
         }
         retire_pending_deliveries(self.pending_deliveries.as_ref(), channel_id).await;
         self.pending_pump_retirements
@@ -4597,7 +4598,7 @@ impl ExperimentalGptLiveWebrtcTransport {
                 .flatten()
         };
         if let Some(active) = active {
-            retire_sideband_actors(active).await;
+            retire_sideband_actors(active, SidebandActorRetirement::Graceful).await;
         }
         let _ = self.unbind_channel_locked(channel_id, session_id).await;
     }
@@ -5262,7 +5263,7 @@ impl ExperimentalGptLiveWebrtcTransport {
                 };
                 if let Some(active) = active {
                     let _ = active.sideband.close().await;
-                    retire_sideband_actors(active).await;
+                    retire_sideband_actors(active, SidebandActorRetirement::Graceful).await;
                 }
                 let mut registrations = registered_by_channel.lock().await;
                 if registrations
@@ -5508,8 +5509,22 @@ impl ExperimentalGptLiveWebrtcTransport {
             // until then; with media flowing the drain cannot settle. Ask the
             // provider to close, give it one bounded chance to confirm, then
             // retire the transport locally. Not provider-confirmed closure.
+            // The owned appends whose acknowledgement is still outstanding do
+            // not hold the close: they are spent with the typed
+            // `InterruptedByClose` outcome (the same terminal a delegation
+            // result receives when its channel closes), so their owners settle
+            // now instead of after the provider's silence.
             let close_result = drain.request_close(Arc::clone(&sideband)).await;
-            match tokio::time::timeout(LIVE_CLOSE_QUIET_APPEND_BOUND, drain.wait()).await {
+            let settled = tokio::time::timeout(LIVE_CLOSE_QUIET_APPEND_BOUND, drain.wait()).await;
+            tracing::info!(
+                target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                channel = %binding.channel_id(),
+                step = "quiet_append_close_bound",
+                settled = settled.is_ok(),
+                close_accepted = drain.close_sent.load(Ordering::Acquire),
+                "live close observed the quiet append bound"
+            );
+            match settled {
                 Ok(Ok(outcome)) => (outcome, Some(close_result)),
                 Ok(Err(error)) => {
                     return Err(ProviderWebrtcSignalingError::SidebandClose(error));
@@ -5518,8 +5533,14 @@ impl ExperimentalGptLiveWebrtcTransport {
                     tracing::warn!(
                         session_id = %binding.session_id(),
                         channel_id = %binding.channel_id(),
-                        "provider did not confirm closure while a quiet context append was pending injection; retiring the live transport locally without provider confirmation"
+                        "provider did not confirm closure while a quiet context append was pending injection; abandoning the unacknowledged appends and retiring the live transport locally without provider confirmation"
                     );
+                    resolve_pending_deliveries(
+                        self.pending_deliveries.as_ref(),
+                        binding.channel_id(),
+                        meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose,
+                    )
+                    .await;
                     (
                         ExperimentalGptLiveDrainOutcome::Terminated,
                         Some(close_result),
@@ -5649,8 +5670,15 @@ impl ExperimentalGptLiveWebrtcTransport {
             .remove(binding.session_id());
         if let Some(active) = active {
             let retired_drain = Arc::clone(&drain);
+            // Without provider confirmation the actors are blocked on a
+            // provider that will not settle; granting them a grace period
+            // only delays the close past its owner's bound.
+            let actor_retirement = match outcome {
+                ExperimentalGptLiveDrainOutcome::Graceful => SidebandActorRetirement::Graceful,
+                ExperimentalGptLiveDrainOutcome::Terminated => SidebandActorRetirement::Immediate,
+            };
             *retirement = Some(tokio::spawn(async move {
-                retire_sideband_actors(active).await;
+                retire_sideband_actors(active, actor_retirement).await;
                 retired_drain
                     .physically_retired
                     .store(true, Ordering::Release);
@@ -5661,7 +5689,14 @@ impl ExperimentalGptLiveWebrtcTransport {
             .await_physical_retirement()
             .await
             .map_err(ProviderWebrtcSignalingError::SidebandClose)?;
-        retire_pending_deliveries(self.pending_deliveries.as_ref(), binding.channel_id()).await;
+        // Closure was requested on this channel: anything still awaiting a
+        // provider terminal was interrupted by the close.
+        resolve_pending_deliveries(
+            self.pending_deliveries.as_ref(),
+            binding.channel_id(),
+            meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose,
+        )
+        .await;
         Ok(true)
     }
 }
@@ -6305,7 +6340,23 @@ async fn resolve_pending_deliveries(
     }
 }
 
-async fn retire_sideband_actors(active: ActiveExperimentalGptLiveBinding) {
+/// How the sideband actors of a retired binding are brought down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebandActorRetirement {
+    /// The provider confirmed closure (or the binding is being unbound after
+    /// one): each actor gets a bounded chance to finish its own tail.
+    Graceful,
+    /// The owner retired the transport without provider confirmation. The
+    /// actors are blocked on a provider that will not settle (a stream that
+    /// stays open, an append whose acknowledgement never comes), so waiting on
+    /// them only delays the close. Abort at once.
+    Immediate,
+}
+
+async fn retire_sideband_actors(
+    active: ActiveExperimentalGptLiveBinding,
+    retirement: SidebandActorRetirement,
+) {
     if let Some(prepared) = active
         .activation_gate
         .prepared
@@ -6322,31 +6373,34 @@ async fn retire_sideband_actors(active: ActiveExperimentalGptLiveBinding) {
     active.activation_gate.cancel();
     active.command_actor.abort();
     let _ = active.command_actor.await;
-    let mut observation_actor = active.observation_actor;
-    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut observation_actor)
-        .await
-        .is_err()
-    {
-        observation_actor.abort();
-        let _ = observation_actor.await;
-    }
-    let mut control_actor = active.control_actor;
-    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut control_actor)
-        .await
-        .is_err()
-    {
-        control_actor.abort();
-        let _ = control_actor.await;
-    }
-    let mut adapter_pump = active.adapter_pump;
-    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut adapter_pump)
-        .await
-        .is_err()
-    {
-        adapter_pump.abort();
-        let _ = adapter_pump.await;
+    for actor in [
+        active.observation_actor,
+        active.control_actor,
+        active.adapter_pump,
+    ] {
+        retire_sideband_actor(actor, retirement).await;
     }
 }
+
+async fn retire_sideband_actor(mut actor: JoinHandle<()>, retirement: SidebandActorRetirement) {
+    let finished = match retirement {
+        SidebandActorRetirement::Graceful => {
+            tokio::time::timeout(SIDEBAND_ACTOR_GRACEFUL_RETIREMENT_BOUND, &mut actor)
+                .await
+                .is_ok()
+        }
+        SidebandActorRetirement::Immediate => actor.is_finished(),
+    };
+    if !finished {
+        actor.abort();
+        let _ = actor.await;
+    }
+}
+
+/// How long a gracefully retired sideband actor may take to finish its own
+/// tail after the provider confirmed closure.
+const SIDEBAND_ACTOR_GRACEFUL_RETIREMENT_BOUND: std::time::Duration =
+    std::time::Duration::from_secs(2);
 
 fn provider_signaling_error(error: ProviderWebrtcSignalingError) -> LiveWebrtcError {
     let reason = match error {
@@ -6677,6 +6731,12 @@ struct ExperimentalGptLiveSideband {
     correlations: Mutex<SidebandCorrelations>,
     synthetic_tx: mpsc::Sender<LiveSidebandObservation>,
     synthetic_rx: Mutex<mpsc::Receiver<LiveSidebandObservation>>,
+    /// Set once `session.close` has been requested through this sideband.
+    /// From then on no append command reaches the provider: a context tail
+    /// scheduled behind the close is refused as `Rejected` instead of
+    /// becoming one more unacknowledged append the close would have to
+    /// outlive.
+    closing: AtomicBool,
 }
 
 impl fmt::Debug for ExperimentalGptLiveSideband {
@@ -6696,6 +6756,9 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
         command: LiveSidebandCommand,
     ) -> Result<LiveSidebandCommandDelivery, ProviderWebrtcBrokerError> {
         if command.binding() != &self.binding {
+            return Err(ProviderWebrtcBrokerError::Rejected);
+        }
+        if self.closing.load(Ordering::Acquire) {
             return Err(ProviderWebrtcBrokerError::Rejected);
         }
         match command.__into_provider_command() {
@@ -6820,6 +6883,7 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
     }
 
     async fn close(&self) -> Result<(), ProviderWebrtcBrokerError> {
+        self.closing.store(true, Ordering::Release);
         self.session.close().await.map_err(map_broker_error)
     }
 
@@ -7371,6 +7435,8 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    use meerkat_live::LiveSidebandAppendAuthority;
 
     #[cfg(all(
         feature = "session-store",
@@ -8003,6 +8069,9 @@ mod tests {
         context_commands: Mutex<Vec<LiveSidebandProviderCommand>>,
         reject_context: AtomicBool,
         acknowledge_before_ambiguous_return: Mutex<Option<TestPendingLiveDeliveries>>,
+        /// A thinking append was accepted while acknowledgements were held:
+        /// the quiet lane stays reserved, as on the production sideband.
+        held_thinking_append: AtomicBool,
     }
 
     type TestPendingLiveDeliveries =
@@ -8030,6 +8099,7 @@ mod tests {
                 context_commands: Mutex::new(Vec::new()),
                 reject_context: AtomicBool::new(false),
                 acknowledge_before_ambiguous_return: Mutex::new(None),
+                held_thinking_append: AtomicBool::new(false),
             }
         }
 
@@ -8102,6 +8172,12 @@ mod tests {
                 return Ok(LiveSidebandCommandDelivery::Accepted);
             }
             if self.hold_context_ack.load(Ordering::Acquire) {
+                if matches!(
+                    command.__into_provider_command(),
+                    LiveSidebandProviderCommand::AppendThinkingContext { .. }
+                ) {
+                    self.held_thinking_append.store(true, Ordering::Release);
+                }
                 return Ok(LiveSidebandCommandDelivery::Accepted);
             }
             if self
@@ -8154,6 +8230,66 @@ mod tests {
                 .lock()
                 .expect("controlled sideband sender")
                 .take();
+            Ok(())
+        }
+
+        async fn quiet_append_pending(&self) -> bool {
+            self.held_thinking_append.load(Ordering::Acquire)
+        }
+    }
+
+    /// Broker session that counts what reaches the provider after a close.
+    struct ClosingBrokerSession {
+        thinking_appends: AtomicUsize,
+        closes: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ExperimentalGptLiveBrokerSession for ClosingBrokerSession {
+        async fn await_ready_and_seed_session_context(
+            &self,
+            _commentary: Option<String>,
+        ) -> Result<(), GptLiveBrokerError> {
+            Ok(())
+        }
+
+        async fn append_session_context(
+            &self,
+            _text: String,
+        ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+            Err(GptLiveBrokerError::Transport {
+                class: GptLiveBrokerTerminalClass::Protocol,
+            })
+        }
+
+        async fn append_thinking_context(
+            &self,
+            _text: String,
+        ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+            self.thinking_appends.fetch_add(1, AtomicOrdering::SeqCst);
+            Err(GptLiveBrokerError::Transport {
+                class: GptLiveBrokerTerminalClass::Protocol,
+            })
+        }
+
+        async fn append_delegation_context(
+            &self,
+            _delegation: &GptLiveDelegationRef,
+            _text: String,
+        ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+            Err(GptLiveBrokerError::Transport {
+                class: GptLiveBrokerTerminalClass::Protocol,
+            })
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<Option<GptLiveBrokerObservation>, GptLiveBrokerError> {
+            Ok(None)
+        }
+
+        async fn close(&self) -> Result<(), GptLiveBrokerError> {
+            self.closes.fetch_add(1, AtomicOrdering::SeqCst);
             Ok(())
         }
     }
@@ -10378,6 +10514,7 @@ mod tests {
             correlations: Mutex::new(SidebandCorrelations::default()),
             synthetic_tx,
             synthetic_rx: Mutex::new(synthetic_rx),
+            closing: AtomicBool::new(false),
         });
 
         // Constructing the sideband is the answer-return boundary. It must not
@@ -10584,7 +10721,7 @@ mod tests {
             expected,
             "the refused lifecycle observation must not end the observation actor"
         );
-        retire_sideband_actors(active).await;
+        retire_sideband_actors(active, SidebandActorRetirement::Graceful).await;
     }
 
     /// Lost custody is different from a refusal: once the observation's
@@ -10681,7 +10818,7 @@ mod tests {
             1,
             "no lifecycle fact is applied after custody was lost"
         );
-        retire_sideband_actors(active).await;
+        retire_sideband_actors(active, SidebandActorRetirement::Graceful).await;
     }
 
     /// Finding C (S104): a close while the member's own turn is running must
@@ -11048,7 +11185,7 @@ mod tests {
             0,
             "answer construction and binder preparation must not read or project provider observations"
         );
-        retire_sideband_actors(active).await;
+        retire_sideband_actors(active, SidebandActorRetirement::Graceful).await;
     }
 
     #[tokio::test]
@@ -11822,6 +11959,181 @@ mod tests {
                 .await
                 .is_none(),
             "local retirement releases the binding"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn close_converges_without_the_acknowledgement_of_an_in_flight_owned_append() {
+        // S99 channel 1 on 10ba653c6: owned thinking append
+        // `meerkat-thinking-20-0` was attempted 97 ms before the owner
+        // requested the close; the provider acknowledged neither it nor the
+        // close. The close then waited the quiet-append bound, granted every
+        // sideband actor its grace period, and resolved the pending delivery
+        // only after all of that: past the owner's ceiling. An append whose
+        // acknowledgement is outstanding must not hold the close. It is spent
+        // with `InterruptedByClose` and the close converges at the bound.
+        let transport = ExperimentalGptLiveWebrtcTransport::new();
+        let binding = ProviderWebrtcBinding::new(
+            meerkat_live::LiveChannelId::new("close-with-append-in-flight"),
+            meerkat_core::SessionId::new(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let sideband = Arc::new(ControlledAmbiguousSideband::new());
+        // The provider accepts the append; its acknowledgement never comes.
+        sideband.hold_context_ack.store(true, Ordering::Release);
+        let (retirement_tx, _retirement_rx) = mpsc::channel(1);
+        let active = spawn_sideband_actors(
+            binding.clone(),
+            Arc::clone(&sideband) as Arc<dyn ProviderWebrtcSidebandSession>,
+            test_deferred_adapter(),
+            1,
+            retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
+        );
+        active.observation_actor.abort();
+        active.adapter_pump.abort();
+        active.control_actor.abort();
+        active
+            .activation_gate
+            .committed
+            .store(true, Ordering::Release);
+        transport
+            .active_by_session
+            .lock()
+            .await
+            .insert(binding.session_id().clone(), active);
+
+        // The owned append travels through the live command actor and stays
+        // unacknowledged, with its delivery pending on the transport.
+        let authority = LiveSidebandAppendAuthority::__from_generated_authority(
+            binding.clone(),
+            "append:thinking-in-flight".to_string(),
+            20,
+        )
+        .expect("append authority");
+        let command =
+            LiveSidebandCommand::append_thinking_context(authority, "quiet progress note")
+                .expect("thinking command");
+        let (resolution_tx, resolution_rx) = oneshot::channel();
+        transport.pending_deliveries.lock().await.insert(
+            command.attempt(),
+            PendingExperimentalGptLiveDelivery::DelegationNarration {
+                channel_id: binding.channel_id().clone(),
+                resolution_tx,
+            },
+        );
+        assert_eq!(
+            transport
+                .send_authorized_command(command)
+                .await
+                .expect("the provider accepts the append"),
+            LiveSidebandCommandDelivery::Accepted
+        );
+        assert!(
+            sideband.quiet_append_pending().await,
+            "the append awaits its acknowledgement when the close is requested"
+        );
+
+        let started = tokio::time::Instant::now();
+        assert!(
+            transport
+                .close_exact(&binding, None)
+                .await
+                .expect("the close converges without the acknowledgement"),
+            "the exact binding was closed"
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed <= LIVE_CLOSE_QUIET_APPEND_BOUND,
+            "the close converges at the quiet append bound, not after actor grace periods: {elapsed:?}"
+        );
+        assert!(
+            sideband.close_started.load(Ordering::Acquire),
+            "session.close was still requested from the provider"
+        );
+        assert_eq!(
+            resolution_rx
+                .await
+                .expect("the pending delivery is resolved by the close"),
+            meerkat_core::LiveAppendDeliveryOutcome::InterruptedByClose,
+            "the unacknowledged append is spent with the typed close terminal"
+        );
+        assert!(
+            transport
+                .active_binding(binding.session_id())
+                .await
+                .is_none(),
+            "local retirement releases the binding"
+        );
+        assert!(
+            transport.pending_deliveries.lock().await.is_empty(),
+            "no delivery stays pending behind the closed channel"
+        );
+        // A context tail scheduled behind the close is refused, never sent.
+        let late = LiveSidebandAppendAuthority::__from_generated_authority(
+            binding.clone(),
+            "append:causal-tail-after-close".to_string(),
+            21,
+        )
+        .expect("late append authority");
+        let late = LiveSidebandCommand::append_thinking_context(late, "late causal tail")
+            .expect("late thinking command");
+        assert!(matches!(
+            transport.send_authorized_command(late).await,
+            Err(ProviderWebrtcBrokerError::Rejected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn production_sideband_refuses_append_commands_once_its_close_was_requested() {
+        // The command actor may dequeue a context append after the owner
+        // requested the close. The sideband refuses it typed instead of
+        // handing the provider one more append the close would have to
+        // outlive.
+        let session = Arc::new(ClosingBrokerSession {
+            thinking_appends: AtomicUsize::new(0),
+            closes: AtomicUsize::new(0),
+        });
+        let binding = ProviderWebrtcBinding::new(
+            meerkat_live::LiveChannelId::new("closing-sideband"),
+            meerkat_core::SessionId::new(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let (synthetic_tx, synthetic_rx) = mpsc::channel(8);
+        let sideband = ExperimentalGptLiveSideband {
+            binding: binding.clone(),
+            session: Arc::clone(&session) as Arc<dyn ExperimentalGptLiveBrokerSession>,
+            seed_custody: Mutex::new(ExperimentalGptLiveSeedCustody::Ready),
+            seed_changed: Notify::new(),
+            correlations: Mutex::new(SidebandCorrelations::default()),
+            synthetic_tx,
+            synthetic_rx: Mutex::new(synthetic_rx),
+            closing: AtomicBool::new(false),
+        };
+        sideband.close().await.expect("close requested");
+        assert_eq!(session.closes.load(AtomicOrdering::SeqCst), 1);
+        let authority = LiveSidebandAppendAuthority::__from_generated_authority(
+            binding,
+            "append:after-close".to_string(),
+            3,
+        )
+        .expect("append authority");
+        let command = LiveSidebandCommand::append_thinking_context(authority, "late causal tail")
+            .expect("thinking command");
+        assert!(matches!(
+            sideband.send_command(command).await,
+            Err(ProviderWebrtcBrokerError::Rejected)
+        ));
+        assert_eq!(
+            session.thinking_appends.load(AtomicOrdering::SeqCst),
+            0,
+            "nothing reaches the provider behind the close"
+        );
+        assert!(
+            !sideband.quiet_append_pending().await,
+            "a refused append reserves no quiet lane the close would wait on"
         );
     }
 

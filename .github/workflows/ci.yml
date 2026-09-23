@@ -67,6 +67,9 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
   SCCACHE_GHA_ENABLED: "true"
   SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  # sccache objects are keyed by content, so one entry serves every lane and
+  # branch; the GitHub cache scope lets pull requests read what main pushes
+  # wrote. Debuginfo is off (above) so the objects stay small.
   # Push-to-terminal budget in seconds, measured from workflow creation.
   CI_MAX_SECONDS: "1200"
   # Target set for the closure-check lane: "all" checks every target of the
@@ -139,10 +142,18 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.11
 
-      - name: Cache cargo
+      - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-governance
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
           cache-on-failure: true
 
       - name: Format check
@@ -197,10 +208,18 @@ jobs:
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
 
-      - name: Cache cargo
+      - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-ratchets
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
           cache-on-failure: true
 
       - name: Report selected ratchets
@@ -322,10 +341,18 @@ jobs:
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
 
-      - name: Cache cargo
+      - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-clippy-${{ matrix.name }}
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
           cache-on-failure: true
 
       - name: Clippy (changed packages, all targets, all features)
@@ -362,10 +389,18 @@ jobs:
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
 
-      - name: Cache cargo
+      - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-unit-${{ matrix.name }}
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
           cache-on-failure: true
 
       - name: Install nextest
@@ -405,10 +440,18 @@ jobs:
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
 
-      - name: Cache cargo
+      - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-closure-check
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
           cache-on-failure: true
 
       - name: Check the reverse-dependency closure
@@ -446,10 +489,18 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.11
 
-      - name: Cache cargo
+      - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-wasm-check
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
           cache-on-failure: true
 
       - name: WASM runtime check
@@ -486,10 +537,18 @@ jobs:
       - name: Setup mold linker
         uses: rui314/setup-mold@v1
 
-      - name: Cache cargo
+      - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-sdk-host
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
           cache-on-failure: true
 
       - name: Build RPC binary for SDK smoke tests

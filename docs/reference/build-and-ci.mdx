@@ -203,7 +203,11 @@ need the unbounded verification set.
 Pull-request CI is `.github/workflows/ci.yml`. It runs on pull requests,
 pushes to `main`, and manual dispatches (a branch head runs once, through its
 pull request), entirely with Cargo on GitHub-hosted `ubuntu-latest` runners
-(4 vCPU), and it is sized to a 20-minute push-to-terminal budget:
+(4 vCPU), and it is sized to a 20-minute push-to-terminal budget. Compiled
+objects are cached by sccache (content-addressed, shared by every lane and
+readable from `main` by every pull request); rust-cache holds only the
+registry, because per-lane target caches exceeded the repository's 10 GB
+cache limit in one pull request:
 
 | Job | Runs | Command |
 | --- | --- | --- |

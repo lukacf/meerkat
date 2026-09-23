@@ -135,6 +135,10 @@ them.
   and the gate asserts that those lanes ran; an unmapped Rust path, a missing
   diff base, or a global build-configuration path escalates to the whole
   workspace. `make ci-lanes-selftest` pins the classifier with fixtures.
+  Compiled objects are cached by sccache only (content-addressed, shared by
+  every lane and readable from `main` by every PR); rust-cache keeps just the
+  registry, since per-lane target caches filled the 10 GB repository cache
+  limit in one PR and were evicted between PRs.
   Format, docs, semver self-test, version parity, and lock consistency run
   always; generated-contract freshness and machine/protocol drift run when
   their paths change; wasm-check and the Python/TypeScript SDK suites run

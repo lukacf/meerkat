@@ -28,6 +28,24 @@ filegroup(
 
 
 
+exports_files(
+
+    [
+        "tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "tests/fixtures/compiled_application_tool_policy_valid_v1.json",
+        "tests/fixtures/v0_8_10_ob3_recovery_migration_session.json",
+    ],
+
+    visibility = [
+        "//meerkat-contracts:__pkg__",
+        "//meerkat-runtime:__pkg__",
+    ],
+
+)
+
+
+
 rust_library(
     name = "meerkat_core",
     aliases = aliases(package_name = "meerkat-core"),

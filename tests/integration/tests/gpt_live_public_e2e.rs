@@ -3375,7 +3375,7 @@ async fn e2e_scenario_100_gpt_live_public_morning_standup() -> Result<(), Box<dy
 async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
         )
         .with_test_writer()
         .try_init();
@@ -3979,7 +3979,7 @@ async fn e2e_scenario_102_gpt_live_public_who_are_you() -> Result<(), Box<dyn st
 async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
         )
         .with_test_writer()
         .try_init();
@@ -4310,7 +4310,7 @@ async fn run_s103_interrupt_and_recover(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
         )
         .with_test_writer()
         .try_init();
@@ -4691,7 +4691,7 @@ async fn run_s107_stuck_close_convergence(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
         )
         .with_test_writer()
         .try_init();
@@ -5052,7 +5052,7 @@ async fn run_s104_handoff_voice_typed_voice(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
         )
         .with_test_writer()
         .try_init();
@@ -5549,7 +5549,7 @@ async fn e2e_scenario_106_gpt_live_public_long_haul() -> Result<(), Box<dyn std:
 async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
         )
         .with_test_writer()
         .try_init();
@@ -5888,7 +5888,7 @@ async fn e2e_scenario_101_gpt_live_public_busy_backend() -> Result<(), Box<dyn s
 async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
         )
         .with_test_writer()
         .try_init();
@@ -6279,7 +6279,7 @@ async fn run_s105_fork_and_merge_parallel(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
+            "meerkat_openai::public_live=debug,meerkat::experimental_gpt_live=debug,meerkat::live_close=info,meerkat_live=info,meerkat_mob_mcp::live_delegation=debug",
         )
         .with_test_writer()
         .try_init();

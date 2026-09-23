@@ -265,6 +265,7 @@ pub enum WorkGraphErrorKind {
     Store,
     NamespaceAssignmentRequired,
     UnsupportedBackend,
+    AttentionTargetRealmMismatch,
 }
 
 /// Machine-owned public error classification surfaced to REST/RPC callers. The
@@ -1888,6 +1889,7 @@ machine! {
             guard "invalid_arguments_class" {
                 kind == WorkGraphErrorKind::InvalidInput
                 || kind == WorkGraphErrorKind::InvalidTimestampMillis
+                || kind == WorkGraphErrorKind::AttentionTargetRealmMismatch
             }
             update {}
             to Absent

@@ -1414,6 +1414,10 @@ struct SessionHandle {
     /// recovery creates a new witness even when it reuses the same SessionId.
     actor_witness: LiveSessionActorWitness,
     #[cfg(not(target_arch = "wasm32"))]
+    // Read by the durable-convergence fatalization (`session-store`) and the
+    // test-only abort helper; other builds keep the handle alive without
+    // reading it.
+    #[cfg_attr(not(any(test, feature = "session-store")), allow(dead_code))]
     task_handle: tokio::task::JoinHandle<()>,
     command_tx: mpsc::Sender<SessionCommand>,
     state_tx: watch::Sender<SessionState>,

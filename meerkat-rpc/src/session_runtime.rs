@@ -5221,11 +5221,18 @@ impl SessionRuntime {
                     .to_string(),
                 data: None,
             })?;
+        // The runtime knows which sessions belong to mob members (their
+        // `mob_id` / `agent_identity` labels), so `Session` attention targets
+        // are held to the mob-realm rule like `Owner` targets.
+        let session_service: Arc<dyn meerkat_core::SessionService> = self.service.clone();
         Ok(meerkat::WorkGraphService::with_scope(
             self.workgraph_store.clone(),
             realm_id,
             meerkat::WorkNamespace::default(),
-        ))
+        )
+        .with_attention_realm_resolver(Arc::new(
+            meerkat::surface::SessionServiceAttentionRealmResolver::new(session_service),
+        )))
     }
 
     pub fn blob_store(&self) -> Arc<dyn meerkat_core::BlobStore> {

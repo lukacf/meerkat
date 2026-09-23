@@ -781,7 +781,7 @@ ClassifyPublicErrorInvalidTransitionFailed(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsAbsent(kind) ==
     /\ phase = "Absent"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (kind = "InvalidTimestampMillis"))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -789,7 +789,7 @@ ClassifyPublicErrorInvalidArgumentsAbsent(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsOpen(kind) ==
     /\ phase = "Open"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (kind = "InvalidTimestampMillis"))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -797,7 +797,7 @@ ClassifyPublicErrorInvalidArgumentsOpen(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsInProgress(kind) ==
     /\ phase = "InProgress"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (kind = "InvalidTimestampMillis"))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -805,7 +805,7 @@ ClassifyPublicErrorInvalidArgumentsInProgress(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsBlocked(kind) ==
     /\ phase = "Blocked"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (kind = "InvalidTimestampMillis"))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -813,7 +813,7 @@ ClassifyPublicErrorInvalidArgumentsBlocked(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsCompleted(kind) ==
     /\ phase = "Completed"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (kind = "InvalidTimestampMillis"))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -821,7 +821,7 @@ ClassifyPublicErrorInvalidArgumentsCompleted(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsCancelled(kind) ==
     /\ phase = "Cancelled"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (kind = "InvalidTimestampMillis"))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
     /\ phase' = "Cancelled"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f
@@ -829,7 +829,7 @@ ClassifyPublicErrorInvalidArgumentsCancelled(kind) ==
 
 ClassifyPublicErrorInvalidArgumentsFailed(kind) ==
     /\ phase = "Failed"
-    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (kind = "InvalidTimestampMillis"))
+    /\ (IF (kind = "InvalidInput") THEN TRUE ELSE (IF (kind = "InvalidTimestampMillis") THEN TRUE ELSE (kind = "AttentionTargetRealmMismatch")))
     /\ phase' = "Failed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_11dfc16157be893f

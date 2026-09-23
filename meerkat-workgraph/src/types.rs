@@ -291,6 +291,75 @@ impl WorkOwnerKey {
     pub fn canonical(&self) -> String {
         format!("{}:{}", self.kind.as_str(), self.id)
     }
+
+    /// The owner key of one mob member: kind `Agent`, id
+    /// `mob/<mob_id>/agent/<agent_identity>`. This is the only shape a mob
+    /// runtime lowers a member identity to, and the only shape a member's
+    /// attention overlay resolution recognizes, so both segments must be
+    /// non-empty and free of `/`.
+    pub fn mob_agent(mob_id: &str, agent_identity: &str) -> Result<Self, WorkGraphError> {
+        for (label, value) in [("mob_id", mob_id), ("agent_identity", agent_identity)] {
+            if value.is_empty() || value.contains('/') {
+                return Err(WorkGraphError::InvalidInput(format!(
+                    "mob attention owner key {label} must be non-empty and must not contain '/'"
+                )));
+            }
+        }
+        Self::agent(format!("mob/{mob_id}/agent/{agent_identity}"))
+    }
+
+    /// The mob member this key names, when it has the [`Self::mob_agent`]
+    /// shape. Any other agent key (or any non-agent kind) yields `None`.
+    pub fn as_mob_agent(&self) -> Option<MobAgentOwner<'_>> {
+        if self.kind != WorkOwnerKind::Agent {
+            return None;
+        }
+        let (mob_id, agent_identity) = mob_agent_owner_id_parts(&self.id)?;
+        Some(MobAgentOwner {
+            mob_id,
+            agent_identity,
+        })
+    }
+}
+
+/// Split a `mob/<mob_id>/agent/<agent_identity>` owner id into its two
+/// segments. Returns `None` for any other shape, including empty segments or
+/// segments that contain `/`.
+pub fn mob_agent_owner_id_parts(owner_id: &str) -> Option<(&str, &str)> {
+    let rest = owner_id.strip_prefix("mob/")?;
+    let (mob_id, agent_identity) = rest.split_once("/agent/")?;
+    if mob_id.is_empty()
+        || agent_identity.is_empty()
+        || mob_id.contains('/')
+        || agent_identity.contains('/')
+    {
+        return None;
+    }
+    Some((mob_id, agent_identity))
+}
+
+/// A mob member named by a [`WorkOwnerKey::mob_agent`] key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MobAgentOwner<'a> {
+    pub mob_id: &'a str,
+    pub agent_identity: &'a str,
+}
+
+impl MobAgentOwner<'_> {
+    /// The WorkGraph realm a member of this mob builds in and resolves its
+    /// attention bindings from (`mob.<mob_id>`, see
+    /// `meerkat_core::mob_realm_id`). A binding that names this member but
+    /// lives in another realm is never visible to the member.
+    pub fn realm_id(&self) -> Result<String, WorkGraphError> {
+        meerkat_core::mob_realm_id(self.mob_id)
+            .map(|realm| realm.as_str().to_string())
+            .map_err(|error| {
+                WorkGraphError::InvalidInput(format!(
+                    "mob '{}' has no valid WorkGraph realm: {error}",
+                    self.mob_id
+                ))
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

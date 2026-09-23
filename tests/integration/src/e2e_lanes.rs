@@ -222,6 +222,14 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s97_gpt_live_public_client_context_vertical, 97);
             scenario(e2e_smoke_s98_gpt_live_public_playback_settlement_and_reopen, 98);
             scenario(e2e_smoke_s99_gpt_live_public_concurrent_context, 99);
+            scenario(e2e_smoke_s100_gpt_live_public_morning_standup, 100);
+            scenario(e2e_smoke_s101_gpt_live_public_busy_backend, 101);
+            scenario(e2e_smoke_s102_gpt_live_public_who_are_you, 102);
+            scenario(e2e_smoke_s103_gpt_live_public_interrupt_and_recover, 103);
+            scenario(e2e_smoke_s104_gpt_live_public_handoff_voice_typed_voice, 104);
+            scenario(e2e_smoke_s105_gpt_live_public_fork_and_merge_parallel, 105);
+            scenario(e2e_smoke_s106_gpt_live_public_long_haul, 106);
+            scenario(e2e_smoke_s107_gpt_live_public_stuck_close_convergence, 107);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
@@ -2768,7 +2776,7 @@ fn strict_prereqs_for(spec: &Spec) -> bool {
     // These public-Live scenarios promise real provider audio. Selecting one
     // cannot become a successful readiness-only run when credentials or the
     // browser toolchain are missing.
-    matches!(spec.id, Some(97..=99)) || strict_prereqs_enabled()
+    matches!(spec.id, Some(97..=107)) || strict_prereqs_enabled()
 }
 
 fn clean_e2e_scenario_targets_enabled() -> bool {
@@ -4189,6 +4197,182 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 package: "meerkat-integration-tests",
                 test_target: "gpt_live_public_e2e",
                 test_name: "e2e_scenario_99_gpt_live_public_concurrent_context",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
+        100 => Some(&Spec {
+            id: Some(100),
+            lane: Lane::Smoke,
+            title: "GPT Live public real-audio morning standup (timed multi-turn, delegation, barge-in, close)",
+            timeout_secs: 1200,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_100_gpt_live_public_morning_standup",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
+        101 => Some(&Spec {
+            id: Some(101),
+            lane: Lane::Smoke,
+            title: "GPT Live public real-audio busy backend (slow job, quick question, second slow job in parallel)",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_101_gpt_live_public_busy_backend",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
+        102 => Some(&Spec {
+            id: Some(102),
+            lane: Lane::Smoke,
+            title: "GPT Live public real-audio who are you (capabilities, roster preface, ask another member)",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_102_gpt_live_public_who_are_you",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
+        103 => Some(&Spec {
+            id: Some(103),
+            lane: Lane::Smoke,
+            title: "GPT Live public real-audio interrupt and recover (long monologue with pauses, barge-in, corrections)",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_103_gpt_live_public_interrupt_and_recover",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
+        104 => Some(&Spec {
+            id: Some(104),
+            lane: Lane::Smoke,
+            title: "GPT Live public real-audio handoff voice to typed to voice (close mid-job, typed turn, reopen)",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
+        105 => Some(&Spec {
+            id: Some(105),
+            lane: Lane::Smoke,
+            title: "GPT Live public real-audio fork and merge, parallel variant (DurableFork, artifact doubling, typed correction)",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_105_gpt_live_public_fork_and_merge_parallel",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
+        106 => Some(&Spec {
+            id: Some(106),
+            lane: Lane::Smoke,
+            title: "GPT Live public real-audio long haul (ten exchanges, holds, two reopen cycles with summary)",
+            timeout_secs: 1800,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_106_gpt_live_public_long_haul",
+                features: &["openai-live-e2e"],
+                all_features: false,
+            },
+        }),
+        107 => Some(&Spec {
+            id: Some(107),
+            lane: Lane::Smoke,
+            title: "GPT Live public real-audio stuck close convergence (transport cut mid-job, host close, reopen)",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
+            required_bins: &["cargo", "node", "npm"],
+            cwd: "tests/live_smoke/browser",
+            env: &[("RUST_MIN_STACK", "67108864")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["/bin/sh", "-c", "test -d node_modules || npm ci"],
+                &["npx", "playwright", "install", "chromium"],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "gpt_live_public_e2e",
+                test_name: "e2e_scenario_107_gpt_live_public_stuck_close_convergence",
                 features: &["openai-live-e2e"],
                 all_features: false,
             },
@@ -6511,6 +6695,65 @@ mod tests {
                 assert!(!all_features);
             }
             _ => panic!("S99 must use the existing public Live test binary"),
+        }
+    }
+
+    #[test]
+    fn gpt_live_public_voice_scenarios_share_the_public_live_shard_composition() {
+        for (id, test_name) in [
+            (100, "e2e_scenario_100_gpt_live_public_morning_standup"),
+            (101, "e2e_scenario_101_gpt_live_public_busy_backend"),
+            (102, "e2e_scenario_102_gpt_live_public_who_are_you"),
+            (
+                103,
+                "e2e_scenario_103_gpt_live_public_interrupt_and_recover",
+            ),
+            (
+                104,
+                "e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice",
+            ),
+            (
+                105,
+                "e2e_scenario_105_gpt_live_public_fork_and_merge_parallel",
+            ),
+            (106, "e2e_scenario_106_gpt_live_public_long_haul"),
+            (
+                107,
+                "e2e_scenario_107_gpt_live_public_stuck_close_convergence",
+            ),
+        ] {
+            gpt_live_public_voice_scenario_shares_composition(id, test_name);
+        }
+    }
+
+    fn gpt_live_public_voice_scenario_shares_composition(id: u16, expected_test_name: &str) {
+        let spec = scenario_spec(id).unwrap();
+        let sibling = scenario_spec(99).unwrap();
+        assert_eq!(spec.lane, Lane::Smoke);
+        assert!(super::strict_prereqs_for(spec));
+        assert_eq!(spec.required_env, sibling.required_env);
+        assert_eq!(spec.cwd, sibling.cwd);
+        assert_eq!(spec.env, sibling.env);
+        assert_eq!(spec.pre_commands, sibling.pre_commands);
+        assert_eq!(
+            super::smoke_test_filter_for_selection(&E2eSelection::Scenario(id)).unwrap(),
+            Some(format!("e2e_smoke_s{id}_"))
+        );
+        match spec.command {
+            CommandSpec::CargoTest {
+                package,
+                test_target,
+                test_name,
+                features,
+                all_features,
+            } => {
+                assert_eq!(package, "meerkat-integration-tests");
+                assert_eq!(test_target, "gpt_live_public_e2e");
+                assert_eq!(test_name, expected_test_name);
+                assert_eq!(features, &["openai-live-e2e"]);
+                assert!(!all_features);
+            }
+            _ => panic!("S{id} must use the existing public Live test binary"),
         }
     }
 

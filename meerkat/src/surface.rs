@@ -425,17 +425,52 @@ fn attention_target_matches_session(
     }
 }
 
-fn mob_agent_owner_key_parts(owner_id: &str) -> Option<(&str, &str)> {
-    let rest = owner_id.strip_prefix("mob/")?;
-    let (mob_id, agent_identity) = rest.split_once("/agent/")?;
-    if mob_id.is_empty()
-        || agent_identity.is_empty()
-        || mob_id.contains('/')
-        || agent_identity.contains('/')
-    {
-        return None;
+/// Resolves a `Session` attention target to the mob member that owns the
+/// session by reading the session's `mob_id` / `agent_identity` labels, the
+/// same labels the member's overlay resolution matches on. Installed on a
+/// host's [`crate::WorkGraphService`] so a member-bound binding spelled as a
+/// `Session` target is refused outside the mob realm exactly like an `Owner`
+/// target. A session the host does not know yet resolves to `None`: it cannot
+/// be classified, and refusing it would block creating attention for a
+/// session that is still being created.
+pub struct SessionServiceAttentionRealmResolver {
+    session_service: Arc<dyn meerkat_core::SessionService>,
+}
+
+impl SessionServiceAttentionRealmResolver {
+    pub fn new(session_service: Arc<dyn meerkat_core::SessionService>) -> Self {
+        Self { session_service }
     }
-    Some((mob_id, agent_identity))
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::AttentionTargetRealmResolver for SessionServiceAttentionRealmResolver {
+    async fn member_owner_key_for_session(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<Option<crate::WorkOwnerKey>, crate::WorkGraphError> {
+        let view = match self.session_service.read(session_id).await {
+            Ok(view) => view,
+            Err(meerkat_core::service::SessionError::NotFound { .. }) => return Ok(None),
+            Err(error) => {
+                return Err(crate::WorkGraphError::Store(format!(
+                    "reading session {session_id} to classify its attention target: {error}"
+                )));
+            }
+        };
+        let labels = &view.state.labels;
+        let (Some(mob_id), Some(agent_identity)) =
+            (labels.get("mob_id"), labels.get("agent_identity"))
+        else {
+            return Ok(None);
+        };
+        crate::WorkOwnerKey::mob_agent(mob_id, agent_identity).map(Some)
+    }
+}
+
+fn mob_agent_owner_key_parts(owner_id: &str) -> Option<(&str, &str)> {
+    crate::mob_agent_owner_id_parts(owner_id)
 }
 
 fn compose_turn_tool_overlay(
@@ -1875,8 +1910,16 @@ mod tests {
     }
 
     async fn owner_scoped_workgraph_service() -> crate::WorkGraphService {
-        let service =
-            crate::WorkGraphService::new(std::sync::Arc::new(crate::MemoryWorkGraphStore::new()));
+        // The goal binds a member of mob `alpha`; member-bound attention lives
+        // only in that mob's realm, which is also where the mob runtime
+        // resolves it from (`mob_scoped_workgraph_service`).
+        let service = crate::WorkGraphService::with_scope(
+            std::sync::Arc::new(crate::MemoryWorkGraphStore::new()),
+            meerkat_core::mob_realm_id("alpha")
+                .expect("mob realm")
+                .as_str(),
+            crate::WorkNamespace::default(),
+        );
         service
             .create_goal(crate::GoalCreateRequest {
                 failed_child_join_policy: Default::default(),
@@ -1924,6 +1967,111 @@ mod tests {
     /// Respawn-overlap arbitration on the canonical apply-time injection
     /// path: when two live sessions carry the same mob owner labels, only
     /// the newest receives the attention overlay.
+    #[tokio::test]
+    async fn session_target_of_a_member_session_is_refused_outside_the_mob_realm() {
+        let session_id = meerkat_core::SessionId::new();
+        let member_sessions: Arc<dyn meerkat_core::SessionService> =
+            Arc::new(RespawnOverlapSessionService {
+                summaries: Vec::new(),
+                labels: mob_owner_labels(),
+            });
+        let resolver: Arc<dyn crate::AttentionTargetRealmResolver> =
+            Arc::new(SessionServiceAttentionRealmResolver::new(member_sessions));
+        let store: Arc<dyn crate::WorkGraphStore> = Arc::new(crate::MemoryWorkGraphStore::new());
+        let request = |realm: &str| crate::GoalCreateRequest {
+            failed_child_join_policy: Default::default(),
+            cancelled_child_join_policy: Default::default(),
+            priority: Default::default(),
+            labels: Default::default(),
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+            evidence_refs: Vec::new(),
+            status: None,
+            realm_id: Some(realm.to_string()),
+            namespace: None,
+            title: "session-spelled member goal".to_string(),
+            description: None,
+            target: crate::GoalAttentionTarget::Session {
+                session_id: session_id.clone(),
+            },
+            mode: crate::WorkAttentionMode::Coordinate,
+            completion_policy: crate::WorkCompletionPolicy::SelfAttest,
+            delegated_authority: crate::AttentionDelegatedAuthority::AddEvidence,
+            projection_policy: crate::AttentionProjectionPolicy::default(),
+        };
+
+        let host = crate::WorkGraphService::with_scope(
+            Arc::clone(&store),
+            "host-realm",
+            crate::WorkNamespace::default(),
+        )
+        .with_attention_realm_resolver(Arc::clone(&resolver));
+        let refused = host
+            .create_goal(request("host-realm"))
+            .await
+            .expect_err("a member's session spelled as a Session target is realm-bound too");
+        match refused {
+            crate::WorkGraphError::AttentionTargetRealmMismatch {
+                owner_key,
+                mob_id,
+                required_realm_id,
+                realm_id,
+            } => {
+                assert_eq!(
+                    owner_key,
+                    crate::WorkOwnerKey::mob_agent("alpha", "reviewer")
+                        .expect("member key")
+                        .canonical()
+                );
+                assert_eq!(mob_id, "alpha");
+                assert_eq!(required_realm_id, "mob.alpha");
+                assert_eq!(realm_id, "host-realm");
+            }
+            other => panic!("expected AttentionTargetRealmMismatch, got {other:?}"),
+        }
+
+        let mob = crate::WorkGraphService::with_scope(
+            Arc::clone(&store),
+            "mob.alpha",
+            crate::WorkNamespace::default(),
+        )
+        .with_attention_realm_resolver(Arc::clone(&resolver));
+        mob.create_goal(request("mob.alpha"))
+            .await
+            .expect("the member's session binds in the mob realm");
+
+        // A session with no member labels is not realm-bound, and a service
+        // without a resolver cannot classify Session targets at all.
+        let plain_sessions: Arc<dyn meerkat_core::SessionService> =
+            Arc::new(RespawnOverlapSessionService {
+                summaries: Vec::new(),
+                labels: BTreeMap::new(),
+            });
+        let plain = crate::WorkGraphService::with_scope(
+            Arc::new(crate::MemoryWorkGraphStore::new()),
+            "host-realm",
+            crate::WorkNamespace::default(),
+        )
+        .with_attention_realm_resolver(Arc::new(
+            SessionServiceAttentionRealmResolver::new(plain_sessions),
+        ));
+        plain
+            .create_goal(request("host-realm"))
+            .await
+            .expect("a non-member session binds in any realm");
+        let unresolved = crate::WorkGraphService::with_scope(
+            Arc::new(crate::MemoryWorkGraphStore::new()),
+            "host-realm",
+            crate::WorkNamespace::default(),
+        );
+        unresolved
+            .create_goal(request("host-realm"))
+            .await
+            .expect("without a resolver a Session target is accepted as before");
+    }
+
     #[tokio::test]
     async fn attention_overlay_binds_only_to_newest_labeled_session() {
         let labels = mob_owner_labels();

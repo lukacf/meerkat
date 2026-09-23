@@ -1438,13 +1438,36 @@ async fn held_reconstructed_resume_topology() -> (
         .expect("runtime");
     let gate = Arc::new(TestRuntimeControlBarrier::new());
     let release_topology = ReleaseConstructionGate(Arc::clone(&gate));
-    *runtime.trust_mutation_gate.write().expect("trust gate") = Some(Arc::clone(&gate));
+    // Park ONLY the resume topology worker's trust installs. The reconstructed
+    // member's own supervisor publish also installs trust on this runtime and
+    // must stay unparked: it is not a mob topology mutation. A gate that
+    // counted it let the tests proceed before the topology phase owned the
+    // wiring graph, and on a starved 4 vCPU runner Stop and Retire then
+    // legitimately finished inside their early windows.
+    runtime.park_trust_mutations_from(
+        Arc::clone(&gate),
+        [meerkat_core::comms::GeneratedCommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring],
+    );
     drop(release_construction);
-    wait_until("topology mutation entered", Duration::from_secs(5), || {
-        let gate = Arc::clone(&gate);
-        async move { gate.boundary_calls.load(Ordering::Acquire) > 0 }
-    })
+    wait_until(
+        "resume topology trust mutation entered",
+        Duration::from_secs(5),
+        || {
+            let gate = Arc::clone(&gate);
+            async move { gate.boundary_calls.load(Ordering::Acquire) > 0 }
+        },
+    )
     .await;
+    // The parked install was minted by the topology worker, which the actor
+    // spawns only after `BeginExplicitResumeTopology`: the machine must say
+    // so before any lifecycle control is issued against it.
+    assert!(
+        mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .explicit_resume_topology_pending,
+        "the parked trust install must belong to the explicit resume topology phase"
+    );
     (mob, resume, release_topology)
 }
 
@@ -1457,8 +1480,13 @@ async fn reconstructed_resume_topology_mutation_keeps_queries_responsive_and_sto
         let handle = mob.handle.clone();
         async move { handle.stop().await }
     });
+    // This window must ELAPSE: while the topology worker is parked the resume
+    // attempt cannot finish (`FinishExplicitResume` requires the topology to
+    // be settled), so the deferred Stop cannot run. A slow host only makes
+    // the wait longer; it can never make Stop complete early.
     let stop_early = tokio::time::timeout(Duration::from_millis(250), &mut stop).await;
     let stopped_early = stop_early.is_ok();
+    let early_stop_result = stop_early.as_ref().ok().map(|result| format!("{result:?}"));
     drop(release_topology);
     let stopped = match stop_early {
         Ok(result) => result,
@@ -1478,7 +1506,7 @@ async fn reconstructed_resume_topology_mutation_keeps_queries_responsive_and_sto
     assert!(!resume_finished_early);
     assert!(
         !stopped_early,
-        "Stop cannot finish while topology owns mutation"
+        "Stop cannot finish while topology owns mutation: early result {early_stop_result:?}"
     );
     stopped.expect("stop task").expect("stop");
     assert!(resumed.is_err());
@@ -1492,6 +1520,8 @@ async fn reconstructed_resume_retire_waits_for_granted_topology_without_blocking
         let identity = mob.member(1).clone();
         async move { handle.retire(identity).await }
     });
+    // Must elapse: Retire is a topology control and stays deferred while the
+    // resume topology worker owns the wiring graph (it is parked above).
     let early = tokio::time::timeout(Duration::from_millis(250), &mut retire).await;
     let retired_early = early.is_ok();
     let phase = tokio::time::timeout(Duration::from_secs(1), mob.handle.status()).await;
@@ -1739,19 +1769,54 @@ async fn reconstructed_resume_retire_waits_for_its_constructor_without_blocking_
 }
 
 /// Load: 48 members, 200 concurrent deliveries, member 0's durable
-/// admission parked. Peer admission p99 stays tight, the probe never pages,
-/// and member 0's lane depth is bounded by its own deliveries.
+/// admission parked. Peer admission p99 stays within this host's own
+/// unwedged admission budget, the probe never pages, and member 0's lane
+/// depth is bounded by its own deliveries.
+///
+/// The budget is measured, not guessed: the same 200 deliveries run first
+/// against a mob with nothing parked, and the wedged run is held to three
+/// times that p99 with a 3 s floor. On a fast host that is the historical
+/// 3 s bound; on a starved 4 vCPU CI runner it is the observed cost of 200
+/// inline admissions, so the assertion still isolates the wedge's effect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn load_one_wedged_member_does_not_page_or_delay_peers() {
     const MEMBERS: usize = 48;
     const DELIVERIES: usize = 200;
+    let baseline = create_isolation_mob(MEMBERS).await;
+    let baseline_outcomes = futures::future::join_all((0..DELIVERIES).map(|n| {
+        let index = n % MEMBERS;
+        let send = timed_send(
+            baseline.handle.clone(),
+            baseline.member(index).clone(),
+            format!("baseline delivery {n}"),
+            Duration::from_secs(30),
+        );
+        async move {
+            let (elapsed, result) = send.await;
+            (index, elapsed, result)
+        }
+    }))
+    .await;
+    let mut baseline_latencies = Vec::new();
+    for (index, elapsed, result) in baseline_outcomes {
+        result
+            .unwrap_or_else(|_| panic!("baseline delivery to member {index} timed out"))
+            .unwrap_or_else(|error| panic!("baseline delivery to member {index} failed: {error}"));
+        baseline_latencies.push(elapsed);
+    }
+    let baseline_p99 = percentile(&mut baseline_latencies, 0.99);
+    baseline.handle.shutdown().await.expect("baseline shutdown");
+    let admission_budget = (baseline_p99 * 3).max(Duration::from_secs(3));
+    let delivery_timeout = admission_budget + Duration::from_secs(2);
+    let run_timeout = admission_budget + Duration::from_secs(5);
+
     let mob = create_isolation_mob(MEMBERS).await;
     mob.store.park_admissions(mob.session(0));
     // 200 deliveries queue 200 inline DSL admissions ahead of any probe; the
     // probe budget matches the admission p99 bound (a probe is one more
     // command in that queue), well below the production 30 s page.
     let (probe_stop, probe_pages, probe_task) =
-        mob.spawn_probe_loop(Duration::from_millis(100), Duration::from_secs(3));
+        mob.spawn_probe_loop(Duration::from_millis(100), admission_budget);
 
     let deliveries = futures::future::join_all((0..DELIVERIES).map(|n| {
         let index = n % MEMBERS;
@@ -1759,7 +1824,7 @@ async fn load_one_wedged_member_does_not_page_or_delay_peers() {
             mob.handle.clone(),
             mob.member(index).clone(),
             format!("load delivery {n}"),
-            Duration::from_secs(5),
+            delivery_timeout,
         );
         async move {
             let (elapsed, result) = send.await;
@@ -1767,7 +1832,7 @@ async fn load_one_wedged_member_does_not_page_or_delay_peers() {
         }
     }));
     let wedged_deliveries = (0..DELIVERIES).filter(|n| n % MEMBERS == 0).count();
-    let (outcomes, peak_parked) = tokio::time::timeout(Duration::from_secs(8), async {
+    let (outcomes, peak_parked) = tokio::time::timeout(run_timeout, async {
         // Member 0's deliveries stay parked; release them once its lane
         // holds every one of them so the join can complete.
         let store = Arc::clone(&mob.store);
@@ -1814,8 +1879,8 @@ async fn load_one_wedged_member_does_not_page_or_delay_peers() {
     }
     let p99 = percentile(&mut peer_latencies, 0.99);
     assert!(
-        p99 < Duration::from_secs(3),
-        "peer admission p99 was {p99:?}"
+        p99 < admission_budget,
+        "peer admission p99 was {p99:?} (budget {admission_budget:?} from unwedged baseline p99 {baseline_p99:?})"
     );
     assert_eq!(
         probe_pages.load(Ordering::Relaxed),

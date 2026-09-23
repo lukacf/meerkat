@@ -742,10 +742,15 @@ pub fn builtin_tool_visibility_witness() -> meerkat_core::ToolVisibilityWitness 
     }
 }
 
+// Re-exported for the experimental GPT Live tests only; every other caller
+// lives inside `orchestrator`. Without `openai-live` nothing imports it, so
+// the gate names that feature too instead of leaving an unused import in the
+// default-feature lib test build.
 #[cfg(all(
     test,
     feature = "session-store",
     feature = "live",
+    feature = "openai-live",
     not(target_arch = "wasm32")
 ))]
 pub(crate) use orchestrator::settle_live_close_playback_deferred;

@@ -41,6 +41,15 @@ pub enum WorkGraphError {
     },
     #[error("work graph backend '{0}' does not support this operation")]
     UnsupportedBackend(String),
+    #[error(
+        "attention target {owner_key} names a member of mob '{mob_id}', whose members resolve attention only in realm '{required_realm_id}'; the binding was requested in realm '{realm_id}' and would never reach the member"
+    )]
+    AttentionTargetRealmMismatch {
+        owner_key: String,
+        mob_id: String,
+        required_realm_id: String,
+        realm_id: String,
+    },
 }
 
 impl WorkGraphError {

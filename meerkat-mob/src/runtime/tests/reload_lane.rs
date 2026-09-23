@@ -918,7 +918,7 @@ async fn queued_reload_and_predecessor_settle_before_topology_acquires_graph_fen
             .borrow()
             .explicit_resume_topology_pending
     );
-    *comms.trust_mutation_gate.write().expect("trust gate") = Some(Arc::clone(&topology_gate));
+    comms.park_trust_mutations(Arc::clone(&topology_gate));
     mob.probe(Duration::from_secs(1))
         .await
         .expect("query progresses while topology waits");

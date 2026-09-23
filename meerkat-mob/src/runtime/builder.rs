@@ -6525,6 +6525,24 @@ impl Drop for SupervisorBridgeStartupGuard {
     }
 }
 
+/// A mob knows which sessions are its members' (their `mob_id` /
+/// `agent_identity` labels), so a `Session` attention target that names a
+/// member is held to the mob-realm rule like an `Owner` target. A host that
+/// already installed its own resolver on the service keeps it.
+fn with_member_session_attention_resolver(
+    service: meerkat::WorkGraphService,
+    session_service: &Arc<dyn MobSessionService>,
+) -> meerkat::WorkGraphService {
+    if service.attention_realm_resolver().is_some() {
+        return service;
+    }
+    let session_service: Arc<dyn meerkat_core::SessionService> =
+        Arc::clone(session_service) as Arc<dyn meerkat_core::SessionService>;
+    service.with_attention_realm_resolver(Arc::new(
+        meerkat::surface::SessionServiceAttentionRealmResolver::new(session_service),
+    ))
+}
+
 impl MobBuilder {
     /// Create a builder for a new mob.
     pub fn new(definition: MobDefinition, storage: MobStorage) -> Self {
@@ -6882,6 +6900,8 @@ impl MobBuilder {
                 .flatten();
             let session_service = session_service
                 .ok_or_else(|| MobError::Internal("session_service is required".into()))?;
+            let workgraph_service = workgraph_service
+                .map(|service| with_member_session_attention_resolver(service, &session_service));
             if !allow_ephemeral_sessions && !session_service.supports_persistent_sessions() {
                 return Err(MobError::Internal(
                     "session_service must satisfy persistent-session contract (REQ-MOB-030)"
@@ -7092,6 +7112,8 @@ impl MobBuilder {
 
         let session_service = session_service
             .ok_or_else(|| MobError::Internal("session_service is required".into()))?;
+        let workgraph_service = workgraph_service
+            .map(|service| with_member_session_attention_resolver(service, &session_service));
         if !allow_ephemeral_sessions && !session_service.supports_persistent_sessions() {
             return Err(MobError::Internal(
                 "session_service must satisfy persistent-session contract (REQ-MOB-030)"

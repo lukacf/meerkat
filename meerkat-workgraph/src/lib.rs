@@ -39,7 +39,7 @@ pub use rest_contract::{
     WorkGraphRestRoute, workgraph_rest_path_catalog, workgraph_rest_request_response_schema,
     workgraph_rest_response_schema,
 };
-pub use service::{WorkExecutionBridge, WorkGraphService};
+pub use service::{AttentionTargetRealmResolver, WorkExecutionBridge, WorkGraphService};
 pub use store::{
     DisabledWorkGraphStore, MemoryWorkGraphStore, WorkGraphEventFilter, WorkGraphNamespaceRead,
     WorkGraphStore, WorkGraphStoreKind,
@@ -69,7 +69,7 @@ pub use types::{
     ExternalWorkRef, FailedChildJoinPolicy, GoalAttentionTarget, GoalBindExistingRequest,
     GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest, GoalCreateResult,
     GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult,
-    GoalTerminalStatus, LinkWorkItemsRequest, MAX_WORK_CLAIM_LEASE_SECONDS,
+    GoalTerminalStatus, LinkWorkItemsRequest, MAX_WORK_CLAIM_LEASE_SECONDS, MobAgentOwner,
     ObserveLeaseExpiryRequest, ObserveReadinessRequest, PolicyEscalateRequest,
     ProjectedAttentionAuthority, PublicGoalCompletionPolicy, PublicGoalCreateRequest,
     PublicGoalRequestCloseRequest, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
@@ -81,7 +81,7 @@ pub use types::{
     WorkGraphEvent, WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphFact, WorkGraphIdParams,
     WorkGraphItemsResponse, WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter,
     WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey,
-    WorkOwnerKind, WorkPriority, WorkStatus,
+    WorkOwnerKind, WorkPriority, WorkStatus, mob_agent_owner_id_parts,
 };
 
 pub const WORKGRAPH_CAPABILITY_DISABLED_DESCRIPTION: &str =

@@ -63,6 +63,14 @@ impl KennelSession {
     }
 }
 
+/// Resolve the kennel binary from the runtime environment so archived test
+/// binaries keep working outside the build that produced them.
+fn kennel_binary() -> std::path::PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_mdm-kennel")
+        .map(std::path::PathBuf::from)
+        .expect("CARGO_BIN_EXE_mdm-kennel is set by cargo test")
+}
+
 /// Spawn a real kennel process on a random port and return its address.
 ///
 /// There is still a tiny TOCTOU gap between releasing the probe listener and the
@@ -70,7 +78,7 @@ impl KennelSession {
 /// port if the child exits early or never becomes reachable.
 async fn spawn_kennel() -> anyhow::Result<(String, tokio::process::Child, tempfile::TempDir)> {
     let mut last_err = None;
-    let kennel = env!("CARGO_BIN_EXE_mdm-kennel");
+    let kennel = kennel_binary();
 
     for attempt in 0..10 {
         let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
@@ -81,7 +89,7 @@ async fn spawn_kennel() -> anyhow::Result<(String, tokio::process::Child, tempfi
         let port = listener.local_addr()?.port();
         drop(listener);
 
-        let mut child = tokio::process::Command::new(kennel)
+        let mut child = tokio::process::Command::new(&kennel)
             .arg("--listen")
             .arg(format!("127.0.0.1:{port}"))
             .arg("--data-dir")
@@ -143,7 +151,7 @@ async fn real_broker_restart_changes_incarnation_but_preserves_hive_session() {
     let mut first_incarnation = None;
     for epoch in 0..2 {
         if epoch == 1 {
-            child = tokio::process::Command::new(env!("CARGO_BIN_EXE_mdm-kennel"))
+            child = tokio::process::Command::new(kennel_binary())
                 .args([
                     "--listen",
                     &addr,

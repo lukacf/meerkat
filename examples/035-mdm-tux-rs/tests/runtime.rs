@@ -951,30 +951,33 @@ async fn actual_target_boot_and_restart_advertise_the_same_rpc_session() {
         let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let rpc_addr = probe.local_addr().unwrap();
         drop(probe);
-        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_mdm-target"))
-            .args([
-                "--name",
-                "synthetic-target",
-                "--model",
-                "gpt-5.5",
-                "--provider",
-                "openai",
-                "--advertise",
-                "127.0.0.1",
-                "--rpc-port",
-            ])
-            .arg(rpc_addr.port().to_string())
-            .arg("--kennel")
-            .arg(broker.local_addr().unwrap().to_string())
-            .arg("--data-dir")
-            .arg(root.path())
-            .env("HOME", root.path())
-            .env("OPENAI_API_KEY", "synthetic-never-called")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+        let mut child = tokio::process::Command::new(
+            std::env::var_os("CARGO_BIN_EXE_mdm-target")
+                .expect("CARGO_BIN_EXE_mdm-target is set by cargo test"),
+        )
+        .args([
+            "--name",
+            "synthetic-target",
+            "--model",
+            "gpt-5.5",
+            "--provider",
+            "openai",
+            "--advertise",
+            "127.0.0.1",
+            "--rpc-port",
+        ])
+        .arg(rpc_addr.port().to_string())
+        .arg("--kennel")
+        .arg(broker.local_addr().unwrap().to_string())
+        .arg("--data-dir")
+        .arg(root.path())
+        .env("HOME", root.path())
+        .env("OPENAI_API_KEY", "synthetic-never-called")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         let client = tokio::time::timeout(Duration::from_secs(30), async {
             loop {

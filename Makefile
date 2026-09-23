@@ -244,6 +244,10 @@ rust-lane-doctor:
 	@echo "$(GREEN)Checking Rust lane isolation and test-lane shape...$(NC)"
 	@scripts/rust-lane-doctor
 
+ci-lanes-selftest:
+	@echo "$(GREEN)Self-testing the CI lane classifier (fail-closed contracts)...$(NC)"
+	@node scripts/ci-cargo-lanes-selftest.mjs
+
 cargo-agent-gate: rust-lane-doctor
 	@echo "$(GREEN)Running Cargo agent changed-path gate...$(NC)"
 	@scripts/cargo-agent-gate $(AGENT_GATE_ARGS)

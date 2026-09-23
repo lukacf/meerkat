@@ -241,7 +241,13 @@ jobs:
                .validation_backend == "gcp-buildbuddy+github-hosted-dense-mob" and
                .validation_result == "success" and
                .component_results.gcp_buildbuddy == "success" and
-               .component_results.github_hosted_dense_mob == "success"))' \
+               .component_results.github_hosted_dense_mob == "success") or
+              (.schema_version == 4 and
+               .validation_backend == "github-hosted-cargo" and
+               .validation_result == "success" and
+               .component_results.changes == "success" and
+               .component_results.fmt_governance == "success" and
+               .component_results.ratchets == "success"))' \
             "${attestation}"
           echo "Verified exact-tree CI attestation for ${RELEASE_SHA} (${RELEASE_TREE})"
 
@@ -357,6 +363,20 @@ jobs:
       - name: Verify MODULE.bazel.lock recorded inputs
         run: make verify-bazel-module-lock-inputs
 
+  # The tag path reuses the exact-tree Cargo CI attestation for the hosted
+  # lanes and runs the whole BuildBuddy/Bazel graph (prebuild, static, native
+  # nextest, governance, SDK suites, wasm-check, minimal-feature, feature
+  # matrix, audit) in `full-fresh` mode as its release gate. Pull-request CI
+  # never runs that graph.
+  release_validate_buildbuddy_full:
+    name: Validate release tree with the full BuildBuddy graph
+    needs: [require_ci_green]
+    if: ${{ github.event_name != 'workflow_dispatch' }}
+    uses: ./.github/workflows/buildbuddy.yml
+    with:
+      mode: full-fresh
+    secrets: inherit
+
   release_validate_gate:
     name: Release validation gate
     if: >-
@@ -364,7 +384,7 @@ jobs:
       (github.event_name != 'workflow_dispatch' ||
        (github.event.inputs.publish_web_sdk_only != 'true' &&
         github.event.inputs.publish_release_assets_only != 'true'))
-    needs: [require_ci_green, release_validate_cargo, release_validate_buildbuddy]
+    needs: [require_ci_green, release_validate_cargo, release_validate_buildbuddy, release_validate_buildbuddy_full]
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Check selected release validation backend
@@ -375,6 +395,7 @@ jobs:
           bb_selected="${{ github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))) }}"
           cargo_result="${{ needs.release_validate_cargo.result }}"
           buildbuddy_result="${{ needs.release_validate_buildbuddy.result }}"
+          buildbuddy_full_result="${{ needs.release_validate_buildbuddy_full.result }}"
 
           echo "Required Cargo CI: ${ci_result}"
           [[ "${ci_result}" == "success" ]]
@@ -382,9 +403,13 @@ jobs:
           if [[ "${{ github.event_name }}" != "workflow_dispatch" ]]; then
             echo "Exact-tree CI attestation reused; Cargo release validation: ${cargo_result}"
             echo "Exact-tree CI attestation reused; BuildBuddy release validation: ${buildbuddy_result}"
-            [[ "${cargo_result}" == "skipped" && "${buildbuddy_result}" == "skipped" ]]
+            echo "Full BuildBuddy graph (full-fresh) on the release tree: ${buildbuddy_full_result}"
+            [[ "${cargo_result}" == "skipped" && "${buildbuddy_result}" == "skipped" && "${buildbuddy_full_result}" == "success" ]]
             exit $?
           fi
+
+          echo "Full BuildBuddy graph is a tag-path gate only: ${buildbuddy_full_result}"
+          [[ "${buildbuddy_full_result}" == "skipped" ]]
 
           if [[ "${bb_selected}" == "true" ]]; then
             echo "BuildBuddy release validation selected: ${buildbuddy_result}"

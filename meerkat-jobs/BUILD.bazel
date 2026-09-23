@@ -2,6 +2,8 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 
+load("//:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
 
 
 filegroup(
@@ -35,6 +37,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -65,6 +68,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -103,6 +107,7 @@ rust_test(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -116,12 +121,13 @@ rust_test(
         "fast",
         "unit",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-jobs",
@@ -152,6 +158,7 @@ rust_test(
     crate_root = "tests/health_census.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -167,10 +174,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-jobs",
@@ -202,6 +210,7 @@ rust_test(
     crate_root = "tests/machine_contract.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -217,10 +226,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-jobs",
@@ -252,6 +262,7 @@ rust_test(
     crate_root = "tests/notification_outbox.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -267,10 +278,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-jobs",
@@ -302,6 +314,7 @@ rust_test(
     crate_root = "tests/predicate_watch.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -317,10 +330,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-jobs",
@@ -352,6 +366,7 @@ rust_test(
     crate_root = "tests/public_projection.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -367,10 +382,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-jobs",
@@ -402,6 +418,7 @@ rust_test(
     crate_root = "tests/recovery_fencing.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -417,10 +434,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-jobs",
@@ -452,6 +470,7 @@ rust_test(
     crate_root = "tests/sqlite_store_conformance.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -467,10 +486,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-jobs",
@@ -502,6 +522,7 @@ rust_test(
     crate_root = "tests/store_contract.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -517,10 +538,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-jobs",
@@ -552,6 +574,7 @@ rust_test(
     crate_root = "tests/subscriptions.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -567,10 +590,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-jobs",
@@ -602,6 +626,7 @@ rust_test(
     crate_root = "tests/terminal_outbox.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -617,10 +642,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-jobs",

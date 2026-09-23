@@ -833,10 +833,30 @@ function targetScanSource(target) {
   return sources.join("\n");
 }
 
-function workspaceDataLabels(target) {
-  const source = targetScanSource(target);
+// Every source file of a library crate. A unit test compiles the whole
+// crate, so a `#[cfg(test)]` module anywhere in `src/**` (meerkat-store's
+// sqlite_store tests copy meerkat-runtime's released-corpus fixture) can name
+// runfiles the crate root never mentions; the crate root alone missed them on
+// the first real unit lane.
+function crateScanSource(target, packageRoot) {
+  const sources = [targetScanSource(target)];
+  for (const file of rustSourceFiles(packageRoot, false)) {
+    if (file === target.src_path) continue;
+    sources.push(readFileSync(file, "utf8"));
+  }
+  return sources.join("\n");
+}
+
+function workspaceDataLabels(target, source = targetScanSource(target)) {
   const labels = new Set();
-  if (source.includes("workspace_root") || source.includes("rev-parse")) {
+  if (
+    source.includes("workspace_root") ||
+    source.includes("rev-parse") ||
+    // scripts/repo-cargo exports this for every Cargo run; a test that reads
+    // it falls back to a cwd holding the root Cargo.toml when it is unset,
+    // which is the runfiles root once workspace_metadata is in its data.
+    source.includes("MEERKAT_WORKSPACE_ROOT")
+  ) {
     labels.add("//:workspace_metadata");
     labels.add("//:workspace_cargo_manifests");
   }
@@ -947,6 +967,16 @@ function testSourceInputs(target, pkg, packageRoot) {
 }
 
 const externalTestSourcesByOwner = new Map();
+function registerExternalInput(owner, consumer, absolute) {
+  let entry = externalTestSourcesByOwner.get(owner.id);
+  if (!entry) {
+    entry = { paths: new Set(), visibility: new Set() };
+    externalTestSourcesByOwner.set(owner.id, entry);
+  }
+  entry.paths.add(relative(packageDir(owner), absolute).replaceAll("\\", "/"));
+  entry.visibility.add(`//${packageKey(consumer)}:__pkg__`);
+}
+const includeMacroRe = /\binclude_(?:str|bytes)!\(\s*"([^"]+)"\s*\)|\binclude!\(\s*"([^"]+)"\s*\)/g;
 for (const consumer of localPackages.values()) {
   const consumerRoot = packageDir(consumer);
   for (const target of consumer.targets) {
@@ -956,15 +986,42 @@ for (const consumer of localPackages.values()) {
       if (pathIsWithin(absolute, consumerRoot)) continue;
       const owner = localPackageOwningSource(absolute);
       if (!owner) continue;
-      let entry = externalTestSourcesByOwner.get(owner.id);
-      if (!entry) {
-        entry = { paths: new Set(), visibility: new Set() };
-        externalTestSourcesByOwner.set(owner.id, entry);
-      }
-      entry.paths.add(relative(packageDir(owner), absolute).replaceAll("\\", "/"));
-      entry.visibility.add(`//${packageKey(consumer)}:__pkg__`);
+      registerExternalInput(owner, consumer, absolute);
     }
   }
+  // A crate that include_str!/include_bytes! a file of another workspace
+  // member (meerkat-contracts embeds meerkat-core's tool-policy fixtures)
+  // needs that member to export the file: Bazel sandboxes each package.
+  const sourceFiles = new Set([
+    ...consumer.targets.map((target) => target.src_path),
+    ...rustSourceFiles(consumerRoot, true),
+  ]);
+  for (const sourceFile of sourceFiles) {
+    const source = readFileSync(sourceFile, "utf8");
+    for (const match of source.matchAll(includeMacroRe)) {
+      const includePath = match[1] ?? match[2];
+      if (!includePath) continue;
+      const absolute = resolve(dirname(sourceFile), includePath);
+      if (!existsSync(absolute) || pathIsWithin(absolute, consumerRoot)) continue;
+      const owner = localPackageOwningSource(absolute);
+      if (!owner || owner.id === consumer.id) continue;
+      registerExternalInput(owner, consumer, absolute);
+    }
+  }
+}
+
+// Files of the root Bazel package that a crate reaches through an include
+// macro (meerkat-cli's help contract embeds docs/**). The root BUILD exports
+// them so the including target can name them in compile_data.
+const rootIncludedFiles = new Set();
+
+function bazelPackageDirOwning(absolute) {
+  let dir = dirname(absolute);
+  while (dir.startsWith(root) && dir !== root) {
+    if (existsSync(resolve(dir, "BUILD.bazel")) || existsSync(resolve(dir, "BUILD"))) return dir;
+    dir = dirname(dir);
+  }
+  return root;
 }
 
 function compileData(target, packageRoot, includeTests) {
@@ -1001,6 +1058,29 @@ function compileData(target, packageRoot, includeTests) {
       ) {
         const rel = relative(resolve(root, "meerkat-machine-kernels"), absolute).replaceAll("\\", "/");
         labels.add(`//meerkat-machine-kernels:${rel}`);
+      } else {
+        // Cross-package include: the owner exports the file (see the
+        // externalTestSourcesByOwner pre-pass) and this target names it.
+        const owner = localPackageOwningSource(absolute);
+        if (owner) {
+          const rel = relative(packageDir(owner), absolute).replaceAll("\\", "/");
+          labels.add(`//${packageKey(owner)}:${rel}`);
+        } else if (absolute.startsWith(`${root}/`)) {
+          // Not a workspace member's file. If the root package owns it, the
+          // root BUILD exports it; a file under some other BUILD has no owner
+          // on this path and must fail generation instead of rustc on the
+          // executor ("couldn't read ..." was the first real Prebuild lane's
+          // second failure, for docs/** in meerkat-cli's help contract test).
+          const bazelPackage = bazelPackageDirOwning(absolute);
+          if (bazelPackage !== root) {
+            throw new Error(
+              `${relative(root, sourceFile)} includes ${relative(root, absolute)}, owned by Bazel package //${relative(root, bazelPackage)} which does not export it`,
+            );
+          }
+          const rel = relative(root, absolute).replaceAll("\\", "/");
+          rootIncludedFiles.add(rel);
+          labels.add(`//:${rel}`);
+        }
       }
     }
     if (source.includes("../../test-fixtures/live_smoke/support.rs")) {
@@ -1040,6 +1120,151 @@ const packageRunfileLabels = [
       .map((dir) => `//${dir}:package_runfiles`),
   ),
 ].sort();
+
+// The root Cargo.toml `[workspace.lints]` table as rustc lint flags, in
+// Cargo's order (lower `priority` first, so later flags override). Cargo
+// passes exactly these to rustc for every member that declares
+// `[lints] workspace = true`; rules_rust never reads the table, so the Bazel
+// clippy lanes used to judge `-Dwarnings` alone: laxer than `make lint` (no
+// `pedantic`, no `unwrap_used = deny`) and stricter at once (the allows were
+// ignored; the first real lane failed on `large_enum_variant`). Plain rustc
+// accepts `clippy::` tool lints silently, so the same flags ride on builds
+// too, as they do under Cargo.
+//
+// Not forwarded, and named in the generated file: the `cargo` lint group
+// (its lints call `cargo metadata`, absent inside a Bazel action) and rust
+// lints carrying extra configuration such as `check-cfg` (the Bazel build
+// declares its cfgs itself).
+const LINT_LEVEL_FLAGS = { allow: "A", warn: "W", deny: "D", forbid: "F" };
+const LINT_SIMPLE = /^([A-Za-z0-9_]+)\s*=\s*"(allow|warn|deny|forbid)"\s*$/;
+const LINT_TABLE =
+  /^([A-Za-z0-9_]+)\s*=\s*\{\s*level\s*=\s*"(allow|warn|deny|forbid)"(?:\s*,\s*priority\s*=\s*(-?\d+))?\s*(?:,\s*(.*?))?\s*\}\s*$/;
+
+function parseWorkspaceLintTable(cargoTomlLines, header) {
+  const entries = [];
+  let inTable = false;
+  for (const raw of cargoTomlLines) {
+    const line = raw.split("#", 1)[0].trimEnd();
+    if (!line.trim()) continue;
+    if (line.startsWith("[")) {
+      inTable = line.trim() === header;
+      continue;
+    }
+    if (!inTable) continue;
+    const simple = line.match(LINT_SIMPLE);
+    if (simple) {
+      entries.push({ priority: 0, name: simple[1], level: simple[2], extra: null });
+      continue;
+    }
+    const table = line.match(LINT_TABLE);
+    if (table) {
+      entries.push({
+        priority: table[3] === undefined ? 0 : Number(table[3]),
+        name: table[1],
+        level: table[2],
+        extra: table[4] || null,
+      });
+      continue;
+    }
+    throw new Error(`cannot parse ${header} entry in Cargo.toml: ${line}`);
+  }
+  return entries.sort((a, b) => a.priority - b.priority);
+}
+
+function workspaceLintRustcFlags() {
+  const lines = readFileSync(resolve(root, "Cargo.toml"), "utf8").split(/\r?\n/);
+  const flags = [];
+  const skipped = [];
+  for (const entry of parseWorkspaceLintTable(lines, "[workspace.lints.rust]")) {
+    if (entry.extra) {
+      skipped.push(`rust lint ${entry.name} (carries ${entry.extra.split("=")[0].trim()})`);
+      continue;
+    }
+    flags.push(`-${LINT_LEVEL_FLAGS[entry.level]}${entry.name}`);
+  }
+  for (const entry of parseWorkspaceLintTable(lines, "[workspace.lints.clippy]")) {
+    if (entry.name === "cargo") {
+      skipped.push("clippy::cargo group (needs `cargo metadata`, absent under Bazel)");
+      continue;
+    }
+    if (entry.extra) throw new Error(`unsupported clippy lint options on ${entry.name}: ${entry.extra}`);
+    flags.push(`-${LINT_LEVEL_FLAGS[entry.level]}clippy::${entry.name}`);
+  }
+  if (!flags.length) throw new Error("Cargo.toml [workspace.lints] produced no lint flags");
+  return { flags, skipped };
+}
+
+// Cargo's unit and integration lanes run under nextest: one process per test.
+// A Bazel rust_test runs a whole binary in one process on every core, and
+// the first real unit lane failed dozens of tests on state that is
+// process-global by design (inproc participant names, the realtime open
+// projection memory budget, observability counters). Running each binary
+// single-threaded is the nearest libtest equivalent of that isolation; the
+// binaries still run in parallel with each other on the executors.
+const SINGLE_THREADED_TEST_ENV = [`        "RUST_TEST_THREADS": "1",`];
+// Unit binaries with hundreds of tokio tests, measured serially.
+const LARGE_UNIT_TEST_PACKAGES = new Set([
+  "meerkat",
+  "meerkat-core",
+  "meerkat-live",
+  "meerkat-mcp-server",
+  "meerkat-mob",
+  "meerkat-mob-mcp",
+  "meerkat-rest",
+  "meerkat-rpc",
+  "meerkat-runtime",
+  "xtask",
+]);
+
+const WORKSPACE_LINTS_BZL = "workspace_lints.bzl";
+const WORKSPACE_LINTS_LOAD = `load("//:${WORKSPACE_LINTS_BZL}", "WORKSPACE_LINT_RUSTC_FLAGS")`;
+
+function writeWorkspaceLintsBzl() {
+  const { flags, skipped } = workspaceLintRustcFlags();
+  writeGenerated(
+    resolve(root, WORKSPACE_LINTS_BZL),
+    [
+      `"""Root Cargo.toml [workspace.lints] as rustc flags. Generated by`,
+      `scripts/generate-bazel-rust-builds.mjs; do not edit."""`,
+      ``,
+      ...skipped.map((entry) => `# Not forwarded: ${entry}.`),
+      `WORKSPACE_LINT_RUSTC_FLAGS = ${listExpr(flags)}`,
+      ``,
+    ].join("\n"),
+  );
+}
+
+// Whether a member declares `[lints] workspace = true`; only those members
+// get the workspace lint flags, exactly as under Cargo. tests/integration and
+// meerkat-live declare no `[lints]` and are linted at default levels.
+function packageInheritsWorkspaceLints(pkg) {
+  const manifest = readFileSync(pkg.manifest_path, "utf8").split(/\r?\n/);
+  let inLints = false;
+  for (const raw of manifest) {
+    const line = raw.split("#", 1)[0].trim();
+    if (!line) continue;
+    if (line.startsWith("[")) {
+      inLints = line === "[lints]";
+      continue;
+    }
+    if (inLints && /^workspace\s*=\s*true$/.test(line)) return true;
+  }
+  return false;
+}
+
+const RUST_RULE_HEAD = /^rust_[a-z_]+\($/m;
+
+function withWorkspaceLintFlags(rule) {
+  if (!RUST_RULE_HEAD.test(rule.split("\n", 1)[0])) return rule;
+  if (rule.includes("\n    rustc_flags = ")) {
+    return rule.replace("\n    rustc_flags = ", "\n    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + ");
+  }
+  const editionLine = '\n    edition = "2024",';
+  if (!rule.includes(editionLine)) {
+    throw new Error(`rust rule without an edition line cannot take workspace lint flags:\n${rule}`);
+  }
+  return rule.replace(editionLine, `${editionLine}\n    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,`);
+}
 
 function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatrixLabels) {
   const lines = [
@@ -1116,6 +1341,19 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `    visibility = ["//visibility:public"],`,
     `)`,
     ``,
+    ...(rootIncludedFiles.size
+      ? [
+          `# Root-package files that crates embed through include macros; see`,
+          `# compileData() in scripts/generate-bazel-rust-builds.mjs.`,
+          `exports_files(`,
+          `    [`,
+          ...[...rootIncludedFiles].sort().map((file) => `        ${q(file)},`),
+          `    ],`,
+          `    visibility = ["//visibility:public"],`,
+          `)`,
+          ``,
+        ]
+      : []),
     `filegroup(`,
     `    name = "repo_governance_files",`,
     `    srcs = glob(["Makefile", "scripts/*"], allow_empty = True),`,
@@ -1652,7 +1890,7 @@ for (const pkg of localPackages.values()) {
       if (needsPackageRunfiles(target) || extraData.includes(currentPackageRunfiles) || usesTrybuild) {
         data.unshift(":package_runfiles");
       }
-      const env = [`        "RUST_MIN_STACK": "8388608",`];
+      const env = [`        "RUST_MIN_STACK": "8388608",`, ...SINGLE_THREADED_TEST_ENV];
       attrs.splice(attrs.length - 1, 0, `    tags = ${listExpr([...new Set(tags)].sort())},`);
       if (key === "meerkat" && target.name === "agent_builder_policy_canary") {
         attrs.splice(attrs.length - 1, 0, `    size = "large",`);
@@ -1661,8 +1899,16 @@ for (const pkg of localPackages.values()) {
         // resolves ownership anchors against a full workspace type index);
         // the 60s "small" budget times out on remote executors.
         attrs.splice(attrs.length - 1, 0, `    size = "medium",`);
+      } else if (key === "meerkat-machine-codegen" && target.name === "render_contracts") {
+        // Renders the full canonical machine and composition catalog (the
+        // mob seam model alone is ~100k TLA lines) once per contract, 36
+        // times over: 52s on a 192-core host, past the 60s "small" budget on
+        // the remote executors.
+        attrs.splice(attrs.length - 1, 0, `    size = "medium",`);
       } else if (tags.includes("fast")) {
-        attrs.splice(attrs.length - 1, 0, `    size = "small",`);
+        // Single-threaded (see SINGLE_THREADED_TEST_ENV): the 60s "small"
+        // budget no longer fits a binary that used to spread over 30 cores.
+        attrs.splice(attrs.length - 1, 0, `    size = "medium",`);
       }
       if (usesTrybuild) {
         data.push("//:workspace_runfiles");
@@ -1885,10 +2131,23 @@ for (const pkg of localPackages.values()) {
       const currentPackageRunfiles = `//${relative(root, dir)}:package_runfiles`;
       const unitData = [
         ":package_runfiles",
-        ...workspaceDataLabels(target).filter((label) => label !== currentPackageRunfiles),
+        ...workspaceDataLabels(target, crateScanSource(target, dir)).filter(
+          (label) => label !== currentPackageRunfiles,
+        ),
       ];
-      const unitEnv = [`        "RUST_MIN_STACK": "8388608",`];
-      const unitSize = key === "meerkat-mob" ? "large" : key === "xtask" ? "medium" : "small";
+      const unitEnv = [`        "RUST_MIN_STACK": "8388608",`, ...SINGLE_THREADED_TEST_ENV];
+      // Single-threaded, so the heavy binaries need the 900s budget: the
+      // first real unit lane timed the facade and live crates out at 60s
+      // while their tests hung behind sandbox failures, and mob/rpc/rest run
+      // hundreds of tokio tests each.
+      const unitSize = LARGE_UNIT_TEST_PACKAGES.has(key) ? "large" : "medium";
+      const unitFeatures = crateFeaturesFor(key, pkg);
+      // WebRTC tests bind UDP sockets and run ICE over loopback; the unit
+      // lane's default sandbox has no network at all, so they failed and the
+      // binary hung until the timeout (2026-09-23 unit lane, meerkat and
+      // meerkat-live). Give exactly those binaries the network the
+      // cargo-equivalent tests already have.
+      const unitNeedsNetwork = unitFeatures.some((feature) => /(^|-)webrtc$/.test(feature));
       if (key === "xtask") {
         const rustfmt = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin";
         const rustfmtLib = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib";
@@ -1915,6 +2174,18 @@ for (const pkg of localPackages.values()) {
           `        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": ${q(agentFactoryBridgeSymbolSuffix)},`,
         );
       }
+      // A `#[path = "../../tests/..."]` module reached from `src/` (meerkat-mob's
+      // runtime tests include the shared placement fixture) compiles into the
+      // unit test but lives outside the `src/**` glob. Follow the module graph
+      // from the crate root and name every in-package source the glob misses.
+      // An include that leaves the package has no Bazel owner on this path and
+      // fails generation loudly instead of failing rustc on the executor.
+      const unitExtraSrcs = testSourceInputs(target, pkg, dir).paths.filter(
+        (path) => !path.startsWith("src/"),
+      );
+      const unitSrcsExpr = unitExtraSrcs.length
+        ? `glob(["src/**/*.rs"]) + ${listExpr(unitExtraSrcs, 8)}`
+        : srcsExpr;
       const unitAttrs = [
         `    name = ${q(unitName)},`,
         `    aliases = ${aliasesExpr.replace(`aliases(package_name = ${q(key)})`, `aliases(\n        package_name = ${q(key)},\n        normal = True,\n        normal_dev = True,\n        proc_macro = True,\n        proc_macro_dev = True,\n    )`)},`,
@@ -1923,11 +2194,12 @@ for (const pkg of localPackages.values()) {
         `    crate_features = ${listExpr(crateFeaturesFor(key, pkg))},`,
         `    edition = "2024",`,
         `    compile_data = ${compileDataExpr},`,
-        `    srcs = ${srcsExpr},`,
+        `    srcs = ${unitSrcsExpr},`,
         `    visibility = ${rustTargetVisibility(key)},`,
         `    rustc_env = {\n${unitRustcEnv.join("\n")}\n    },`,
         `    tags = ${listExpr(["fast", "unit"])},`,
         `    size = ${q(unitSize)},`,
+        ...(unitNeedsNetwork ? [`    exec_properties = {"test.network": "external"},`] : []),
         `    data = ${listExpr([...new Set(unitData)].sort())},`,
         `    env = {\n${unitEnv.join("\n")}\n    },`,
         `    proc_macro_deps = ${unitProcExpr},`,
@@ -2165,12 +2437,15 @@ for (const pkg of localPackages.values()) {
   }
   if (!checkOnly) mkdirSync(dir, { recursive: true });
   const externalTestSources = externalTestSourcesByOwner.get(pkg.id);
+  const inheritsWorkspaceLints = packageInheritsWorkspaceLints(pkg);
+  const packageRules = inheritsWorkspaceLints ? rules.map(withWorkspaceLintFlags) : rules;
   writeGenerated(
     resolve(dir, "BUILD.bazel"),
     [
       `load("@crates//:defs.bzl", "aliases", "all_crate_deps")`,
       `load("@rules_rust//rust:defs.bzl", ${[...loads].sort().map(q).join(", ")})`,
       ...(needsShellTestLoad ? [`load("@rules_shell//shell:sh_test.bzl", "sh_test")`] : []),
+      ...(inheritsWorkspaceLints ? [WORKSPACE_LINTS_LOAD] : []),
       "",
       `filegroup(`,
       `    name = "cargo_manifest",`,
@@ -2193,24 +2468,13 @@ for (const pkg of localPackages.values()) {
             "",
           ]
         : []),
-      ...(key === "meerkat-machine-kernels"
-        ? [
-            `exports_files(`,
-            `    [`,
-            `        "src/generated/meerkat.rs",`,
-            `        "src/generated/mob.rs",`,
-            `    ],`,
-            `    visibility = ["//meerkat-machine-codegen:__pkg__"],`,
-            `)`,
-            "",
-          ]
-        : []),
-      ...rules,
+      ...packageRules,
       "",
     ].join("\n\n"),
   );
 }
 
+writeWorkspaceLintsBzl();
 writeRootBuild(
   [...new Set(fastTestLabels)].sort(),
   [...new Set(e2eSystemTestLabels)].sort(),

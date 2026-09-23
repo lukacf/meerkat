@@ -2,6 +2,8 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 
+load("//:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
 
 
 filegroup(
@@ -60,7 +62,7 @@ rust_library(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "-Ccodegen-units=256",
     ] + select({
         "@platforms//os:windows": ["-Clto=off"],
@@ -123,7 +125,7 @@ rust_library(
         "test-support",
     ],
     edition = "2024",
-    rustc_flags = [
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS + [
         "-Ccodegen-units=256",
     ] + select({
         "@platforms//os:windows": ["-Clto=off"],
@@ -204,6 +206,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -215,7 +218,10 @@ rust_test(
         "src/runtime/recovery.rs",
         "src/runtime/state.rs",
     ],
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"]) + [
+        "tests/support/probe_shared.rs",
+        "tests/support/shared.rs",
+    ],
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.40",
@@ -228,10 +234,22 @@ rust_test(
     ],
     size = "large",
     data = [
+        "//meerkat-contracts:cargo_manifest",
+        "//meerkat-core:cargo_manifest",
+        "//meerkat-machine-schema:cargo_manifest",
+        "//meerkat-machine-schema:package_runfiles",
+        "//meerkat-mcp:cargo_manifest",
+        "//meerkat-mob:cargo_manifest",
+        "//meerkat-rpc:cargo_manifest",
+        "//meerkat-rpc:package_runfiles",
+        "//meerkat-runtime:cargo_manifest",
+        "//meerkat-runtime:package_runfiles",
+        "//meerkat:cargo_manifest",
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -283,6 +301,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -310,12 +329,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -367,6 +387,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -394,10 +415,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -449,6 +471,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -476,10 +499,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -531,6 +555,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -564,6 +589,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -615,6 +641,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -642,10 +669,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -697,6 +725,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -721,12 +750,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//xtask:package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -778,6 +808,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -802,10 +833,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -857,6 +889,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -884,10 +917,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -939,6 +973,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -963,10 +998,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1018,6 +1054,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -1042,10 +1079,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1097,6 +1135,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -1124,10 +1163,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1179,6 +1219,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -1206,10 +1247,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1261,6 +1303,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -1285,10 +1328,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1340,6 +1384,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -1367,10 +1412,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1422,6 +1468,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -1449,12 +1496,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1506,6 +1554,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -1530,10 +1579,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1585,6 +1635,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -1615,6 +1666,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1666,6 +1718,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -1693,12 +1746,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//tests/integration:package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1750,6 +1804,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -1777,10 +1832,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1832,6 +1888,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -1859,12 +1916,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1916,6 +1974,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -1943,10 +2002,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -1998,6 +2058,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2022,12 +2083,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2079,6 +2141,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2106,10 +2169,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2161,6 +2225,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2185,10 +2250,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2240,6 +2306,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2264,10 +2331,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2319,6 +2387,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2343,10 +2412,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2398,6 +2468,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2422,10 +2493,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2477,6 +2549,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2504,12 +2577,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2561,6 +2635,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2585,10 +2660,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2640,6 +2716,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2664,10 +2741,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2719,6 +2797,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2743,10 +2822,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2798,6 +2878,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2825,10 +2906,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2880,6 +2962,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2904,10 +2987,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -2959,6 +3043,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -2986,10 +3071,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -3041,6 +3127,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -3068,10 +3155,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -3123,6 +3211,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -3151,12 +3240,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//tests/integration:package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -3208,6 +3298,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -3232,10 +3323,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -3287,6 +3379,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -3320,6 +3413,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -3371,6 +3465,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -3401,6 +3496,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -3452,6 +3548,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -3480,6 +3577,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -3531,6 +3629,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -3559,6 +3658,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -3610,6 +3710,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -3640,6 +3741,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -3691,6 +3793,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -3721,6 +3824,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",
@@ -3772,6 +3876,7 @@ rust_test(
         "test-support",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/runtime/actor.rs",
@@ -3799,12 +3904,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = [
         "//meerkat-machine-derive:meerkat_machine_derive",

@@ -4121,7 +4121,11 @@ fn maybe_run_tlc_in_dir_with_config(
         .arg(&config)
         .arg(&model)
         .current_dir(&root)
-        .env("JAVA_TOOL_OPTIONS", merged_java_tool_options());
+        .env("JAVA_TOOL_OPTIONS", merged_java_tool_options())
+        .env(
+            "JDK_JAVA_OPTIONS",
+            merged_jdk_java_options(&merged_java_tool_options()),
+        );
 
     let output = cmd
         .output()
@@ -4437,6 +4441,43 @@ fn verify_profile_name(profile: VerifyProfile) -> &'static str {
     }
 }
 
+/// Launcher-level JVM options for the `tlc` child.
+///
+/// `JAVA_TOOL_OPTIONS` is read by the JVM once it exists, so its `-Xss` sizes
+/// only the threads the JVM creates (TLC workers). The main thread, where TLC
+/// parses the module and computes the initial states, is created by the
+/// `java` launcher from its own option sources: the command line and
+/// `JDK_JAVA_OPTIONS`. `tlc` is a `java -jar` wrapper, so the only way to give
+/// that thread the deep stack the generated initial predicate needs is
+/// `JDK_JAVA_OPTIONS`. Without it TLC reports a `StackOverflowError` while
+/// "Computing initial states" no matter how large `-Xss` in
+/// `JAVA_TOOL_OPTIONS` is.
+///
+/// The stack flag is taken from the merged `JAVA_TOOL_OPTIONS` so an explicit
+/// caller `-Xss` governs both layers; an existing `JDK_JAVA_OPTIONS` `-Xss`
+/// is preserved as-is.
+fn merged_jdk_java_options(java_tool_options: &str) -> String {
+    merge_jdk_java_options(
+        &env::var("JDK_JAVA_OPTIONS").unwrap_or_default(),
+        java_tool_options,
+    )
+}
+
+fn merge_jdk_java_options(existing: &str, java_tool_options: &str) -> String {
+    let mut flags = existing
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !flags.iter().any(|flag| flag.starts_with("-Xss")) {
+        let stack_size = java_tool_options
+            .split_whitespace()
+            .find(|flag| flag.starts_with("-Xss"))
+            .unwrap_or("-Xss256m");
+        flags.insert(0, stack_size.into());
+    }
+    flags.join(" ")
+}
+
 fn merged_java_tool_options() -> String {
     let throughput_gc = "-XX:+UseParallelGC";
     let stack_size = "-Xss256m";
@@ -4499,19 +4540,26 @@ fn rustfmt_source(source: &str) -> Result<String> {
         .spawn()
         .context("spawn rustfmt for machine codegen")?;
 
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .context("open rustfmt stdin for machine codegen")?;
-        stdin
-            .write_all(source.as_bytes())
-            .context("write generated machine source to rustfmt")?;
-    }
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("open rustfmt stdin for machine codegen")?;
+    let write_result = stdin.write_all(source.as_bytes());
+    drop(stdin);
 
     let output = child
         .wait_with_output()
         .context("wait for rustfmt during machine codegen")?;
+    if let Err(error) = write_result {
+        // A rustfmt that exits before reading (a rustup proxy without the
+        // component, a binary missing its libraries) surfaces here as a
+        // broken pipe; its own stderr is the only clue, so carry it.
+        bail!(
+            "write generated machine source to rustfmt: {error}; rustfmt exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     if !output.status.success() {
         bail!(
             "rustfmt failed for generated machine code: {}",
@@ -5188,7 +5236,11 @@ fn dump_tlc_dot_for_target(
         .arg(&config)
         .arg(&model)
         .current_dir(root)
-        .env("JAVA_TOOL_OPTIONS", merged_java_tool_options());
+        .env("JAVA_TOOL_OPTIONS", merged_java_tool_options())
+        .env(
+            "JDK_JAVA_OPTIONS",
+            merged_jdk_java_options(&merged_java_tool_options()),
+        );
 
     let output = cmd
         .output()

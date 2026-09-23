@@ -364,16 +364,19 @@ fi
 rm -rf "${dispatch_log_root}"
 
 if grep -Fq 'name: CI' .github/workflows/ci.yml &&
-  grep -Fq 'name: GCP BuildBuddy' .github/workflows/ci.yml &&
   job_has_line .github/workflows/ci.yml gate 'name: CI gate' &&
-  job_has_line .github/workflows/ci.yml gate 'name: Check CI result' &&
-  job_has_line .github/workflows/ci.yml gate 'BUILDBUDDY_RESULT:' &&
-  job_has_line .github/workflows/ci.yml gate 'CI did not complete successfully.' &&
+  job_has_line .github/workflows/ci.yml gate 'name: Check lane results' &&
+  job_has_line .github/workflows/ci.yml gate 'require_ran "Clippy"' &&
   job_has_line .github/workflows/ci.yml gate 'Enforce push-to-terminal budget' &&
-  job_has_line .github/workflows/ci.yml gate 'MAX_SECONDS: "1200"' &&
+  grep -Fq 'CI_MAX_SECONDS: "1200"' .github/workflows/ci.yml &&
+  grep -Fq 'scripts/ci-cargo-lanes.mjs' .github/workflows/ci.yml &&
   ! grep -Fq 'uses: ./.github/workflows/cargo.yml' .github/workflows/ci.yml &&
-  grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/ci.yml &&
-  job_has_line .github/workflows/ci.yml gcp-buildbuddy 'name: GCP BuildBuddy' &&
+  ! grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/ci.yml &&
+  ! grep -Fiq 'buildbuddy' .github/workflows/ci.yml &&
+  job_has_line .github/workflows/nightly.yml gcp-buildbuddy 'uses: ./.github/workflows/buildbuddy.yml' &&
+  job_has_line .github/workflows/nightly.yml gcp-buildbuddy 'mode: full-fresh' &&
+  job_has_line .github/workflows/release.yml release_validate_buildbuddy_full 'uses: ./.github/workflows/buildbuddy.yml' &&
+  job_has_line .github/workflows/release.yml release_validate_buildbuddy_full 'mode: full-fresh' &&
   grep -Fq 'name: Cargo CI' .github/workflows/cargo.yml &&
   grep -Fq 'workflow_call:' .github/workflows/cargo.yml &&
   grep -Fq 'name: GCP BuildBuddy CI' .github/workflows/buildbuddy.yml &&
@@ -382,12 +385,11 @@ if grep -Fq 'name: CI' .github/workflows/ci.yml &&
   ! grep -q '^  pull_request:' .github/workflows/buildbuddy.yml &&
   ! grep -q '^  push:' .github/workflows/buildbuddy.yml &&
   grep -Fq 'gcp-buildbuddy' .github/workflows/buildbuddy.yml &&
-  ! grep -Fq 'buildbuddy-hosted' .github/workflows/ci.yml &&
   ! grep -Fq 'buildbuddy-hosted' .github/workflows/buildbuddy.yml &&
   grep -Fq 'GCP BuildBuddy gate' .github/workflows/buildbuddy.yml; then
-  pass "Top-level CI uses the reusable GCP BuildBuddy lane"
+  pass "PR CI is Cargo-only; nightly and release call the reusable GCP BuildBuddy lane"
 else
-  bad "Top-level GCP BuildBuddy CI is not wired correctly"
+  bad "PR CI, nightly, or release BuildBuddy wiring does not match the Cargo-PR plus full-fresh shape"
 fi
 
 if grep -Fq 'MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS' .github/workflows/buildbuddy.yml &&
@@ -420,7 +422,7 @@ else
   bad "CI or BuildBuddy opt-in switch is not wired consistently"
 fi
 
-if job_has_line .github/workflows/ci.yml gcp-buildbuddy 'name: GCP BuildBuddy' &&
+if job_has_line .github/workflows/nightly.yml gcp-buildbuddy 'name: GCP BuildBuddy (full-fresh)' &&
   ! job_has_line .github/workflows/ci.yml cargo 'name: GHA Cargo' &&
   job_has_line .github/workflows/ci.yml gate 'name: CI gate' &&
   job_has_line .github/workflows/buildbuddy.yml prebuild-submit 'name: Prebuild submitter' &&
@@ -435,7 +437,7 @@ if job_has_line .github/workflows/ci.yml gcp-buildbuddy 'name: GCP BuildBuddy' &
   job_has_line .github/workflows/buildbuddy.yml wasm-feature-changes 'name: WASM, SDK, and feature change detection' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-sdk-submit 'name: SDK suites submitter' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-sdk-submit 'timeout-minutes: 45' &&
-  job_has_line .github/workflows/buildbuddy.yml wasm-sdk-submit 'MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "1200"' &&
+  job_has_line .github/workflows/buildbuddy.yml wasm-sdk-submit 'MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: "3000"' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-check-submit 'name: WASM check submitter' &&
   job_has_line .github/workflows/buildbuddy.yml minimal-feature-submit 'name: Minimal feature submitter' &&
   job_has_line .github/workflows/buildbuddy.yml feature-submit 'name: Feature matrix submitter' &&
@@ -490,7 +492,7 @@ if job_has_line .github/workflows/ci.yml gcp-buildbuddy 'name: GCP BuildBuddy' &
   ! job_has_line .github/workflows/buildbuddy.yml feature-submit 'rmat-audit' &&
   ! job_has_line .github/workflows/buildbuddy.yml feature-submit 'machine-authority' &&
   grep -Fq 'MEERKAT_BUILDBUDDY_BATCH_JOBS' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'MAX_SECONDS: "1200"' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'MAX_SECONDS: "3000"' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY_BATCH_JOBS: ${{ inputs.batch_jobs || env.MEERKAT_BUILDBUDDY_BATCH_JOBS }}' .github/actions/run-buildbuddy-ci-lane-batch/action.yml &&
   grep -Fq 'Check GCP CI duration SLO' .github/workflows/buildbuddy.yml &&
   grep -Fq 'Active BuildBuddy lane heartbeat' scripts/buildbuddy-ci-lane-batch &&
@@ -587,7 +589,9 @@ else
   bad "BuildBuddy workflow does not match the simplified GCP lane map"
 fi
 
-if grep -Fq 'default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
+if grep -Fq 'default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_tests"' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'name = "sdk_suites_cargo_equivalent_tests"' tools/buildbuddy/BUILD.bazel &&
+  grep -Fq '"sdk_web_cargo_equivalent_test": "sdk-web"' tools/buildbuddy/BUILD.bazel &&
   grep -Fq 'default_target="//tools/buildbuddy:wasm_contract_cargo_equivalent_tests"' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'default_target="//tools/buildbuddy:wasm_check_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'default_target="//tools/buildbuddy:security_audit_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
@@ -689,18 +693,23 @@ if ! grep -Fq 'rust-release-packaging:' .github/workflows/cargo.yml &&
   grep -Fq 'Verify Rust release config' .github/workflows/release.yml &&
   job_has_line .github/workflows/nightly.yml feature-matrix 'make test-feature-matrix' &&
   ! grep -Fq 'name: GHA Cargo' .github/workflows/ci.yml &&
-  grep -Fq 'name: GCP BuildBuddy' .github/workflows/ci.yml &&
-  grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/ci.yml &&
+  ! grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/ci.yml &&
+  grep -Fq 'name: GCP BuildBuddy (full-fresh)' .github/workflows/nightly.yml &&
+  grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/nightly.yml &&
   ! grep -Fq 'BuildBuddy hosted' .github/workflows/ci.yml &&
   ! grep -Fq 'buildbuddy-hosted' .github/workflows/ci.yml; then
-  pass "CI uses one GCP BuildBuddy lane and defers low-churn feature checks to nightly"
+  pass "PR CI is Cargo-only and nightly owns the full BuildBuddy graph plus low-churn feature checks"
 else
-  bad "CI does not match the BuildBuddy per-push plus nightly shape"
+  bad "CI does not match the Cargo-PR plus nightly BuildBuddy shape"
 fi
 
 if grep -Fq 'name = "e2e_system_tests"' BUILD.bazel &&
   grep -Fq 'workspace-unit-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'workspace-integration-fast-rbe' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'run_bazel_lane unit-cargo-equivalent-rbe' scripts/buildbuddy-ci-lane &&
+  grep -Fq 'run_bazel_lane integration-fast-cargo-equivalent-rbe' scripts/buildbuddy-ci-lane &&
+  grep -Fq '"unit_cargo_equivalent_test": "test-unit"' tools/buildbuddy/BUILD.bazel &&
+  grep -Fq '"integration_fast_cargo_equivalent_test": "integration-fast"' tools/buildbuddy/BUILD.bazel &&
   grep -Fq 'e2e-fast-rbe' scripts/buildbuddy-ci-lane &&
   grep -Fq 'e2e-live-rbe' scripts/buildbuddy-ci-lane &&
   grep -Fq 'e2e-smoke-remote-rbe' scripts/buildbuddy-ci-lane &&

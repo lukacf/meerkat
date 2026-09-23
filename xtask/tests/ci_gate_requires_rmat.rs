@@ -2,12 +2,17 @@
 
 //! Pinning tests for the CI workflow contract.
 //!
-//! CI runs the broad GCP BuildBuddy/RBE lane plus one exact GitHub-hosted dense
-//! Mob topology stress. The full GitHub-hosted Cargo workflow remains a
-//! diagnostic fallback, while nightly owns low-churn heavy coverage. These
-//! tests ratchet the load-bearing invariants: the typed governance gates
-//! (rmat-audit set) bind every run, both selected lanes stay on the hot path,
-//! and the aggregate gate enforces the 40-minute terminal budget.
+//! Pull-request CI (ci.yml) is Cargo-only on GitHub-hosted runners: the lanes
+//! are selected from the changed paths by scripts/ci-cargo-lanes.mjs, which
+//! fails closed, and the aggregate "CI gate" enforces a 20-minute
+//! push-to-terminal budget. Nightly owns the full workspace test lanes, the
+//! dense Mob topology stress, bounded TLC, and the whole BuildBuddy/Bazel
+//! graph; the release workflow re-runs that graph on the tag. The full
+//! GitHub-hosted Cargo workflow (cargo.yml) remains a diagnostic fallback.
+//! These tests ratchet the load-bearing invariants: the typed governance
+//! gates (rmat-audit set) bind the diagnostic and nightly lanes, the
+//! fail-closed lane selection stays on the PR hot path, and BuildBuddy is
+//! never called from PR CI.
 
 use std::path::{Path, PathBuf};
 
@@ -48,7 +53,7 @@ fn job_names(doc: &serde_yaml::Value, path: &Path) -> Vec<String> {
 }
 
 #[test]
-fn ci_runs_buildbuddy_and_hosted_dense_topology_lanes() {
+fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
     let ci_yml = workflow_yml_path("ci.yml");
     let ci = std::fs::read_to_string(&ci_yml)
         .unwrap_or_else(|e| panic!("read {}: {e}", ci_yml.display()));
@@ -56,31 +61,133 @@ fn ci_runs_buildbuddy_and_hosted_dense_topology_lanes() {
 
     assert_eq!(
         job_names(&doc, &ci_yml),
-        vec!["gate", "gcp-buildbuddy", "github-hosted-dense-topology",],
-        "{} should expose only the selected validation lanes and aggregating gate",
+        vec![
+            "changes",
+            "clippy",
+            "closure-check",
+            "fmt-governance",
+            "gate",
+            "main-unit",
+            "ratchets",
+            "sdk-host",
+            "unit",
+            "wasm-check",
+        ],
+        "{} should expose the changed-path Cargo lanes and the aggregating gate",
         ci_yml.display(),
     );
     assert!(
-        ci.contains("uses: ./.github/workflows/buildbuddy.yml"),
-        "CI must route through the authoritative GCP BuildBuddy lane"
+        ci.contains("scripts/ci-cargo-lanes.mjs"),
+        "CI must select its lanes through the fail-closed changed-path classifier"
     );
-    assert!(
-        !ci.contains("uses: ./.github/workflows/cargo.yml"),
-        "the diagnostic Cargo workflow must not duplicate authoritative CI"
-    );
-    assert!(
-        ci.contains("uses: ./.github/workflows/mob-dense-topology.yml"),
-        "CI must include the exact GitHub-hosted dense Mob topology lane"
-    );
+    for forbidden in [
+        "uses: ./.github/workflows/buildbuddy.yml",
+        "uses: ./.github/workflows/cargo.yml",
+        "uses: ./.github/workflows/mob-dense-topology.yml",
+        "buildbuddy",
+        "self-hosted",
+    ] {
+        assert!(
+            !ci.to_lowercase().contains(forbidden),
+            "PR CI must stay Cargo-only on hosted runners; found `{forbidden}`"
+        );
+    }
     assert!(
         !ci.contains("github.actor"),
-        "CI must not route by actor — one lane for everyone"
+        "CI must not route by actor: one lane for everyone"
     );
     assert!(ci.contains("name: Enforce push-to-terminal budget"));
-    assert!(ci.contains("MAX_SECONDS: \"2400\""));
     assert!(
-        ci.contains("id-token: write"),
-        "the caller must grant the OIDC permission requested by the reusable BuildBuddy workflow"
+        ci.contains("CI_MAX_SECONDS: \"1200\""),
+        "the push-to-terminal budget is 1200 seconds from run creation"
+    );
+    assert!(
+        ci.contains("group: pr-${{ github.event.pull_request.number || github.ref }}"),
+        "one concurrency group per PR (or ref)"
+    );
+    assert!(ci.contains("cancel-in-progress: true"));
+
+    let jobs = doc
+        .get("jobs")
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("ci workflow jobs mapping");
+    let gate = jobs
+        .get(serde_yaml::Value::String("gate".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("gate job");
+    assert_eq!(
+        gate.get("name").and_then(serde_yaml::Value::as_str),
+        Some("CI gate"),
+        "branch protection requires the exact context name `CI gate`"
+    );
+    assert_eq!(
+        gate.get("if").and_then(serde_yaml::Value::as_str),
+        Some("${{ !cancelled() }}"),
+        "a superseded run must surface as cancelled, not as a failed CI gate"
+    );
+    let gate_needs: Vec<&str> = gate
+        .get("needs")
+        .and_then(serde_yaml::Value::as_sequence)
+        .expect("gate needs list")
+        .iter()
+        .filter_map(serde_yaml::Value::as_str)
+        .collect();
+    for lane in [
+        "changes",
+        "fmt-governance",
+        "ratchets",
+        "clippy",
+        "unit",
+        "main-unit",
+        "closure-check",
+        "wasm-check",
+        "sdk-host",
+    ] {
+        assert!(gate_needs.contains(&lane), "the CI gate must bind `{lane}`");
+    }
+    // Fail closed: a build-relevant change must have run clippy, unit, and
+    // the closure check; a classifier error or an empty plan fails the gate.
+    for contract in [
+        "require_success \"Change classification\"",
+        "require_ran \"Clippy\"",
+        "require_ran \"Unit tests\"",
+        "require_ran \"Main unit tests\"",
+        "require_ran \"Closure check\"",
+        "a build-relevant change produced no lanes",
+        "neither a unit lane nor a deferred package list",
+        "unit tests deferred to the push-to-main run",
+    ] {
+        assert!(ci.contains(contract), "CI gate must enforce `{contract}`");
+    }
+    for lane in [
+        "--no-deps --all-targets --all-features -- -D warnings",
+        "--lib --bins --profile ci-pr",
+        "unit_shard_matrix",
+        "main_unit_shard_matrix",
+        "CLOSURE_CHECK_TARGETS: lib",
+        "--all-features",
+        "make fmt-check",
+        "make docs-check",
+        "make semver-breaks-selftest",
+        "make verify-version-parity",
+        "make verify-lock-consistency",
+        "make ci-lanes-selftest",
+        "make verify-schema-freshness",
+        "make verify-sdk-codegen-freshness",
+        "make machine-check-drift",
+        "make wasm-check",
+        "schema_version: 4",
+        "validation_backend: \"github-hosted-cargo\"",
+    ] {
+        assert!(ci.contains(lane), "PR CI must run `{lane}`");
+    }
+    let fmt_governance = jobs
+        .get(serde_yaml::Value::String("fmt-governance".to_string()))
+        .and_then(serde_yaml::Value::as_mapping)
+        .expect("fmt-governance job");
+    assert!(
+        fmt_governance.get("if").is_none(),
+        "docs-only changes must not skip the always-run format and governance lane"
     );
 }
 
@@ -264,19 +371,29 @@ fn nightly_covers_the_deferred_heavy_lanes() {
         "make e2e-system",
         "make test-sdk-web",
         "make check-rust-release-packaging",
+        // Moved off the PR hot path by the Cargo-only PR CI.
+        "make test-unit",
+        "make test-int",
+        "make e2e-fast",
+        "make machine-verify",
+        "test-sdk-python test-sdk-typescript",
+        "uses: ./.github/workflows/mob-dense-topology.yml",
+        "uses: ./.github/workflows/buildbuddy.yml",
+        "mode: full-fresh",
     ] {
         assert!(nightly.contains(lane), "nightly must run `{lane}`");
     }
 }
 
 #[test]
-fn buildbuddy_workflow_is_authoritative_and_single_caller() {
+fn buildbuddy_workflow_is_called_only_by_nightly_and_release() {
     let ci_yml = workflow_yml_path("ci.yml");
     let cargo_yml = workflow_yml_path("cargo.yml");
     let nightly_yml = workflow_yml_path("nightly.yml");
+    let release_yml = workflow_yml_path("release.yml");
     let buildbuddy_yml = workflow_yml_path("buildbuddy.yml");
-    // The implementation stays workflow_call-only so ci.yml remains the one
-    // top-level policy owner and attestation boundary.
+    // The implementation stays workflow_call-only: nightly and the release
+    // workflow are its callers, PR CI never is.
     // (YAML 1.1 parses the bare `on` key as boolean true.)
     let doc = read_workflow(&buildbuddy_yml);
     let triggers = doc
@@ -289,30 +406,43 @@ fn buildbuddy_workflow_is_authoritative_and_single_caller() {
     assert_eq!(
         names,
         vec!["workflow_call"],
-        "buildbuddy.yml must stay workflow_call-only behind the CI policy owner"
+        "buildbuddy.yml must stay workflow_call-only behind its callers"
     );
-    let ci = std::fs::read_to_string(&ci_yml)
-        .unwrap_or_else(|e| panic!("read {}: {e}", ci_yml.display()));
-    assert!(
-        ci.lines().any(|line| {
-            line.trim_start().starts_with("uses:") && line.contains("buildbuddy.yml")
-        }),
-        "{} must call the authoritative BuildBuddy workflow",
-        ci_yml.display()
-    );
-    for caller in [&cargo_yml, &nightly_yml] {
-        let text = std::fs::read_to_string(caller)
-            .unwrap_or_else(|e| panic!("read {}: {e}", caller.display()));
+    let calls_buildbuddy = |path: &Path| {
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        text.lines()
+            .any(|line| line.trim_start().starts_with("uses:") && line.contains("buildbuddy.yml"))
+    };
+    for caller in [&nightly_yml, &release_yml] {
         assert!(
-            !text.lines().any(|line| {
-                line.trim_start().starts_with("uses:") && line.contains("buildbuddy.yml")
-            }),
-            "{} must not duplicate the authoritative BuildBuddy caller",
+            calls_buildbuddy(caller),
+            "{} must call the BuildBuddy workflow in full-fresh mode",
             caller.display()
+        );
+    }
+    for non_caller in [&ci_yml, &cargo_yml] {
+        assert!(
+            !calls_buildbuddy(non_caller),
+            "{} must not call the BuildBuddy workflow",
+            non_caller.display()
         );
     }
     let buildbuddy = std::fs::read_to_string(&buildbuddy_yml)
         .unwrap_or_else(|e| panic!("read {}: {e}", buildbuddy_yml.display()));
-    assert!(buildbuddy.contains("MAX_SECONDS: \"1200\""));
+    assert!(
+        buildbuddy.contains("MAX_SECONDS: \"3000\""),
+        "the full-fresh graph is sized at 3000 seconds from control-plane start"
+    );
     assert!(!buildbuddy.contains("queue: max"));
+    let release = std::fs::read_to_string(&release_yml)
+        .unwrap_or_else(|e| panic!("read {}: {e}", release_yml.display()));
+    assert!(
+        release.contains("release_validate_buildbuddy_full:"),
+        "the tag path must gate on the full BuildBuddy graph"
+    );
+    assert!(
+        release.contains(".schema_version == 4") && release.contains("github-hosted-cargo"),
+        "require_ci_green must accept the Cargo PR CI attestation"
+    );
 }

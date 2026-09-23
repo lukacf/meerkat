@@ -2,6 +2,8 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 
+load("//:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
 
 
 filegroup(
@@ -40,6 +42,7 @@ rust_library(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -84,6 +87,7 @@ rust_library(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -136,6 +140,7 @@ rust_test(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -149,7 +154,7 @@ rust_test(
         "fast",
         "unit",
     ],
-    size = "small",
+    size = "large",
     data = [
         "//:test_fixtures",
         "//test-fixtures/machine-dsl-tests:package_runfiles",
@@ -159,6 +164,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-mcp-server",
@@ -198,6 +204,7 @@ rust_binary(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -251,6 +258,7 @@ rust_test(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -268,12 +276,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//meerkat-mcp-server:rkat_mcp_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -321,6 +330,7 @@ rust_test(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -346,6 +356,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -393,6 +404,7 @@ rust_test(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -410,7 +422,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:repo_governance_files",
@@ -418,6 +430,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -465,6 +478,7 @@ rust_test(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -492,6 +506,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -539,6 +554,7 @@ rust_test(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -556,12 +572,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//meerkat-mcp-server:rkat_mcp_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -609,6 +626,7 @@ rust_test(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -626,12 +644,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//meerkat-mcp-server:rkat_mcp_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -679,6 +698,7 @@ rust_test(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -696,12 +716,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//meerkat-mcp-server:rkat_mcp_bin",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
@@ -738,6 +759,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -779,6 +801,7 @@ rust_binary(
     crate_root = "src/main.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -827,6 +850,7 @@ rust_library(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -872,6 +896,7 @@ rust_binary(
         "workgraph",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],

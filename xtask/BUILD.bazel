@@ -4,6 +4,8 @@ load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_mac
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
+load("//:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
 
 
 filegroup(
@@ -39,6 +41,7 @@ rust_library(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -77,6 +80,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -90,14 +94,68 @@ rust_test(
         "fast",
         "unit",
     ],
-    size = "medium",
+    size = "large",
     data = [
         "//:repo_governance_files",
+        "//:test_fixtures",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
         "//:workspace_runfiles",
+        "//meerkat-auth-core:cargo_manifest",
+        "//meerkat-auth-core:package_runfiles",
+        "//meerkat-cli:cargo_manifest",
+        "//meerkat-cli:package_runfiles",
+        "//meerkat-comms:cargo_manifest",
+        "//meerkat-comms:package_runfiles",
+        "//meerkat-contracts:cargo_manifest",
+        "//meerkat-contracts:package_runfiles",
+        "//meerkat-core:cargo_manifest",
+        "//meerkat-core:package_runfiles",
+        "//meerkat-hooks:cargo_manifest",
+        "//meerkat-hooks:package_runfiles",
+        "//meerkat-machine-kernels:cargo_manifest",
+        "//meerkat-machine-kernels:package_runfiles",
+        "//meerkat-machine-schema:cargo_manifest",
+        "//meerkat-machine-schema:package_runfiles",
+        "//meerkat-mcp-server:cargo_manifest",
+        "//meerkat-mcp-server:package_runfiles",
+        "//meerkat-mcp:cargo_manifest",
+        "//meerkat-mcp:package_runfiles",
+        "//meerkat-memory:cargo_manifest",
+        "//meerkat-memory:package_runfiles",
+        "//meerkat-mob-mcp:cargo_manifest",
+        "//meerkat-mob-mcp:package_runfiles",
+        "//meerkat-mob-pack:cargo_manifest",
+        "//meerkat-mob-pack:package_runfiles",
         "//meerkat-mob:cargo_manifest",
+        "//meerkat-mob:package_runfiles",
+        "//meerkat-openai:cargo_manifest",
+        "//meerkat-openai:package_runfiles",
+        "//meerkat-rest:cargo_manifest",
+        "//meerkat-rest:package_runfiles",
+        "//meerkat-rpc:cargo_manifest",
+        "//meerkat-rpc:package_runfiles",
+        "//meerkat-runtime:cargo_manifest",
+        "//meerkat-runtime:package_runfiles",
+        "//meerkat-schedule:cargo_manifest",
+        "//meerkat-schedule:package_runfiles",
+        "//meerkat-session:cargo_manifest",
+        "//meerkat-session:package_runfiles",
+        "//meerkat-skills:cargo_manifest",
+        "//meerkat-skills:package_runfiles",
+        "//meerkat-sqlite:cargo_manifest",
+        "//meerkat-sqlite:package_runfiles",
+        "//meerkat-store:cargo_manifest",
+        "//meerkat-store:package_runfiles",
+        "//meerkat-tools:cargo_manifest",
+        "//meerkat-tools:package_runfiles",
+        "//meerkat-workgraph:cargo_manifest",
+        "//meerkat-workgraph:package_runfiles",
         "//meerkat:cargo_manifest",
+        "//meerkat:package_runfiles",
+        "//test-fixtures/machine-dsl-tests:package_runfiles",
+        "//test-fixtures/mcp-test-server:package_runfiles",
+        "//test-fixtures/surface-build-fixtures:package_runfiles",
         "//xtask:cargo_manifest",
         ":package_runfiles",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
@@ -108,6 +166,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -138,6 +197,7 @@ rust_binary(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -178,6 +238,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -193,7 +254,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:github_workflows",
@@ -233,6 +294,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
@@ -270,6 +332,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -285,7 +348,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:github_workflows",
@@ -298,6 +361,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -334,6 +398,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -349,7 +414,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:repo_governance_files",
@@ -376,6 +441,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
@@ -413,6 +479,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -446,6 +513,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
@@ -483,6 +551,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -498,7 +567,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//meerkat-core:cargo_manifest",
@@ -512,6 +581,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -548,6 +618,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -563,7 +634,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:workspace_cargo_manifests",
@@ -630,6 +701,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -667,6 +739,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -682,7 +755,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//:github_workflows",
@@ -697,6 +770,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -734,6 +808,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -749,7 +824,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//meerkat-core:package_runfiles",
@@ -762,6 +837,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -798,6 +874,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -835,6 +912,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -871,6 +949,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -897,6 +976,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
@@ -934,6 +1014,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -949,7 +1030,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//meerkat-runtime:package_runfiles",
         "tests/rustfmt_host.sh",
@@ -960,6 +1041,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
@@ -996,6 +1078,7 @@ rust_test(
         "machine-authority",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -1011,7 +1094,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//:workspace_runfiles",
         "tests/rustfmt_host.sh",
@@ -1022,6 +1105,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
         "RUSTFMT": "$(rootpath tests/rustfmt_host.sh)",
         "RUSTFMT_DARWIN": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)",

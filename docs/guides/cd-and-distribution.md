@@ -22,8 +22,9 @@ packaging selects BuildBuddy only for the literal actor `lukacf` when
 `MEERKAT_RELEASE_BUILDBUDDY` is `true` or `1`; other actors use the hosted
 fallback. Eligible manual dispatches select release validation and packaging
 under the [BuildBuddy rules below](#buildbuddy). Both release backends still
-require exact-main GitHub Actions CI, whose current components are GCP
-BuildBuddy and hosted dense-Mob topology. Windows binaries are cross-compiled
+require exact-main GitHub Actions CI (the Cargo-only pull-request lanes),
+and the tag path additionally runs the full BuildBuddy graph as its
+validation gate. Windows binaries are cross-compiled
 and packaged on hosted Ubuntu, then verified on Windows; credentialed registry
 publishing stays GitHub-hosted.
 
@@ -249,14 +250,15 @@ Readiness evidence is configured to expire after 30 days. PR and manually
 dispatched readiness artifacts use the `meerkat-semver-attestation-preview-`
 prefix and do not qualify for the normal tag path.
 
-The current schema-3 CI attestation binds the repository, commit SHA, Git tree
+The current schema-4 CI attestation binds the repository, commit SHA, Git tree
 SHA, CI workflow run and attempt, branch, and event to backend
-`gcp-buildbuddy+github-hosted-dense-mob`, its aggregate `validation_result`,
-and both `component_results` (`gcp_buildbuddy`, `github_hosted_dense_mob`).
-The release gate downloads it from the successful exact-main workflow run and
-verifies every required field before tag-triggered publication starts. The
-consumer also accepts the supported legacy schema-1 Cargo and schema-2 BuildBuddy
-attestations; the current producer does not emit those formats.
+`github-hosted-cargo`, its aggregate `validation_result`, the selected lane
+`plan`, and every lane's `component_results`. The release gate downloads it
+from the successful exact-main workflow run and verifies every required field
+before tag-triggered publication starts. The consumer also accepts the
+supported legacy schema-1 Cargo, schema-2 BuildBuddy, and schema-3
+BuildBuddy-plus-dense-Mob attestations; the current producer does not emit
+those formats.
 Manual recovery dispatches still require successful exact-main CI for the
 selected release commit. When release validation applies, the dispatch runs
 the selected validation lane directly rather than requiring a retained **CI**
@@ -309,8 +311,8 @@ and Linux/macOS packaging even when they request `release_backend=buildbuddy`.
 Windows packaging and every credentialed registry publish still run on
 GitHub-hosted runners, and the exact-main GitHub Actions CI requirement remains
 in force. This release
-backend selection is separate from per-push CI, which currently requires both
-GCP BuildBuddy and hosted dense-Mob topology.
+backend selection is separate from per-push CI, which is Cargo-only on
+GitHub-hosted runners; the full BuildBuddy graph runs nightly and on the tag.
 
 For local Make commands, `MEERKAT_BUILDBUDDY=1` selects the optional BuildBuddy
 developer backend:

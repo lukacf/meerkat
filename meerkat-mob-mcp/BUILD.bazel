@@ -2,6 +2,8 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 
+load("//:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
 
 
 filegroup(
@@ -51,6 +53,7 @@ rust_library(
         "openai-live",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/public_mcp.rs",
@@ -89,6 +92,7 @@ rust_library(
         "openai-live",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/public_mcp.rs",
@@ -141,6 +145,7 @@ rust_test(
         "openai-live",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/public_mcp.rs",
@@ -155,12 +160,13 @@ rust_test(
         "fast",
         "unit",
     ],
-    size = "small",
+    size = "large",
     data = [
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-mob-mcp",
@@ -194,6 +200,7 @@ rust_binary(
         "openai-live",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/public_mcp.rs",
@@ -242,6 +249,7 @@ rust_test(
         "openai-live",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
         "src/public_mcp.rs",
@@ -259,12 +267,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//meerkat-mob:package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-mob-mcp",

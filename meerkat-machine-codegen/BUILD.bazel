@@ -2,6 +2,8 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 
+load("//:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
 
 
 filegroup(
@@ -35,6 +37,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -64,6 +67,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -101,6 +105,7 @@ rust_test(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ],
@@ -114,12 +119,13 @@ rust_test(
         "fast",
         "unit",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-machine-codegen",
@@ -153,8 +159,12 @@ rust_test(
     crate_root = "tests/artifacts_semantic_model.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//meerkat-machine-kernels:src/generated/mob.rs",
     ],
     srcs = [
         "tests/artifacts_semantic_model.rs",
@@ -168,10 +178,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-machine-codegen",
@@ -206,8 +217,12 @@ rust_test(
     crate_root = "tests/named_type_binding_respected.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//meerkat-machine-kernels:src/generated/mob.rs",
     ],
     srcs = [
         "tests/named_type_binding_respected.rs",
@@ -221,10 +236,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-machine-codegen",
@@ -259,8 +275,12 @@ rust_test(
     crate_root = "tests/render_contracts.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//meerkat-machine-kernels:src/generated/mob.rs",
     ],
     srcs = [
         "tests/render_contracts.rs",
@@ -274,7 +294,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//meerkat-mob:package_runfiles",
@@ -283,6 +303,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-machine-codegen",
@@ -317,8 +338,12 @@ rust_test(
     crate_root = "tests/routed_effect_module_shape.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//meerkat-machine-kernels:src/generated/mob.rs",
     ],
     srcs = [
         "tests/routed_effect_module_shape.rs",
@@ -332,12 +357,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         "//meerkat-runtime:package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-machine-codegen",
@@ -372,8 +398,12 @@ rust_test(
     crate_root = "tests/runtime_alphabet_parity.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//meerkat-machine-kernels:src/generated/mob.rs",
     ],
     srcs = [
         "tests/runtime_alphabet_parity.rs",
@@ -387,7 +417,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//meerkat-mob:package_runfiles",
@@ -395,6 +425,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-machine-codegen",
@@ -429,6 +460,7 @@ rust_test(
     crate_root = "tests/runtime_schema_parity.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
     ] + [
@@ -447,7 +479,7 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
         "//meerkat-machine-kernels:package_runfiles",
@@ -456,6 +488,7 @@ rust_test(
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(

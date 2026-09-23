@@ -133,6 +133,48 @@ them.
 
 ### Changed
 
+- Pull-request CI is Cargo-only on GitHub-hosted runners and sized to a
+  20-minute push-to-terminal budget (`CI gate`, 1200 seconds from run
+  creation). `scripts/ci-cargo-lanes.mjs` selects the lanes from the changed
+  paths and fails closed: any `.rs`, `Cargo.toml`, `Cargo.lock`, `.cargo/`,
+  nextest, toolchain, build-wrapper, or `ci.yml` change yields at least one
+  `clippy --no-deps --all-targets --all-features` lane and one
+  `nextest --lib --bins --profile ci-pr` lane (`ci-pr` is the PR lane's
+  named profile and is identical to `fast`; nothing is excluded) for the
+  directly changed packages outside the meerkat-mob compile chain (mob and
+  the twelve crates that depend on it, computed from metadata; their unit
+  lanes need 17-22 minutes on a 4-vCPU runner, so they, the wasm32 check
+  and the SDK suites run on `push: main` with no budget instead), over the
+  directly changed
+  packages (packed into at most six parallel shards, eight for a
+  whole-workspace plan, balanced by estimated build-and-link cost), a `cargo check
+  --all-targets --all-features` lane over their reverse-dependency closure,
+  and the gate asserts that those lanes ran; an unmapped Rust path, a missing
+  diff base, or a global build-configuration path escalates to the whole
+  workspace. `make ci-lanes-selftest` pins the classifier with fixtures.
+  Compiled objects are cached by sccache only (content-addressed, shared by
+  every lane and readable from `main` by every PR); rust-cache keeps just the
+  registry, since per-lane target caches filled the 10 GB repository cache
+  limit in one PR and were evicted between PRs.
+  Format, docs, semver self-test, version parity, and lock consistency run
+  always; generated-contract freshness and machine/protocol drift run when
+  their paths change; wasm-check and the Python/TypeScript SDK suites run
+  when their inputs change. Pushes trigger CI on `main` only, so a branch
+  head runs once through its pull request instead of twice. The gate runs
+  under `!cancelled()` so a superseded run no longer leaves a failed
+  `CI gate` on the head. Successful
+  `main` pushes emit a schema-4 attestation (backend `github-hosted-cargo`),
+  which the release workflow accepts alongside the legacy schemas.
+- Everything else moved off the pull-request path: nightly now runs the full
+  workspace unit and integration-fast lanes, `e2e-fast`, the dense Mob
+  topology stress, bounded TLC, the SDK host suites, and the whole
+  BuildBuddy/Bazel graph in `full-fresh` mode; the release tag path runs
+  that graph (`release_validate_buildbuddy_full`) as its validation gate,
+  with Cargo validation remaining the manual-dispatch fallback. The
+  BuildBuddy graph's own SLO is 3000 seconds from control-plane start (1200
+  only ever held while the skipped `changed-paths` mode reported unrun lanes
+  as passed). Branch protection is unchanged: `CI gate` stays the only
+  required context.
 - GPT Live (gpt-live-1) summary seeding. A live open that carries history
   (`LiveContextBootstrapMode::Concurrent`) now starts the summary job before
   the provider session is created and waits for it up to
@@ -326,6 +368,41 @@ them.
   Archive names and layout are unchanged.
 
 ### Fixed
+
+- Nightly and release BuildBuddy lanes (the whole Bazel graph in `full-fresh`
+  mode) run for real and green; the fixes below were surfaced by running the
+  lanes that `changed-paths` had skipped since 2026-08-28 (PR #1118):
+  `scripts/buildbuddy-ci-lane` fails a lane whose mode it does not implement
+  (exit 2) instead of skipping it and letting the gate read the skip as a
+  pass; the Bazel BUILD generator exports cross-crate include files and
+  root-package files that crates embed through include macros, compiles
+  `#[path]`-included fixtures into unit tests, gives unit tests the runfiles
+  their whole crate names (scanning `src/**`, with `MEERKAT_WORKSPACE_ROOT`
+  counted as a workspace-root reference), applies the root `[workspace.lints]`
+  table per member as Cargo does (`//:workspace_lints.bzl`), runs Bazel-native
+  test binaries single-threaded and sized for it with WebRTC units granted
+  network, and sizes `render_contracts_test` `medium`; the CI unit and
+  integration-fast lanes run the pre-push hook's nextest invocations as
+  cargo-equivalent remote actions (one process per test, cargo-nextest 0.9.143
+  pinned in `MODULE.bazel`) with a git workspace, a writable Cargo cache root,
+  `MEERKAT_WORKSPACE_ROOT` exported, the sandbox toolchain's own `cargo-clippy`
+  and a working `rustfmt` for nested children, one executor per nextest or
+  SDK action (`EstimatedCPU: 20`, `EstimatedMemory: 60GB`), and failing log
+  tails printed; the SDK suites run as one remote action per suite; `xtask
+  machine-verify` and the bounded adaptive TLC witness size the JVM launcher's
+  main thread through `JDK_JAVA_OPTIONS` (an explicit `-Xss` governs both
+  layers) and `collect_drift_mismatches` reports the drift child's exit
+  status; the Python SDK returns the read loop's typed `CONNECTION_CLOSED`
+  when a request write loses the exit race with `rkat-rpc`; the
+  `meerkat-mcp-server` archive-mob tests and the `meerkat-mob-mcp` unit tests
+  each create a uniquely named mob instead of colliding on a process-global
+  participant name; `meerkat_core::rewrite_record_body_decodes_on_this_thread()`
+  scopes the rewrite-record decode count to the calling thread so the commit
+  read test cannot be moved by a parallel test; the
+  `agent_builder_policy_canary` build-script compiles pass the explicit
+  `-Clinker=cc -Clink-self-contained=no` linker policy; and nextest reserves
+  threads for the peer-admission latency and turn-boundary fork tests whose
+  bounds are unchanged.
 
 - A WorkGraph attention binding that names a mob member is refused, typed, when
   it is requested in any realm other than that mob's realm. Since members build

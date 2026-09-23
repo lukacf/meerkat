@@ -6348,10 +6348,15 @@ mod tests {
     }
 
     #[cfg(feature = "mob")]
+    /// `mob_id` must be unique per calling test: the mob supervisor binds
+    /// `<mob_id>/__mob_supervisor__` in the process-global inproc registry,
+    /// and two tests creating the same mob in parallel fail with
+    /// `ParticipantNameOccupied` (2026-09-22 native unit lane).
     async fn insert_mcp_archive_live_member(
         mob_state: &Arc<meerkat_mob_mcp::MobMcpState>,
+        mob_id: &str,
     ) -> (meerkat_mob::MobId, meerkat::SessionId) {
-        let mob_id = meerkat_mob::MobId::from("mcp-session-archive-live-member");
+        let mob_id = meerkat_mob::MobId::from(mob_id);
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles.insert(
             meerkat_mob::ProfileName::from("worker"),
@@ -9110,7 +9115,8 @@ mod tests {
         let (mob_state, archive_failures) =
             meerkat_mob_mcp::MobMcpState::new_in_memory_with_archive_failure_control();
         state.mob_state = mob_state.clone();
-        let (_parent_mob_id, member_session_id) = insert_mcp_archive_live_member(&mob_state).await;
+        let (_parent_mob_id, member_session_id) =
+            insert_mcp_archive_live_member(&mob_state, "mcp-session-archive-live-member").await;
         archive_failures
             .fail_archive(
                 member_session_id.clone(),
@@ -9704,7 +9710,8 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let mut state = MeerkatMcpState::new_with_store(store).await;
         let owner = Arc::clone(&state.mob_state);
-        let (mob_id, _session_id) = insert_mcp_archive_live_member(&owner).await;
+        let (mob_id, _session_id) =
+            insert_mcp_archive_live_member(&owner, "mcp-event-stream-scope-denial-member").await;
 
         let viewer = meerkat_mob_mcp::MobMcpState::new_in_memory_as(
             meerkat_mob::MobControlPrincipal::External(

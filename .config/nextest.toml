@@ -33,6 +33,15 @@ success-output = "immediate-final"
 filter = 'test(=machines::tests::machine_workflow_red_ok_detects_missing_and_stale_generated_artifacts)'
 slow-timeout = { period = "60s", terminate-after = 8 }
 
+# Pull-request CI unit lane (ci.yml). Identical to `fast`: nothing is
+# excluded from the PR lane. The profile exists so the lane has its own name
+# for a PR-lane-only adjustment, and so that any such adjustment is a
+# reviewed change here rather than an ad hoc filter in the workflow. #1160
+# replaced the fixed peer-admission p99 bound with a budget derived from an
+# unwedged baseline on the same host, so that test runs here too.
+[profile.ci-pr]
+inherits = "fast"
+
 [profile.fast]
 # Cargo's default fast lane: unit + integration-fast, with dedicated e2e lane
 # wrappers left behind explicit `cargo e2e-*` aliases. Report every test still
@@ -100,6 +109,22 @@ filter = 'test(~test_external_tcp)'
 platform = 'cfg(target_os = "macos")'
 test-group = 'mob-real-comms-macos'
 retries = 2
+
+[[profile.default.overrides]]
+# Measures peer admission latency (p99 < 3s) beside one wedged member. On a
+# 30-vCPU remote executor sharing the CPU with 29 other test processes the
+# p99 came out at 3.8s (2026-09-23 unit lane); reserve the threads the
+# measurement needs instead of relaxing the bound. Locally it takes 2.8s.
+filter = 'test(=runtime::tests::actor_isolation::load_one_wedged_member_does_not_page_or_delay_peers)'
+threads-required = 8
+
+[[profile.default.overrides]]
+# Waits up to 10s for a delegation fork to resume once a held turn boundary
+# is released; timed out in 2 of 4 runs on the shared 30-vCPU executor and
+# never locally. Same treatment as the latency test above: reserve threads,
+# keep the bound.
+filter = 'test(=runtime::tests::durable_fork_delegation_waits_for_a_busy_source_turn_boundary_then_forks)'
+threads-required = 8
 
 [[profile.default.overrides]]
 # The workspace unit lane uses the default profile and discovers these lib

@@ -14,7 +14,7 @@ name: Publish MobKit docs
 # Landing the regenerated snapshot on main. The "Protect MAIN" ruleset
 # requires the CI gate status check, and bot-authored pull requests used to
 # stall: their pull_request CI run waited for a maintainer approval that
-# nobody gave, and the CI gate's 40-minute push-to-terminal budget then
+# nobody gave, and the CI gate's 20-minute push-to-terminal budget then
 # failed the late run on time alone (four MobKit releases went unpublished
 # in 2026-09). Two paths, chosen at run time:
 #   - Fast path, when the repository secret MOBKIT_DOCS_PR_TOKEN exists: push

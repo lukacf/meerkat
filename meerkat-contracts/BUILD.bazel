@@ -2,6 +2,8 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 
+load("//:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
 
 
 filegroup(
@@ -37,8 +39,13 @@ rust_library(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -70,8 +77,13 @@ rust_library(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -111,8 +123,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -124,12 +141,18 @@ rust_test(
         "fast",
         "unit",
     ],
-    size = "small",
+    size = "medium",
     data = [
+        "//:repo_governance_files",
+        "//meerkat-comms:package_runfiles",
+        "//meerkat-core:package_runfiles",
+        "//meerkat-rpc:package_runfiles",
+        "//meerkat:package_runfiles",
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",
@@ -157,8 +180,13 @@ rust_binary(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -198,8 +226,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = [
         "tests/auth_binding_wire.rs",
@@ -213,12 +246,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",
@@ -253,8 +287,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = [
         "tests/image_generation_wire.rs",
@@ -268,10 +307,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",
@@ -306,8 +346,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = [
         "tests/jobs_wire.rs",
@@ -321,10 +366,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",
@@ -359,8 +405,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = [
         "tests/live_audio_format.rs",
@@ -377,6 +428,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",
@@ -411,8 +463,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = [
         "tests/live_barge_in.rs",
@@ -429,6 +486,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",
@@ -463,8 +521,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = [
         "tests/live_deadline_and_jitter.rs",
@@ -481,6 +544,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",
@@ -515,8 +579,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = [
         "tests/live_execution_identity_wire.rs",
@@ -533,6 +602,7 @@ rust_test(
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",
@@ -567,8 +637,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = [
         "tests/mob_wire.rs",
@@ -582,10 +657,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",
@@ -620,8 +696,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = [
         "tests/regression_wire_types.rs",
@@ -635,12 +716,13 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [
         ":package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",
@@ -675,8 +757,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = [
         "tests/runtime_turn_metadata_wire_override.rs",
@@ -690,10 +777,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",
@@ -728,8 +816,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = [
         "tests/session_accept_input_typed_round_trip.rs",
@@ -743,10 +836,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",
@@ -781,8 +875,13 @@ rust_test(
         "schema",
     ],
     edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+    ] + [
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_absent_default_deny_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_unknown_field_v1.json",
+        "//meerkat-core:tests/fixtures/compiled_application_tool_policy_valid_v1.json",
     ],
     srcs = [
         "tests/skill_ref_wire_no_legacy.rs",
@@ -796,10 +895,11 @@ rust_test(
     tags = [
         "fast",
     ],
-    size = "small",
+    size = "medium",
     data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-contracts",

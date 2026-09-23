@@ -1,16 +1,51 @@
 name: CI
 
-# BuildBuddy RBE is the broad CI lane. The exact dense Mob topology stress runs
-# from a prebuilt unit archive on GitHub-hosted Linux, so release evidence does
-# not mistake BuildBuddy/macOS timing for the hosted scalability signal.
+# Pull-request CI: Cargo only, on GitHub-hosted runners, sized to a
+# 20-minute push-to-terminal budget. The lanes are selected from the changed
+# paths by scripts/ci-cargo-lanes.mjs, which fails closed: any change that can
+# alter what Cargo compiles yields at least one clippy lane and one unit lane,
+# and the aggregate gate asserts that those lanes ran.
+#
+# Jobs:
+#   changes         - changed-path classification (packages, shards, closure,
+#                     conditional-lane flags)
+#   fmt-governance  - always: fmt, docs, semver self-test, version parity,
+#                     lock consistency, classifier self-test
+#   ratchets        - generated-contract freshness when contract paths
+#                     changed; machine/protocol drift when machine authority
+#                     changed
+#   clippy (xN)     - one lane per shard of directly changed packages:
+#                     clippy --no-deps --all-targets --all-features
+#   unit (xN)       - pull request: one lane per shard of the directly
+#                     changed packages OUTSIDE the meerkat-mob compile chain:
+#                     nextest --lib --bins --profile ci-pr (ci-pr = fast)
+#   closure-check   - cargo check (lib and bin targets) over the
+#                     reverse-dependency closure of the changed packages
+#   gate            - "CI gate": fail-closed aggregate, 1200-second budget on
+#                     pull requests, schema-4 exact-tree attestation on main
+#
+# Push to main only (no wall-clock budget):
+#   main-unit (xN)  - nextest --lib --bins over the whole workspace in eight
+#                     cost-packed shards (this is where the meerkat-mob chain's
+#                     unit tests run: mob, mob-mcp, mob-pack, rpc, rest,
+#                     mcp-server, rkat, web-runtime, integration-tests,
+#                     machine-codegen, machine-dsl-tests, xtask; their lanes
+#                     compile mob's 442k lines and cannot fit the budget)
+#   wasm-check      - wasm32 check of meerkat-web-runtime
+#   sdk-host        - Python + TypeScript SDK suites
+#
+# Everything else (integration-fast, e2e-fast, the dense Mob topology
+# stress, bounded TLC, feature matrices, minimal builds, audit, the Web SDK
+# and browser contract suites, and the whole Bazel graph) runs in nightly.yml
+# and in the release workflow; PR CI never starts the remote Bazel fleet.
 
 on:
+  # Pushes run only on main (the attestation boundary). Every other branch
+  # gets CI through its pull request, so one head runs once: a push run and
+  # a pull_request run of the same head would each publish a "CI gate" check.
   push:
     branches:
       - main
-      - ci/**
-      - feat/**
-      - feature/**
   pull_request:
     types:
       - opened
@@ -20,66 +55,810 @@ on:
   workflow_dispatch: {}
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
   actions: read
   contents: read
+  # Workload identity for the GCS object cache; forks do not get it and
+  # run with a local disk cache only.
   id-token: write
 
-jobs:
-  gcp-buildbuddy:
-    name: GCP BuildBuddy
-    uses: ./.github/workflows/buildbuddy.yml
-    with:
-      mode: changed-paths
-      machine_authority_base_sha: >-
-        ${{
-          github.event_name == 'pull_request' && github.event.pull_request.base.sha ||
-          github.event_name == 'push' && github.event.before ||
-          ''
-        }}
-      machine_authority_head_sha: ${{ github.sha }}
-    secrets: inherit
+env:
+  CARGO_TERM_COLOR: always
+  # Stable per-VM Cargo home: hosted runners are fresh per job, and cache
+  # reuse (rust-cache + sccache) requires registry source paths that do not
+  # change between runs.
+  CARGO_HOME: /home/runner/.cargo
+  RUSTUP_TOOLCHAIN: 1.94.1
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  # The server's own log; every compile lane uploads it, because with the
+  # IO-error fallback a dead server means silent cold compiles (the
+  # mob unit lane of run 35864652602 compiled 15 minutes with 0 requests).
+  # Literal runner temp path: the `runner` context is not available in
+  # workflow-level env, and upload-artifact rejects paths containing `..`.
+  SCCACHE_ERROR_LOG: /home/runner/work/_temp/sccache.log
+  SCCACHE_LOG: info
+  # Never exit on idle: the mob lib-test link runs for minutes with no rustc
+  # request, the default 600 s idle exit took the server down mid-lane, and
+  # the post-step then reported a fresh server's zero statistics.
+  SCCACHE_IDLE_TIMEOUT: "0"
+  # One stable repo-cargo lane key on every runner, so the generated
+  # toolchain wrapper path is identical across runs and lanes.
+  RUST_LANE_ID: ci
+  # Compiled objects live in the GCS bucket named by the repository variable
+  # MEERKAT_SCCACHE_GCS_BUCKET (default: the project bucket below), selected
+  # per job by .github/actions/setup-sccache-ci; with the GCP identity
+  # unavailable (fork pull requests) a lane runs with a local disk cache
+  # only. The GitHub Actions cache is 10 GB per repository and one
+  # workspace-mode run exceeds it, so writes failed at the quota and every run
+  # stayed cold; it now keeps only the cargo registry. Debuginfo is off
+  # (above) so the objects stay small.
+  SCCACHE_GCS_BUCKET_NAME: ${{ vars.MEERKAT_SCCACHE_GCS_BUCKET || 'meerkat-sccache-king-dnn-training-dev' }}
+  # Push-to-terminal budget in seconds, measured from workflow creation.
+  CI_MAX_SECONDS: "1200"
+  # Target set for the closure-check lane: "lib" checks lib and bin targets
+  # of the closure; "all" adds every test target (--all-targets), which
+  # measured 16 min after a meerkat-mob change and does not fit the budget.
+  CLOSURE_CHECK_TARGETS: lib
 
-  github-hosted-dense-topology:
-    name: GitHub-hosted dense Mob topology
-    uses: ./.github/workflows/mob-dense-topology.yml
+jobs:
+  changes:
+    name: Change classification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      rust_changed: ${{ steps.plan.outputs.rust_changed }}
+      mode: ${{ steps.plan.outputs.mode }}
+      reason: ${{ steps.plan.outputs.reason }}
+      generated_contract: ${{ steps.plan.outputs.generated_contract }}
+      machine_authority: ${{ steps.plan.outputs.machine_authority }}
+      wasm: ${{ steps.plan.outputs.wasm }}
+      sdk_host: ${{ steps.plan.outputs.sdk_host }}
+      package_count: ${{ steps.plan.outputs.package_count }}
+      closure_count: ${{ steps.plan.outputs.closure_count }}
+      closure_flags: ${{ steps.plan.outputs.closure_flags }}
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+      shard_matrix: ${{ steps.plan.outputs.shard_matrix }}
+      unit_shard_count: ${{ steps.plan.outputs.unit_shard_count }}
+      unit_shard_matrix: ${{ steps.plan.outputs.unit_shard_matrix }}
+      unit_deferred: ${{ steps.plan.outputs.unit_deferred }}
+      unit_deferred_count: ${{ steps.plan.outputs.unit_deferred_count }}
+      main_unit_shard_count: ${{ steps.plan.outputs.main_unit_shard_count }}
+      main_unit_shard_matrix: ${{ steps.plan.outputs.main_unit_shard_matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Classify changed paths
+        id: plan
+        shell: bash
+        env:
+          BASE_SHA: >-
+            ${{
+              github.event_name == 'pull_request' && github.event.pull_request.base.sha ||
+              github.event_name == 'push' && github.event.before ||
+              ''
+            }}
+        run: |
+          set -euo pipefail
+          # The classifier exits non-zero rather than emit an empty plan for a
+          # build-relevant change; a failure here fails the CI gate.
+          node scripts/ci-cargo-lanes.mjs --format github --base "${BASE_SHA}" --head HEAD \
+            | tee "${RUNNER_TEMP}/ci-cargo-lanes.txt" >> "${GITHUB_OUTPUT}"
+          grep -vE '^(closure_flags|shard_matrix|unit_shard_matrix|main_unit_shard_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
+
+  fmt-governance:
+    name: Format + governance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      # Depth 2, not 1: a depth-1 clone grafts HEAD to have no parents, which
+      # hides the merge topology the lock-consistency gate reports on.
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Format check
+        run: make fmt-check
+
+      - name: Docs validation
+        run: make docs-check
+
+      # The release-time semver-breaks gate needs cargo-semver-checks; its
+      # analyser does not. Run the analyser's unit tests on every PR so parser
+      # drift is caught here rather than at the tag.
+      - name: Semver-breaks analyser self-test
+        run: make semver-breaks-selftest
+
+      - name: Verify version parity
+        run: make verify-version-parity
+
+      # The pull_request checkout is refs/pull/N/merge, and that merge preview
+      # is the only place a merge-manufactured dangling lock reference exists.
+      - name: Cargo.lock resolves under --locked
+        run: make verify-lock-consistency
+
+      - name: MODULE.bazel.lock recorded inputs
+        run: make verify-bazel-module-lock-inputs
+
+      - name: Verify Rust release configuration
+        run: make check-rust-release-config
+
+      - name: CI lane classifier fails closed
+        run: make ci-lanes-selftest
+
+      - name: Release doctor workflow assertions still bind
+        run: scripts/test-release-doctor-workflow-contract.sh
+
+  ratchets:
+    name: Generation ratchets
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Report selected ratchets
+        shell: bash
+        env:
+          GENERATED_CONTRACT: ${{ needs.changes.outputs.generated_contract }}
+          MACHINE_AUTHORITY: ${{ needs.changes.outputs.machine_authority }}
+        run: |
+          echo "generated contract paths changed: ${GENERATED_CONTRACT}"
+          echo "machine authority paths changed: ${MACHINE_AUTHORITY}"
+
+      - name: Verify schema freshness
+        if: ${{ needs.changes.outputs.generated_contract == 'true' }}
+        run: make verify-schema-freshness
+        env:
+          MEERKAT_SCHEMA_DIAGNOSTIC_DIR: ${{ github.workspace }}/schema-freshness-output
+
+      - name: Upload fresh schemas after freshness failure
+        if: ${{ failure() && needs.changes.outputs.generated_contract == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: fresh-contract-schemas
+          path: schema-freshness-output
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Verify SDK codegen freshness
+        if: ${{ needs.changes.outputs.generated_contract == 'true' }}
+        run: make verify-sdk-codegen-freshness
+
+      - name: Verify SDK event inventory
+        if: ${{ needs.changes.outputs.generated_contract == 'true' }}
+        run: make verify-sdk-event-inventory
+
+      - name: Verify RPC surface alignment
+        if: ${{ needs.changes.outputs.generated_contract == 'true' }}
+        run: make verify-rpc-surface-alignment
+
+      - name: Verify REST surface alignment
+        if: ${{ needs.changes.outputs.generated_contract == 'true' }}
+        run: make verify-rest-surface-alignment
+
+      - name: Verify SDK wrapper freshness
+        if: ${{ needs.changes.outputs.generated_contract == 'true' }}
+        run: make verify-sdk-wrapper-freshness
+
+      - name: Verify generated machine kernels are not stale
+        if: ${{ needs.changes.outputs.machine_authority == 'true' }}
+        id: machine_drift
+        shell: bash
+        run: |
+          if make machine-check-drift; then
+            exit 0
+          fi
+          # Preserve the exact generated side of the failed comparison so the
+          # drift can be repaired without a second local Rust build.
+          make machine-codegen
+          exit 1
+
+      - name: Upload fresh machine artifacts after drift failure
+        if: ${{ failure() && steps.machine_drift.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: fresh-machine-artifacts
+          path: |
+            specs/machines
+            specs/compositions
+            meerkat-machine-kernels/src/generated
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Verify generated protocol artifacts are not stale
+        if: ${{ needs.changes.outputs.machine_authority == 'true' }}
+        id: protocol_drift
+        shell: bash
+        run: |
+          if make protocol-check-drift; then
+            exit 0
+          fi
+          make protocol-codegen
+          exit 1
+
+      - name: Upload fresh protocol artifacts after drift failure
+        if: ${{ failure() && steps.protocol_drift.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: fresh-protocol-artifacts
+          path: |
+            meerkat-core/src/generated
+            meerkat-session/src/generated
+            meerkat-mob/src/generated
+            meerkat-mcp/src/generated
+            meerkat-runtime/src/generated
+            meerkat-workgraph/src/generated
+          if-no-files-found: error
+          retention-days: 1
+
+  clippy:
+    name: Clippy (${{ matrix.name }})
+    needs: changes
+    if: ${{ needs.changes.outputs.rust_changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.shard_matrix) }}
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Clippy (changed packages, all targets, all features)
+        shell: bash
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          set -euo pipefail
+          [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a clippy lane"; exit 1; }
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo clippy ${PACKAGES} --no-deps --all-targets --all-features -- -D warnings
+
+      - name: Upload sccache server log
+        if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: sccache-log-clippy-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /home/runner/work/_temp/sccache.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  unit:
+    name: Unit tests (${{ matrix.name }})
+    needs: changes
+    if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.unit_shard_count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.unit_shard_matrix) }}
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      - name: Unit tests (changed packages, lib and bin targets)
+        shell: bash
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          set -euo pipefail
+          [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a unit lane"; exit 1; }
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo nextest run ${PACKAGES} --lib --bins --profile ci-pr \
+            --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
+
+      - name: Upload sccache server log
+        if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: sccache-log-unit-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /home/runner/work/_temp/sccache.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  main-unit:
+    name: Main unit tests (${{ matrix.name }})
+    needs: changes
+    # Post-merge only: the whole workspace, including the meerkat-mob compile
+    # chain that the pull-request unit lane defers; no wall-clock budget.
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.main_unit_shard_matrix) }}
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
+
+      - name: Unit tests (workspace shard, lib and bin targets)
+        shell: bash
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          set -euo pipefail
+          [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a main unit lane"; exit 1; }
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo nextest run ${PACKAGES} --lib --bins --profile ci-pr \
+            --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
+
+      - name: Upload sccache server log
+        if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: sccache-log-main-unit-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /home/runner/work/_temp/sccache.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  closure-check:
+    name: Closure check (${{ needs.changes.outputs.closure_count }} crates)
+    needs: changes
+    if: ${{ needs.changes.outputs.rust_changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Check the reverse-dependency closure
+        shell: bash
+        env:
+          CLOSURE: ${{ needs.changes.outputs.closure_flags }}
+        run: |
+          set -euo pipefail
+          [[ -n "${CLOSURE}" ]] || { echo "::error::empty closure in the closure-check lane"; exit 1; }
+          targets=()
+          if [[ "${CLOSURE_CHECK_TARGETS}" == "all" ]]; then
+            targets+=(--all-targets)
+          fi
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo check ${CLOSURE} "${targets[@]}" --all-features
+
+      - name: Upload sccache server log
+        if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: sccache-log-closure-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /home/runner/work/_temp/sccache.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  wasm-check:
+    name: wasm32 check
+    needs: changes
+    # Post-merge only (12 min measured); pull requests defer it.
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: WASM runtime check
+        run: make wasm-check
+
+  sdk-host:
+    name: Python + TypeScript SDK suites
+    needs: changes
+    # Post-merge only (13 min measured); pull requests defer it.
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Registry index and crate sources only, one key for every lane.
+          # Compiled objects come from sccache: content-addressed, shared by
+          # every lane and readable from main by every pull request, and
+          # about 1.5 GB for the whole workspace. Per-lane target-directory
+          # caches were 300-480 MB each and filled the repository's 10 GB
+          # cache limit in one pull request, so they were evicted between
+          # PRs and every plan was cold in practice.
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Build RPC binary for SDK smoke tests
+        run: ./scripts/repo-cargo build -p meerkat-rpc
+
+      - name: Python + TypeScript SDK tests
+        run: make -j2 test-sdk-python test-sdk-typescript
 
   gate:
     name: CI gate
-    if: ${{ always() }}
+    # Not `always()`: a superseded run (cancel-in-progress) must surface as
+    # cancelled, not leave a FAILURE "CI gate" check on the head.
+    if: ${{ !cancelled() }}
     needs:
-      - gcp-buildbuddy
-      - github-hosted-dense-topology
+      - changes
+      - fmt-governance
+      - ratchets
+      - clippy
+      - unit
+      - main-unit
+      - closure-check
+      - wasm-check
+      - sdk-host
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Check CI result
+      - name: Check lane results
         shell: bash
         env:
-          BUILDBUDDY_RESULT: ${{ needs.gcp-buildbuddy.result }}
-          DENSE_TOPOLOGY_RESULT: ${{ needs.github-hosted-dense-topology.result }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          FMT_GOVERNANCE_RESULT: ${{ needs.fmt-governance.result }}
+          RATCHETS_RESULT: ${{ needs.ratchets.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          MAIN_UNIT_RESULT: ${{ needs.main-unit.result }}
+          CLOSURE_CHECK_RESULT: ${{ needs.closure-check.result }}
+          WASM_CHECK_RESULT: ${{ needs.wasm-check.result }}
+          SDK_HOST_RESULT: ${{ needs.sdk-host.result }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust_changed }}
+          IS_MAIN_PUSH: ${{ github.event_name == 'push' }}
+          MODE: ${{ needs.changes.outputs.mode }}
+          REASON: ${{ needs.changes.outputs.reason }}
+          SHARD_COUNT: ${{ needs.changes.outputs.shard_count }}
+          UNIT_SHARD_COUNT: ${{ needs.changes.outputs.unit_shard_count }}
+          UNIT_DEFERRED: ${{ needs.changes.outputs.unit_deferred }}
+          UNIT_DEFERRED_COUNT: ${{ needs.changes.outputs.unit_deferred_count }}
+          PACKAGE_COUNT: ${{ needs.changes.outputs.package_count }}
+          CLOSURE_COUNT: ${{ needs.changes.outputs.closure_count }}
         run: |
-          echo "GCP BuildBuddy result: ${BUILDBUDDY_RESULT}"
-          echo "GitHub-hosted dense Mob topology result: ${DENSE_TOPOLOGY_RESULT}"
-          if [[ "${BUILDBUDDY_RESULT}" != "success" ]]; then
-            echo "::error::BuildBuddy CI did not complete successfully."
+          set -euo pipefail
+          echo "plan: mode=${MODE} packages=${PACKAGE_COUNT} closure=${CLOSURE_COUNT} clippy_shards=${SHARD_COUNT} unit_shards=${UNIT_SHARD_COUNT} (${REASON})"
+          if [[ -n "${UNIT_DEFERRED}" ]]; then
+            echo "::notice::unit tests deferred to the push-to-main run (meerkat-mob compile chain): ${UNIT_DEFERRED}"
+          fi
+          echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ratchets=${RATCHETS_RESULT}"
+          echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT}"
+          failed=0
+          require_success() {
+            local lane="$1" result="$2"
+            if [[ "${result}" != "success" ]]; then
+              echo "::error::${lane} must succeed on every run (result: ${result})."
+              failed=1
+            fi
+          }
+          require_ran() {
+            local lane="$1" result="$2"
+            if [[ "${result}" != "success" ]]; then
+              echo "::error::${lane} must run and succeed for a build-relevant change (result: ${result})."
+              failed=1
+            fi
+          }
+          forbid_failure() {
+            local lane="$1" result="$2"
+            case "${result}" in
+              success|skipped) ;;
+              *)
+                echo "::error::${lane} did not complete successfully (result: ${result})."
+                failed=1
+                ;;
+            esac
+          }
+          # The classifier is the fail-closed authority: if it did not
+          # produce a plan, nothing below can be trusted.
+          require_success "Change classification" "${CHANGES_RESULT}"
+          require_success "Format + governance" "${FMT_GOVERNANCE_RESULT}"
+          require_success "Generation ratchets" "${RATCHETS_RESULT}"
+          if [[ "${RUST_CHANGED}" == "true" ]]; then
+            if ! [[ "${SHARD_COUNT}" =~ ^[0-9]+$ ]] || (( SHARD_COUNT < 1 )); then
+              echo "::error::a build-relevant change produced no lanes (shard_count='${SHARD_COUNT}')."
+              failed=1
+            fi
+            require_ran "Clippy" "${CLIPPY_RESULT}"
+            require_ran "Closure check" "${CLOSURE_CHECK_RESULT}"
+            # Fail closed on the unit plan: every changed package is either in
+            # a pull-request unit shard or named as deferred to main.
+            if [[ "${UNIT_SHARD_COUNT}" =~ ^[0-9]+$ ]] && (( UNIT_SHARD_COUNT > 0 )); then
+              require_ran "Unit tests" "${UNIT_RESULT}"
+            elif [[ "${UNIT_DEFERRED_COUNT}" =~ ^[0-9]+$ ]] && (( UNIT_DEFERRED_COUNT > 0 )); then
+              echo "no pull-request unit lane: every changed package (${UNIT_DEFERRED}) is in the meerkat-mob compile chain and runs on main."
+              forbid_failure "Unit tests" "${UNIT_RESULT}"
+            else
+              echo "::error::a build-relevant change produced neither a unit lane nor a deferred package list."
+              failed=1
+            fi
+          elif [[ "${CHANGES_RESULT}" == "success" ]]; then
+            for lane in Clippy:"${CLIPPY_RESULT}" "Unit tests":"${UNIT_RESULT}" "Closure check":"${CLOSURE_CHECK_RESULT}"; do
+              forbid_failure "${lane%%:*}" "${lane##*:}"
+            done
+          fi
+          if [[ "${IS_MAIN_PUSH}" == "true" ]]; then
+            # Post-merge coverage of everything the pull request deferred.
+            require_ran "Main unit tests" "${MAIN_UNIT_RESULT}"
+            require_ran "wasm32 check" "${WASM_CHECK_RESULT}"
+            require_ran "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+          else
+            for lane in "Main unit tests":"${MAIN_UNIT_RESULT}" "wasm32 check":"${WASM_CHECK_RESULT}" "Python + TypeScript SDK suites":"${SDK_HOST_RESULT}"; do
+              forbid_failure "${lane%%:*}" "${lane##*:}"
+            done
+          fi
+          if (( failed )); then
             exit 1
           fi
-          if [[ "${DENSE_TOPOLOGY_RESULT}" != "success" ]]; then
-            echo "::error::GitHub-hosted dense Mob topology did not complete successfully."
-            exit 1
-          fi
+          echo "All selected lanes succeeded."
 
       - name: Enforce push-to-terminal budget
+        # Pull requests only: the push-to-main run carries the deferred lanes
+        # and has no wall-clock budget.
+        if: ${{ github.event_name != 'push' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          # 40 minutes: the GitHub-hosted Mob archive lane builds cold after a
-          # release commit (see mob-dense-topology.yml) and must still finish
-          # inside this budget on its first attempt.
-          MAX_SECONDS: "2400"
+          MAX_SECONDS: ${{ env.CI_MAX_SECONDS }}
         run: |
           set -euo pipefail
           created_at="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .created_at)"
@@ -92,13 +871,15 @@ jobs:
           print(int((now - started).total_seconds()))
           PY
           )"
-          echo "Push-to-full-CI terminal budget: ${elapsed}/${MAX_SECONDS} seconds"
+          echo "Push-to-terminal budget: ${elapsed}/${MAX_SECONDS} seconds"
+          echo "elapsed_seconds=${elapsed}" >> "${GITHUB_OUTPUT}"
           if ((elapsed > MAX_SECONDS)); then
-            echo "::error::Full CI exceeded the 40-minute push-to-terminal SLO (${elapsed}s)."
+            echo "::error::CI exceeded the ${MAX_SECONDS}-second push-to-terminal budget (${elapsed}s)."
             exit 1
           fi
 
       - name: Checkout attested source tree
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/checkout@v6
 
       - name: Build exact-tree CI attestation
@@ -106,8 +887,21 @@ jobs:
         id: attestation
         shell: bash
         env:
-          BUILDBUDDY_RESULT: ${{ needs.gcp-buildbuddy.result }}
-          DENSE_TOPOLOGY_RESULT: ${{ needs.github-hosted-dense-topology.result }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          FMT_GOVERNANCE_RESULT: ${{ needs.fmt-governance.result }}
+          RATCHETS_RESULT: ${{ needs.ratchets.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          MAIN_UNIT_RESULT: ${{ needs.main-unit.result }}
+          CLOSURE_CHECK_RESULT: ${{ needs.closure-check.result }}
+          WASM_CHECK_RESULT: ${{ needs.wasm-check.result }}
+          SDK_HOST_RESULT: ${{ needs.sdk-host.result }}
+          MODE: ${{ needs.changes.outputs.mode }}
+          PACKAGE_COUNT: ${{ needs.changes.outputs.package_count }}
+          CLOSURE_COUNT: ${{ needs.changes.outputs.closure_count }}
+          SHARD_COUNT: ${{ needs.changes.outputs.shard_count }}
+          UNIT_SHARD_COUNT: ${{ needs.changes.outputs.unit_shard_count }}
+          MAIN_UNIT_SHARD_COUNT: ${{ needs.changes.outputs.main_unit_shard_count }}
         run: |
           set -euo pipefail
           destination="${RUNNER_TEMP}/meerkat-ci-attestation"
@@ -122,10 +916,23 @@ jobs:
             --arg workflow_run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg event "${GITHUB_EVENT_NAME}" \
             --arg ref "${GITHUB_REF}" \
-            --arg validation_result "${BUILDBUDDY_RESULT}" \
-            --arg dense_topology_result "${DENSE_TOPOLOGY_RESULT}" \
+            --arg changes "${CHANGES_RESULT}" \
+            --arg fmt_governance "${FMT_GOVERNANCE_RESULT}" \
+            --arg ratchets "${RATCHETS_RESULT}" \
+            --arg clippy "${CLIPPY_RESULT}" \
+            --arg unit "${UNIT_RESULT}" \
+            --arg main_unit "${MAIN_UNIT_RESULT}" \
+            --arg closure_check "${CLOSURE_CHECK_RESULT}" \
+            --arg wasm_check "${WASM_CHECK_RESULT}" \
+            --arg sdk_host "${SDK_HOST_RESULT}" \
+            --arg mode "${MODE}" \
+            --argjson package_count "${PACKAGE_COUNT:-0}" \
+            --argjson closure_count "${CLOSURE_COUNT:-0}" \
+            --argjson shard_count "${SHARD_COUNT:-0}" \
+            --argjson unit_shard_count "${UNIT_SHARD_COUNT:-0}" \
+            --argjson main_unit_shard_count "${MAIN_UNIT_SHARD_COUNT:-0}" \
             '{
-              schema_version: 3,
+              schema_version: 4,
               repository: $repository,
               commit_sha: $commit_sha,
               tree_sha: $tree_sha,
@@ -134,16 +941,26 @@ jobs:
               workflow_run_attempt: $workflow_run_attempt,
               event: $event,
               ref: $ref,
-              validation_backend: "gcp-buildbuddy+github-hosted-dense-mob",
-              validation_result: (
-                if $validation_result == "success" and $dense_topology_result == "success"
-                then "success"
-                else "failure"
-                end
-              ),
+              validation_backend: "github-hosted-cargo",
+              validation_result: "success",
+              plan: {
+                mode: $mode,
+                package_count: $package_count,
+                closure_count: $closure_count,
+                clippy_shard_count: $shard_count,
+                unit_shard_count: $unit_shard_count,
+                main_unit_shard_count: $main_unit_shard_count
+              },
               component_results: {
-                gcp_buildbuddy: $validation_result,
-                github_hosted_dense_mob: $dense_topology_result
+                changes: $changes,
+                fmt_governance: $fmt_governance,
+                ratchets: $ratchets,
+                clippy: $clippy,
+                unit: $unit,
+                main_unit: $main_unit,
+                closure_check: $closure_check,
+                wasm_check: $wasm_check,
+                sdk_host: $sdk_host
               }
             }' > "${destination}/attestation.json"
           echo "tree_sha=${tree_sha}"

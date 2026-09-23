@@ -63,6 +63,19 @@ CARGO_EQUIVALENT_EXEC_PROPERTIES = {
     "test.network": "external",
 }
 
+# The nextest unit and integration actions each run one test process per
+# vCPU, and the SDK actions run cold Cargo and wasm-pack builds. Without a
+# resource estimate BuildBuddy packs several onto one c3d-standard-30
+# (30 vCPU, 120 GB); on 2026-09-23 that cost the peer-admission latency test
+# its 3s p99 (3.8s, 3.2s), timed out a 10s turn-boundary wait, and silently
+# killed the xtask drift child. Asking for more than half an executor's CPU
+# and memory gives each of these actions a machine to itself while staying
+# schedulable, which is how the pre-push hook runs them.
+HEAVY_CARGO_EQUIVALENT_EXEC_PROPERTIES = CARGO_EQUIVALENT_EXEC_PROPERTIES | {
+    "EstimatedCPU": "20",
+    "EstimatedMemory": "60GB",
+}
+
 CARGO_EQUIVALENT_TAGS = [
     "buildbuddy",
     "cargo-equivalent",
@@ -150,6 +163,49 @@ sh_test(
     tags = CARGO_EQUIVALENT_TAGS,
 )
 
+# The Native unit and integration-fast lanes as the Cargo lanes the pre-push
+# hook runs (scripts/pre-push-unit.sh): nextest, one process per test. A Bazel
+# rust_test runs a whole binary in one process, and the suite relies on
+# process-per-test cleanup for state that is process-global by design (inproc
+# participant names, the realtime projection memory budget); the first real
+# Bazel-native unit lanes failed hundreds of tests on exactly that. A
+# nextest-parity per-test-process wrapper for the Bazel-native rust_test
+# targets is the follow-up cut from 0.8.41 (about half a day of work).
+# xtask's workflow tests run `machine-check-drift` in a nested repo-cargo
+# child that pipes generated source through rustfmt. The stable toolchain's
+# `bin/rustfmt` cannot load librustc_driver from the runfiles tree (exit 127,
+# 2026-09-23 unit lane); the Bazel xtask targets carry this pinned nightly
+# rustfmt with its rustc_lib for the same reason, so the nested children get it.
+NESTED_RUSTFMT_DATA = [
+    "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib",
+    "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",
+    "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib",
+    "@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin",
+]
+
+NATIVE_CARGO_EQUIVALENT_TESTS = {
+    "unit_cargo_equivalent_test": "test-unit",
+    "integration_fast_cargo_equivalent_test": "integration-fast",
+}
+
+[
+    sh_test(
+        name = name,
+        srcs = ["full_lane_test.sh"],
+        args = [lane],
+        data = [
+            "//:workspace_runfiles",
+            "@cargo_nextest_darwin_arm64//:cargo-nextest",
+            "@cargo_nextest_linux_x86_64//:cargo-nextest",
+        ] + RUST_TOOLCHAIN_DATA + NESTED_RUSTFMT_DATA,
+        exec_properties = HEAVY_CARGO_EQUIVALENT_EXEC_PROPERTIES,
+        size = "enormous",
+        timeout = "eternal",
+        tags = CARGO_EQUIVALENT_TAGS,
+    )
+    for name, lane in NATIVE_CARGO_EQUIVALENT_TESTS.items()
+]
+
 sh_test(
     name = "release_validate_cargo_equivalent_test",
     srcs = ["full_lane_test.sh"],
@@ -175,6 +231,45 @@ sh_test(
     exec_properties = CARGO_EQUIVALENT_EXEC_PROPERTIES,
     size = "enormous",
     timeout = "eternal",
+    tags = CARGO_EQUIVALENT_TAGS,
+)
+
+# The SDK suites as three remote actions instead of one. Together they need a
+# cold `cargo build -p meerkat-rpc`, a cold wasm-pack build of
+# meerkat-web-runtime, and three package installs; on one 30-core executor the
+# single action was still running at 2138s on 2026-09-23. Split by suite the
+# same work runs in parallel on separate executors. `sdk_suites_cargo_equivalent_test`
+# above stays the local single-action form.
+SDK_SUITE_CARGO_EQUIVALENT_TESTS = {
+    "sdk_python_cargo_equivalent_test": "sdk-python",
+    "sdk_typescript_cargo_equivalent_test": "sdk-typescript",
+    "sdk_web_cargo_equivalent_test": "sdk-web",
+}
+
+[
+    sh_test(
+        name = name,
+        srcs = ["full_lane_test.sh"],
+        args = [lane],
+        data = [
+            "//:workspace_runfiles",
+            "@wasm_pack_darwin_arm64//:wasm-pack",
+            "@wasm_pack_linux_x86_64//:wasm-pack",
+        ] + RUST_TOOLCHAIN_DATA + WASM_RUST_TOOLCHAIN_DATA + SDK_TOOL_DATA,
+        exec_properties = HEAVY_CARGO_EQUIVALENT_EXEC_PROPERTIES,
+        size = "enormous",
+        timeout = "eternal",
+        tags = CARGO_EQUIVALENT_TAGS,
+    )
+    for name, lane in SDK_SUITE_CARGO_EQUIVALENT_TESTS.items()
+]
+
+test_suite(
+    name = "sdk_suites_cargo_equivalent_tests",
+    tests = [
+        ":" + name
+        for name in SDK_SUITE_CARGO_EQUIVALENT_TESTS.keys()
+    ],
     tags = CARGO_EQUIVALENT_TAGS,
 )
 

@@ -342,30 +342,57 @@ list.
 
 ### GitHub Workflows
 
-**CI** (`.github/workflows/ci.yml`) — runs on pushes to `main`, `ci/**`,
-`feat/**`, and `feature/**`, PRs, and manual dispatch. Its required components
-are:
-- `gcp-buildbuddy` — calls `buildbuddy.yml` in `changed-paths` mode for the
-  broad GCP BuildBuddy lane: static/native checks and tests, authority
-  governance, and path-selected SDK, WASM, feature-matrix, and audit work.
-- `github-hosted-dense-topology` — calls `mob-dense-topology.yml` to build a
-  Mob unit-test archive and run the 300-member/150-peer stress on hosted Linux.
-- `gate` (`CI gate`) — requires both component results to be `success` and
-  enforces a 2400-second (40-minute) budget from workflow creation. Successful
-  `main` pushes emit a schema-3 exact-tree attestation with backend
-  `gcp-buildbuddy+github-hosted-dense-mob` and both component results.
+**CI** (`.github/workflows/ci.yml`) runs on pushes to `main`, PRs, and
+manual dispatch (a branch head runs once, via its PR). It is Cargo-only on
+GitHub-hosted runners and sized to a 20-minute push-to-terminal budget:
+- `changes` classifies the diff with `scripts/ci-cargo-lanes.mjs` (fail
+  closed: every Rust-relevant change yields lanes; unmapped Rust paths, a
+  missing base, or global build configuration escalate to the workspace).
+- `fmt-governance` (always): fmt, docs-check, semver self-test, version
+  parity, lock consistency, `make ci-lanes-selftest`.
+- `ratchets`: generated-contract freshness when contract paths changed;
+  `machine-check-drift`/`protocol-check-drift` when machine authority changed.
+- `clippy`: one lane per shard of every directly changed package
+  (`clippy --no-deps --all-targets --all-features -D warnings`).
+- `unit`: `nextest --lib --bins --profile ci-pr` (identical to `fast`) for
+  the changed packages outside the meerkat-mob compile chain; crates that
+  compile `meerkat-mob` (mob, mob-mcp, mob-pack, rpc, rest, mcp-server,
+  rkat, web-runtime, integration-tests, machine-codegen, machine-dsl-tests,
+  xtask; computed from metadata) defer their unit tests to `push: main`
+  because their lanes need 17-22 min on 4 vCPU.
+- `closure-check`: `cargo check --all-features` (lib and bin targets) over
+  the reverse-dependency closure of the changed packages.
+- `push: main` only (no budget): `main-unit` over the whole workspace in
+  eight shards, `wasm-check`, `sdk-host`. A red main run is a failed
+  `CI gate` on the main commit and blocks `require_ci_green`.
+- `gate` (`CI gate`, the only required context): fail-closed aggregate,
+  1200-second budget from run creation, schema-4 attestation (backend
+  `github-hosted-cargo`) on successful `main` pushes. It runs under
+  `!cancelled()` so superseded runs surface as cancelled.
 
-`cargo.yml` remains a separate reusable/manually dispatchable Cargo workflow
-with its own `Cargo lane gate`; the current `ci.yml` does not call it.
-Local Make commands still default to Cargo.
+Integration-fast, e2e-fast, the dense Mob topology stress, bounded TLC, the
+feature matrices, audit, the SDK suites, and the whole BuildBuddy/Bazel graph
+do not run in PR CI. `cargo.yml` remains a separate reusable/manually
+dispatchable Cargo workflow with its own `Cargo lane gate`; `ci.yml` does not
+call it. Local Make commands still default to Cargo.
 
-**Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) — the expensive low-churn lanes: `lint` (clippy `--all-targets`), `lint-feature-matrix`, `test-feature-matrix`, `test-minimal`, `test-surface-modularity`, `e2e-system`, `test-sdk-web` (unconditional), `wasm-contract` (unconditional), `check-rust-release-packaging`, cargo-deny sweep.
+**Nightly** (`.github/workflows/nightly.yml`, cron + dispatch) owns everything
+PR CI does not: `workspace-unit` (`make test-unit`), `workspace-int`
+(`make test-int`), `e2e-fast`, `dense-topology` (`mob-dense-topology.yml`),
+`machine-verify` (bounded TLC), `sdk-host`, `gcp-buildbuddy`
+(`buildbuddy.yml` in `full-fresh` mode: the whole Bazel graph), plus the
+existing `lint` (clippy `--all-targets`), `lint-feature-matrix`,
+`test-feature-matrix`, `test-minimal`, `test-surface-modularity`,
+`e2e-system`, `test-sdk-web`, `wasm-contract`, `check-rust-release-packaging`,
+and cargo-deny sweep.
 
-The required GCP BuildBuddy CI component is distinct from the owner-selected
-BuildBuddy release backend (remote.buildbuddy.io), which covers Linux/macOS
-binaries. Windows release binaries are cross-compiled with cargo-xwin
-(clang-cl, lld-link, the Windows SDK) on a GitHub-hosted Ubuntu runner and then
-executed for verification on a windows-latest runner.
+The release tag path requires successful exact-main CI (schema-4 attestation)
+and then runs the full BuildBuddy graph (`release_validate_buildbuddy_full`)
+as its validation gate; Cargo validation remains the manual-dispatch fallback.
+The owner-selected BuildBuddy release backend (remote.buildbuddy.io) covers
+Linux/macOS binaries. Windows release binaries are cross-compiled with
+cargo-xwin (clang-cl, lld-link, the Windows SDK) on a GitHub-hosted Ubuntu
+runner and then executed for verification on a windows-latest runner.
 
 **Release semver readiness** (`.github/workflows/release-semver-readiness.yml`)
 is a separate workflow triggered by `Cargo.toml`/`CHANGELOG.md` changes on
@@ -379,9 +406,10 @@ release semver gate; PR and manual artifacts are previews.
 
 | Job | Trigger | What it does |
 |-----|---------|-------------|
-| `require_ci_green` | Always | Requires successful exact-main CI for the release commit; tag runs also verify its retained exact-tree attestation (currently BuildBuddy plus hosted dense-Mob components) |
+| `require_ci_green` | Always | Requires successful exact-main CI for the release commit; tag runs also verify its retained exact-tree attestation (schema 4, backend `github-hosted-cargo`; legacy schemas accepted) |
+| `release_validate_buildbuddy_full` | Tag runs | Runs the whole BuildBuddy/Bazel graph (`buildbuddy.yml`, `full-fresh`) on the release tree |
 | `release_validate_cargo` / `release_validate_buildbuddy` | Eligible manual dispatches only | Validate release state through the selected lane; tag runs reuse exact-tree CI and skip both jobs |
-| `release_validate_gate` | Tags and full/package dispatches | Accept exact-tree CI on tags or the selected manual validation lane; Web-only and asset-only recovery skip it |
+| `release_validate_gate` | Tags and full/package dispatches | On tags require the full BuildBuddy graph plus exact-tree CI; on manual dispatches accept the selected validation lane; Web-only and asset-only recovery skip it |
 | `release_semver_gate` | Tags and full/package dispatches | After `require_ci_green`, verifies unexpired exact-tree, exact-version main-push readiness evidence on the normal tag/explicit-tag path; narrower manual measurement/recovery exceptions are described in the release guide |
 | `build_binaries` / `build_binaries_buildbuddy` / `build_binaries_windows_cross` / `verify_windows_binaries` / `build_binaries_gate` | Tags or manual asset recovery | The selected BuildBuddy or GitHub-hosted lane builds Linux/macOS (4 targets); `build_binaries_windows_cross` cross-compiles Windows from Linux with cargo-xwin and `verify_windows_binaries` runs the result on windows-latest; each target packages 4 binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`); the gate requires the selected lanes plus both Windows jobs |
 | `build_web_sdk_package` | Tags or package/Web recovery without a reused artifact | Builds the `@rkat/web` package artifact |

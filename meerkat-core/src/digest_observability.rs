@@ -60,14 +60,33 @@ pub fn global_session_encode_bytes() -> u64 {
 static REWRITE_RECORD_BODY_DECODES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+thread_local! {
+    // The same count scoped to the calling thread, so a caller can attribute
+    // decodes to its own synchronous work while other threads decode too.
+    static REWRITE_RECORD_BODY_DECODES_ON_THREAD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn record_rewrite_record_body_decode() {
     REWRITE_RECORD_BODY_DECODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    REWRITE_RECORD_BODY_DECODES_ON_THREAD.with(|count| count.set(count.get() + 1));
 }
 
 #[doc(hidden)]
 #[must_use]
 pub fn rewrite_record_body_decodes() -> u64 {
     REWRITE_RECORD_BODY_DECODES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Rewrite-record body decodes performed by the current thread.
+///
+/// The process-wide [`rewrite_record_body_decodes`] moves whenever any thread
+/// decodes a body; an assertion that a particular synchronous read performed
+/// no decode has to look at its own thread, or a parallel test that decodes
+/// a record fails it (as the Bazel unit lane did on 2026-09-23).
+#[doc(hidden)]
+#[must_use]
+pub fn rewrite_record_body_decodes_on_this_thread() -> u64 {
+    REWRITE_RECORD_BODY_DECODES_ON_THREAD.with(std::cell::Cell::get)
 }
 
 pub(crate) const DIGEST_SITE_COUNT: usize = 6;

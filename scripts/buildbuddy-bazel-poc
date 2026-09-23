@@ -426,10 +426,39 @@ case "${command}" in
       --curses=no
     )
     ;;
+  unit-cargo-equivalent-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    # The pre-push hook's `nextest run -E 'kind(lib)'` as one remote action
+    # (process-per-test semantics); the Bazel-native form is workspace-unit-rbe.
+    default_target="//tools/buildbuddy:unit_cargo_equivalent_test"
+    extra_args+=(
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
+  integration-fast-cargo-equivalent-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    # The pre-push hook's `nextest run --profile fast -E 'kind(test)'` as one
+    # remote action; the Bazel-native form is workspace-integration-fast-rbe.
+    default_target="//tools/buildbuddy:integration_fast_cargo_equivalent_test"
+    extra_args+=(
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
   sdk-suites-rbe)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_test"
+    # One action per SDK suite so the cold rkat-rpc and wasm builds land on
+    # separate executors; the single-action form is
+    # //tools/buildbuddy:sdk_suites_cargo_equivalent_test.
+    default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_tests"
     extra_args+=(
       --test_output=errors
       --test_summary=terse

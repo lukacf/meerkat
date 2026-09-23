@@ -20,19 +20,23 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-arm64)
     host_triple="aarch64-apple-darwin"
     host_rust_toolchain="rust_macos_aarch64__aarch64-apple-darwin__stable_tools"
+    nested_rustfmt_toolchain="rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools"
     wasm_rust_toolchain="rust_macos_aarch64__wasm32-unknown-unknown__stable_tools"
     node_repo="node_darwin_arm64"
     python_repo="python_darwin_arm64"
     cargo_deny_repo="cargo_deny_darwin_arm64"
+    cargo_nextest_repo="cargo_nextest_darwin_arm64"
     wasm_pack_repo="wasm_pack_darwin_arm64"
     ;;
   Linux-x86_64)
     host_triple="x86_64-unknown-linux-gnu"
     host_rust_toolchain="rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools"
+    nested_rustfmt_toolchain="rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools"
     wasm_rust_toolchain="rust_linux_x86_64__wasm32-unknown-unknown__stable_tools"
     node_repo="node_linux_x86_64"
     python_repo="python_linux_x86_64"
     cargo_deny_repo="cargo_deny_linux_x86_64"
+    cargo_nextest_repo="cargo_nextest_linux_x86_64"
     wasm_pack_repo="wasm_pack_linux_x86_64"
     ;;
   *)
@@ -156,6 +160,17 @@ configure_rust_with_wasm_target() {
   export RUSTC="${sandbox_toolchain}/bin/rustc"
   export RUSTDOC="${sandbox_toolchain}/bin/rustdoc"
   export RUSTFMT="${sandbox_toolchain}/bin/rustfmt"
+  # `cargo clippy` resolves the external `cargo-clippy` subcommand from
+  # $CARGO_HOME/bin before PATH, and CARGO_HOME is the executor image's
+  # /usr/local/cargo, whose rustup proxy runs the image toolchain. That mixed a
+  # 1.94.1 clippy-driver into a 1.94.0 build (E0514 "compiled by an
+  # incompatible version of rustc") on the 2026-09-22 wasm-check lane. Name the
+  # sandbox binary and fail closed if the toolchain does not ship it.
+  export CARGO_CLIPPY="${sandbox_toolchain}/bin/cargo-clippy"
+  if [[ ! -x "${CARGO_CLIPPY}" || ! -x "${sandbox_toolchain}/bin/clippy-driver" ]]; then
+    echo "rules_rust host toolchain runfiles lack cargo-clippy/clippy-driver at ${sandbox_toolchain}/bin" >&2
+    exit 127
+  fi
   prepend_path "${sandbox_toolchain}/bin"
   prepend_path "${sandbox_toolchain}/lib/rustlib/${host_triple}/bin"
   export CARGO_HOME="${MEERKAT_HOST_CARGO_HOME:-${TEST_TMPDIR}/cargo-home}"
@@ -204,6 +219,79 @@ configure_cargo_deny() {
   export CARGO_DENY="${cargo_deny_bin}"
 }
 
+configure_cargo_nextest() {
+  local cargo_nextest_bin
+  cargo_nextest_bin="$(find_runfile "*${cargo_nextest_repo}/cargo-nextest")"
+  if [[ -z "${cargo_nextest_bin}" ]]; then
+    echo "pinned cargo-nextest runfile was not found" >&2
+    exit 127
+  fi
+  # Invoked directly (`cargo-nextest nextest run ...`), never through `cargo
+  # nextest`: Cargo resolves external subcommands from $CARGO_HOME/bin first,
+  # and CARGO_HOME here is the executor image's rustup home.
+  export CARGO_NEXTEST="${cargo_nextest_bin}"
+}
+
+# Tests in the unit and integration lanes shell back into the workspace the
+# way the pre-push hook's do: xtask's workflow tests run
+# `scripts/repo-cargo run -p xtask ...`, which needs `git rev-parse` to work in
+# the workspace and a writable Cargo cache root, and every nested repo-root
+# lookup prefers Bazel's TEST_SRCDIR/TEST_WORKSPACE runfiles tree when those
+# variables are set. The copied workspace is the one those children must see:
+# make it a git repository, point the cache root into the test's scratch, and
+# drop the Bazel test variables so nested processes resolve
+# MEERKAT_WORKSPACE_ROOT like a plain Cargo run (run 35820182455 failed the
+# xtask workflow test with "fatal: not a git repository" in the runfiles tree).
+configure_nested_cargo_workspace() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "git is required for the nested repo-cargo children of the unit and integration lanes" >&2
+    exit 127
+  fi
+  if [[ ! -d "${work_root}/.git" ]]; then
+    git -C "${work_root}" init -q
+  fi
+  export XDG_CACHE_HOME="${TEST_TMPDIR}/xdg-cache"
+  mkdir -p "${XDG_CACHE_HOME}"
+  # The stable toolchain's rustfmt cannot load librustc_driver from the
+  # runfiles tree (exit 127); xtask's drift child pipes generated source
+  # through RUSTFMT. Hand the children the pinned nightly rustfmt the Bazel
+  # xtask targets use, resolved while the runfiles variables still exist.
+  local nested_rustfmt
+  nested_rustfmt="$(find_runfile "*${nested_rustfmt_toolchain}*/bin/rustfmt")"
+  if [[ -z "${nested_rustfmt}" ]]; then
+    echo "pinned nightly rustfmt runfile was not found for nested cargo children" >&2
+    exit 127
+  fi
+  if ! "${nested_rustfmt}" --version >/dev/null 2>&1; then
+    echo "pinned nightly rustfmt does not run in this sandbox: ${nested_rustfmt}" >&2
+    "${nested_rustfmt}" --version >&2 || true
+    exit 127
+  fi
+  export RUSTFMT="${nested_rustfmt}"
+  unset TEST_SRCDIR TEST_WORKSPACE RUNFILES_DIR RUNFILES_MANIFEST_FILE
+  # repo-cargo consults rustup whenever it is on PATH: it swaps in the
+  # rustup toolchain named by rust-toolchain.toml (1.94.1 on the executor
+  # image, not the pinned 1.94.0 the lane built with) and exports that
+  # toolchain's RUSTFMT. On 2026-09-23 the xtask drift child's rustfmt exited
+  # at once and the write failed with a broken pipe. Pin the nested cargo to
+  # the sandbox toolchain and hide rustup from the children.
+  export CARGO_BIN="${CARGO}"
+  local dir kept=()
+  local IFS=:
+  for dir in ${PATH}; do
+    if [[ -n "${dir}" && ! -x "${dir}/rustup" ]]; then
+      kept+=("${dir}")
+    fi
+  done
+  unset IFS
+  PATH="$(IFS=:; printf '%s' "${kept[*]}")"
+  export PATH
+  if command -v rustup >/dev/null 2>&1; then
+    echo "rustup is still reachable by nested cargo children: ${PATH}" >&2
+    exit 1
+  fi
+}
+
 configure_wasm_pack() {
   local wasm_pack_bin
   wasm_pack_bin="$(find_runfile "*${wasm_pack_repo}/wasm-pack")"
@@ -235,13 +323,27 @@ wait_parallel_jobs() {
     fi
     failed=1
     echo "FAIL ${name}; log follows:" >&2
-    sed -n '1,220p' "${log_file}" >&2 || true
+    # Keep the head (tool versions, install output) and always the tail: the
+    # failing compiler error or test summary of a long build sits at the end,
+    # and the 09-16 web-sdk failure was undiagnosable from the head alone.
+    local total_lines
+    total_lines="$(wc -l <"${log_file}" || echo 0)"
+    if ((total_lines <= 340)); then
+      cat "${log_file}" >&2 || true
+    else
+      sed -n '1,220p' "${log_file}" >&2 || true
+      echo "... (${total_lines} lines total; last 120 follow)" >&2
+      tail -n 120 "${log_file}" >&2 || true
+    fi
   done <"${parallel_jobs_file}"
   return "${failed}"
 }
 
 copy_workspace
 cd "${work_root}"
+# Parity with scripts/repo-cargo: source-level tests resolve the workspace
+# from this variable instead of the crate directory Cargo runs them from.
+export MEERKAT_WORKSPACE_ROOT="${work_root}"
 
 run_wasm_contract_test() {
   local test_name="$1"
@@ -266,6 +368,29 @@ case "${lane}" in
     configure_rust "${host_rust_toolchain}"
     configure_cargo_deny
     "${CARGO_DENY}" check
+    ;;
+  # The Native unit and integration-fast lanes: the same nextest invocations
+  # scripts/pre-push-unit.sh runs (default features, kind(lib) for units,
+  # profile fast + kind(test) for integration), one process per test, with
+  # the hook's RUST_MIN_STACK. The workspace root and the `fast` profile in
+  # .config/nextest.toml come with the copied workspace.
+  test-unit)
+    configure_rust "${host_rust_toolchain}"
+    configure_cargo_nextest
+    configure_nested_cargo_workspace
+    export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
+    "${CARGO_NEXTEST}" nextest run --workspace \
+      -E 'kind(lib)' --no-tests=fail --no-fail-fast \
+      --show-progress none --status-level none --final-status-level fail
+    ;;
+  integration-fast)
+    configure_rust "${host_rust_toolchain}"
+    configure_cargo_nextest
+    configure_nested_cargo_workspace
+    export RUST_MIN_STACK="${RUST_MIN_STACK:-33554432}"
+    "${CARGO_NEXTEST}" nextest run --workspace \
+      --profile fast -E 'kind(test)' --no-tests=fail --no-fail-fast \
+      --show-progress none --status-level none --final-status-level fail
     ;;
   release-validate)
     configure_rust "${host_rust_toolchain}"
@@ -329,11 +454,51 @@ case "${lane}" in
     wait_parallel_jobs
     make verify-sdk-wrapper-freshness CARGO="${CARGO}" PYTHON="${PYTHON}"
     ;;
+  # The three suites below are the `sdk-suites` lane split one suite per
+  # remote action (see SDK_SUITE_CARGO_EQUIVALENT_TESTS in BUILD.bazel). Each
+  # keeps exactly the steps the combined lane ran for that suite: the Python
+  # and TypeScript suites resolve the rkat-rpc binary, so they build it; the
+  # Web suite builds the wasm bundle and never spawns rkat-rpc; the wrapper
+  # freshness check needs cargo and python and rides with the Python suite.
+  sdk-python)
+    configure_rust "${host_rust_toolchain}"
+    configure_python
+    "${CARGO}" build -p meerkat-rpc
+    (
+      cd sdks/python &&
+      "${PYTHON}" -m pip install --upgrade pip &&
+      "${PYTHON}" -m pip install -e ".[dev]" &&
+      "${PYTHON}" -m pytest -q tests
+    )
+    make verify-sdk-wrapper-freshness CARGO="${CARGO}" PYTHON="${PYTHON}"
+    ;;
+  sdk-typescript)
+    configure_rust "${host_rust_toolchain}"
+    configure_node
+    "${CARGO}" build -p meerkat-rpc
+    (
+      cd sdks/typescript &&
+      npm install --ignore-scripts &&
+      npm run build &&
+      npm test
+    )
+    ;;
+  sdk-web)
+    configure_rust_with_wasm_target
+    configure_node
+    configure_wasm_pack
+    (
+      cd sdks/web &&
+      npm install --ignore-scripts &&
+      npm run build &&
+      npm test
+    )
+    ;;
   wasm-check)
     configure_rust_with_wasm_target
     append_rust_cfg 'getrandom_backend="wasm_js"'
     "${CARGO}" check -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets
-    "${CARGO}" clippy -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets -- -D warnings
+    "${CARGO_CLIPPY}" clippy -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets -- -D warnings
     ;;
   wasm-contract-tests)
     configure_rust_with_wasm_target

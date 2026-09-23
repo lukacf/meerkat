@@ -160,6 +160,19 @@ them.
 
 ### Fixed
 
+- Compaction no longer mints an audit graph edge over inline media. When a
+  session has a blob store, the agent externalizes inline images in the live
+  transcript before the compaction witness binds the exact rows, so the rows a
+  rewrite edge retains verbatim are already in their persisted (blob-backed)
+  form. Previously the edge kept the inline bytes while the next WholeBlob
+  checkpoint externalized only the live rows, so the live transcript no longer
+  preserved the graph-proved audited endpoint (`LivePrefixDiverges` at the
+  image row) and every later read of the document was refused; a session in
+  that state could not be reloaded (HomeCore parent-1, 2026-09-22). The
+  checkpoint pass is now a byte-identical no-op for those rows. A failed
+  externalization skips that compaction attempt with a typed
+  `CompactionFailed` reason instead of proceeding.
+
 - WholeBlob persistence refuses to mint a document its own reader would
   refuse. `Session::to_persisted_artifact` and the runtime store's WholeBlob
   encoder now run the audited-endpoint check before serializing, so a live

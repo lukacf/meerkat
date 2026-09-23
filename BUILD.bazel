@@ -460,6 +460,7 @@ test_suite(
         "//meerkat-core:transcript_digest_budget_test",
         "//meerkat-core:transcript_graph_ingress_validation_test",
         "//meerkat-core:v0_8_10_ob3_recovery_migration_test",
+        "//meerkat-core:wedge_evidence_probe_test",
         "//meerkat-core:wholeblob_compaction_media_guard_test",
         "//meerkat-gemini:meerkat_gemini_unit_test",
         "//meerkat-gemini:oauth_resolve_test",

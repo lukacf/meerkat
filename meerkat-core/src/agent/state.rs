@@ -2783,14 +2783,39 @@ where
                         // `transcript_messages_digest(self.session.messages())`
                         // and binds the compaction authority to the exact
                         // pre-compaction transcript.
-                        let compaction_source = self.session.transcript_content_digest().and_then(
-                            |revision| {
-                                crate::agent::compact::CompactionObservationSource::from_session(
-                                    &self.session,
-                                )
-                                .map(|observations| (revision, observations))
-                            },
-                        );
+                        // Inline media must reach its persisted (blob-backed)
+                        // form BEFORE the compaction witness binds the exact
+                        // transcript. The rewrite edge records the retained
+                        // rows verbatim, while the later checkpoint externalizes
+                        // only the live rows (`Session::externalize_media`
+                        // leaves audited graph metadata untouched). A row that
+                        // is inline in the edge and blob-backed in the body makes
+                        // the live transcript diverge from the graph-proved
+                        // endpoint, and every later read of the document is
+                        // refused. This is the same in-place scan the checkpoint
+                        // performs, so the checkpoint pass becomes a
+                        // byte-identical no-op for these rows.
+                        let externalized = match self.blob_store.as_ref() {
+                            Some(blob_store) => self
+                                .session
+                                .externalize_media(blob_store.as_ref(), 0)
+                                .await
+                                .map_err(|error| {
+                                    format!("inline media could not be externalized before compaction: {error}")
+                                }),
+                            None => Ok(()),
+                        };
+                        let compaction_source = externalized.and_then(|()| {
+                            self.session
+                                .transcript_content_digest()
+                                .and_then(|revision| {
+                                    crate::agent::compact::CompactionObservationSource::from_session(
+                                        &self.session,
+                                    )
+                                    .map(|observations| (revision, observations))
+                                })
+                                .map_err(|error| format!("live transcript is not digestible: {error}"))
+                        });
                         let outcome = match compaction_source {
                             Ok((parent_revision, observation_source)) => {
                                 crate::agent::compact::run_compaction(
@@ -2816,10 +2841,10 @@ where
                             Err(error) => {
                                 tracing::warn!(
                                     error = %error,
-                                    "live transcript is not digestible; skipping compaction"
+                                    "compaction preconditions failed; skipping compaction"
                                 );
                                 Err(crate::agent::compact::CompactionError::InvalidRebuild(
-                                    format!("live transcript is not digestible: {error}"),
+                                    error,
                                 ))
                             }
                         };
@@ -12162,6 +12187,244 @@ mod tests {
                         && user.text_content().contains("curated summary")
             )),
             "the committed history must carry the curated summary as a typed compaction-summary message"
+        );
+    }
+
+    /// Blob store double that actually stores what it receives, so a row that
+    /// compaction externalizes can be hydrated again before the model call.
+    struct StoringBlobStore {
+        blobs: Mutex<std::collections::HashMap<BlobId, BlobPayload>>,
+    }
+    impl StoringBlobStore {
+        fn new() -> Self {
+            Self {
+                blobs: Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+    }
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl BlobStore for StoringBlobStore {
+        async fn put_image(&self, media_type: &str, data: &str) -> Result<BlobRef, BlobStoreError> {
+            let mut blobs = self.blobs.lock().unwrap();
+            let blob_id = BlobId::new(format!("sha256:test-{}", blobs.len()));
+            blobs.insert(
+                blob_id.clone(),
+                BlobPayload {
+                    blob_id: blob_id.clone(),
+                    media_type: media_type.to_string(),
+                    data: data.to_string(),
+                },
+            );
+            Ok(BlobRef {
+                blob_id,
+                media_type: media_type.to_string(),
+            })
+        }
+        async fn get(&self, blob_id: &BlobId) -> Result<BlobPayload, BlobStoreError> {
+            self.blobs
+                .lock()
+                .unwrap()
+                .get(blob_id)
+                .cloned()
+                .ok_or_else(|| BlobStoreError::NotFound(blob_id.clone()))
+        }
+        async fn delete(&self, blob_id: &BlobId) -> Result<(), BlobStoreError> {
+            self.blobs.lock().unwrap().remove(blob_id);
+            Ok(())
+        }
+        fn is_persistent(&self) -> bool {
+            false
+        }
+    }
+
+    /// Test compactor that summarizes everything before the first image-bearing
+    /// user row and retains that row and everything after it verbatim, the
+    /// shape a production compaction takes when a recent turn carried media.
+    struct RetainingTailCompactor {
+        boundaries_seen: Mutex<u64>,
+    }
+    impl Compactor for RetainingTailCompactor {
+        fn should_compact(&self, _ctx: &CompactionContext) -> bool {
+            // Fire on the second pre-LLM boundary the agent asks about, so the
+            // seeded history has one completed turn behind it whatever the
+            // seeded cadence numbering is.
+            let mut seen = self.boundaries_seen.lock().unwrap();
+            *seen += 1;
+            *seen == 2
+        }
+        fn compaction_prompt(&self) -> &'static str {
+            "COMPACT NOW"
+        }
+        fn max_summary_tokens(&self) -> u32 {
+            32
+        }
+        fn rebuild_history(&self, messages: &[Message], summary: &str) -> CompactionResult {
+            let tail_start = messages
+                .iter()
+                .position(|message| {
+                    matches!(
+                        message,
+                        Message::User(user) if user.content.iter().any(|block| matches!(block, ContentBlock::Image { .. }))
+                    )
+                })
+                .unwrap_or(messages.len());
+            let summary_mapping = test_compaction_summary(0, summary);
+            let mut compacted = vec![summary_mapping.message.clone()];
+            let mut retained = Vec::new();
+            for (source_offset, message) in messages.iter().enumerate().skip(tail_start) {
+                retained.push(CompactionRetained::new(
+                    u64::try_from(source_offset).unwrap_or(u64::MAX),
+                    u64::try_from(compacted.len()).unwrap_or(u64::MAX),
+                    message.clone(),
+                ));
+                compacted.push(message.clone());
+            }
+            CompactionResult {
+                messages: compacted,
+                summary: summary_mapping,
+                retained,
+                discarded: messages
+                    .iter()
+                    .enumerate()
+                    .take(tail_start)
+                    .map(|(offset, message)| {
+                        CompactionDiscard::new(
+                            u64::try_from(offset).unwrap_or(u64::MAX),
+                            message.clone(),
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_externalizes_inline_media_before_the_rewrite_edge_binds_it() {
+        // Regression for the 2026-09-22 HomeCore wedge (session parent-1,
+        // meerkat 0.8.40): a user row carrying an inline image was retained
+        // verbatim by a compaction rewrite, so the audit graph edge recorded
+        // the row with inline bytes. The WholeBlob checkpoint then
+        // externalized only the live rows, leaving the edge inline and the
+        // body blob-backed. The ingress guard refused every later read
+        // ("live transcript does not preserve the graph-proved audited
+        // endpoint") and the session could not be reloaded. With a blob store
+        // configured, compaction must externalize the live rows before the
+        // witness binds them, so the checkpoint pass is a byte-identical
+        // no-op and the endpoint relation holds.
+        let mut session = crate::Session::new();
+        session.push(Message::User(UserMessage::text("older context")));
+        session.push(Message::BlockAssistant(
+            crate::types::BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "ok".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ),
+        ));
+        session.push(Message::User(UserMessage::with_blocks(vec![
+            ContentBlock::Text {
+                text: "look at this".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: "A".repeat(4_096),
+                },
+            },
+        ])));
+        session.push(Message::BlockAssistant(
+            crate::types::BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: "noted".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ),
+        ));
+        let blob_store = Arc::new(StoringBlobStore::new());
+        let client = Arc::new(FailingCompactionLlmClient::new());
+        let curator = Arc::new(SubstitutingCurator::new());
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .compactor(Arc::new(RetainingTailCompactor {
+                boundaries_seen: Mutex::new(0),
+            }))
+            .compaction_curator(curator.clone())
+            .with_blob_store(blob_store.clone())
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+        agent.run("first".into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
+        agent
+            .run_with_events("second".into(), tx)
+            .await
+            .expect("curated compaction should commit and continue the turn");
+        let events: Vec<crate::event::AgentEvent> =
+            std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, crate::event::AgentEvent::CompactionCompleted { .. })),
+            "the boundary trigger must drive compaction to completion; events: {:?}",
+            events
+                .iter()
+                .map(|event| {
+                    let debug = format!("{event:?}");
+                    debug
+                        .split(['{', '('])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        );
+        let compaction_failures: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::event::AgentEvent::CompactionFailed { reason } => {
+                    Some(format!("{reason:?}"))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            compaction_failures.is_empty(),
+            "compaction failed: {compaction_failures:?}"
+        );
+        // The WholeBlob checkpoint externalizes the live rows. On 0.8.40 this
+        // is where the wedge was minted: the edge kept the inline row, the
+        // body got the blob-backed one, and the ingress guard refused every
+        // later read with "live transcript does not preserve the graph-proved
+        // audited endpoint" (LivePrefixDiverges at the image row).
+        let mut checkpointed = agent.session().clone();
+        checkpointed
+            .externalize_media(blob_store.as_ref(), 0)
+            .await
+            .expect("checkpoint externalization");
+        assert_eq!(
+            checkpointed.audited_endpoint_divergence().unwrap(),
+            None,
+            "checkpoint externalization must not diverge the live rows from the audited endpoint"
+        );
+        assert_eq!(
+            agent.session().audited_endpoint_divergence().unwrap(),
+            None,
+            "the live rows must equal the graph-proved endpoint right after compaction"
+        );
+        let retained_image_is_blob_backed = agent.session().messages().iter().any(|message| {
+            matches!(
+                message,
+                Message::User(user) if user.content.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Image { data: ImageData::Blob { .. }, .. }
+                ))
+            )
+        });
+        assert!(
+            retained_image_is_blob_backed,
+            "the retained image row must already be blob-backed when the rewrite edge binds it"
         );
     }
 

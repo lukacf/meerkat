@@ -854,6 +854,10 @@ fn mob_catalog_gate_rejects_missing_scope() {
     assert!(!gated, "a missing scope must fail closed");
 }
 
+// machines_test_support.rs stands in for machines.rs without the
+// machine-authority feature and includes this file too; the merge helper
+// lives only in machines.rs.
+#[cfg(feature = "machine-authority")]
 #[test]
 fn jdk_java_options_mirror_the_tlc_stack_flag_for_the_launcher_main_thread() {
     // The launcher sizes TLC's main thread from JDK_JAVA_OPTIONS, not from

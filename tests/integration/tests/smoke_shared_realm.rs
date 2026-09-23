@@ -13,8 +13,12 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use meerkat_integration_tests::voice_fixtures::{
+    LIVE_AUDIO_FRAME_MS, LIVE_AUDIO_PRESERVED_INTERNAL_SILENCE_MS, LIVE_AUDIO_TRAILING_SILENCE_MS,
+    OPENAI_TTS_DEFAULT_VOICE, OPENAI_TTS_MODEL, cached_openai_tts_pcm, chunk_pcm_bytes,
+    live_audio_cache_key, live_pcm_bytes_per_ms, pcm_has_non_silence, prepare_tts_pcm_for_live_vad,
+};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -4406,17 +4410,6 @@ budget_warning_threshold = 0.8
 // Live adapter audio helpers
 // ===========================================================================
 
-const OPENAI_TTS_MODEL: &str = "gpt-4o-mini-tts";
-const OPENAI_TTS_DEFAULT_VOICE: &str = "alloy";
-const LIVE_AUDIO_SAMPLE_RATE_HZ: usize = 24_000;
-const LIVE_AUDIO_BYTES_PER_SAMPLE: usize = 2;
-const LIVE_AUDIO_FRAME_MS: usize = 200;
-// 1500ms (not 500ms) — gpt-realtime-2 server VAD requires this floor for
-// reliable speech_stopped on long utterances. See commit f08ce9e3b.
-const LIVE_AUDIO_TRAILING_SILENCE_MS: usize = 1500;
-const LIVE_AUDIO_INTERNAL_SILENCE_THRESHOLD: i16 = 100;
-const LIVE_AUDIO_MAX_INTERNAL_SILENCE_MS: usize = 200;
-const LIVE_AUDIO_PRESERVED_INTERNAL_SILENCE_MS: usize = 80;
 const LIVE_OUTPUT_IDLE_SETTLE_MS: u64 = 2_000;
 
 fn openai_tts_model() -> String {
@@ -4444,17 +4437,6 @@ fn live_audio_artifacts_dir(scenario: &str) -> PathBuf {
         .join(scenario)
 }
 
-fn live_audio_cache_key(text: &str, model: &str, voice: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"openai-tts-v2\0");
-    digest.update(model.as_bytes());
-    digest.update(b"\0");
-    digest.update(voice.as_bytes());
-    digest.update(b"\0");
-    digest.update(text.as_bytes());
-    format!("{:x}", digest.finalize())
-}
-
 fn normalize_semantic_text(text: &str) -> String {
     text.split_whitespace()
         .map(|segment| segment.to_ascii_lowercase())
@@ -4477,115 +4459,18 @@ fn normalized_text_contains_any(text: &str, variants: &[&str]) -> bool {
         .any(|variant| text.contains(&normalize_semantic_text(variant)))
 }
 
-fn live_pcm_bytes_per_ms() -> usize {
-    (LIVE_AUDIO_SAMPLE_RATE_HZ * LIVE_AUDIO_BYTES_PER_SAMPLE) / 1000
-}
-
-fn append_pcm_trailing_silence(pcm: &[u8], trailing_silence_ms: usize) -> Vec<u8> {
-    let silence_bytes = live_pcm_bytes_per_ms() * trailing_silence_ms;
-    let mut output = Vec::with_capacity(pcm.len() + silence_bytes);
-    output.extend_from_slice(pcm);
-    output.resize(output.len() + silence_bytes, 0);
-    output
-}
-
-fn compress_internal_pcm_silence(
-    pcm: &[u8],
-    amplitude_threshold: i16,
-    max_silence_ms: usize,
-    preserved_silence_ms: usize,
-) -> Vec<u8> {
-    let max_silence_bytes = live_pcm_bytes_per_ms() * max_silence_ms;
-    let preserved_silence_bytes = live_pcm_bytes_per_ms() * preserved_silence_ms;
-    let mut output = Vec::with_capacity(pcm.len());
-    let mut index = 0usize;
-
-    while index + LIVE_AUDIO_BYTES_PER_SAMPLE <= pcm.len() {
-        let sample = i16::from_le_bytes([pcm[index], pcm[index + 1]]);
-        let silent = sample.abs() <= amplitude_threshold;
-        let run_start = index;
-        index += LIVE_AUDIO_BYTES_PER_SAMPLE;
-
-        while index + LIVE_AUDIO_BYTES_PER_SAMPLE <= pcm.len() {
-            let next_sample = i16::from_le_bytes([pcm[index], pcm[index + 1]]);
-            if (next_sample.abs() <= amplitude_threshold) != silent {
-                break;
-            }
-            index += LIVE_AUDIO_BYTES_PER_SAMPLE;
-        }
-
-        let run = &pcm[run_start..index];
-        if silent && run.len() > max_silence_bytes {
-            output.extend_from_slice(&run[..preserved_silence_bytes.min(run.len())]);
-        } else {
-            output.extend_from_slice(run);
-        }
-    }
-
-    if index < pcm.len() {
-        output.extend_from_slice(&pcm[index..]);
-    }
-
-    output
-}
-
-fn prepare_tts_pcm_for_live_vad(pcm: &[u8]) -> Vec<u8> {
-    compress_internal_pcm_silence(
-        pcm,
-        LIVE_AUDIO_INTERNAL_SILENCE_THRESHOLD,
-        LIVE_AUDIO_MAX_INTERNAL_SILENCE_MS,
-        LIVE_AUDIO_PRESERVED_INTERNAL_SILENCE_MS,
-    )
-}
-
-fn chunk_pcm_bytes(pcm: &[u8], frame_ms: usize, trailing_silence_ms: usize) -> Vec<Vec<u8>> {
-    let frame_bytes = live_pcm_bytes_per_ms() * frame_ms;
-    append_pcm_trailing_silence(pcm, trailing_silence_ms)
-        .chunks(frame_bytes.max(1))
-        .map(|chunk| chunk.to_vec())
-        .collect()
-}
-
-fn pcm_has_non_silence(pcm: &[u8]) -> bool {
-    pcm.chunks_exact(2)
-        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
-        .any(|sample| sample != 0)
-}
-
+/// VAD-prepared TTS speech for the live-adapter smokes, cached under
+/// `target/e2e-live-tts-cache` (see `meerkat_integration_tests::voice_fixtures`).
 async fn openai_tts_pcm(text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let api_key = openai_api_key().ok_or("OpenAI API key is required for live audio smokes")?;
-    let model = openai_tts_model();
-    let voice = openai_tts_voice();
-    let cache_key = live_audio_cache_key(text, &model, &voice);
-    let cache_path = live_tts_cache_dir().join(format!("{cache_key}.pcm"));
-    if cache_path.exists() {
-        return Ok(tokio::fs::read(cache_path).await?);
-    }
-
-    tokio::fs::create_dir_all(live_tts_cache_dir()).await?;
-    let response = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(60))
-        .build()?
-        .post("https://api.openai.com/v1/audio/speech")
-        .bearer_auth(api_key)
-        .json(&json!({
-            "model": model,
-            "voice": voice,
-            "input": text,
-            "response_format": "pcm",
-        }))
-        .send()
-        .await?
-        .error_for_status()?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("OpenAI TTS request failed with {status}: {body}").into());
-    }
-    let pcm = prepare_tts_pcm_for_live_vad(&response.bytes().await?);
-    tokio::fs::write(&cache_path, &pcm).await?;
-    Ok(pcm)
+    Ok(cached_openai_tts_pcm(
+        &api_key,
+        &live_tts_cache_dir(),
+        &openai_tts_model(),
+        &openai_tts_voice(),
+        text,
+    )
+    .await?)
 }
 
 // ---------------------------------------------------------------------------

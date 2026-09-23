@@ -12,7 +12,7 @@ use std::time::Instant;
 use meerkat::experimental_gpt_live::thinking_capture;
 use serde::{Deserialize, Serialize};
 
-use super::AudioEvidence;
+use super::{AudioEvidence, TimelineEntry};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +34,40 @@ pub enum Stage {
     ReplacementUnknown,
     ReplacementRecall,
     Finished,
+    // S100 morning standup.
+    StandupSilence,
+    StandupOpen,
+    StandupDelegation,
+    StandupBargeIn,
+    StandupReadback,
+    StandupFarewell,
+    // S102 who are you.
+    WhoAreYouCapabilities,
+    WhoAreYouRoster,
+    WhoAreYouAsk,
+    // S103 interrupt and recover.
+    InterruptMonologue,
+    InterruptBargeIn,
+    // S107 stuck close convergence.
+    StuckCloseJob,
+    StuckCloseCut,
+    StuckCloseJobCommit,
+    // S104 handoff voice -> typed -> voice.
+    HandoffJob,
+    HandoffClose,
+    HandoffTyped,
+    HandoffBack,
+    // Shared: a silence hold right after an open or reopen (greeting check).
+    SilenceHold,
+    // S101 busy backend.
+    BusyJobs,
+    // S105 fork and merge.
+    ForkRequests,
+    ForkCorrection,
+    // S106 long haul.
+    HaulExchanges,
+    HaulHold,
+    HaulReopen,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -142,15 +176,42 @@ pub enum NativeRecord {
     },
     Fault {
         fault: BrowserFault,
+        /// Soft faults are sampled through the evidence chain and carry the
+        /// media snapshot; hard faults are written directly without one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio: Option<AudioEvidence>,
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserFault {
+    // Hard: the browser evidence stream is no longer trustworthy.
     QueueLimit,
     StringLimit,
     CaptureFailure,
+    // Soft: architecture observations the scenario asserts on.
+    /// The assistant kept speaking over a playing fixture for `ms` beyond
+    /// the fixture's overlap bound (talk-over / late barge-in cancel).
+    Overlap {
+        ms: u64,
+        fixture: String,
+        bound_ms: u64,
+    },
+    /// The same assistant sentence was delivered twice within one response.
+    DuplicateReadout {
+        text: String,
+        response: u32,
+    },
+}
+
+impl BrowserFault {
+    pub fn is_hard(&self) -> bool {
+        matches!(
+            self,
+            Self::QueueLimit | Self::StringLimit | Self::CaptureFailure
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -243,6 +304,134 @@ pub enum Record {
         outcome: Outcome,
         last_stage: Stage,
     },
+    /// Downsampled assistant energy windows (t_ms, rms) for one channel.
+    Energy {
+        channel: u32,
+        windows: Vec<(u32, f32)>,
+    },
+    /// The browser peer's ordered timeline for one channel.
+    Timeline {
+        channel: u32,
+        entries: Vec<TimelineEntry>,
+    },
+    /// Per-turn response latency: user input final to first assistant
+    /// audio, and end of user speech to first assistant audio.
+    /// Protocol-anchored by arrival (join by arrival, alternation by
+    /// arrival), mirroring the runtime: for a delegated turn the utterance is
+    /// the `session.input_transcript.delta`s that arrived before
+    /// `session.delegation.created`; for a plain turn those that arrived
+    /// before the response's first `output_transcript.delta`. The input final
+    /// is the arrival of the last such delta and `input_final_end_ms` its
+    /// provider `end_ms`; `input_final_to_delegation_ms` is the
+    /// delegation.created arrival minus that (non-negative by construction).
+    Latency {
+        channel: u32,
+        turn: u32,
+        input_final_to_audio_ms: Option<i64>,
+        speech_end_to_audio_ms: Option<i64>,
+        input_final_end_ms: Option<f64>,
+        input_final_to_delegation_ms: Option<i64>,
+    },
+    /// Whether the first assistant transcript of a continuing conversation
+    /// opened with a fresh greeting (measurement, not a gate).
+    Greeting {
+        channel: u32,
+        greeted: bool,
+        transcript: String,
+    },
+    /// Client-side disconnect to host-observed Closed.
+    CloseConvergence {
+        channel: u32,
+        converged_before_host_close: bool,
+        ms: u64,
+    },
+    /// Time-to-talk breakdown for one channel, every mark on the journal
+    /// clock (ms since the journal was created; `None` when not observed):
+    /// live/open request -> open returned (pending handle) -> provider
+    /// session attached (thinking capture `SessionAttached`) -> host answer
+    /// delivered -> browser WebRTC connected / data channel open -> first
+    /// outbound user audio packet -> first user speech -> first user input
+    /// transcript delta. The public path carries media browser <-> provider
+    /// directly, so the host never accepts an audio packet; the browser's
+    /// first outbound RTP packet is the media-path-up mark.
+    TimeToTalk {
+        channel: u32,
+        open_request_ms: u64,
+        open_returned_ms: u64,
+        session_attached_ms: Option<u64>,
+        answer_delivered_ms: u64,
+        webrtc_connected_ms: Option<u64>,
+        data_channel_open_ms: Option<u64>,
+        first_audio_packet_ms: Option<u64>,
+        first_user_speech_ms: Option<u64>,
+        first_input_delta_ms: Option<u64>,
+    },
+    /// Barge-in breakdown on the browser clock, relative to the user's
+    /// speech onset (fixture start): first provider input transcript delta
+    /// of the interruption, the assistant's last energetic window, the
+    /// overlap the fixture accumulated, and every provider event type seen
+    /// in the window. Media is browser <-> provider on the public path, so
+    /// the peer plays a live track with no queued playback to flush.
+    BargeIn {
+        channel: u32,
+        onset_ms: u64,
+        first_input_delta_after_onset_ms: Option<i64>,
+        assistant_quiet_after_onset_ms: Option<i64>,
+        overlap_ms: u64,
+        overlap_bound_ms: u64,
+        provider_events: Vec<String>,
+    },
+    /// Browser uplink health at close: outbound audio RTP packets sent
+    /// against the ~50 packets/s a continuous 20 ms Opus track produces
+    /// since `connected`. A ratio well under 1.0 means the headless
+    /// browser's audio rendering stalled (host CPU starvation), which loses
+    /// user speech before it ever reaches the provider.
+    Uplink {
+        channel: u32,
+        packets_sent: u64,
+        expected_packets: u64,
+        ratio: f32,
+    },
+    /// Host `/proc/loadavg` at a scenario moment (open, close), so provider
+    /// transcript loss can be correlated with machine load.
+    HostLoad {
+        moment: String,
+        loadavg: String,
+    },
+    /// Mob-scoped WorkGraph items behind the channel's delegations: `items`
+    /// at or above `expected_delegations` is parallel mode (the coordinator
+    /// scheduled through WorkGraph); none is the serial fallback.
+    WorkGraph {
+        channel: u32,
+        items: usize,
+        expected_delegations: usize,
+        mode: String,
+        titles: Vec<String>,
+    },
+    /// One close/reopen-with-summary cycle: close convergence, reopen
+    /// connect time, summary delivery time (reopen -> fragments acknowledged),
+    /// and the instructions-lane fragment accounting for the cycle.
+    ReopenCycle {
+        channel: u32,
+        close_ms: Option<u64>,
+        reopen_ms: u64,
+        summary_delivery_ms: u64,
+        framed_before: usize,
+        framed_after: usize,
+        fragments: usize,
+        expected_fragments: usize,
+        fragment_bytes: usize,
+        acknowledged: usize,
+        greeted: bool,
+    },
+    /// A tolerant (model-dependent) check: recorded with its outcome, never
+    /// a gate on its own. The deterministic checks assert.
+    Tolerant {
+        channel: u32,
+        check: String,
+        passed: bool,
+        detail: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -263,10 +452,17 @@ struct State {
     job: u32,
     exchange: u32,
     attached_channels: Vec<u32>,
+    /// Journal-clock time of each channel's provider `SessionAttached`.
+    session_attached_ms: Vec<(u32, u64)>,
+    /// Texts of owned instructions-lane append attempts, in wire order.
+    instructions_append_texts: Vec<String>,
     /// Running count of owned thinking-append attempts seen on the wire.
     thinking_append_attempts: usize,
     /// Bounded copy of the attempted thinking-append texts, for echo checks.
     thinking_append_texts: Vec<String>,
+    /// Owned instructions-lane appends the provider acknowledged (matched an
+    /// owned client event id and was accepted).
+    instructions_acknowledged: usize,
     /// Owned instructions-lane attempts (one per wire fragment) and how many
     /// reassembled appends opened a framed summary.
     instructions_append_attempts: usize,
@@ -275,6 +471,8 @@ struct State {
     /// channel ordinal and the append token shared by every fragment's client
     /// event id (`meerkat-instructions-<token>-<index>`).
     instructions_appends: HashMap<String, InstructionsAppendReassembly>,
+    /// Soft browser faults (overlap, duplicate readout); never invalidate.
+    browser_faults: Vec<BrowserFault>,
 }
 
 #[derive(Default)]
@@ -295,6 +493,9 @@ fn instructions_append_token(client_event_id: &str) -> Option<&str> {
 pub struct OwnerAppends {
     pub thinking_attempts: usize,
     pub instructions_attempts: usize,
+    /// Instructions-lane fragments the provider acknowledged as owned and
+    /// accepted.
+    pub instructions_acknowledged: usize,
     /// Instructions attempts that open a bootstrap summary (carry its framing).
     pub framed_summaries: usize,
 }
@@ -303,6 +504,7 @@ struct Inner {
     state: Mutex<State>,
     started: Instant,
     path: PathBuf,
+    label: &'static str,
     expected_phrase: String,
     secrets: Vec<String>,
     limits: Limits,
@@ -314,8 +516,14 @@ pub struct Journal(Arc<Inner>);
 
 impl Journal {
     pub fn create(expected_phrase: String) -> Result<Self, Fault> {
+        Self::create_for("S99", expected_phrase)
+    }
+
+    /// One journal under `target/e2e-live-audio-artifacts/<label>/<uuid>`.
+    pub fn create_for(label: &'static str, expected_phrase: String) -> Result<Self, Fault> {
         let directory = super::workspace_root()
-            .join("target/e2e-live-audio-artifacts/s99")
+            .join("target/e2e-live-audio-artifacts")
+            .join(label.to_ascii_lowercase())
             .join(uuid::Uuid::new_v4().to_string());
         let secrets = [
             "OPENAI_API_KEY",
@@ -326,11 +534,27 @@ impl Journal {
         .filter_map(|name| std::env::var(name).ok())
         .filter(|secret| !secret.is_empty())
         .collect();
-        Self::at(&directory, expected_phrase, secrets, Limits::default())
+        Self::at_labeled(
+            &directory,
+            label,
+            expected_phrase,
+            secrets,
+            Limits::default(),
+        )
     }
 
     fn at(
         directory: &Path,
+        expected_phrase: String,
+        secrets: Vec<String>,
+        limits: Limits,
+    ) -> Result<Self, Fault> {
+        Self::at_labeled(directory, "S99", expected_phrase, secrets, limits)
+    }
+
+    fn at_labeled(
+        directory: &Path,
+        label: &'static str,
         expected_phrase: String,
         mut secrets: Vec<String>,
         limits: Limits,
@@ -361,14 +585,19 @@ impl Journal {
                 job: 0,
                 exchange: 0,
                 attached_channels: Vec::new(),
+                session_attached_ms: Vec::new(),
+                instructions_append_texts: Vec::new(),
+                instructions_acknowledged: 0,
                 thinking_append_attempts: 0,
                 thinking_append_texts: Vec::new(),
                 instructions_append_attempts: 0,
                 framed_summary_attempts: 0,
                 instructions_appends: HashMap::new(),
+                browser_faults: Vec::new(),
             }),
             started: Instant::now(),
             path,
+            label,
             expected_phrase: expected_phrase.clone(),
             secrets,
             limits,
@@ -387,7 +616,7 @@ impl Journal {
                 provider_id_bytes: thinking_capture::Capture::MAX_ID_BYTES,
             },
         })?;
-        println!("S99_EVIDENCE_JOURNAL path={}", journal.path().display());
+        println!("{label}_EVIDENCE_JOURNAL path={}", journal.path().display());
         Ok(journal)
     }
 
@@ -472,26 +701,45 @@ impl Journal {
     }
 
     pub fn native(&self, channel: u32, record: NativeRecord) -> Result<(), Fault> {
-        if let NativeRecord::Fault { fault } = record {
-            return self.fail(match fault {
-                BrowserFault::QueueLimit => Fault::BrowserQueueLimit,
-                BrowserFault::StringLimit => Fault::BrowserStringLimit,
-                BrowserFault::CaptureFailure => Fault::InvalidBrowserEvidence,
-            });
+        if let NativeRecord::Fault { fault, .. } = &record {
+            match fault {
+                BrowserFault::QueueLimit => return self.fail(Fault::BrowserQueueLimit),
+                BrowserFault::StringLimit => return self.fail(Fault::BrowserStringLimit),
+                BrowserFault::CaptureFailure => return self.fail(Fault::InvalidBrowserEvidence),
+                BrowserFault::Overlap { .. } | BrowserFault::DuplicateReadout { .. } => {
+                    self.0
+                        .state
+                        .lock()
+                        .map_err(|_| Fault::Poisoned)?
+                        .browser_faults
+                        .push(fault.clone());
+                }
+            }
         }
         self.record(Record::Native { channel, record })
+    }
+
+    /// Soft browser faults recorded so far. Scenarios assert on this; the
+    /// journal itself stays valid.
+    pub fn faults(&self) -> Result<Vec<BrowserFault>, Fault> {
+        Ok(self
+            .0
+            .state
+            .lock()
+            .map_err(|_| Fault::Poisoned)?
+            .browser_faults
+            .clone())
     }
 
     pub fn flush_wire(&self) -> Result<(), Fault> {
         let events = self.0.wire.drain().map_err(|_| Fault::ProviderContention)?;
         for event in events {
             if matches!(event.event, thinking_capture::EventKind::SessionAttached) {
-                self.0
-                    .state
-                    .lock()
-                    .map_err(|_| Fault::Poisoned)?
-                    .attached_channels
-                    .push(event.channel_ordinal);
+                let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+                state.attached_channels.push(event.channel_ordinal);
+                state
+                    .session_attached_ms
+                    .push((event.channel_ordinal, event.elapsed_ms));
             }
             if let thinking_capture::EventKind::ThinkingAppendAttempt { text, .. } = &event.event {
                 let mut state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
@@ -525,6 +773,21 @@ impl Journal {
                     append.counted_as_framed = true;
                     state.framed_summary_attempts += 1;
                 }
+                if state.instructions_append_texts.len() < thinking_capture::Capture::MAX_EVENTS {
+                    state.instructions_append_texts.push(text.clone());
+                }
+            }
+            if let thinking_capture::EventKind::InstructionsAppended {
+                matched_owned: true,
+                accepted: true,
+                ..
+            } = &event.event
+            {
+                self.0
+                    .state
+                    .lock()
+                    .map_err(|_| Fault::Poisoned)?
+                    .instructions_acknowledged += 1;
             }
             self.record(Record::Thinking { event })?;
         }
@@ -552,6 +815,35 @@ impl Journal {
             .thinking_append_attempts)
     }
 
+    /// Milliseconds on the journal clock at `at` (the thinking capture and
+    /// the journal start together, so its `elapsed_ms` is the same clock).
+    pub fn elapsed_ms_at(&self, at: Instant) -> u64 {
+        u64::try_from(at.saturating_duration_since(self.0.started).as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Journal-clock time the provider session of `channel` attached.
+    pub fn session_attached_ms(&self, channel: u32) -> Result<Option<u64>, Fault> {
+        self.flush_wire()?;
+        let state = self.0.state.lock().map_err(|_| Fault::Poisoned)?;
+        Ok(state
+            .session_attached_ms
+            .iter()
+            .find(|(ordinal, _)| *ordinal == channel)
+            .map(|(_, ms)| *ms))
+    }
+
+    /// Texts of every owned instructions-lane append attempt so far.
+    pub fn instructions_append_attempt_texts(&self) -> Result<Vec<String>, Fault> {
+        self.flush_wire()?;
+        Ok(self
+            .0
+            .state
+            .lock()
+            .map_err(|_| Fault::Poisoned)?
+            .instructions_append_texts
+            .clone())
+    }
+
     /// Owner appends observed so far, by lane.
     pub fn owner_appends(&self) -> Result<OwnerAppends, Fault> {
         self.flush_wire()?;
@@ -559,6 +851,7 @@ impl Journal {
         Ok(OwnerAppends {
             thinking_attempts: state.thinking_append_attempts,
             instructions_attempts: state.instructions_append_attempts,
+            instructions_acknowledged: state.instructions_acknowledged,
             framed_summaries: state.framed_summary_attempts,
         })
     }
@@ -677,10 +970,15 @@ impl Journal {
                 .encode(state.count, &Record::Fault { fault }, false)
                 .and_then(|bytes| self.write_locked(state, &bytes));
             if result.is_err() {
-                eprintln!("S99_EVIDENCE_WRITE_FAILURE path={}", self.path().display());
+                eprintln!(
+                    "{}_EVIDENCE_WRITE_FAILURE path={}",
+                    self.0.label,
+                    self.path().display()
+                );
             }
             eprintln!(
-                "S99_EVIDENCE_FAULT fault={fault:?} path={}",
+                "{}_EVIDENCE_FAULT fault={fault:?} path={}",
+                self.0.label,
                 self.path().display()
             );
         }
@@ -721,7 +1019,7 @@ impl Journal {
 
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "S99 evidence failure: {self:?}")
+        write!(f, "live evidence failure: {self:?}")
     }
 }
 impl std::error::Error for Fault {}
@@ -1134,7 +1432,8 @@ mod tests {
             journal.native(
                 1,
                 NativeRecord::Fault {
-                    fault: BrowserFault::QueueLimit
+                    fault: BrowserFault::QueueLimit,
+                    audio: None,
                 }
             ),
             Err(Fault::BrowserQueueLimit)
@@ -1159,6 +1458,70 @@ mod tests {
             Err(Fault::AfterFinish)
         );
         assert_eq!(journal.check(), Err(Fault::AfterFinish));
+    }
+
+    #[test]
+    fn soft_browser_faults_are_collected_without_invalidating_the_journal() {
+        let root = root();
+        let journal = Journal::at(
+            root.path(),
+            "amber otter copper".into(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let overlap: NativeRecord = serde_json::from_value(serde_json::json!({
+            "kind": "fault",
+            "fault": {"overlap": {"ms": 700, "fixture": "standup_barge_in", "bound_ms": 300}},
+            "audio": {
+                "decoded_non_silent_frames": 1, "decoded_non_silent_seconds": 0.1,
+                "non_silent_frames": 1, "total_audio_energy": null,
+                "total_samples_received": null, "total_samples_duration": null,
+                "bytes_received": 1, "packets_received": 1
+            }
+        }))
+        .unwrap();
+        journal.native(1, overlap).unwrap();
+        let duplicate: NativeRecord = serde_json::from_value(serde_json::json!({
+            "kind": "fault",
+            "fault": {"duplicate_readout": {"text": "the first line is ready", "response": 3}}
+        }))
+        .unwrap();
+        journal.native(1, duplicate).unwrap();
+        assert_eq!(journal.faults().unwrap().len(), 2);
+        assert!(
+            journal
+                .faults()
+                .unwrap()
+                .iter()
+                .all(|fault| !fault.is_hard())
+        );
+        assert!(matches!(
+            &journal.faults().unwrap()[0],
+            BrowserFault::Overlap {
+                ms: 700,
+                bound_ms: 300,
+                ..
+            }
+        ));
+        let hard: NativeRecord =
+            serde_json::from_value(serde_json::json!({"kind": "fault", "fault": "queue_limit"}))
+                .unwrap();
+        assert_eq!(journal.native(1, hard), Err(Fault::BrowserQueueLimit));
+        journal
+            .record(Record::Latency {
+                channel: 1,
+                turn: 1,
+                input_final_to_audio_ms: Some(850),
+                speech_end_to_audio_ms: Some(1400),
+                input_final_end_ms: None,
+                input_final_to_delegation_ms: None,
+            })
+            .unwrap_err();
+        assert_eq!(
+            journal.finish(Outcome::Passed),
+            Err(Fault::BrowserQueueLimit)
+        );
     }
 
     #[test]

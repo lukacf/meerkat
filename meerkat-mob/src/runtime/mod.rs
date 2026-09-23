@@ -324,6 +324,30 @@ use actor_turn_executor::ActorFlowTurnExecutor;
 use flow::FlowEngine;
 #[cfg(feature = "runtime-adapter")]
 use provisioner::MultiBackendProvisioner;
+
+/// The mob-shared WorkGraph as this mob's members see it.
+///
+/// Members build in the realm `mob.<id>`, and the factory refuses a WorkGraph
+/// namespace grant issued for any other realm. A host hands the mob runtime
+/// one service scoped to the host's own realm (the RPC runtime realm, or
+/// `default`); this rescopes that service's store to the mob realm, keeping
+/// the host's default namespace, so member tools, voice delegation items, and
+/// attention overlays all address the same per-mob namespace.
+pub fn mob_scoped_workgraph_service(
+    host_service: &meerkat::WorkGraphService,
+    mob_id: &crate::ids::MobId,
+) -> Result<meerkat::WorkGraphService, MobError> {
+    let realm = meerkat_core::mob_realm_id(mob_id.as_str()).map_err(|error| {
+        MobError::WiringError(format!(
+            "mob '{mob_id}' has no valid WorkGraph realm: {error}"
+        ))
+    })?;
+    Ok(meerkat::WorkGraphService::with_scope(
+        Arc::clone(host_service.store()),
+        realm.as_str(),
+        host_service.default_namespace().clone(),
+    ))
+}
 use provisioner::{MobProvisioner, ProvisionMemberRequest};
 use state::MobCommand;
 use tools::compose_external_tools_for_profile;

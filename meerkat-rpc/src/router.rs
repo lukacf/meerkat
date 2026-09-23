@@ -179,7 +179,13 @@ pub fn compose_rpc_mob_state(
         meerkat_mob::MobControlPrincipal::Owner,
     )
     .with_persistent_storage_root(persistent_mob_root)
-    .with_workgraph_service(runtime.workgraph_service().ok())
+    // Mobs rescope this service's store to their own realm, so the host
+    // service is supplied even when no runtime realm identity is active.
+    .with_workgraph_service(Some(
+        runtime
+            .workgraph_service()
+            .unwrap_or_else(|_| meerkat::WorkGraphService::new(runtime.workgraph_store())),
+    ))
     .with_default_llm_client_provider(Some(llm_provider))
     .with_external_tools_provider(Some(tools_provider));
     if let Some(acceptor) = controlling_acceptor {
@@ -6318,6 +6324,60 @@ mod tests {
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);
         (router, notif_rx)
+    }
+
+    /// The RPC-built mob state serves live delegation's WorkGraph even when
+    /// the runtime has no realm identity (the e2e harness and `rkat serve`
+    /// without a manifest): the host service is supplied from the store and
+    /// each mob rescopes it to `mob.<id>`, where its members build. Without
+    /// this the coordinator silently ran its serial fallback.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn rpc_mob_state_serves_a_mob_scoped_workgraph_without_a_runtime_realm() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = anthropic_test_config();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime = SessionRuntime::new(
+            factory,
+            config.clone(),
+            10,
+            runtime_backed_persistence(store),
+            NotificationSink::noop(),
+        );
+        let config_store: Arc<dyn ConfigStore> =
+            Arc::new(MemoryConfigStore::new(config, meerkat_models::canonical()));
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient::anthropic())));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            Arc::clone(&config_store),
+            temp.path().join("config_state.json"),
+        )));
+        let runtime = Arc::new(runtime);
+        assert!(
+            runtime.workgraph_service().is_err(),
+            "this runtime has no realm identity"
+        );
+        let state = compose_rpc_mob_state(&runtime, &config_store, None);
+        let host = state.workgraph_service().expect("host WorkGraph service");
+        let mob_id = state
+            .mob_create_definition(meerkat_mob::MobDefinition::implicit(
+                "rpc-workgraph-scope",
+                "claude-sonnet-4-5",
+            ))
+            .await
+            .expect("mob");
+        let scoped = state
+            .workgraph_service_for_mob(&mob_id)
+            .expect("mob scope")
+            .expect("mob WorkGraph service");
+        assert_eq!(
+            scoped.default_realm_id(),
+            meerkat_core::mob_realm_id(mob_id.as_str())
+                .expect("mob realm")
+                .as_str()
+        );
+        assert_ne!(scoped.default_realm_id(), host.default_realm_id());
+        assert!(Arc::ptr_eq(scoped.store(), host.store()));
     }
 
     #[cfg(feature = "mob")]

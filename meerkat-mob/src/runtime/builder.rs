@@ -6872,6 +6872,13 @@ impl MobBuilder {
                     warning.message
                 );
             }
+            // Members build in this mob's realm; the host's WorkGraph service
+            // is rescoped to it once here so every consumer (member tools,
+            // live delegation items, attention overlays) shares one namespace.
+            let workgraph_service = workgraph_service
+                .as_ref()
+                .map(|service| super::mob_scoped_workgraph_service(service, &definition.id))
+                .transpose()?;
             let session_service = session_service
                 .ok_or_else(|| MobError::Internal("session_service is required".into()))?;
             if !allow_ephemeral_sessions && !session_service.supports_persistent_sessions() {
@@ -7145,6 +7152,10 @@ impl MobBuilder {
         Self::sync_definition_with_spec_store(&storage, &definition, definition_epoch).await?;
 
         let definition = Arc::new(definition);
+        let workgraph_service = workgraph_service
+            .as_ref()
+            .map(|service| super::mob_scoped_workgraph_service(service, &definition.id))
+            .transpose()?;
         let mut diagnostics = crate::validate::validate_definition(&definition);
         diagnostics.extend(crate::spec::SpecValidator::validate(definition.as_ref()));
         let (errors, warnings) = crate::validate::partition_diagnostics(diagnostics);

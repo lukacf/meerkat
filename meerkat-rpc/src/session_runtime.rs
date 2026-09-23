@@ -5186,6 +5186,12 @@ impl SessionRuntime {
     /// The store scope comes from the typed realm owner — never an invented
     /// `"default"` slug. A runtime without realm identity has no WorkGraph
     /// scope and fails closed.
+    /// The WorkGraph store behind this runtime, for consumers that scope
+    /// their own realm (the mob runtime rescopes it to `mob.<id>`).
+    pub fn workgraph_store(&self) -> Arc<dyn meerkat::WorkGraphStore> {
+        Arc::clone(&self.workgraph_store)
+    }
+
     pub fn workgraph_service(&self) -> Result<meerkat::WorkGraphService, RpcError> {
         let realm_id = self
             .realm_id()

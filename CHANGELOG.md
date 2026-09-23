@@ -369,6 +369,20 @@ them.
 
 ### Fixed
 
+- Live close no longer waits on an owned context append whose provider
+  acknowledgement is outstanding (`meerkat`, S99 channel 1: a thinking append
+  attempted 97 ms before `live/close` held the close past the 5 s ceiling).
+  When the quiet-append bound elapses without `session.closed`, the pending
+  appends of the channel are resolved with the typed
+  `LiveAppendDeliveryOutcome::InterruptedByClose` terminal at once (the same
+  terminal a delegation result receives when its channel closes), the sideband
+  actors are aborted immediately instead of each receiving a 2 s grace period,
+  and the close converges at the bound. The facade sideband refuses append
+  commands once its `session.close` was requested (`Rejected`), so a context
+  tail scheduled behind the close never becomes one more unacknowledged
+  append; generated authority already defers such appends after close custody
+  is revoked. Regression: `close_converges_without_the_acknowledgement_of_an_in_flight_owned_append`,
+  `production_sideband_refuses_append_commands_once_its_close_was_requested`.
 - Nightly and release BuildBuddy lanes (the whole Bazel graph in `full-fresh`
   mode) run for real and green; the fixes below were surfaced by running the
   lanes that `changed-paths` had skipped since 2026-08-28 (PR #1118):

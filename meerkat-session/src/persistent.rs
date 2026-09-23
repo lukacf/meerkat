@@ -2309,6 +2309,18 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// same-SessionId teardown/re-registration overlap) without retaining one
     /// allocation forever for every rejected/random SessionId ever observed.
     turn_finalization_gates: Mutex<HashMap<SessionId, std::sync::Weak<Mutex<()>>>>,
+    /// Live channels whose projections no longer wait behind a held turn
+    /// boundary. An explicit channel close records the channel here once the
+    /// owner has revoked its custody: a projection for that channel that
+    /// finds the member's turn boundary held returns `Busy` at once (the
+    /// transport defers it to the boundary) instead of parking the close
+    /// behind the running turn. The deferred close settlement clears the
+    /// entry before it replays the deferred projections at the boundary.
+    live_projection_released_channels:
+        std::sync::Mutex<HashMap<SessionId, HashSet<meerkat_core::LiveChannelId>>>,
+    /// Wakes projections parked on a held turn boundary when a channel is
+    /// released so they can return `Busy` without waiting for the turn.
+    live_projection_release_changed: tokio::sync::Notify,
     /// Typed faults recorded by detached event-projection tasks that halted on
     /// a durable append failure. Replay reads fail closed on these instead of
     /// serving an event stream with a silent sequence hole.
@@ -2332,6 +2344,19 @@ enum ForkSourceBoundary {
         turn_finalization_guard: tokio::sync::OwnedMutexGuard<()>,
         recovery_gate_bound: std::time::Duration,
     },
+}
+
+/// What a realtime mutation guard does when the document machine rules the
+/// durable body authoritative over the live actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveDurableSyncPolicy {
+    /// Synchronize the live actor from the durable body (the ordinary rule).
+    Synchronize,
+    /// Refuse with `Busy` instead of synchronizing when the only reason is a
+    /// live transcript ahead of the store: the member turn's boundary commit
+    /// is still landing and its rows must not be discarded. Other durable
+    /// verdicts (archived, diverged revision) still synchronize.
+    RefuseUncommittedTranscript,
 }
 
 struct SessionMutationGuard {
@@ -4455,6 +4480,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                                     snapshot: live_authority,
                                 });
                             };
+                            tracing::debug!(
+                                session_id = %id,
+                                ?reason,
+                                live_message_count = live_authority.message_count(),
+                                stored_message_count = head.message_count,
+                                revisions_match,
+                                "live session authority classified durable from bounded head-canonical facts"
+                            );
                             return Ok(LiveSessionAuthority::DurableAuthoritative {
                                 session: Box::new(stored),
                                 reason,
@@ -4519,6 +4552,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     })
                 }
                 LiveSessionAuthorityKind::DurableAuthoritative => {
+                    tracing::debug!(
+                        session_id = %id,
+                        ?reason,
+                        live_message_count = live.messages().len(),
+                        stored_message_count = stored.messages().len(),
+                        stored_transcript_diverged,
+                        "live session authority classified durable from full-body comparison"
+                    );
                     Ok(LiveSessionAuthority::DurableAuthoritative {
                         session: Box::new(stored),
                         reason,
@@ -4720,6 +4761,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _recovery_guard = recovery_gate.lock().await;
         match self.live_session_authority(id).await? {
+            // A live transcript ahead of the store is not a live projection
+            // that fell behind: it is a runtime turn whose boundary commit
+            // has not landed yet (the actor's rows and its checkpoint receipt
+            // are exactly what the pending promotion consumes). Callers use
+            // this read to catch a live actor the store has overtaken, so the
+            // pending turn is left alone here; its commit lands, or the
+            // runtime's own durability reload retires the actor.
+            LiveSessionAuthority::DurableAuthoritative {
+                reason: LiveSessionAuthorityReason::LiveUncommittedTranscript,
+                ..
+            } => {
+                tracing::debug!(
+                    session_id = %id,
+                    "live session is ahead of the store with a turn commit pending; not synchronized"
+                );
+                Ok(false)
+            }
             LiveSessionAuthority::DurableAuthoritative { session, reason } => {
                 self.synchronize_runtime_backed_live_from_durable_authority(
                     id,
@@ -6618,7 +6676,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         content_index: u32,
         observation_id: Option<meerkat_core::LiveContextObservationId>,
     ) -> Result<meerkat_core::LiveAssistantPlaybackTarget, SessionError> {
-        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let _mutation_guard = self
+            .realtime_transcript_mutation_guard_for_channel(id, &channel_id)
+            .await?;
         let target = self
             .inner
             .admit_live_assistant_playback_target_with_context_observation(
@@ -6708,7 +6768,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         event: meerkat_core::RealtimeTranscriptEvent,
         channel_id: Option<meerkat_core::LiveChannelId>,
     ) -> Result<meerkat_core::RealtimeTranscriptApplyOutcome, SessionError> {
-        let mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let mutation_guard = match channel_id.as_ref() {
+            Some(channel_id) => {
+                self.realtime_transcript_mutation_guard_for_channel(id, channel_id)
+                    .await?
+            }
+            None => self.realtime_transcript_mutation_guard(id).await?,
+        };
         let outcome = self
             .append_realtime_transcript_event_guarded_with_origin(id, event, channel_id)
             .await?;
@@ -6907,6 +6973,53 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(evidence)
     }
 
+    /// [`Self::commit_live_user_transcript_final_with_machine`] that waits at
+    /// most `bound` for the source session's turn-finalization boundary.
+    ///
+    /// A live delegation arrives while the member that owns the canonical
+    /// session may be mid-turn. That turn holds the turn-finalization gate
+    /// for its whole duration, and the canonical commit of the spoken input
+    /// must wait behind it (the transcript cannot be extended under a
+    /// running turn). Waiting without a bound stalled the caller for the
+    /// length of the member's turn with nothing to say to the user; this
+    /// entry point reports `SourceBusy` at the bound instead, having
+    /// committed nothing, so the caller can narrate and retry. Once the
+    /// boundary is won the commit runs to completion under it; the bound
+    /// never cancels a commit in progress.
+    #[cfg(feature = "live")]
+    pub async fn commit_live_user_transcript_final_with_machine_at_turn_boundary(
+        &self,
+        machine: &MeerkatMachine,
+        id: &SessionId,
+        provisional: meerkat_core::ProvisionalLiveHandoff,
+        final_event: Option<meerkat_core::RealtimeTranscriptEvent>,
+        bound: std::time::Duration,
+    ) -> Result<meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary, SessionError> {
+        let started = std::time::Instant::now();
+        let Ok(turn_finalization_guard) =
+            tokio::time::timeout(bound, self.acquire_runtime_turn_finalization_guard(id)).await
+        else {
+            return Ok(
+                meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary::SourceBusy {
+                    waited: started.elapsed(),
+                },
+            );
+        };
+        let mutation_guard = self
+            .realtime_transcript_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
+            .await?;
+        let evidence = self
+            .commit_live_user_transcript_final_guarded(id, provisional, final_event)
+            .await?;
+        let (committed, token) = self.committed_realtime_projection_guarded(id).await?;
+        drop(mutation_guard);
+        machine
+            .enqueue_committed_live_transcript_boundary(id, &committed, &token)
+            .await
+            .map_err(runtime_driver_error_to_session_error)?;
+        Ok(meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary::Committed(evidence))
+    }
+
     pub async fn commit_live_user_transcript_final(
         &self,
         id: &SessionId,
@@ -6950,8 +7063,64 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
             .try_lock_owned()
             .map_err(|_| SessionError::Busy { id: id.clone() })?;
+        self.resolve_live_assistant_playback_on_channel_close_under_boundary(
+            id,
+            channel_id,
+            turn_finalization_guard,
+        )
+        .await
+    }
+
+    /// [`Self::resolve_live_assistant_playback_on_channel_close`] that waits
+    /// at most `bound` for the session's turn-finalization boundary.
+    ///
+    /// A close issued while the member's own turn is still running (an
+    /// existing-member delegation executing the spoken request, or the
+    /// short window in which a durable fork holds the boundary) settles once
+    /// that turn reaches its boundary instead of refusing on the first
+    /// request. The wait stays bounded because the running turn may itself
+    /// be awaiting this close; past the bound the close is `Busy` and the
+    /// caller retries, exactly as before.
+    pub async fn resolve_live_assistant_playback_on_channel_close_within(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        bound: std::time::Duration,
+    ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
+        let gate = self.turn_finalization_gate_for_session(id).await;
+        let turn_finalization_guard = tokio::time::timeout(bound, gate.lock_owned())
+            .await
+            .map_err(|_| SessionError::Busy { id: id.clone() })?;
+        self.resolve_live_assistant_playback_on_channel_close_under_boundary(
+            id,
+            channel_id,
+            turn_finalization_guard,
+        )
+        .await
+    }
+
+    async fn resolve_live_assistant_playback_on_channel_close_under_boundary(
+        &self,
+        id: &SessionId,
+        channel_id: meerkat_core::LiveChannelId,
+        turn_finalization_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
+        // A close settlement queued behind a running member turn wins the
+        // boundary the instant that turn releases it, inside the window
+        // between the turn's boundary commit and its actor-carried checkpoint
+        // landing in the store. In that window the durable body still lacks
+        // the turn's rows, so the document machine rules the durable side
+        // authoritative and the ordinary realtime mutation guard would
+        // synchronize the live actor from it: the turn's rows and its
+        // checkpoint receipt would be gone and its finalization would fail.
+        // Close settlement never makes that call; while the turn's commit is
+        // still landing it is `Busy` and the owner retries.
         let _mutation_guard = self
-            .realtime_transcript_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
+            .realtime_transcript_mutation_guard_with_turn_boundary_and_policy(
+                id,
+                turn_finalization_guard,
+                LiveDurableSyncPolicy::RefuseUncommittedTranscript,
+            )
             .await?;
         let receipt = self
             .inner
@@ -6979,7 +7148,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         content_index: u32,
         evidence: meerkat_core::LiveAssistantPlaybackEvidence,
     ) -> Result<meerkat_core::LiveAssistantPlaybackTruncationEvidence, SessionError> {
-        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let _mutation_guard = self
+            .realtime_transcript_mutation_guard_for_channel(id, &channel_id)
+            .await?;
         let receipt = self
             .inner
             .commit_live_assistant_playback_truncation(
@@ -7011,7 +7182,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         stop_reason: meerkat_core::StopReason,
         usage: meerkat_core::TurnUsage,
     ) -> Result<meerkat_core::LiveAssistantPlaybackTruncationEvidence, SessionError> {
-        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let _mutation_guard = self
+            .realtime_transcript_mutation_guard_for_channel(id, &channel_id)
+            .await?;
         let receipt = self
             .inner
             .commit_live_assistant_playback_complete(
@@ -7047,7 +7220,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         stop_reason: meerkat_core::StopReason,
         usage: meerkat_core::TurnUsage,
     ) -> Result<crate::LiveAssistantPlaybackObservationResult, SessionError> {
-        let mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let mutation_guard = self
+            .realtime_transcript_mutation_guard_for_channel(id, &channel_id)
+            .await?;
         let outcome = self
             .inner
             .observe_live_assistant_playback_terminal(
@@ -7109,7 +7284,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         stop_reason: meerkat_core::StopReason,
         usage: meerkat_core::TurnUsage,
     ) -> Result<crate::LiveAssistantPlaybackObservationResult, SessionError> {
-        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let _mutation_guard = self
+            .realtime_transcript_mutation_guard_for_channel(id, &channel_id)
+            .await?;
         let outcome = self
             .inner
             .observe_live_assistant_playback_terminal(
@@ -7141,7 +7318,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         item_id: String,
         content_index: u32,
     ) -> Result<Option<meerkat_core::LiveAssistantPlaybackTruncationEvidence>, SessionError> {
-        let _mutation_guard = self.realtime_transcript_mutation_guard(id).await?;
+        let _mutation_guard = self
+            .realtime_transcript_mutation_guard_for_channel(id, &channel_id)
+            .await?;
         let receipt = self
             .inner
             .observe_live_assistant_playback_final(
@@ -7457,6 +7636,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             recovery_gates: Mutex::new(HashMap::new()),
             rejected_run_compaction_aborted: std::sync::Mutex::new(HashSet::new()),
             turn_finalization_gates: Mutex::new(HashMap::new()),
+            live_projection_released_channels: std::sync::Mutex::new(HashMap::new()),
+            live_projection_release_changed: tokio::sync::Notify::new(),
             event_projection_faults: Arc::new(Mutex::new(HashMap::new())),
             event_projection_gates: Arc::new(Mutex::new(HashMap::new())),
             event_projection_drains: Arc::new(Mutex::new(HashMap::new())),
@@ -9635,10 +9816,117 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
     }
 
+    /// Stop this channel's live projections from waiting behind a held turn
+    /// boundary. Called by an explicit channel close once the owner has
+    /// revoked the channel's custody: a projection already parked on the
+    /// boundary returns [`SessionError::Busy`] now, and later projections for
+    /// the channel do the same while the boundary stays held, so the close
+    /// never waits out the member's running turn. Projections that find the
+    /// boundary free proceed unchanged, so a channel reopened on the same
+    /// session is unaffected. The deferred close settlement restores the
+    /// waiting behaviour with
+    /// [`Self::restore_live_projection_turn_boundary_wait`] before it replays
+    /// the deferred projections at the boundary.
+    pub fn release_live_projection_turn_boundary_waiters(
+        &self,
+        id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) {
+        self.live_projection_released_channels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(id.clone())
+            .or_default()
+            .insert(channel_id.clone());
+        self.live_projection_release_changed.notify_waiters();
+    }
+
+    /// Undo [`Self::release_live_projection_turn_boundary_waiters`] for one
+    /// channel: its projections wait for the turn boundary again.
+    pub fn restore_live_projection_turn_boundary_wait(
+        &self,
+        id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) {
+        let mut released = self
+            .live_projection_released_channels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(channels) = released.get_mut(id) {
+            channels.remove(channel_id);
+            if channels.is_empty() {
+                released.remove(id);
+            }
+        }
+    }
+
+    /// Whether this channel's projections currently return `Busy` instead of
+    /// waiting behind a held turn boundary.
+    #[must_use]
+    pub fn live_projection_turn_boundary_released(
+        &self,
+        id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> bool {
+        self.live_projection_released_channels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .is_some_and(|channels| channels.contains(channel_id))
+    }
+
+    /// [`Self::realtime_transcript_mutation_guard`] for a projection that
+    /// arrives from one live channel. A free boundary is taken at once. A held
+    /// boundary is waited for unless the channel has been released by its
+    /// close, in which case the projection is refused with
+    /// [`SessionError::Busy`] so the transport can defer it to the boundary.
+    async fn realtime_transcript_mutation_guard_for_channel(
+        &self,
+        id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Result<SessionMutationGuard, SessionError> {
+        let gate = self.turn_finalization_gate_for_session(id).await;
+        let turn_finalization_guard = match Arc::clone(&gate).try_lock_owned() {
+            Ok(guard) => guard,
+            Err(_) => {
+                let lock = Arc::clone(&gate).lock_owned();
+                tokio::pin!(lock);
+                loop {
+                    let changed = self.live_projection_release_changed.notified();
+                    tokio::pin!(changed);
+                    changed.as_mut().enable();
+                    if self.live_projection_turn_boundary_released(id, channel_id) {
+                        return Err(SessionError::Busy { id: id.clone() });
+                    }
+                    tokio::select! {
+                        guard = &mut lock => break guard,
+                        () = &mut changed => {}
+                    }
+                }
+            }
+        };
+        self.realtime_transcript_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
+            .await
+    }
+
     async fn realtime_transcript_mutation_guard_with_turn_boundary(
         &self,
         id: &SessionId,
         turn_finalization_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<SessionMutationGuard, SessionError> {
+        self.realtime_transcript_mutation_guard_with_turn_boundary_and_policy(
+            id,
+            turn_finalization_guard,
+            LiveDurableSyncPolicy::Synchronize,
+        )
+        .await
+    }
+
+    async fn realtime_transcript_mutation_guard_with_turn_boundary_and_policy(
+        &self,
+        id: &SessionId,
+        turn_finalization_guard: tokio::sync::OwnedMutexGuard<()>,
+        sync_policy: LiveDurableSyncPolicy,
     ) -> Result<SessionMutationGuard, SessionError> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let recovery_guard = recovery_gate.lock_owned().await;
@@ -9649,6 +9937,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .await?
                 {
                     return Err(SessionError::NotFound { id: id.clone() });
+                }
+                if sync_policy == LiveDurableSyncPolicy::RefuseUncommittedTranscript
+                    && reason == LiveSessionAuthorityReason::LiveUncommittedTranscript
+                {
+                    tracing::debug!(
+                        session_id = %id,
+                        "live mutation found the member turn's commit still landing; busy"
+                    );
+                    return Err(SessionError::Busy { id: id.clone() });
                 }
                 self.synchronize_live_session_from_durable(
                     id,
@@ -13603,13 +13900,13 @@ mod tests {
 
     #[tokio::test]
     async fn live_close_refuses_busy_turn_boundary_and_can_retry() {
-        let service = PersistentSessionService::new(
+        let service = Arc::new(PersistentSessionService::new(
             DummyBuilder,
             4,
             Arc::new(MemoryStore::new()),
             Arc::new(InMemoryRuntimeStore::new()),
             memory_blob_store(),
-        );
+        ));
         let session_id = service
             .create_session(create_request("seed", InitialTurnPolicy::Defer))
             .await
@@ -13626,7 +13923,52 @@ mod tests {
         .await
         .expect("close must not wait for a pending turn's durable boundary");
         assert!(matches!(result, Err(SessionError::Busy { .. })));
+        // The bounded variant waits for the running turn's boundary instead
+        // of refusing, and settles as soon as the turn releases it.
+        let bounded_service = Arc::clone(&service);
+        let bounded_session = session_id.clone();
+        let bounded_channel = channel.clone();
+        let bounded = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let result = bounded_service
+                .resolve_live_assistant_playback_on_channel_close_within(
+                    &bounded_session,
+                    bounded_channel,
+                    std::time::Duration::from_secs(5),
+                )
+                .await;
+            (result, started.elapsed())
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !bounded.is_finished(),
+            "the bounded close waits for the turn"
+        );
         drop(boundary);
+        let (bounded_result, waited) = bounded.await.expect("bounded close task");
+        assert!(
+            bounded_result
+                .expect("bounded close settles once the turn ends")
+                .is_none()
+        );
+        assert!(
+            waited >= std::time::Duration::from_millis(150)
+                && waited < std::time::Duration::from_secs(5),
+            "settled when the turn released the boundary: {waited:?}"
+        );
+        // Held past the bound, the bounded variant is Busy like the unbounded one.
+        let held = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        let result = service
+            .resolve_live_assistant_playback_on_channel_close_within(
+                &session_id,
+                channel.clone(),
+                std::time::Duration::from_millis(100),
+            )
+            .await;
+        assert!(matches!(result, Err(SessionError::Busy { .. })));
+        drop(held);
         assert!(
             service
                 .resolve_live_assistant_playback_on_channel_close(&session_id, channel)
@@ -13634,6 +13976,97 @@ mod tests {
                 .expect("retry after the turn settles")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn released_channel_projection_refuses_busy_behind_a_held_turn_boundary() {
+        let service = Arc::new(PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        ));
+        let session_id = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session")
+            .session_id;
+        let closing = meerkat_core::LiveChannelId::new("closing-channel");
+        let reopened = meerkat_core::LiveChannelId::new("reopened-channel");
+        let guard_for = |channel: meerkat_core::LiveChannelId| {
+            let service = Arc::clone(&service);
+            let session_id = session_id.clone();
+            async move {
+                service
+                    .realtime_transcript_mutation_guard_for_channel(&session_id, &channel)
+                    .await
+                    .map(|_guard| ())
+            }
+        };
+
+        // A free boundary is taken at once, released or not.
+        service.release_live_projection_turn_boundary_waiters(&session_id, &closing);
+        assert!(service.live_projection_turn_boundary_released(&session_id, &closing));
+        guard_for(closing.clone())
+            .await
+            .expect("a released channel still projects on a free boundary");
+        service.restore_live_projection_turn_boundary_wait(&session_id, &closing);
+        assert!(!service.live_projection_turn_boundary_released(&session_id, &closing));
+
+        // The member's turn holds the boundary: a projection for the channel parks.
+        let boundary = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        let parked = tokio::spawn(guard_for(closing.clone()));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(!parked.is_finished(), "the projection waits for the turn");
+
+        // The channel's close releases it: the parked projection returns Busy
+        // now, and so does a later one while the boundary stays held.
+        service.release_live_projection_turn_boundary_waiters(&session_id, &closing);
+        let released = tokio::time::timeout(std::time::Duration::from_secs(1), parked)
+            .await
+            .expect("the released projection returns without the turn")
+            .expect("projection task");
+        assert!(matches!(released, Err(SessionError::Busy { .. })));
+        let later = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            guard_for(closing.clone()),
+        )
+        .await
+        .expect("a later projection on the released channel returns at once");
+        assert!(matches!(later, Err(SessionError::Busy { .. })));
+
+        // Another channel of the same session (a reopen) keeps waiting for
+        // the boundary and proceeds when the turn releases it.
+        let waiting = tokio::spawn(guard_for(reopened.clone()));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !waiting.is_finished(),
+            "an unreleased channel still waits for the turn"
+        );
+        drop(boundary);
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+            .await
+            .expect("the waiting projection proceeds once the turn ends")
+            .expect("projection task")
+            .expect("projection guard");
+
+        // Restored, the closing channel waits again.
+        service.restore_live_projection_turn_boundary_wait(&session_id, &closing);
+        let held = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        let waits_again = tokio::spawn(guard_for(closing));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(!waits_again.is_finished());
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(2), waits_again)
+            .await
+            .expect("proceeds once the turn ends")
+            .expect("projection task")
+            .expect("projection guard");
     }
 
     #[tokio::test]

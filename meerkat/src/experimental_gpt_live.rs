@@ -49,7 +49,8 @@ use meerkat_openai::public_live::{
 };
 use meerkat_runtime::live_execution::{
     LiveContextAppendAuthority, LiveContextBootstrapAppendAuthority,
-    LiveDelegationResultDeliveryAuthority, LiveDelegationResultDeliveryObservation,
+    LiveDelegationNarrationAuthority, LiveDelegationResultDeliveryAuthority,
+    LiveDelegationResultDeliveryObservation,
 };
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -201,6 +202,19 @@ pub trait ExperimentalLiveOpenAuthorityProvider: Send + Sync {
         channel_id: &meerkat_live::LiveChannelId,
         canonical_session_id: &meerkat_core::SessionId,
     ) -> Result<ExperimentalLivePhysicalClose, ExperimentalLiveOpenAuthorityError>;
+
+    /// [`Self::close_physical_if_bound`] with an explicit convergence policy.
+    /// The default ignores the policy; the shipping transport converges an
+    /// explicit owner close within the confirmation bound.
+    async fn close_physical_if_bound_with(
+        &self,
+        channel_id: &meerkat_live::LiveChannelId,
+        canonical_session_id: &meerkat_core::SessionId,
+        _convergence: ExperimentalLiveCloseConvergence,
+    ) -> Result<ExperimentalLivePhysicalClose, ExperimentalLiveOpenAuthorityError> {
+        self.close_physical_if_bound(channel_id, canonical_session_id)
+            .await
+    }
 
     /// Retain one exact generated ambiguity-recovery carrier until the
     /// admitted replacement answer reaches seed acknowledgement. The carrier
@@ -400,12 +414,26 @@ pub use meerkat_openai::public_live::thinking_capture;
 pub const LIVE_CLOSE_QUIET_APPEND_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long a requested closure may go unsettled before the owner retires the
-/// transport locally: counted from an accepted `session.close` that the
-/// provider never confirms, and also from the first close request when the
-/// provider never accepts one (the remote side already hung up). Earlier
-/// close attempts keep the binding for retry so a slow but progressing drain
-/// can settle.
-pub const LIVE_CLOSE_CONFIRMATION_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
+/// transport locally. Defined on the ungated orchestration module so the
+/// close verb can apply it on every feature set; re-exported here for the
+/// transport and its callers.
+pub use crate::session_runtime::live_orchestration::LIVE_CLOSE_CONFIRMATION_BOUND;
+
+/// One observation slice of the closing drain inside a close request.
+const LIVE_CLOSE_DRAIN_WAIT_SLICE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long one physical close request observes the closing drain.
+///
+/// An explicit owner close (`live/close`) converges within
+/// [`LIVE_CLOSE_CONFIRMATION_BOUND`] on its first request: it settles the
+/// moment the provider confirms and otherwise retires the transport locally
+/// at the bound. Recovery-driven closes observe one slice and report the
+/// unsettled drain so the recovery owner keeps its own custody and retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExperimentalLiveCloseConvergence {
+    SingleSlice,
+    WithinBound,
+}
 
 /// Longest a spoken owner append waits for the provider to end an open user
 /// turn before it is sent anyway.
@@ -1050,8 +1078,22 @@ impl ExperimentalLiveOpenAuthorityProvider for ExperimentalGptLiveOpenAuthority 
         channel_id: &meerkat_live::LiveChannelId,
         canonical_session_id: &meerkat_core::SessionId,
     ) -> Result<ExperimentalLivePhysicalClose, ExperimentalLiveOpenAuthorityError> {
+        self.close_physical_if_bound_with(
+            channel_id,
+            canonical_session_id,
+            ExperimentalLiveCloseConvergence::SingleSlice,
+        )
+        .await
+    }
+
+    async fn close_physical_if_bound_with(
+        &self,
+        channel_id: &meerkat_live::LiveChannelId,
+        canonical_session_id: &meerkat_core::SessionId,
+        convergence: ExperimentalLiveCloseConvergence,
+    ) -> Result<ExperimentalLivePhysicalClose, ExperimentalLiveOpenAuthorityError> {
         self.transport
-            .close_physical_if_bound(channel_id, canonical_session_id)
+            .close_physical_if_bound_with(channel_id, canonical_session_id, convergence)
             .await
             .map_err(|error| {
                 tracing::warn!(%error, %channel_id, "experimental live physical close remains incomplete");
@@ -1222,7 +1264,45 @@ pub trait ExperimentalGptLiveControlPlane: Send + Sync {
         delegation: LiveSidebandDelegationRef,
         text: String,
     ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError>;
+
+    /// Client-context capability only. Templated executor-state narration for
+    /// one exact delegation, released under generated narration authority. It
+    /// is spoken by the provider like a delegation result but carries none.
+    async fn narrate_delegation(
+        &self,
+        authority: LiveDelegationNarrationAuthority,
+        delegation: LiveSidebandDelegationRef,
+        text: String,
+    ) -> Result<ExperimentalGptLiveNarrationDispatch, ExperimentalGptLiveBridgeError>;
 }
+
+/// Why one provider lifecycle fact was not applied.
+///
+/// The observation pump treats the two differently: a refused fact fails
+/// closed on its own and the provider stream continues for the user, while
+/// lost custody (no bound channel, no generated binding for the observation's
+/// session and channel) means nothing further can be applied and the pump
+/// ends the stream instead of leaving a call that refuses every turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExperimentalLiveLifecycleObservationError {
+    /// The machine or the owner refused this fact; the channel is intact.
+    Refused(String),
+    /// The observation's channel has no running custody or generated binding.
+    CustodyLost(String),
+}
+
+impl std::fmt::Display for ExperimentalLiveLifecycleObservationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(reason) => write!(f, "lifecycle observation refused: {reason}"),
+            Self::CustodyLost(reason) => {
+                write!(f, "lifecycle observation lost channel custody: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExperimentalLiveLifecycleObservationError {}
 
 #[async_trait]
 pub trait ExperimentalLiveBoundChannelActivator: Send + Sync {
@@ -1244,7 +1324,7 @@ pub trait ExperimentalLiveBoundChannelActivator: Send + Sync {
     async fn observe_provider_lifecycle(
         &self,
         observation: &LiveSidebandObservation,
-    ) -> Result<(), String>;
+    ) -> Result<(), ExperimentalLiveLifecycleObservationError>;
 
     /// Cancel and await the exact prepared/running binding idempotently.
     async fn deactivate_bound_channel(
@@ -1758,6 +1838,35 @@ impl ExperimentalGptLiveResultDeliveryWaiter {
     }
 }
 
+/// Outcome of handing one authorized narration to the provider. Narration is
+/// spoken commentary keyed to a delegation; it has no retry, recovery, or
+/// canonical-context lifecycle, so the outcome is only observed.
+#[derive(Debug)]
+pub enum ExperimentalGptLiveNarrationDispatch {
+    AwaitingAcknowledgement(ExperimentalGptLiveNarrationWaiter),
+    Resolved(meerkat_core::LiveAppendDeliveryOutcome),
+}
+
+pub struct ExperimentalGptLiveNarrationWaiter {
+    resolution_rx: oneshot::Receiver<meerkat_core::LiveAppendDeliveryOutcome>,
+}
+
+impl fmt::Debug for ExperimentalGptLiveNarrationWaiter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ExperimentalGptLiveNarrationWaiter([OPAQUE])")
+    }
+}
+
+impl ExperimentalGptLiveNarrationWaiter {
+    pub async fn resolve(
+        self,
+    ) -> Result<meerkat_core::LiveAppendDeliveryOutcome, ExperimentalGptLiveBridgeError> {
+        self.resolution_rx
+            .await
+            .map_err(|_| ExperimentalGptLiveBridgeError::ActiveBindingUnavailable)
+    }
+}
+
 pub struct ExperimentalGptLiveAppendWaiter {
     resolution_rx: oneshot::Receiver<ExperimentalGptLiveAppendResolution>,
 }
@@ -1805,6 +1914,10 @@ enum PendingExperimentalGptLiveDelivery {
         authority: LiveDelegationResultDeliveryAuthority,
         resolution_tx: oneshot::Sender<ExperimentalGptLiveResultDeliveryResolution>,
     },
+    DelegationNarration {
+        channel_id: meerkat_live::LiveChannelId,
+        resolution_tx: oneshot::Sender<meerkat_core::LiveAppendDeliveryOutcome>,
+    },
 }
 
 impl PendingExperimentalGptLiveDelivery {
@@ -1815,6 +1928,7 @@ impl PendingExperimentalGptLiveDelivery {
             Self::DelegationResult { authority, .. } => {
                 authority.operation().domain_correlation().channel_id()
             }
+            Self::DelegationNarration { channel_id, .. } => channel_id,
         }
     }
 }
@@ -2440,10 +2554,14 @@ impl ExperimentalGptLiveDrain {
         let task = pending
             .as_mut()
             .ok_or(ProviderWebrtcBrokerError::Unavailable)?;
-        tokio::time::timeout(std::time::Duration::from_secs(5), task)
-            .await
-            .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?
-            .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
+        meerkat_live::traced_live_close_step(
+            None,
+            "retirement_task",
+            tokio::time::timeout(std::time::Duration::from_secs(5), task),
+        )
+        .await
+        .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?
+        .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
         *pending = None;
         if !self.physically_retired.load(Ordering::Acquire) {
             return Err(ProviderWebrtcBrokerError::Unavailable);
@@ -2490,9 +2608,13 @@ impl ExperimentalGptLiveDrain {
             pending.get_or_insert_with(|| tokio::spawn(async move { sideband.close().await }));
         // Only the observation is bounded. Cancellation or timeout leaves the
         // in-flight close owned here; a retry observes the same operation.
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), task)
-            .await
-            .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
+        let outcome = meerkat_live::traced_live_close_step(
+            None,
+            "sideband_close",
+            tokio::time::timeout(std::time::Duration::from_secs(5), task),
+        )
+        .await
+        .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?;
         *pending = None;
         outcome.map_err(|_| ProviderWebrtcBrokerError::Unavailable)??;
         if let Ok(mut sent_at) = self.close_sent_at.lock()
@@ -2617,7 +2739,18 @@ impl ExperimentalGptLiveDrain {
     }
 
     async fn wait(&self) -> Result<ExperimentalGptLiveDrainOutcome, ProviderWebrtcBrokerError> {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        self.wait_slice(std::time::Duration::from_secs(5))
+            .await
+            .unwrap_or(Err(ProviderWebrtcBrokerError::Unavailable))
+    }
+
+    /// Observe the drain for one bounded slice. `None` means it did not settle
+    /// within the slice, distinct from a settled failure.
+    async fn wait_slice(
+        &self,
+        slice: std::time::Duration,
+    ) -> Option<Result<ExperimentalGptLiveDrainOutcome, ProviderWebrtcBrokerError>> {
+        tokio::time::timeout(slice, async {
             loop {
                 let changed = self.changed.notified();
                 if let Some(result) = self.result() {
@@ -2627,7 +2760,7 @@ impl ExperimentalGptLiveDrain {
             }
         })
         .await
-        .map_err(|_| ProviderWebrtcBrokerError::Unavailable)?
+        .ok()
     }
 }
 
@@ -4292,6 +4425,20 @@ impl ExperimentalGptLiveWebrtcTransport {
         channel_id: &meerkat_live::LiveChannelId,
         session_id: &meerkat_core::SessionId,
     ) -> Result<ExperimentalLivePhysicalClose, LiveWebrtcError> {
+        self.close_physical_if_bound_with(
+            channel_id,
+            session_id,
+            ExperimentalLiveCloseConvergence::SingleSlice,
+        )
+        .await
+    }
+
+    pub async fn close_physical_if_bound_with(
+        &self,
+        channel_id: &meerkat_live::LiveChannelId,
+        session_id: &meerkat_core::SessionId,
+        convergence: ExperimentalLiveCloseConvergence,
+    ) -> Result<ExperimentalLivePhysicalClose, LiveWebrtcError> {
         let adapter = self
             .registered_by_channel
             .lock()
@@ -4310,9 +4457,13 @@ impl ExperimentalGptLiveWebrtcTransport {
             .filter(|active| active.binding.channel_id() == channel_id)
             .map(|active| active.binding.clone());
         if let Some(provider_binding) = provider_binding {
-            self.close_exact(&provider_binding, None)
-                .await
-                .map_err(provider_signaling_error)?;
+            meerkat_live::traced_live_close_step(
+                Some(channel_id),
+                "close_exact",
+                self.close_exact_with(&provider_binding, None, convergence),
+            )
+            .await
+            .map_err(provider_signaling_error)?;
         }
         let drain = adapter
             .drain
@@ -4324,7 +4475,13 @@ impl ExperimentalGptLiveWebrtcTransport {
             })?
             .clone();
         if let Some(drain) = drain.as_ref() {
-            drain.await_physical_retirement().await.map_err(|error| {
+            meerkat_live::traced_live_close_step(
+                Some(channel_id),
+                "await_physical_retirement",
+                drain.await_physical_retirement(),
+            )
+            .await
+            .map_err(|error| {
                 provider_signaling_error(ProviderWebrtcSignalingError::SidebandClose(error))
             })?;
             let terminal = drain.terminal.lock().map_err(|_| {
@@ -4585,6 +4742,73 @@ impl ExperimentalGptLiveWebrtcTransport {
         self.dispatch_delegation_result(authority, command).await
     }
 
+    pub async fn narrate_delegation(
+        &self,
+        authority: LiveDelegationNarrationAuthority,
+        delegation: LiveSidebandDelegationRef,
+        text: impl Into<String>,
+    ) -> Result<ExperimentalGptLiveNarrationDispatch, ExperimentalGptLiveBridgeError> {
+        let text = require_context_text(text)?;
+        let binding = self
+            .active_binding(authority.session_id())
+            .await
+            .filter(|binding| {
+                binding.channel_id() == authority.operation().domain_correlation().channel_id()
+            })
+            .ok_or(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable)?;
+        let channel_id = binding.channel_id().clone();
+        let sideband = authority
+            .into_sideband_narration_authority(binding, &delegation)
+            .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+        let command = LiveSidebandCommand::narrate_delegation(sideband, delegation, text)
+            .map_err(|_| ExperimentalGptLiveBridgeError::ContextAuthorityRejected)?;
+        // Narration is spoken; never start it while the user is speaking.
+        let adapter = self
+            .registered_by_channel
+            .lock()
+            .await
+            .get(&channel_id)
+            .map(|registration| Arc::clone(&registration.adapter));
+        if let Some(adapter) = adapter {
+            adapter
+                .wait_for_quiet_user(SPOKEN_CONTEXT_USER_TURN_BOUND)
+                .await;
+        }
+        let attempt = command.attempt();
+        let (resolution_tx, resolution_rx) = oneshot::channel();
+        self.pending_deliveries.lock().await.insert(
+            attempt.clone(),
+            PendingExperimentalGptLiveDelivery::DelegationNarration {
+                channel_id,
+                resolution_tx,
+            },
+        );
+        let outcome = match self.send_authorized_command(command).await {
+            Ok(LiveSidebandCommandDelivery::Accepted) => {
+                return Ok(
+                    ExperimentalGptLiveNarrationDispatch::AwaitingAcknowledgement(
+                        ExperimentalGptLiveNarrationWaiter { resolution_rx },
+                    ),
+                );
+            }
+            Ok(LiveSidebandCommandDelivery::AmbiguousTerminal) => {
+                meerkat_core::LiveAppendDeliveryOutcome::Ambiguous
+            }
+            Err(ProviderWebrtcBrokerError::Rejected) => {
+                meerkat_core::LiveAppendDeliveryOutcome::Rejected
+            }
+            Err(_) => meerkat_core::LiveAppendDeliveryOutcome::Ambiguous,
+        };
+        let pending = self.pending_deliveries.lock().await.remove(&attempt);
+        if pending.is_none() {
+            return resolution_rx
+                .await
+                .map(ExperimentalGptLiveNarrationDispatch::Resolved)
+                .map_err(|_| ExperimentalGptLiveBridgeError::ActiveBindingUnavailable);
+        }
+        Ok(ExperimentalGptLiveNarrationDispatch::Resolved(outcome))
+    }
+
     async fn dispatch_generated_append(
         &self,
         authority: LiveContextAppendAuthority,
@@ -4839,6 +5063,13 @@ impl ExperimentalGptLiveWebrtcTransport {
                             ),
                         ));
                     }
+                }
+                PendingExperimentalGptLiveDelivery::DelegationNarration {
+                    resolution_tx, ..
+                } => {
+                    // Narration has no canonical lifecycle to resolve; a
+                    // dropped waiter simply stops observing the outcome.
+                    let _ = resolution_tx.send(outcome);
                 }
             }
             return Ok(Some(ExperimentalGptLiveControlObservation::Provider(
@@ -5154,7 +5385,26 @@ impl ExperimentalGptLiveWebrtcTransport {
         binding: &ProviderWebrtcBinding,
         answer_observation_sequence: Option<u64>,
     ) -> Result<bool, ProviderWebrtcSignalingError> {
-        let _operation = self.operations.lock().await;
+        self.close_exact_with(
+            binding,
+            answer_observation_sequence,
+            ExperimentalLiveCloseConvergence::SingleSlice,
+        )
+        .await
+    }
+
+    async fn close_exact_with(
+        &self,
+        binding: &ProviderWebrtcBinding,
+        answer_observation_sequence: Option<u64>,
+        convergence: ExperimentalLiveCloseConvergence,
+    ) -> Result<bool, ProviderWebrtcSignalingError> {
+        let _operation = meerkat_live::traced_live_close_step(
+            Some(binding.channel_id()),
+            "operations_lock",
+            self.operations.lock(),
+        )
+        .await;
         let closing = {
             let active = self.active_by_session.lock().await;
             active
@@ -5177,7 +5427,14 @@ impl ExperimentalGptLiveWebrtcTransport {
             return Ok(false);
         };
         drain.retry_projection();
-        let (outcome, close_result) = if activated && sideband.quiet_append_pending().await {
+        let quiet_append_pending = activated
+            && meerkat_live::traced_live_close_step(
+                Some(binding.channel_id()),
+                "quiet_append_pending",
+                sideband.quiet_append_pending(),
+            )
+            .await;
+        let (outcome, close_result) = if quiet_append_pending {
             // A quiet append is awaiting injection. The provider injects it
             // only at an input frame stall and withholds `session.closed`
             // until then; with media flowing the drain cannot settle. Ask the
@@ -5204,44 +5461,77 @@ impl ExperimentalGptLiveWebrtcTransport {
         } else if activated {
             // Keep the exact binding reachable by the control consumer until
             // provider EOF and successful canonical projection are witnessed.
-            let waited: Result<_, ProviderWebrtcSignalingError> = tokio::select! {
-                result = drain.wait() => result
-                    .map(|outcome| (outcome, None))
-                    .map_err(ProviderWebrtcSignalingError::SidebandClose),
-                result = drain.request_close(Arc::clone(&sideband)) => drain
-                    .wait()
-                    .await
-                    .map(|outcome| (outcome, Some(result)))
-                    .map_err(ProviderWebrtcSignalingError::SidebandClose),
-            };
-            match waited {
-                Ok(settled) => settled,
-                // Closure has been pending past the bound without the drain
-                // settling: either the provider accepted `session.close` and
-                // never confirmed it, or the remote side was already gone and
-                // never accepted it (the stream ended, or every close attempt
-                // was rejected). Retaining the binding for retry is right
-                // while the drain can still settle; past this bound nothing
-                // will, so the transport is retired locally. Previously the
-                // bound only counted from an accepted `session.close`, so a
-                // dead remote kept every retry failing with the same
-                // unavailable error indefinitely. This is not
-                // provider-confirmed closure and is logged as such.
-                Err(ProviderWebrtcSignalingError::SidebandClose(error))
-                    if drain.closure_unconfirmed_for(LIVE_CLOSE_CONFIRMATION_BOUND) =>
-                {
-                    tracing::warn!(
-                        %error,
-                        session_id = %binding.session_id(),
-                        channel_id = %binding.channel_id(),
-                        bound_secs = LIVE_CLOSE_CONFIRMATION_BOUND.as_secs(),
-                        close_accepted = drain.close_sent.load(Ordering::Acquire),
-                        provider_stream_ended = drain.remote_stream_ended(),
-                        "closure did not settle within the bound; retiring the live transport locally without provider confirmation"
-                    );
-                    (ExperimentalGptLiveDrainOutcome::Terminated, None)
+            // One request observes the drain for the whole confirmation
+            // bound: a slow but progressing drain settles gracefully, and a
+            // drain that cannot settle (the provider never accepts or never
+            // confirms `session.close` because the remote already hung up, or
+            // its stream failed) is retired locally within this same call.
+            // Returning an error at the first slice made every retry on a
+            // dead remote fail identically while the channel stayed bound.
+            let close_request = drain.request_close(Arc::clone(&sideband));
+            tokio::pin!(close_request);
+            let mut close_result: Option<Result<(), ProviderWebrtcBrokerError>> = None;
+            loop {
+                let waited = if close_result.is_none() {
+                    tokio::select! {
+                        result = drain.wait_slice(LIVE_CLOSE_DRAIN_WAIT_SLICE) => result,
+                        result = &mut close_request => {
+                            close_result = Some(result);
+                            continue;
+                        }
+                    }
+                } else {
+                    drain.wait_slice(LIVE_CLOSE_DRAIN_WAIT_SLICE).await
+                };
+                tracing::info!(
+                    target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                    channel = %binding.channel_id(),
+                    step = "drain_slice",
+                    settled = waited.is_some(),
+                    close_accepted = drain.close_sent.load(Ordering::Acquire),
+                    close_request_resolved = close_result.is_some(),
+                    provider_stream_ended = drain.remote_stream_ended(),
+                    "live close drain slice observed"
+                );
+                match waited {
+                    Some(Ok(outcome)) => break (outcome, close_result),
+                    Some(Err(error))
+                        if convergence == ExperimentalLiveCloseConvergence::WithinBound =>
+                    {
+                        tracing::warn!(
+                            %error,
+                            session_id = %binding.session_id(),
+                            channel_id = %binding.channel_id(),
+                            "provider stream failed before closure was confirmed; retiring the live transport locally without provider confirmation"
+                        );
+                        break (ExperimentalGptLiveDrainOutcome::Terminated, close_result);
+                    }
+                    Some(Err(error)) => {
+                        return Err(ProviderWebrtcSignalingError::SidebandClose(error));
+                    }
+                    None if drain.closure_unconfirmed_for(LIVE_CLOSE_CONFIRMATION_BOUND) => {
+                        tracing::warn!(
+                            session_id = %binding.session_id(),
+                            channel_id = %binding.channel_id(),
+                            bound_secs = LIVE_CLOSE_CONFIRMATION_BOUND.as_secs(),
+                            close_accepted = drain.close_sent.load(Ordering::Acquire),
+                            provider_stream_ended = drain.remote_stream_ended(),
+                            "closure did not settle within the bound; retiring the live transport locally without provider confirmation"
+                        );
+                        break (ExperimentalGptLiveDrainOutcome::Terminated, close_result);
+                    }
+                    // A recovery-driven close observes one slice and reports
+                    // the unsettled drain; its owner keeps custody and retries.
+                    None if convergence == ExperimentalLiveCloseConvergence::SingleSlice => {
+                        if let Some(Err(error)) = close_result {
+                            return Err(ProviderWebrtcSignalingError::SidebandClose(error));
+                        }
+                        return Err(ProviderWebrtcSignalingError::SidebandClose(
+                            ProviderWebrtcBrokerError::Unavailable,
+                        ));
+                    }
+                    None => {}
                 }
-                Err(error) => return Err(error),
             }
         } else {
             (
@@ -5250,22 +5540,40 @@ impl ExperimentalGptLiveWebrtcTransport {
             )
         };
         if outcome == ExperimentalGptLiveDrainOutcome::Graceful {
-            match close_result {
+            let close_result = match close_result {
                 Some(result) => result,
                 None => drain.request_close(Arc::clone(&sideband)).await,
+            };
+            if let Err(error) = close_result {
+                if activated {
+                    // The provider already confirmed closure on its own; the
+                    // rejected `session.close` send changes nothing.
+                    tracing::debug!(%error, "session.close was refused after the provider confirmed closure");
+                } else {
+                    return Err(ProviderWebrtcSignalingError::SidebandClose(error));
+                }
             }
-            .map_err(ProviderWebrtcSignalingError::SidebandClose)?;
         } else {
             if let Some(Err(error)) = close_result {
                 tracing::warn!(%error, "failed live transport retired locally without provider close acknowledgement");
             }
             if let Some(task) = drain.close_task.lock().await.take() {
                 task.abort();
-                let _ = task.await;
+                let _ = meerkat_live::traced_live_close_step(
+                    Some(binding.channel_id()),
+                    "abort_close_task",
+                    task,
+                )
+                .await;
             }
         }
         drop(sideband);
-        let mut retirement = drain.retirement_task.lock().await;
+        let mut retirement = meerkat_live::traced_live_close_step(
+            Some(binding.channel_id()),
+            "retirement_lock",
+            drain.retirement_task.lock(),
+        )
+        .await;
         let active = self
             .active_by_session
             .lock()
@@ -5338,6 +5646,16 @@ impl ExperimentalGptLiveControlPlane for ExperimentalGptLiveWebrtcTransport {
             self, authority, delegation, text,
         )
         .await
+    }
+
+    async fn narrate_delegation(
+        &self,
+        authority: LiveDelegationNarrationAuthority,
+        delegation: LiveSidebandDelegationRef,
+        text: String,
+    ) -> Result<ExperimentalGptLiveNarrationDispatch, ExperimentalGptLiveBridgeError> {
+        ExperimentalGptLiveWebrtcTransport::narrate_delegation(self, authority, delegation, text)
+            .await
     }
 }
 
@@ -5449,17 +5767,34 @@ fn spawn_sideband_actors(
                     } else {
                         None
                     };
-                    if lifecycle_observation
-                        && let Err(error) = activation
+                    // One refused lifecycle fact fails that fact closed, not
+                    // the channel: transcript projection and delivery
+                    // receipts for the same observation still flow, and the
+                    // provider stream keeps running for the user. Lost
+                    // custody is different: nothing further can be applied
+                    // for this channel, so the stream ends instead of
+                    // leaving a call that refuses every turn.
+                    if lifecycle_observation {
+                        match activation
                             .activator
                             .observe_provider_lifecycle(&observation)
                             .await
-                    {
-                        tracing::warn!(
-                            error,
-                            "experimental live lifecycle observation failed closed"
-                        );
-                        break;
+                        {
+                            Ok(()) => {}
+                            Err(ExperimentalLiveLifecycleObservationError::Refused(reason)) => {
+                                tracing::warn!(
+                                    reason,
+                                    "experimental live lifecycle observation was refused; the channel continues"
+                                );
+                            }
+                            Err(ExperimentalLiveLifecycleObservationError::CustodyLost(reason)) => {
+                                tracing::warn!(
+                                    reason,
+                                    "experimental live lifecycle observation lost channel custody; the provider stream ends"
+                                );
+                                break;
+                            }
+                        }
                     }
                     if adapter_observation
                         && observation_adapter
@@ -5629,6 +5964,10 @@ fn spawn_sideband_actors(
                 continue;
             };
             let retry_sequence = pump_drain.projection_retry.load(Ordering::Acquire);
+            // Set when the session refused the projection because the
+            // member's turn boundary is held and the channel's close has
+            // released this channel's projections from waiting behind it.
+            let mut boundary_busy = false;
             let apply_result = async {
                 let outcome = if let Some(outcome) = applied.as_ref() {
                     outcome.clone()
@@ -5637,7 +5976,15 @@ fn spawn_sideband_actors(
                         .live_adapter_host
                         .apply_observation(pump_binding.channel_id(), observation)
                         .await
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| {
+                            boundary_busy = matches!(
+                                &error,
+                                meerkat_live::LiveAdapterHostError::ProjectionError(
+                                    meerkat_live::LiveProjectionError::SessionBusy(_)
+                                )
+                            );
+                            error.to_string()
+                        })?;
                     *applied = Some(outcome.clone());
                     outcome
                 };
@@ -5724,6 +6071,37 @@ fn spawn_sideband_actors(
                 Ok::<(), String>(())
             }
             .await;
+            if boundary_busy {
+                // The channel is closing while the member's own turn holds the
+                // session's turn boundary. The close does not wait for that
+                // turn: the observation is handed to the deferred close
+                // settlement, which applies it once the boundary frees, and
+                // the pump keeps draining so the close can converge.
+                let deferred = observation.clone();
+                let close_requested = pump_drain.requested.load(Ordering::Acquire);
+                match activation
+                    .live_adapter_host
+                    .defer_projection_after_close(pump_binding.channel_id(), deferred)
+                    .await
+                {
+                    Ok(()) => tracing::info!(
+                        target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                        channel = %pump_binding.channel_id(),
+                        observation = ?observation,
+                        close_requested,
+                        "live projection parked behind the member turn boundary was deferred to the boundary by the close"
+                    ),
+                    Err(error) => tracing::warn!(
+                        target: meerkat_live::LIVE_CLOSE_TRACE_TARGET,
+                        channel = %pump_binding.channel_id(),
+                        observation = ?observation,
+                        %error,
+                        "live projection parked behind the member turn boundary could not be deferred; it is dropped by the close"
+                    ),
+                }
+                pending_projection = None;
+                continue;
+            }
             if let Err(error) = apply_result {
                 tracing::warn!(error, "live projection remains retained for exact retry");
                 pump_drain
@@ -5848,6 +6226,11 @@ async fn resolve_pending_deliveries(
                             _ => LiveDelegationResultDeliveryObservation::Ambiguous,
                         },
                     });
+                }
+                PendingExperimentalGptLiveDelivery::DelegationNarration {
+                    resolution_tx, ..
+                } => {
+                    let _ = resolution_tx.send(outcome);
                 }
             }
         }
@@ -6297,6 +6680,32 @@ impl ProviderWebrtcSidebandSession for ExperimentalGptLiveSideband {
                 self.lower_append_delivery(reservation, result).await
             }
             LiveSidebandProviderCommand::ReleaseDelegationContext {
+                attempt,
+                delegation,
+                text,
+                ..
+            } => {
+                let provider_delegation = self
+                    .correlations
+                    .lock()
+                    .await
+                    .delegations
+                    .get(delegation.__provider_opaque_value())
+                    .cloned()
+                    .ok_or(ProviderWebrtcBrokerError::Rejected)?;
+                let reservation = self
+                    .correlations
+                    .lock()
+                    .await
+                    .appends
+                    .reserve(SidebandAppendLane::Delegation, attempt)?;
+                let result = self
+                    .session
+                    .append_delegation_context(&provider_delegation, text)
+                    .await;
+                self.lower_append_delivery(reservation, result).await
+            }
+            LiveSidebandProviderCommand::NarrateDelegationContext {
                 attempt,
                 delegation,
                 text,
@@ -7737,7 +8146,7 @@ mod tests {
         async fn observe_provider_lifecycle(
             &self,
             _observation: &LiveSidebandObservation,
-        ) -> Result<(), String> {
+        ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
             Ok(())
         }
 
@@ -7805,7 +8214,10 @@ mod tests {
         async fn observe_provider_lifecycle(
             &self,
             observation: &LiveSidebandObservation,
-        ) -> Result<(), String> {
+        ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
+            let refused = |error: meerkat_runtime::RuntimeDriverError| {
+                ExperimentalLiveLifecycleObservationError::Refused(error.to_string())
+            };
             match observation.kind() {
                 LiveSidebandObservationKind::TurnStarted {
                     role: LiveSidebandTurnRole::User,
@@ -7815,7 +8227,7 @@ mod tests {
                     .observe_live_provider_turn_started(observation)
                     .await
                     .map(|_| ())
-                    .map_err(|error| error.to_string()),
+                    .map_err(refused),
                 LiveSidebandObservationKind::TurnFinished {
                     role: LiveSidebandTurnRole::User,
                     ..
@@ -7824,7 +8236,7 @@ mod tests {
                     .observe_live_provider_turn_finished(observation)
                     .await
                     .map(|_| ())
-                    .map_err(|error| error.to_string()),
+                    .map_err(refused),
                 _ => Ok(()),
             }
         }
@@ -7922,7 +8334,7 @@ mod tests {
         async fn observe_provider_lifecycle(
             &self,
             _observation: &LiveSidebandObservation,
-        ) -> Result<(), String> {
+        ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
             Ok(())
         }
 
@@ -8223,7 +8635,7 @@ mod tests {
         async fn observe_provider_lifecycle(
             &self,
             _observation: &LiveSidebandObservation,
-        ) -> Result<(), String> {
+        ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
             Ok(())
         }
 
@@ -9952,6 +10364,584 @@ mod tests {
         assert_eq!(session.provider_reads.load(AtomicOrdering::SeqCst), 1);
     }
 
+    /// One refused lifecycle fact must not end the provider stream: the
+    /// observation actor keeps consuming and every later lifecycle fact still
+    /// reaches the activator.
+    struct RefusingFirstLifecycleActivator {
+        lifecycle_calls: AtomicUsize,
+        all_seen: Notify,
+        expected: usize,
+        /// Report the first fact as lost custody instead of a refusal.
+        lose_custody: bool,
+    }
+
+    #[async_trait]
+    impl ExperimentalLiveBoundChannelActivator for RefusingFirstLifecycleActivator {
+        async fn prepare_bound_channel(
+            &self,
+            _binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+            _control: Arc<dyn ExperimentalGptLiveControlPlane>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn run_bound_channel(
+            &self,
+            _binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+            _control: Arc<dyn ExperimentalGptLiveControlPlane>,
+        ) {
+        }
+
+        async fn observe_provider_lifecycle(
+            &self,
+            _observation: &LiveSidebandObservation,
+        ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
+            let call = self.lifecycle_calls.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            if call >= self.expected {
+                self.all_seen.notify_waiters();
+            }
+            if call == 1 {
+                Err(if self.lose_custody {
+                    ExperimentalLiveLifecycleObservationError::CustodyLost(
+                        "no exact running channel custody (fixture)".to_string(),
+                    )
+                } else {
+                    ExperimentalLiveLifecycleObservationError::Refused(
+                        "guard rejected transition (fixture refusal)".to_string(),
+                    )
+                })
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn deactivate_bound_channel(
+            &self,
+            _binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_lifecycle_observation_does_not_end_the_provider_stream() {
+        let session_id = meerkat_core::SessionId::new();
+        let channel_id = meerkat_live::LiveChannelId::new("refused-lifecycle-continues");
+        let binding = ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let mut observations = VecDeque::new();
+        for index in 0..3 {
+            let turn = LiveSidebandTurnRef::__from_provider_observation(
+                &channel_id,
+                format!("turn-{index}"),
+                format!("provider-turn-{index}"),
+            )
+            .expect("turn ref");
+            observations.push_back(LiveSidebandObservation::new(
+                binding.clone(),
+                LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ));
+            observations.push_back(LiveSidebandObservation::new(
+                binding.clone(),
+                LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: format!("utterance {index}"),
+                },
+            ));
+        }
+        let expected = observations.len();
+        let sideband: Arc<dyn ProviderWebrtcSidebandSession> = Arc::new(FloodingSideband {
+            observations: std::sync::Mutex::new(observations),
+            fail_close: false,
+        });
+        let activator = Arc::new(RefusingFirstLifecycleActivator {
+            lifecycle_calls: AtomicUsize::new(0),
+            all_seen: Notify::new(),
+            expected,
+            lose_custody: false,
+        });
+        let transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());
+        let (retirement_tx, _retirement_rx) = mpsc::channel(1);
+        let active = spawn_sideband_actors(
+            binding.clone(),
+            sideband,
+            test_deferred_adapter(),
+            1,
+            retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
+        );
+        let all_seen = activator.all_seen.notified();
+        *active.activation_gate.prepared.lock().await =
+            Some(Arc::new(PreparedExperimentalGptLiveActivation {
+                runtime: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+                runtime_binding:
+                    meerkat_runtime::live_execution::LiveDelegationRuntimeBinding::__test_new(
+                        session_id.clone(),
+                        channel_id.clone(),
+                        meerkat_runtime::identifiers::LogicalRuntimeId::new("fixture-runtime"),
+                        1,
+                        1,
+                    ),
+                activator: Arc::clone(&activator) as Arc<dyn ExperimentalLiveBoundChannelActivator>,
+                control: Arc::clone(&transport) as Arc<dyn ExperimentalGptLiveControlPlane>,
+                live_adapter_host: Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+                    meerkat_live::NoOpProjectionSink,
+                ))),
+                public_observation_publisher: Arc::new(NoopPublicObservationPublisher),
+            }));
+        active
+            .activation_gate
+            .committed
+            .store(true, Ordering::Release);
+        active.activation_gate.changed.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(5), all_seen)
+            .await
+            .expect("every lifecycle fact after the refused one still reaches the activator");
+        assert_eq!(
+            activator.lifecycle_calls.load(AtomicOrdering::SeqCst),
+            expected,
+            "the refused lifecycle observation must not end the observation actor"
+        );
+        retire_sideband_actors(active).await;
+    }
+
+    /// Lost custody is different from a refusal: once the observation's
+    /// channel has no running custody, nothing further can be applied, so
+    /// the observation actor ends the provider stream instead of leaving a
+    /// call that refuses every later turn.
+    #[tokio::test]
+    async fn lost_custody_lifecycle_observation_ends_the_provider_stream() {
+        let session_id = meerkat_core::SessionId::new();
+        let channel_id = meerkat_live::LiveChannelId::new("lost-custody-lifecycle-ends");
+        let binding = ProviderWebrtcBinding::new(
+            channel_id.clone(),
+            session_id.clone(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let mut observations = VecDeque::new();
+        for index in 0..3 {
+            let turn = LiveSidebandTurnRef::__from_provider_observation(
+                &channel_id,
+                format!("turn-{index}"),
+                format!("provider-turn-{index}"),
+            )
+            .expect("turn ref");
+            observations.push_back(LiveSidebandObservation::new(
+                binding.clone(),
+                LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ));
+            observations.push_back(LiveSidebandObservation::new(
+                binding.clone(),
+                LiveSidebandObservationKind::TurnFinished {
+                    turn,
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                    transcript: format!("utterance {index}"),
+                },
+            ));
+        }
+        let expected = observations.len();
+        let sideband: Arc<dyn ProviderWebrtcSidebandSession> = Arc::new(FloodingSideband {
+            observations: std::sync::Mutex::new(observations),
+            fail_close: false,
+        });
+        let activator = Arc::new(RefusingFirstLifecycleActivator {
+            lifecycle_calls: AtomicUsize::new(0),
+            all_seen: Notify::new(),
+            expected,
+            lose_custody: true,
+        });
+        let transport = Arc::new(ExperimentalGptLiveWebrtcTransport::new());
+        let (retirement_tx, _retirement_rx) = mpsc::channel(1);
+        let active = spawn_sideband_actors(
+            binding.clone(),
+            sideband,
+            test_deferred_adapter(),
+            1,
+            retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
+        );
+        *active.activation_gate.prepared.lock().await =
+            Some(Arc::new(PreparedExperimentalGptLiveActivation {
+                runtime: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+                runtime_binding:
+                    meerkat_runtime::live_execution::LiveDelegationRuntimeBinding::__test_new(
+                        session_id.clone(),
+                        channel_id.clone(),
+                        meerkat_runtime::identifiers::LogicalRuntimeId::new("fixture-runtime"),
+                        1,
+                        1,
+                    ),
+                activator: Arc::clone(&activator) as Arc<dyn ExperimentalLiveBoundChannelActivator>,
+                control: Arc::clone(&transport) as Arc<dyn ExperimentalGptLiveControlPlane>,
+                live_adapter_host: Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+                    meerkat_live::NoOpProjectionSink,
+                ))),
+                public_observation_publisher: Arc::new(NoopPublicObservationPublisher),
+            }));
+        active
+            .activation_gate
+            .committed
+            .store(true, Ordering::Release);
+        active.activation_gate.changed.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !active.observation_actor.is_finished() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("lost custody ends the observation actor");
+        assert_eq!(
+            activator.lifecycle_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "no lifecycle fact is applied after custody was lost"
+        );
+        retire_sideband_actors(active).await;
+    }
+
+    /// Finding C (S104): a close while the member's own turn is running must
+    /// not wait for that turn. The close records its result and defers the
+    /// playback settlement; the deferred task settles once the turn releases
+    /// its boundary, and the machine's deferral resolves exactly then.
+    #[tokio::test]
+    async fn deferred_close_settlement_waits_for_the_member_turn_boundary_then_resolves() {
+        use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
+
+        let persistence = crate::PersistenceBundle::new(
+            Arc::new(crate::MemoryStore::new()),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let factory = crate::AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut builder = crate::FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(Arc::new(meerkat_client::TestClient::default()));
+        let (service, runtime) =
+            crate::surface::build_runtime_backed_service(builder, 4, persistence);
+        let service = Arc::new(service);
+        let session = crate::Session::new();
+        let session_id = session.id().clone();
+        let executor_service = Arc::clone(&service);
+        let executor_runtime = Arc::clone(&runtime);
+        Box::pin(crate::surface::materialize_session(
+            &service,
+            &runtime,
+            session,
+            crate::CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-realtime-2".to_string(),
+                prompt: meerkat_core::ContentInput::Text(String::new()),
+                system_prompt: crate::SystemPromptOverride::Disable,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            },
+            move |materialized_session_id| {
+                crate::surface::default_persistent_executor(
+                    executor_service,
+                    executor_runtime,
+                    materialized_session_id,
+                )
+            },
+        ))
+        .await
+        .expect("materialize deferred-settlement fixture session");
+        let channel_id = meerkat_live::LiveChannelId::new("deferred-close-settlement");
+        runtime
+            .resolve_live_open_admission(
+                &session_id,
+                &channel_id,
+                &meerkat_core::SessionLlmIdentity {
+                    model: "gpt-realtime-2".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+            )
+            .await
+            .expect("channel admitted");
+        runtime
+            .abandon_live_open_admission(&session_id, &channel_id)
+            .await
+            .expect("channel closed");
+
+        // The member's turn holds its finalization boundary across the close.
+        let boundary = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        runtime
+            .defer_live_close_settlement(&session_id, &channel_id)
+            .await
+            .expect("deferral recorded on the closed channel");
+        let settlement = tokio::spawn(
+            crate::session_runtime::live_orchestration::settle_live_close_playback_deferred(
+                Arc::clone(&service),
+                Arc::clone(&runtime),
+                meerkat_live::LiveAdapterHost::new(Arc::new(meerkat_live::NoOpProjectionSink)),
+                Vec::new(),
+                session_id.clone(),
+                channel_id.clone(),
+            ),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !settlement.is_finished(),
+            "settlement waits for the running turn instead of failing"
+        );
+        assert_eq!(
+            runtime
+                .live_close_settlement_deferred_channels(&session_id)
+                .await,
+            vec![channel_id.clone()],
+            "the deferral stays recorded while the turn runs"
+        );
+
+        // The turn ends: the playback row settles and the deferral resolves.
+        drop(boundary);
+        tokio::time::timeout(std::time::Duration::from_secs(5), settlement)
+            .await
+            .expect("settlement finishes once the boundary frees")
+            .expect("settlement task");
+        assert!(
+            runtime
+                .live_close_settlement_deferred_channels(&session_id)
+                .await
+                .is_empty(),
+            "the machine no longer holds the deferral"
+        );
+    }
+
+    /// S104's graceful browser disconnect (the peer closes its data channel
+    /// and ends its audio track while the RTCPeerConnection stays connected)
+    /// reaches the host as no transport signal at all, so the host close is
+    /// the only close. It arrives while an existing-member delegation holds
+    /// the session's turn boundary and the transport's pump is parked behind
+    /// that boundary projecting an assistant output the provider started
+    /// after the disconnect. The close must not wait for the turn: once it
+    /// has released the channel, the parked projection returns a typed
+    /// `Busy`, the transport defers the observation, and the deferred close
+    /// settlement applies it at the boundary before it settles playback.
+    #[tokio::test]
+    async fn close_with_a_projection_parked_behind_the_running_delegation_turn_converges() {
+        use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
+
+        let persistence = crate::PersistenceBundle::new(
+            Arc::new(crate::MemoryStore::new()),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let factory = crate::AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut builder = crate::FactoryAgentBuilder::new(factory, crate::Config::default());
+        builder.default_llm_client = Some(Arc::new(meerkat_client::TestClient::default()));
+        let (service, runtime) =
+            crate::surface::build_runtime_backed_service(builder, 4, persistence);
+        let service = Arc::new(service);
+        let session = crate::Session::new();
+        let session_id = session.id().clone();
+        let executor_service = Arc::clone(&service);
+        let executor_runtime = Arc::clone(&runtime);
+        Box::pin(crate::surface::materialize_session(
+            &service,
+            &runtime,
+            session,
+            crate::CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-realtime-2".to_string(),
+                prompt: meerkat_core::ContentInput::Text(String::new()),
+                system_prompt: crate::SystemPromptOverride::Disable,
+                max_tokens: None,
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            },
+            move |materialized_session_id| {
+                crate::surface::default_persistent_executor(
+                    executor_service,
+                    executor_runtime,
+                    materialized_session_id,
+                )
+            },
+        ))
+        .await
+        .expect("materialize graceful-disconnect fixture session");
+        let channel_id = meerkat_live::LiveChannelId::new("graceful-disconnect-close");
+        let admission = runtime
+            .resolve_live_open_admission(
+                &session_id,
+                &channel_id,
+                &meerkat_core::SessionLlmIdentity {
+                    model: "gpt-realtime-2".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+            )
+            .await
+            .expect("channel admitted");
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        )));
+        host.open_channel_with_authority(
+            admission
+                .channel_open_authority()
+                .expect("admission carries host open authority"),
+        )
+        .await
+        .expect("host channel opened");
+
+        // The existing-member delegation runs on the session: its turn holds
+        // the finalization boundary. The provider starts an assistant output
+        // after the browser has gone; the transport's projection of it parks
+        // behind that boundary, exactly as the pump did in S104.
+        let boundary = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        let parked_service = Arc::clone(&service);
+        let parked_session = session_id.clone();
+        let parked_channel = channel_id.clone();
+        let parked = tokio::spawn(async move {
+            parked_service
+                .admit_live_assistant_playback_target_with_context_observation(
+                    &parked_session,
+                    parked_channel,
+                    meerkat_core::InteractionId::new(),
+                    "response:after-disconnect".to_string(),
+                    "item:after-disconnect".to_string(),
+                    0,
+                    None,
+                )
+                .await
+                .map(|_| ())
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !parked.is_finished(),
+            "a live projection waits behind the member's running turn"
+        );
+
+        // The host close revokes the channel's custody and releases its
+        // projections from the boundary (what the explicit close does before
+        // the physical close). The parked projection returns Busy now instead
+        // of holding the close for the turn's duration.
+        service.release_live_projection_turn_boundary_waiters(&session_id, &channel_id);
+        let refused = tokio::time::timeout(std::time::Duration::from_secs(2), parked)
+            .await
+            .expect("the released projection returns without waiting for the turn")
+            .expect("projection task");
+        assert!(
+            matches!(
+                refused,
+                Err(meerkat_core::service::SessionError::Busy { .. })
+            ),
+            "the released projection is a typed Busy: {refused:?}"
+        );
+        // Later projections for the closing channel are refused the same way
+        // while the boundary stays held; the close never waits for them.
+        let later = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            service.admit_live_assistant_playback_target_with_context_observation(
+                &session_id,
+                channel_id.clone(),
+                meerkat_core::InteractionId::new(),
+                "response:later".to_string(),
+                "item:later".to_string(),
+                0,
+                None,
+            ),
+        )
+        .await
+        .expect("a later projection on the released channel returns at once");
+        assert!(matches!(
+            later,
+            Err(meerkat_core::service::SessionError::Busy { .. })
+        ));
+
+        // The transport hands the refused observation to the close; the
+        // close commits and defers its settlement to the boundary.
+        let observation =
+            meerkat_core::live_adapter::LiveAdapterObservation::AssistantOutputStarted {
+                provider_turn_ref: "turn:after-disconnect".to_string(),
+                response_id: "response:after-disconnect".to_string(),
+                provider_item_id: "item:after-disconnect".to_string(),
+                content_index: 0,
+            };
+        host.defer_projection_after_close(&channel_id, observation.clone())
+            .await
+            .expect("deferred on the open channel");
+        runtime
+            .abandon_live_open_admission(&session_id, &channel_id)
+            .await
+            .expect("channel closed");
+        runtime
+            .defer_live_close_settlement(&session_id, &channel_id)
+            .await
+            .expect("deferral recorded on the closed channel");
+        let deferred = host.take_deferred_projections(&channel_id).await;
+        assert_eq!(deferred, vec![observation]);
+        assert!(host.take_deferred_projections(&channel_id).await.is_empty());
+        let settlement = tokio::spawn(
+            crate::session_runtime::live_orchestration::settle_live_close_playback_deferred(
+                Arc::clone(&service),
+                Arc::clone(&runtime),
+                host.owned_handle(),
+                deferred,
+                session_id.clone(),
+                channel_id.clone(),
+            ),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !settlement.is_finished(),
+            "the deferred projection and settlement wait for the running turn"
+        );
+        assert!(
+            !service.live_projection_turn_boundary_released(&session_id, &channel_id),
+            "the deferred settlement restores the boundary wait before it replays projections"
+        );
+        assert_eq!(
+            runtime
+                .live_close_settlement_deferred_channels(&session_id)
+                .await,
+            vec![channel_id.clone()],
+            "the deferral stays recorded while the turn runs"
+        );
+
+        // The turn ends: the deferred projection lands (or is refused typed,
+        // the close having retired the assistant handle), playback settles,
+        // and the deferral resolves.
+        drop(boundary);
+        tokio::time::timeout(std::time::Duration::from_secs(5), settlement)
+            .await
+            .expect("settlement finishes once the boundary frees")
+            .expect("settlement task");
+        assert!(
+            runtime
+                .live_close_settlement_deferred_channels(&session_id)
+                .await
+                .is_empty(),
+            "the machine no longer holds the deferral"
+        );
+    }
+
     #[tokio::test]
     async fn provider_observation_tasks_do_not_read_before_outer_commit_gate() {
         let reads = Arc::new(AtomicUsize::new(0));
@@ -10687,110 +11677,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn close_drains_queued_final_without_erasing_early_playback_evidence() {
-        for queued_start in [false, true] {
-            let adapter = test_deferred_adapter();
-            let binding = ProviderWebrtcBinding::new(
-                meerkat_live::LiveChannelId::new("queued-final-close"),
-                meerkat_core::SessionId::new(),
-                meerkat_live::LiveRuntimeBindingGeneration::new(1),
-                meerkat_live::LiveRuntimeBindingFence::new(1),
-            );
-            let turn = LiveSidebandTurnRef::__from_provider_observation(
-                binding.channel_id(),
-                "turn:close".to_string(),
-                "private-close".to_string(),
-            )
-            .expect("turn identity");
-            adapter
-                .push_observation(LiveSidebandObservation::new(
-                    binding.clone(),
-                    LiveSidebandObservationKind::TurnStarted {
-                        turn: turn.clone(),
-                        role: LiveSidebandTurnRole::Assistant,
-                    },
-                ))
-                .expect("queue start");
-            if !queued_start {
-                assert!(matches!(
-                    adapter.next_observation().await.expect("read output start"),
-                    Some(LiveAdapterObservation::AssistantOutputStarted { .. })
-                ));
-                adapter
-                    .send_command(LiveAdapterCommand::CompleteAssistantPlayback {
-                        interaction_id: meerkat_core::InteractionId::new(),
-                        item_id: ExperimentalGptLiveDeferredAdapter::local_item_id(&turn),
-                        content_index: 0,
-                    })
-                    .await
-                    .expect("retain actual playback report before final");
-            }
-            let item_id = ExperimentalGptLiveDeferredAdapter::local_item_id(&turn);
-            adapter
-                .push_observation(LiveSidebandObservation::new(
-                    binding,
-                    LiveSidebandObservationKind::TurnFinished {
-                        turn,
-                        role: LiveSidebandTurnRole::Assistant,
-                        transcript: "The final spoken reply.".to_string(),
-                    },
-                ))
-                .expect("queue final");
-            adapter.close().await.expect("seal ingress");
-            adapter.close().await.expect("repeat close");
-            let first = adapter
-                .next_observation()
-                .await
-                .expect("read queued observation")
-                .expect("queued observation exists after close");
-            if queued_start {
-                assert!(matches!(
-                    first,
-                    LiveAdapterObservation::AssistantOutputStarted { .. }
-                ));
-            } else {
-                assert!(matches!(
-                    first,
-                    LiveAdapterObservation::AssistantPlaybackTerminalObserved {
-                        evidence: meerkat_core::LiveAssistantPlaybackEvidence::PlaybackComplete,
-                        ..
-                    }
-                ));
-            }
-            assert!(
-                matches!(adapter.next_observation().await.expect("read queued final"),
-                Some(LiveAdapterObservation::AssistantTranscriptFinal { text, .. })
-                    if text == "The final spoken reply.")
-            );
-            assert!(
-                adapter
-                    .next_observation()
-                    .await
-                    .expect("read sealed stream")
-                    .is_none()
-            );
-            assert!(
-                adapter
-                    .send_command(LiveAdapterCommand::CompleteAssistantPlayback {
-                        interaction_id: meerkat_core::InteractionId::new(),
-                        item_id,
-                        content_index: 0,
-                    })
-                    .await
-                    .is_err(),
-                "late playback cannot mutate sealed output custody"
-            );
-            assert!(
-                adapter
-                    .next_observation()
-                    .await
-                    .expect("sealed stream remains empty")
-                    .is_none()
-            );
-        }
-    }
-
     #[tokio::test(start_paused = true)]
     async fn unconfirmed_provider_closure_is_retired_locally_after_the_bound() {
         let transport = ExperimentalGptLiveWebrtcTransport::new();
@@ -10846,9 +11732,15 @@ mod tests {
         }
         assert!(drain.close_sent.load(Ordering::Acquire));
         assert!(started.elapsed() >= LIVE_CLOSE_CONFIRMATION_BOUND);
+        // Each recovery-driven attempt observes one drain slice, so the
+        // bound is reached after `bound / slice` retained attempts.
+        let retained_attempts = usize::try_from(
+            LIVE_CLOSE_CONFIRMATION_BOUND.as_secs() / LIVE_CLOSE_DRAIN_WAIT_SLICE.as_secs(),
+        )
+        .expect("small attempt count");
         assert!(
-            attempts >= 4,
-            "several retained attempts precede local retirement"
+            attempts >= retained_attempts,
+            "several retained attempts precede local retirement: {attempts} < {retained_attempts}"
         );
         assert!(
             transport
@@ -10950,8 +11842,11 @@ mod tests {
         );
     }
 
+    /// One close request observes the drain for the whole confirmation
+    /// bound: a drain that settles while the request is in flight returns
+    /// gracefully, and the binding is retained until every receipt landed.
     #[tokio::test(start_paused = true)]
-    async fn close_timeout_retains_binding_until_all_drain_receipts_and_allows_retry() {
+    async fn close_waits_within_the_bound_for_all_drain_receipts_then_settles_gracefully() {
         let transport = ExperimentalGptLiveWebrtcTransport::new();
         let binding = ProviderWebrtcBinding::new(
             meerkat_live::LiveChannelId::new("close-drain-retry"),
@@ -10984,22 +11879,39 @@ mod tests {
         drain.finish_reader(Ok(
             meerkat_live::ProviderWebrtcEofEvidence::ProviderConfirmed,
         ));
-        assert!(transport.close_exact(&binding, None).await.is_err());
-        assert_eq!(
-            transport.active_binding(binding.session_id()).await,
-            Some(binding.clone())
+        let started = tokio::time::Instant::now();
+        let settle = async {
+            // The canonical projection lands, then the control consumer
+            // finishes, both inside the bound: neither alone settles the drain.
+            tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+            assert_eq!(
+                transport.active_binding(binding.session_id()).await,
+                Some(binding.clone()),
+                "the binding is retained while the drain has not settled"
+            );
+            drain.finish_projection(Ok(()));
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            assert_eq!(
+                transport.active_binding(binding.session_id()).await,
+                Some(binding.clone()),
+                "canonical projection alone cannot bypass unfinished control settlement"
+            );
+            drain.control_finished.store(true, Ordering::Release);
+            drain.changed.notify_waiters();
+        };
+        let (closed, ()) = tokio::join!(
+            transport.close_exact_with(
+                &binding,
+                None,
+                ExperimentalLiveCloseConvergence::WithinBound
+            ),
+            settle
         );
-        drain.finish_projection(Ok(()));
+        assert!(closed.expect("the close settles once every receipt landed"));
+        let elapsed = started.elapsed();
         assert!(
-            transport.close_exact(&binding, None).await.is_err(),
-            "canonical projection alone cannot bypass unfinished control settlement"
-        );
-        drain.control_finished.store(true, Ordering::Release);
-        assert!(
-            transport
-                .close_exact(&binding, None)
-                .await
-                .expect("retry settles")
+            elapsed >= std::time::Duration::from_secs(9) && elapsed < LIVE_CLOSE_CONFIRMATION_BOUND,
+            "the close returned as soon as the drain settled: {elapsed:?}"
         );
         assert!(
             !transport
@@ -11012,6 +11924,74 @@ mod tests {
                 .active_binding(binding.session_id())
                 .await
                 .is_none()
+        );
+    }
+
+    /// The remote already hung up: `session.close` is refused and neither
+    /// EOF nor projection nor control settlement will ever arrive. The first
+    /// close request still converges inside the bound by retiring the
+    /// transport locally, so the channel can be released and reopened.
+    #[tokio::test(start_paused = true)]
+    async fn close_on_a_dead_remote_converges_on_the_first_request() {
+        let transport = ExperimentalGptLiveWebrtcTransport::new();
+        let binding = ProviderWebrtcBinding::new(
+            meerkat_live::LiveChannelId::new("close-dead-remote"),
+            meerkat_core::SessionId::new(),
+            meerkat_live::LiveRuntimeBindingGeneration::new(1),
+            meerkat_live::LiveRuntimeBindingFence::new(1),
+        );
+        let sideband = Arc::new(ControlledAmbiguousSideband::new());
+        sideband.fail_close.store(true, Ordering::Release);
+        let (retirement_tx, _retirement_rx) = mpsc::channel(1);
+        let active = spawn_sideband_actors(
+            binding.clone(),
+            sideband,
+            test_deferred_adapter(),
+            1,
+            retirement_tx,
+            Arc::clone(&transport.pending_deliveries),
+        );
+        active.observation_actor.abort();
+        active.adapter_pump.abort();
+        active.control_actor.abort();
+        active
+            .activation_gate
+            .committed
+            .store(true, Ordering::Release);
+        transport
+            .active_by_session
+            .lock()
+            .await
+            .insert(binding.session_id().clone(), active);
+        let started = tokio::time::Instant::now();
+        assert!(
+            transport
+                .close_exact_with(
+                    &binding,
+                    None,
+                    ExperimentalLiveCloseConvergence::WithinBound
+                )
+                .await
+                .expect("a dead remote converges on the first close request")
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= LIVE_CLOSE_CONFIRMATION_BOUND
+                && elapsed < LIVE_CLOSE_CONFIRMATION_BOUND + std::time::Duration::from_secs(6),
+            "local retirement happens at the confirmation bound: {elapsed:?}"
+        );
+        assert!(
+            transport
+                .active_binding(binding.session_id())
+                .await
+                .is_none(),
+            "the transport binding is released so the session can open again"
+        );
+        assert!(
+            !transport
+                .close_exact(&binding, None)
+                .await
+                .expect("repeat is idempotent")
         );
     }
 

@@ -194,6 +194,98 @@ them.
   for every read racing a head-canonical writer. It still never waits for a
   turn.
 
+- `ExperimentalLiveCloseConvergence` selects how long one physical live close
+  observes the closing drain (`WithinBound` for explicit owner closes,
+  `SingleSlice` for recovery-driven closes);
+  `ExperimentalLiveOpenAuthorityProvider::close_physical_if_bound_with` and
+  `ExperimentalGptLiveWebrtcTransport::close_physical_if_bound_with` take it
+  (the provider trait method has a delegating default).
+- Public GPT Live client delegations run in parallel. Every client
+  delegation becomes an item in the mob's shared WorkGraph (labels `voice`
+  and `live-channel:<id>`, evidence naming the provider delegation, channel,
+  and source session); up to four forks per channel run at once
+  (`LIVE_DELEGATION_CHANNEL_WORKER_CAP`, enforced by the generated machine's
+  new `live_delegation_channel_worker_cap`), later requests wait in arrival
+  order until the WorkGraph reports them ready, and a new request never
+  supersedes or cancels an earlier one. Forks receive the WorkGraph tools
+  (`DelegationMemberOptions::grant_workgraph_tools`) and a briefing that names
+  their item; a fork that needs a sibling's result links a `blocks` edge and
+  releases its item, is retired without a result
+  (`LiveDelegationWorkerTerminalKind::Blocked`), and the same operation binds
+  a fresh worker with the sibling's result once the item is ready again
+  (`RequeueLiveDelegation`). Channel close cancels only items that never
+  started (`CancelQueuedLiveDelegation`); running forks finish and their
+  results are queued on the source member as internal work. A fork refused
+  because the source member was still mid-turn (`SourceBusy`) is requeued
+  through the same input and retried; the request is never dropped.
+  Executor state (queued, started, waiting on another request, waiting for
+  the source member's turn, finished, failed) reaches the voice model only
+  through generated narration authority
+  (`AuthorizeLiveDelegationNarration`, `LiveDelegationNarrationAuthority`,
+  `ExperimentalGptLiveControlPlane::narrate_delegation`,
+  `LiveSidebandCommand::narrate_delegation`) with constant templates; a
+  request that cannot start or whose worker ends failed is spoken as failed
+  (`LiveDelegationNarrationKind::Failed`) instead of vanishing. A blocked
+  request whose dependency ends failed or cancelled (the WorkGraph treats
+  only a completed blocker as satisfied) restarts with a replacement item and
+  a preface naming what did not finish. Without a WorkGraph store the
+  channel degrades to a strict serial queue. The WorkGraph item title and
+  every narration name the request by the delegation window's user-only
+  transcript (`LiveDelegationExecutorInput::request_transcript`); the fork's
+  task is the composed executor text (`delegation_request_text`), and the
+  canonical user row and the provisional handoff keep the provider-final
+  transcript. The canonical transcript commit
+  for a delegation happens when the item is dispatched and waits at most the
+  source turn bound (`MobSessionService::
+  commit_live_delegation_final_transcript_at_turn_boundary`,
+  `PersistentSessionService::
+  commit_live_user_transcript_final_with_machine_at_turn_boundary`,
+  `meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary`), so a member that
+  is mid-turn is narrated as busy and retried instead of stalling the
+  channel. The mob runtime rescopes the host's WorkGraph service to the mob
+  realm (`meerkat_mob::mob_scoped_workgraph_service`,
+  `MobMcpState::workgraph_service_for_mob`) so voice items and the forks'
+  `workgraph_*` tools address one namespace under any host realm; the RPC mob
+  state supplies the host store (`SessionRuntime::workgraph_store`) even when
+  no runtime realm identity is active, and supplies nothing when the backend
+  is disabled (`WorkGraphStoreKind::Disabled`), so mob create and destroy keep
+  working there and members build without WorkGraph tools. `MeerkatMachine` gains
+  `live_delegation_schedule_state`, `requeue_live_delegation`,
+  `cancel_queued_live_delegation`, and `authorize_live_delegation_narration`;
+  `MobMcpState::workgraph_service` exposes the host WorkGraph service as the
+  host scoped it.
+
+
+- Live context mirror: an assistant row committed from the live channel
+  itself (realtime materialization, no context observation) now carries a
+  channel `realtime_origin`, so the mirror classifies it as
+  `LiveRealtimeTranscript`: already present in the channel, never echoed
+  back, and, with no observation claim, not reasserted after a bootstrap
+  summary. Before, such rows were re-mirrored as `ParentSessionServiceTurn`.
+  This is the intended disposition: the speech already exists in the
+  channel, and the concurrent bootstrap summary carries earlier speech
+  forward.
+- The MobKit documentation mirror on docs.rkat.ai tracks MobKit main instead
+  of releases. `Publish MobKit docs` now runs on the `mobkit-docs-updated`
+  dispatch that MobKit sends for every push to main touching `docs/`, on a
+  nightly catch-up, and on manual dispatch; it refuses commits that are not
+  on MobKit main and drops the release identity, latestness, and registry
+  checks. The regenerated snapshot lands through a pull request whose CI run
+  the workflow approves at once, or directly to main when an admin-held
+  `MOBKIT_DOCS_PR_TOKEN` secret exists. Mirrored pages carry the exact
+  MobKit commit and date instead of a release version, the manifest records
+  `source_branch`, and the nightly lag check compares the mirrored commit
+  with MobKit main by docs-touching commits rather than by release count.
+- Windows release binaries are cross-compiled from Linux with cargo-xwin
+  (clang-cl, lld-link, the Windows SDK) and then verified on a Windows runner.
+  The native windows-latest build ran 190 to 275 minutes on every release from
+  v0.8.11 to v0.8.39 and lost its runner at 162 minutes on v0.8.40, because
+  Windows has no memory overcommit and the generated machine crates peak above
+  13 GB; the same build takes about 20 minutes at four jobs on Linux. The
+  Windows-only pagefile, disk-reclaim, `CARGO_BUILD_JOBS=2`, and opt-level
+  mitigations are gone, so Windows binaries get full release codegen again.
+  Archive names and layout are unchanged.
+
 ### Fixed
 
 - Compaction no longer mints an audit graph edge over inline media. When a
@@ -235,6 +327,29 @@ them.
   realm is `mobkit` under its state directory, since the `mob.<name>` id in
   session metadata is a mob scope rather than a store realm.
 
+- Closing a public GPT Live channel while an existing-member delegation is
+  still executing converges on the provider's closure confirmation instead of
+  waiting out the member's turn. A browser that disconnects gracefully (data
+  channel closed, audio track ended) leaves the WebRTC peer connected and the
+  host without any transport signal, so the host close was the only close; it
+  hung until the running turn released the session's turn boundary, because
+  the transport's observation pump was parked behind that boundary projecting
+  an assistant output the provider started after the disconnect, and the
+  provider drain would not settle until every projection had landed. Once the
+  owner revokes the channel's close custody, the channel's live projections no
+  longer wait behind a held turn boundary: a parked projection returns a typed
+  `Busy`, the transport hands the observation to the deferred close settlement
+  (`DeferLiveCloseSettlement`), and that owned task settles the playback row
+  at the boundary and then applies the deferred projections. The settlement
+  refuses (`Busy`, retried after a short pause) when it wins the boundary
+  while the member turn's boundary commit is still landing in the store:
+  synchronizing the live actor from the durable body at that instant would
+  drop the turn's rows and its checkpoint receipt and fail its finalization,
+  which is what the first version of the deferred settlement did. Every wait
+  on the close path now emits an `info` line on the stable tracing target
+  `meerkat::live_close` (step name plus elapsed time), and a delegation
+  narration is skipped with a typed reason when the session's lifecycle or the
+  channel binding rules it out, instead of surfacing a machine guard rejection.
 - WholeBlob persistence refuses to mint a document its own reader would
   refuse. `Session::to_persisted_artifact` and the runtime store's WholeBlob
   encoder now run the audited-endpoint check before serializing, so a live
@@ -270,6 +385,102 @@ them.
   continues an existing conversation and that the model should wait for the
   user to speak. The instructions also allow the model to keep conversing while
   a delegated request runs.
+- Closing a live channel while a client delegation is running now converges
+  like an idle close. The channel's control consumer finished only after the
+  running worker's bounded turn, so the provider drain timed out, the close
+  failed with `experimental live channel binding failed`, and a later open
+  was refused with `session already has an active live channel`; the close
+  now releases the channel at once, the worker keeps its generated custody,
+  an owned fork's result is queued on the source member as internal work,
+  and an existing member's result stays in its own canonical session. A
+  close on a channel whose remote already hung up also converges on its
+  first request: one request observes the closing drain for the whole
+  `LIVE_CLOSE_CONFIRMATION_BOUND` (now 15 s, counted from the first close
+  request as well as from an accepted `session.close`), settles gracefully
+  the moment the provider confirms, and otherwise retires the transport
+  locally and reports `Closed` instead of failing every retry with
+  `remote_close_unavailable` while the session stayed bound.
+  `PersistentSessionService::resolve_live_assistant_playback_on_channel_close_within`
+  waits, bounded, for the session's turn boundary and backs the deferred
+  close settlement described below.
+- A refused live lifecycle fact (for example a cancellation outcome that
+  arrives after the worker's own terminal was recorded) no longer ends the
+  provider stream for the whole channel: the fact fails closed on its own,
+  transcript projection and delivery receipts still flow, and
+  `ResolveLiveDelegationCancellation` is now accepted after the terminal
+  (`ResolveLiveDelegationCancellationAfterTerminal`) as evidence about an
+  already-settled worker.
+- A live delegation arriving while the backing member is mid-turn no longer
+  stalls the channel's observation loop. The canonical final-transcript
+  commit waited without bound for the member's turn-finalization gate,
+  inline in the loop that consumes provider observations, so transcript
+  deltas and lifecycle facts stopped flowing until the member's turn ended
+  and the user heard nothing. The commit now runs when the item is
+  dispatched, off that loop, waits at most
+  `DelegationExecutionService::SOURCE_TURN_BOUNDARY_WAIT`, and a source still
+  mid-turn is narrated as busy and retried with nothing committed.
+- Mob members that resolve WorkGraph tools on now build under `rkat serve`.
+  Member builds used the host's default WorkGraph grant, scoped to the
+  runtime realm, which the factory refuses against the member's `mob.<id>`
+  build realm; live delegation therefore silently ran its serial fallback
+  there. The provisioner hands every member build the mob-scoped service and
+  its grant.
+- A live delegation whose WorkGraph item refuses the scheduler's claim (a
+  sibling fork linked it between read and claim, or a transient store error)
+  is deferred and retried (`WORKGRAPH_START_ATTEMPTS` bounded) instead of
+  being retired unspoken; a busy-source deferral no longer stops the
+  scheduling pass for the channel's other ready items.
+- A channel close no longer both speaks and merges the same delegation
+  result: the pending delivery task settles first and only a result that
+  never crossed the provider boundary merges into the source member. The
+  "finished" sentence and the result it introduces are released under one
+  hold of the channel's delegation append lane, so another worker's
+  narration or result cannot land between them.
+- Closing a live channel while the member's own turn is still running (an
+  existing-member delegation executing the spoken request) returns like an
+  idle close instead of waiting for that turn or failing busy. Close-time
+  assistant playback settlement that finds the turn boundary held is
+  deferred: the close records its result, the generated machine records the
+  debt on the closed channel (`DeferLiveCloseSettlement`,
+  `live_close_settlement_deferred_channels`), and an owned task settles the
+  playback row once the boundary frees (`LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND`
+  per wait, `LIVE_CLOSE_DEFERRED_SETTLEMENT_ATTEMPTS` waits) and resolves the
+  debt (`ResolveLiveCloseSettlement`). From the commit-target read on, the
+  settlement, generated commit, and host realization run on one owned task,
+  so a caller that stops observing a slow close (an RPC deadline) can no
+  longer leave the transport retired with the machine channel still active
+  through the settlement wait, which
+  made the session unprojectable ("session not found"), refused typed turns
+  ("no captured live actor authority"), and blocked a reopen. Live S104 hit
+  this when the executor turn outlived the harness's close bound.
+- A delegation result released to a live channel but not yet delivered when
+  the channel closes no longer violates the generated machine's exact-once
+  delivery invariant (a debug panic on the delivery task, the result then
+  retried against a retired transport forever). Both close transitions
+  (`RecordLiveCloseClosed`, `AbandonLiveOpenAdmission`) now terminalize such
+  a delivery as `InterruptedByClose`, and the delegation coordinator merges a
+  result whose delivery finds the machine channel closed into the source
+  member exactly once, the same post-close path a worker that finishes after
+  the close takes; the result text is taken under the retained result's lock
+  so the close sweep and the delivery task cannot both merge it, whichever
+  order the machine close and the transport retirement arrive in
+  (`MeerkatMachine::live_channel_activity_for_session` reports an unreadable
+  machine state as unknown, which is retried, never merged).
+- A live lifecycle fact that fails is now typed
+  (`ExperimentalLiveLifecycleObservationError`): a refusal while the channel
+  is still bound fails that fact alone and the provider stream continues;
+  lost custody (no bound channel, or a machine binding under another fence
+  or generation) ends the stream instead of leaving a call that refuses every
+  turn. `ExperimentalLiveBoundChannelActivator::observe_provider_lifecycle`
+  returns that error.
+- The generated machine's revoked-worker restart reconciliation
+  (`ReconcileRevokedLiveDelegationWorkerAfterRestartFresh`) settles the
+  operation's schedule state with its recorded terminal; it previously left
+  the state Running behind a retired worker. The invariant
+  `live_delegation_items_are_channel_bound_and_capped` now ties Claimed and
+  Running schedule states to live worker phases and to a positive slot count
+  on a bound channel, and requires an abandoned interaction's delegation to
+  be refused, terminal, cancelled, or never bound to a worker.
 - A live delegation arriving while the backing member is mid-turn no longer
   fails with `ForkSourceUnavailable { cause: Running }`. The persistent fork
   owner waits, bounded, for the member's turn-finalization boundary and forks
@@ -294,7 +505,8 @@ them.
 - Closing a live channel whose remote side is already gone now converges
   instead of failing on every retry. `ExperimentalGptLiveWebrtcTransport`
   retired an unconfirmed closure only when the provider had accepted
-  `session.close` at least `LIVE_CLOSE_CONFIRMATION_BOUND` (20 s) earlier;
+  `session.close` at least `LIVE_CLOSE_CONFIRMATION_BOUND` (then 20 s, now
+  15 s) earlier;
   when the remote had hung up the close request itself was rejected, the
   clock never started, and every `live/close` failed with
   `remote_close_unavailable` (surfaced by MobKit as "experimental live
@@ -429,38 +641,78 @@ them.
   `meerkat::surface::materialize_prepared_session_actor_unattached_with_actor_slot`,
   `meerkat::session_runtime::recovery::inject_recovery_resources`, and
   `RecoveryContext::recovered_create_request_with_bindings`.
-
-### Changed
-
-- Live context mirror: an assistant row committed from the live channel
-  itself (realtime materialization, no context observation) now carries a
-  channel `realtime_origin`, so the mirror classifies it as
-  `LiveRealtimeTranscript`: already present in the channel, never echoed
-  back, and, with no observation claim, not reasserted after a bootstrap
-  summary. Before, such rows were re-mirrored as `ParentSessionServiceTurn`.
-  This is the intended disposition: the speech already exists in the
-  channel, and the concurrent bootstrap summary carries earlier speech
-  forward.
-- The MobKit documentation mirror on docs.rkat.ai tracks MobKit main instead
-  of releases. `Publish MobKit docs` now runs on the `mobkit-docs-updated`
-  dispatch that MobKit sends for every push to main touching `docs/`, on a
-  nightly catch-up, and on manual dispatch; it refuses commits that are not
-  on MobKit main and drops the release identity, latestness, and registry
-  checks. The regenerated snapshot lands through a pull request whose CI run
-  the workflow approves at once, or directly to main when an admin-held
-  `MOBKIT_DOCS_PR_TOKEN` secret exists. Mirrored pages carry the exact
-  MobKit commit and date instead of a release version, the manifest records
-  `source_branch`, and the nightly lag check compares the mirrored commit
-  with MobKit main by docs-touching commits rather than by release count.
-- Windows release binaries are cross-compiled from Linux with cargo-xwin
-  (clang-cl, lld-link, the Windows SDK) and then verified on a Windows runner.
-  The native windows-latest build ran 190 to 275 minutes on every release from
-  v0.8.11 to v0.8.39 and lost its runner at 162 minutes on v0.8.40, because
-  Windows has no memory overcommit and the generated machine crates peak above
-  13 GB; the same build takes about 20 minutes at four jobs on Linux. The
-  Windows-only pagefile, disk-reclaim, `CARGO_BUILD_JOBS=2`, and opt-level
-  mitigations are gone, so Windows binaries get full release codegen again.
-  Archive names and layout are unchanged.
+- Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+  meerkat-runtime `meerkat_machine::dsl`): the per-channel single-slot state
+  `live_delegation_interaction_by_channel`,
+  `live_delegation_operation_by_channel`, and
+  `live_delegation_provider_turn_by_channel` are removed and replaced by
+  `live_delegation_operation_by_interaction`,
+  `live_delegation_channel_by_operation`,
+  `live_delegation_schedule_state_by_operation`,
+  `live_delegation_active_worker_count_by_channel`,
+  `live_delegation_channel_worker_cap`, and
+  `live_delegation_last_narration_by_operation` (`MeerkatMachineState` struct
+  literals and the generated `State` must add them); the invariant
+  `live_pending_delegation_is_serialized_and_complete` is replaced by
+  `live_delegation_items_are_channel_bound_and_capped`; the transition
+  `AbandonLiveInteractionPreservingEarlierDelegation` is removed and
+  `RequeueBlockedLiveDelegation`, `RequeueUnstartedLiveDelegation`,
+  `CancelQueuedLiveDelegation`, `AuthorizeLiveDelegationNarration`, and
+  `ResolveLiveDelegationCancellationAfterTerminal` are added (`TransitionId::*`
+  discriminants move); the inputs `RequeueLiveDelegation`,
+  `CancelQueuedLiveDelegation`, and `AuthorizeLiveDelegationNarration` are
+  added (`MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`, and
+  kernel `InputKind::*` discriminants move); the effects
+  `LiveDelegationRequeued`, `LiveDelegationQueuedCancelled`, and
+  `LiveDelegationNarrationAuthorized` are added (`MeerkatMachineEffect::*`,
+  `MeerkatMachineEffectVariant::*`, and kernel `EffectKind::*` discriminants
+  move); `LiveDelegationWorkerTerminalKind` gains `Blocked`
+  (`LiveDelegationWorkerTerminalKind::*` in the schema catalog, the kernel,
+  the runtime DSL bridge, and `meerkat_runtime::live_execution`); the enums
+  `LiveDelegationScheduleState` and `LiveDelegationNarrationKind` (variants
+  `Queued`, `Claimed`, `Blocked`, `Completed`, `SourceBusy`, `Failed`) are
+  added.
+  Arrival of a new delegation no longer drives `SupersedeLiveInteraction`;
+  the input remains for explicit cancellation.
+- `meerkat-live`: `LiveSidebandProviderCommand` gains the variant
+  `NarrateDelegationContext` (`LiveSidebandProviderCommand::*` discriminants
+  move); `LiveSidebandNarrationAuthority` and
+  `LiveSidebandCommand::narrate_delegation` are added.
+- `MeerkatMachine` gains `defer_live_close_settlement`,
+  `resolve_live_close_settlement`, and
+  `live_close_settlement_deferred_channels`; the generated machine gains the
+  state `live_close_settlement_deferred_channels`, the inputs
+  `DeferLiveCloseSettlement` and `ResolveLiveCloseSettlement`
+  (`MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`, and kernel
+  `InputKind::*` discriminants move), the effects `LiveCloseSettlementDeferred`
+  and `LiveCloseSettlementResolved` (`MeerkatMachineEffect::*`,
+  `MeerkatMachineEffectVariant::*`, and kernel `EffectKind::*` discriminants
+  move), the transitions of the same names (`TransitionId::*` discriminants
+  move), and the invariant
+  `live_close_settlement_deferral_is_for_closed_channels`.
+- `ExperimentalLiveBoundChannelActivator::observe_provider_lifecycle` returns
+  `Result<(), ExperimentalLiveLifecycleObservationError>` (implementors must
+  classify a failure as `Refused` or `CustodyLost`); `LIVE_CLOSE_CONFIRMATION_BOUND`
+  is defined on `meerkat::session_runtime::live_orchestration` and re-exported
+  from `experimental_gpt_live`.
+- `ExperimentalGptLiveControlPlane` gains the required method
+  `narrate_delegation` (implementors must add it);
+  `ExperimentalGptLiveNarrationDispatch` and
+  `ExperimentalGptLiveNarrationWaiter` are added.
+- `DelegationMemberOptions` gains the public field `grant_workgraph_tools`.
+- `MobSessionService` gains the REQUIRED method
+  `commit_live_delegation_final_transcript_at_turn_boundary` (no default:
+  every implementation must add it, forwarding to the persistent owner where
+  it wraps one). New public items: `meerkat_core::
+  LiveFinalTranscriptCommitAtTurnBoundary`, `PersistentSessionService::
+  commit_live_user_transcript_final_with_machine_at_turn_boundary`,
+  `meerkat_mob::mob_scoped_workgraph_service`,
+  `MobMcpState::workgraph_service_for_mob` (both return `None` for a disabled
+  backend), and (meerkat-rpc) `SessionRuntime::workgraph_store`.
+- `GPT_LIVE_CLIENT_CONTEXT_SESSION_INSTRUCTIONS` is reworded: it now tells
+  the voice model that several delegated requests run at once and that the
+  executor reports each one's state (consumers matching the old text must
+  update).
 
 ## [0.8.40] - 2026-09-17
 

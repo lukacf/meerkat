@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use meerkat::experimental_gpt_live::{
     ExperimentalGptLiveBridgeError, ExperimentalGptLiveControlObservation,
-    ExperimentalGptLiveControlPlane, ExperimentalGptLiveResultDeliveryDispatch,
+    ExperimentalGptLiveControlPlane, ExperimentalGptLiveNarrationDispatch,
+    ExperimentalGptLiveResultDeliveryDispatch, ExperimentalLiveLifecycleObservationError,
 };
 use meerkat_core::exact_operation::ExactOperationIdentity;
 use meerkat_core::ops::OperationId;
@@ -27,9 +28,10 @@ use meerkat_live::{
 use meerkat_mob::{
     AgentIdentity, BoundedResultSpec, DelegationCancellationHandle, DelegationExecutionError,
     DelegationExecutionHandle, DelegationExecutionRequest, DelegationExecutionService,
-    DelegationTerminalizedExecution, DelegationTurnTerminal, DurableBoundedMemberState,
-    DurableBoundedWorkState, LiveBridgeExecutionSnapshot, LiveBridgeOperationTerminal,
-    MobDeliveryIdentity, render_bounded_delegation_task,
+    DelegationMemberOptions, DelegationTerminalizedExecution, DelegationTurnTerminal,
+    DurableBoundedMemberState, DurableBoundedWorkState, LiveBridgeExecutionSnapshot,
+    LiveBridgeOperationTerminal, MobDeliveryIdentity, MobHandle, WorkOrigin, WorkSpec,
+    render_bounded_delegation_task,
 };
 use meerkat_runtime::live_execution::{
     LiveBridgeExecutionTerminalReceipt, LiveBridgeOperationAdmission,
@@ -37,9 +39,10 @@ use meerkat_runtime::live_execution::{
     LiveBridgeSubmissionAttemptAuthority, LiveBridgeSubmissionAuthority,
     LiveBridgeSubmissionReceipt, LiveDelegationCancellationDirective,
     LiveDelegationCancellationOutcome, LiveDelegationExecutionAdmission,
-    LiveDelegationRecoverySnapshot, LiveDelegationResultDeliveryAuthority,
-    LiveDelegationResultDeliveryObservation, LiveDelegationResultDeliveryResolution,
-    LiveDelegationResultReleaseAuthority, LiveDelegationWorkerTerminalKind,
+    LiveDelegationNarrationKind, LiveDelegationRecoverySnapshot,
+    LiveDelegationResultDeliveryAuthority, LiveDelegationResultDeliveryObservation,
+    LiveDelegationResultDeliveryResolution, LiveDelegationResultReleaseAuthority,
+    LiveDelegationRuntimeBinding, LiveDelegationWorkerOwnership, LiveDelegationWorkerTerminalKind,
     LiveHandoffReconciliationReceipt,
 };
 use sha2::{Digest, Sha256};
@@ -78,8 +81,29 @@ pub(crate) fn delegation_request_text(input: &LiveDelegationExecutorInput) -> St
     }
     format!("{request}\n\n{LIVE_DELEGATION_ASSISTANT_CONTEXT_HEADING}\n{context}")
 }
+mod schedule;
+
+use schedule::{
+    LIVE_DELEGATION_CHANNEL_WORKER_CAP, VoiceWorkGraph, VoiceWorkItem, WorkItemDisposition,
+    fork_work_instructions, narration_text, narration_title, post_close_merge_text,
+    task_after_failed_blockers, task_with_waited_results,
+};
 
 const LIVE_DELEGATION_RESULT_BYTES: usize = 16 * 1024;
+/// Bounded attempts for post-close reconciliation steps that have no live
+/// channel left to fence them; giving up is logged, never silent.
+const POST_CLOSE_RECONCILE_ATTEMPTS: usize = 24;
+/// Delay before a channel whose source member was mid-turn is offered the
+/// queued delegation again.
+const SOURCE_BUSY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+/// Delay before a delegation whose WorkGraph item refused the scheduler's
+/// claim (a sibling fork linked it between read and claim, or the store was
+/// briefly unavailable) is offered again.
+const WORKGRAPH_START_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+/// Bounded WorkGraph start attempts before an item that keeps refusing the
+/// claim is retired and the failure is spoken.
+const WORKGRAPH_START_ATTEMPTS: u32 = 8;
+
 const LIVE_DELEGATION_CLEANUP_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_millis(25);
 const LIVE_DELEGATION_CLEANUP_RETRY_MAX_DELAY: std::time::Duration =
@@ -233,8 +257,157 @@ fn live_bridge_admission_matches_current_owner(
 
 struct ActiveDelegation {
     retained: Arc<RetainedDelegation>,
+    #[allow(
+        dead_code,
+        reason = "cancellation custody stays bound to the running worker"
+    )]
     cancellation: DelegationCancellationHandle,
+    #[allow(dead_code, reason = "the task owns its terminal realization")]
     task: JoinHandle<()>,
+}
+
+/// One admitted delegation between provider join and a worker slot: queued
+/// (`Created`), or blocked behind WorkGraph dependencies awaiting requeue.
+#[derive(Clone)]
+struct PendingDelegation {
+    provider_binding: ProviderWebrtcBinding,
+    control: Arc<dyn ExperimentalGptLiveControlPlane>,
+    operation: ExactOperationIdentity<LiveUserTurnCorrelation>,
+    provisional: ProvisionalLiveHandoff,
+    runtime_binding: LiveDelegationRuntimeBinding,
+    mob_handle: MobHandle,
+    source_identity: AgentIdentity,
+    delegation: LiveSidebandDelegationRef,
+    /// The provider user turn that carried the request; its adapter key
+    /// identifies the final transcript item at commit time.
+    turn: LiveSidebandTurnRef,
+    /// Provider-final transcript text, committed canonically at dispatch.
+    /// This is the canonical user row and the provisional handoff; it never
+    /// carries the composed executor text.
+    final_transcript: String,
+    /// The provider window behind the delegation: `request_transcript` (the
+    /// user-only window text) names the WorkGraph item and every narration;
+    /// the composed `delegation_request_text` output is the fork's task.
+    executor_input: LiveDelegationExecutorInput,
+    /// Canonical commit evidence and its reconciliation once committed; a
+    /// deferred item keeps them so a retry never commits twice.
+    transcript: Option<ConfirmedTranscript>,
+    workgraph: Option<VoiceWorkGraph>,
+    work: Option<VoiceWorkItem>,
+    title: String,
+    /// The machine holds the item as Blocked; dispatch requeues it first.
+    blocked: bool,
+    /// Returned to the queue after a busy source or a WorkGraph refusal;
+    /// skipped by the pump until the retry clears the flag.
+    deferred: bool,
+    /// The Queued narration has been released for this item.
+    queued_narrated: bool,
+    /// Dispatch attempts that ended in a deferral.
+    start_attempts: u32,
+    waited_on: Vec<meerkat::WorkItemId>,
+    /// Blockers that ended without completing, found by the pump; dispatch
+    /// replaces the item and prefaces the task with them.
+    failed_blockers: Vec<(meerkat::WorkItemId, String)>,
+}
+
+/// Canonical transcript commit evidence and its `Confirmed` reconciliation.
+#[derive(Clone)]
+struct ConfirmedTranscript {
+    final_evidence: FinalLiveUserTranscriptCommitEvidence,
+    reconciliation: LiveHandoffReconciliationReceipt,
+}
+
+/// Why a scheduled delegation did not start on this pass.
+#[derive(Debug)]
+enum ScheduledStartFailure {
+    /// The source member stayed mid-turn past the bound, at the canonical
+    /// transcript commit or at the fork. Nothing physical exists; the item
+    /// is deferred and retried.
+    SourceBusy {
+        source_identity: AgentIdentity,
+        waited_ms: u64,
+    },
+    /// The WorkGraph refused the scheduler's claim or replacement (a revision
+    /// conflict with a sibling fork's link, or a transient store error). The
+    /// item is deferred and retried a bounded number of times.
+    WorkGraph(String),
+    /// Any other start failure: the request is retired and spoken as failed.
+    Failed(String),
+}
+
+impl From<LiveDelegationStartFailure> for ScheduledStartFailure {
+    fn from(failure: LiveDelegationStartFailure) -> Self {
+        match failure {
+            LiveDelegationStartFailure::SourceBusy {
+                source_identity,
+                waited_ms,
+            } => Self::SourceBusy {
+                source_identity,
+                waited_ms,
+            },
+            LiveDelegationStartFailure::Failed(message) => Self::Failed(message),
+        }
+    }
+}
+
+/// Per-channel schedule. Arrival order is kept; readiness comes from the
+/// WorkGraph; the running set is bounded by the generated worker cap.
+struct ChannelSchedule {
+    queue: std::collections::VecDeque<OperationId>,
+    running: std::collections::BTreeSet<OperationId>,
+    pending: std::collections::HashMap<OperationId, PendingDelegation>,
+    /// Serializes delegation-lane provider appends (narration and results):
+    /// the provider accepts one delegation append in flight per session.
+    append_lane: Arc<Mutex<()>>,
+    /// Results of completed items on this channel, by item, so a worker
+    /// restarted after waiting on them receives them verbatim.
+    completed_results: std::collections::HashMap<meerkat::WorkItemId, (String, String)>,
+}
+
+impl ChannelSchedule {
+    fn new() -> Self {
+        Self {
+            queue: std::collections::VecDeque::new(),
+            running: std::collections::BTreeSet::new(),
+            pending: std::collections::HashMap::new(),
+            append_lane: Arc::new(Mutex::new(())),
+            completed_results: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Exact identity and transport needed to narrate one delegation's state.
+struct NarrationSubject {
+    runtime_binding: LiveDelegationRuntimeBinding,
+    operation: ExactOperationIdentity<LiveUserTurnCorrelation>,
+    control: Arc<dyn ExperimentalGptLiveControlPlane>,
+    delegation: LiveSidebandDelegationRef,
+    title: String,
+    lane: Arc<Mutex<()>>,
+}
+
+impl NarrationSubject {
+    fn from_pending(pending: &PendingDelegation, lane: Arc<Mutex<()>>) -> Self {
+        Self {
+            runtime_binding: pending.runtime_binding.clone(),
+            operation: pending.operation.clone(),
+            control: Arc::clone(&pending.control),
+            delegation: pending.delegation.clone(),
+            title: pending.title.clone(),
+            lane,
+        }
+    }
+
+    fn from_retained(retained: &RetainedDelegation) -> Self {
+        Self {
+            runtime_binding: retained.runtime_binding.clone(),
+            operation: retained.operation.clone(),
+            control: Arc::clone(&retained.control),
+            delegation: retained.delegation.clone(),
+            title: retained.title.clone(),
+            lane: Arc::clone(&retained.append_lane),
+        }
+    }
 }
 
 struct OwnedDelegationCleanup {
@@ -693,6 +866,14 @@ struct RetainedDelegation {
     delegation: LiveSidebandDelegationRef,
     control: Arc<dyn ExperimentalGptLiveControlPlane>,
     result: Mutex<RetainedDelegationResult>,
+    /// WorkGraph item this worker holds, absent in degraded serial mode.
+    work: Option<VoiceWorkItem>,
+    workgraph: Option<VoiceWorkGraph>,
+    title: String,
+    append_lane: Arc<Mutex<()>>,
+    /// Source mob handle for post-close merging and owned-child retirement.
+    mob_handle: Option<MobHandle>,
+    source_identity: AgentIdentity,
 }
 
 /// One ownership-preserving handoff of an exact bounded executor result to
@@ -752,6 +933,9 @@ struct RetainedDelegationResult {
     delivery_authority: Option<LiveDelegationResultDeliveryAuthority>,
     terminal_ineligible: bool,
     delivery_reservation: Option<ResultDeliveryReservation>,
+    /// A result dispatch reached the provider boundary (delivered or
+    /// ambiguous). A closed channel merges only results that never crossed.
+    dispatch_crossed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -947,7 +1131,9 @@ async fn release_bound_channel(
 }
 
 /// One coordinator per RPC host. Channel actors are fenced by the exact
-/// provider binding and retain at most one generated delegation per channel.
+/// provider binding. Every client delegation becomes an item in the mob's
+/// shared WorkGraph; up to the generated per-channel worker cap run at once,
+/// the rest wait in arrival order until the WorkGraph reports them ready.
 #[derive(Clone)]
 pub struct ExperimentalLiveDelegationCoordinator {
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
@@ -957,7 +1143,8 @@ pub struct ExperimentalLiveDelegationCoordinator {
     responses_prepared: Arc<Mutex<PreparedResponsesMap>>,
     responses_active: Arc<Mutex<ActiveResponsesMap>>,
     responses_pending_retirements: Arc<Mutex<PendingResponsesRetirementMap>>,
-    active: Arc<Mutex<std::collections::HashMap<ActiveChannelKey, ActiveDelegation>>>,
+    active: Arc<Mutex<std::collections::HashMap<OperationId, ActiveDelegation>>>,
+    schedules: Arc<Mutex<std::collections::HashMap<ActiveChannelKey, ChannelSchedule>>>,
     retained: Arc<Mutex<std::collections::HashMap<OperationId, Arc<RetainedDelegation>>>>,
     failed_start_cleanups:
         Arc<Mutex<std::collections::HashMap<OperationId, OwnedDelegationCleanup>>>,
@@ -1261,6 +1448,7 @@ impl ExperimentalLiveDelegationCoordinator {
             responses_active: Arc::new(Mutex::new(std::collections::HashMap::new())),
             responses_pending_retirements: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            schedules: Arc::new(Mutex::new(std::collections::HashMap::new())),
             retained: Arc::new(Mutex::new(std::collections::HashMap::new())),
             failed_start_cleanups: Arc::new(Mutex::new(std::collections::HashMap::new())),
             result_delivery_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -2706,7 +2894,7 @@ impl ExperimentalLiveDelegationCoordinator {
     async fn observe_provider_lifecycle(
         &self,
         observation: &LiveSidebandObservation,
-    ) -> Result<(), String> {
+    ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
         let key = (
             observation.binding().session_id().clone(),
             observation.binding().channel_id().clone(),
@@ -2728,10 +2916,48 @@ impl ExperimentalLiveDelegationCoordinator {
                     )
             });
         if !bound {
-            return Err(
+            return Err(ExperimentalLiveLifecycleObservationError::CustodyLost(
                 "provider lifecycle observation has no exact running channel custody".to_string(),
-            );
+            ));
         }
+        let applied = self.apply_provider_lifecycle(observation).await;
+        match applied {
+            Ok(()) => Ok(()),
+            Err(reason) => Err(self.classify_lifecycle_failure(observation, reason).await),
+        }
+    }
+
+    /// A lifecycle fact the runtime did not apply is a refusal while the
+    /// observation's channel is still bound in the machine with the same
+    /// fence and generation; once that binding is gone (the channel closed or
+    /// was rebound under the observation), nothing further can be applied and
+    /// the failure is lost custody. Both are typed state reads, never a
+    /// reading of the error text.
+    async fn classify_lifecycle_failure(
+        &self,
+        observation: &LiveSidebandObservation,
+        reason: String,
+    ) -> ExperimentalLiveLifecycleObservationError {
+        let binding = observation.binding();
+        let bound = self
+            .runtime
+            .live_delegation_runtime_binding(binding.session_id(), binding.channel_id())
+            .await
+            .is_ok_and(|runtime_binding| {
+                runtime_binding.generation() == binding.runtime_generation().get()
+                    && runtime_binding.fence_token() == binding.runtime_fence().get()
+            });
+        if bound {
+            ExperimentalLiveLifecycleObservationError::Refused(reason)
+        } else {
+            ExperimentalLiveLifecycleObservationError::CustodyLost(reason)
+        }
+    }
+
+    async fn apply_provider_lifecycle(
+        &self,
+        observation: &LiveSidebandObservation,
+    ) -> Result<(), String> {
         match observation.kind() {
             LiveSidebandObservationKind::TurnStarted {
                 role: meerkat_live::LiveSidebandTurnRole::User,
@@ -2895,14 +3121,10 @@ impl ExperimentalLiveDelegationCoordinator {
         // The provider can start its assistant acknowledgement immediately
         // after the joined delegation turn. Admit the exact provisional join
         // while the generated interaction is still active, then close the
-        // conversational turn. Canonical transcript reconciliation and all
-        // executor authority remain control-owned below.
-        self.supersede_previous_delegation(
-            &channel_key,
-            &runtime_binding,
-            operation.domain_correlation().interaction_id(),
-        )
-        .await?;
+        // conversational turn. Earlier delegations on this channel keep
+        // running: arrival never cancels or supersedes them. Canonical
+        // transcript reconciliation and all executor authority remain
+        // control-owned below.
         self.runtime
             .admit_live_delegation(&runtime_binding, &operation, &provisional)
             .await
@@ -2946,73 +3168,6 @@ impl ExperimentalLiveDelegationCoordinator {
         }
         self.runtime.wake_live_context_outbox(finished.binding());
         Ok(())
-    }
-
-    /// Close exact previous execution custody before either admitting a new
-    /// delegation or acquiring the source session's transcript mutation lane.
-    async fn supersede_previous_delegation(
-        &self,
-        channel_key: &ActiveChannelKey,
-        runtime_binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
-        superseding_interaction_id: meerkat_core::InteractionId,
-    ) -> Result<(), String> {
-        let previous = self.active.lock().await.remove(channel_key);
-        let Some(previous) = previous else {
-            return Ok(());
-        };
-        if !previous.task.is_finished() {
-            let directive = match self
-                .runtime
-                .supersede_live_delegation(
-                    runtime_binding.runtime_id(),
-                    runtime_binding.fence_token(),
-                    runtime_binding.generation(),
-                    &previous.retained.admission,
-                    superseding_interaction_id,
-                )
-                .await
-            {
-                Ok(directive) => Some(directive),
-                Err(_) if previous.task.is_finished() => None,
-                Err(error) => {
-                    self.active
-                        .lock()
-                        .await
-                        .insert(channel_key.clone(), previous);
-                    return Err(error.to_string());
-                }
-            };
-            if let Some(LiveDelegationCancellationDirective::CancellationAuthorized(cancellation)) =
-                directive
-            {
-                let outcome = previous
-                    .cancellation
-                    .cancel(&cancellation)
-                    .await
-                    .unwrap_or(LiveDelegationCancellationOutcome::Failed);
-                if let Err(error) = self
-                    .runtime
-                    .resolve_live_delegation_cancellation(
-                        runtime_binding.runtime_id(),
-                        runtime_binding.fence_token(),
-                        runtime_binding.generation(),
-                        &cancellation,
-                        outcome,
-                    )
-                    .await
-                {
-                    self.active
-                        .lock()
-                        .await
-                        .insert(channel_key.clone(), previous);
-                    return Err(error.to_string());
-                }
-            }
-        }
-        previous
-            .task
-            .await
-            .map_err(|error| format!("live delegation terminal task failed: {error}"))
     }
 
     /// Client-context capability only. The provider-final transcript remains
@@ -3073,83 +3228,823 @@ impl ExperimentalLiveDelegationCoordinator {
             .ok_or_else(|| {
                 "live delegation requires a durable Meerkat-Mob member owner".to_string()
             })?;
-        // Existing-member execution holds this same session's finalization
-        // boundary. Cancellation must run before waiting to append the next
-        // canonical user transcript; it must never interrupt unrelated text.
-        self.supersede_previous_delegation(
-            &channel_key,
-            &runtime_binding,
-            operation.domain_correlation().interaction_id(),
+        self.admit_scheduled_delegation(
+            provider_binding,
+            control,
+            channel_key,
+            operation,
+            provisional,
+            runtime_binding,
+            mob_handle,
+            source_identity,
+            delegation,
+            turn,
+            final_transcript,
+            executor_input,
         )
-        .await?;
+        .await;
+        self.completed_delegation_turns
+            .lock()
+            .await
+            .remove(&completed_key);
+        Ok(())
+    }
+
+    /// The mob's shared WorkGraph as this mob's members see it. Members build
+    /// in `mob.<id>`, and the host state rescopes its service to that realm;
+    /// a host without a WorkGraph store leaves the channel on a strict serial
+    /// queue instead of starting forks that can never build.
+    fn voice_workgraph(&self, mob_handle: &MobHandle) -> Option<VoiceWorkGraph> {
+        match self
+            .mobs
+            .workgraph_service_for_mob(&mob_handle.definition().id)
+        {
+            Ok(Some(service)) => Some(VoiceWorkGraph::new(service)),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    mob_id = %mob_handle.definition().id,
+                    "mob WorkGraph service unavailable; voice delegation runs serially"
+                );
+                None
+            }
+        }
+    }
+
+    /// Concurrent worker bound for one channel. The generated machine caps
+    /// forks; an existing member executes one admitted turn at a time, so
+    /// that policy is strictly serial regardless of the machine cap.
+    fn channel_worker_cap(&self) -> usize {
+        match self.execution_policy {
+            LiveDelegationExecutionPolicy::DurableFork => LIVE_DELEGATION_CHANNEL_WORKER_CAP,
+            LiveDelegationExecutionPolicy::ExistingMember => 1,
+        }
+    }
+
+    /// Place an admitted delegation into its channel schedule and wake the
+    /// schedule. The canonical transcript commit and reconciliation happen
+    /// when the item is dispatched (see [`Self::start_scheduled_delegation`]):
+    /// they wait, bounded, for the source member's turn boundary, and that
+    /// wait must never hold up the channel's observation loop.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "this exact delegation boundary carries independent provider, runtime, mob, and operation authorities"
+    )]
+    async fn admit_scheduled_delegation(
+        &self,
+        provider_binding: &ProviderWebrtcBinding,
+        control: Arc<dyn ExperimentalGptLiveControlPlane>,
+        channel_key: ActiveChannelKey,
+        operation: ExactOperationIdentity<LiveUserTurnCorrelation>,
+        provisional: ProvisionalLiveHandoff,
+        runtime_binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        mob_handle: MobHandle,
+        source_identity: AgentIdentity,
+        delegation: LiveSidebandDelegationRef,
+        turn: LiveSidebandTurnRef,
+        final_transcript: String,
+        executor_input: LiveDelegationExecutorInput,
+    ) {
+        let title = narration_title(&executor_input.request_transcript);
+        let workgraph = self.voice_workgraph(&mob_handle);
+        let work = match workgraph.as_ref() {
+            Some(workgraph) => match workgraph
+                .create_item(
+                    provider_binding.channel_id(),
+                    provider_binding.session_id(),
+                    delegation.adapter_key(),
+                    &executor_input.request_transcript,
+                )
+                .await
+            {
+                Ok(work) => Some(work),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        operation_id = %operation.operation_id(),
+                        "voice delegation continues without a WorkGraph item (serial fallback)"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        let operation_id = operation.operation_id().clone();
+        let pending = PendingDelegation {
+            provider_binding: provider_binding.clone(),
+            control,
+            operation,
+            provisional,
+            runtime_binding,
+            mob_handle,
+            source_identity,
+            delegation,
+            turn,
+            final_transcript,
+            executor_input,
+            transcript: None,
+            workgraph,
+            work,
+            title,
+            blocked: false,
+            deferred: false,
+            queued_narrated: false,
+            start_attempts: 0,
+            waited_on: Vec::new(),
+            failed_blockers: Vec::new(),
+        };
+        {
+            let mut schedules = self.schedules.lock().await;
+            let schedule = schedules
+                .entry(channel_key.clone())
+                .or_insert_with(ChannelSchedule::new);
+            schedule.pending.insert(operation_id.clone(), pending);
+            schedule.queue.push_back(operation_id);
+        }
+        self.spawn_pump(channel_key);
+    }
+
+    /// Wake one channel's schedule off the caller's task. Starting a worker
+    /// may wait for the source member's turn boundary (bounded), so the
+    /// observation loop that admits delegations never runs the pump inline.
+    fn spawn_pump(&self, channel_key: ActiveChannelKey) {
+        let coordinator = self.clone();
+        tokio::spawn(async move {
+            coordinator.pump_channel_schedule(&channel_key).await;
+        });
+    }
+
+    /// Start queued delegations while a worker slot is free. An item with a
+    /// WorkGraph binding starts when the WorkGraph reports it ready, or when
+    /// every item it waited on ended without completing; an item without one
+    /// (degraded mode) starts only when nothing else runs. Items deferred
+    /// after a busy source or a transient WorkGraph refusal are skipped until
+    /// their retry wakes the schedule again. When nothing can start, the
+    /// items still waiting are narrated as queued, once each.
+    ///
+    /// Boxed because a worker's terminal realization pumps the schedule that
+    /// starts the next worker: the future type would otherwise be recursive.
+    fn pump_channel_schedule<'a>(
+        &'a self,
+        channel_key: &'a ActiveChannelKey,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(self.pump_channel_schedule_inner(channel_key))
+    }
+
+    async fn pump_channel_schedule_inner(&self, channel_key: &ActiveChannelKey) {
+        loop {
+            let workgraph = {
+                let schedules = self.schedules.lock().await;
+                let Some(schedule) = schedules.get(channel_key) else {
+                    return;
+                };
+                schedule.queue.iter().find_map(|operation_id| {
+                    schedule
+                        .pending
+                        .get(operation_id)
+                        .and_then(|pending| pending.workgraph.clone())
+                })
+            };
+            let readiness = match workgraph {
+                Some(workgraph) => match workgraph.channel_readiness(&channel_key.1).await {
+                    Ok(readiness) => Some(readiness),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "voice work readiness unavailable; scheduling this pass serially"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            };
+            let cap = self.channel_worker_cap();
+            let next = {
+                let mut schedules = self.schedules.lock().await;
+                let Some(schedule) = schedules.get_mut(channel_key) else {
+                    return;
+                };
+                let position = if schedule.running.len() >= cap {
+                    None
+                } else {
+                    schedule.queue.iter().position(|operation_id| {
+                        let Some(pending) = schedule.pending.get(operation_id) else {
+                            return false;
+                        };
+                        if pending.deferred {
+                            return false;
+                        }
+                        match (&pending.work, &readiness) {
+                            (Some(work), Some(readiness)) => {
+                                readiness.ready.contains(&work.id)
+                                    || readiness.blockers_failed.contains_key(&work.id)
+                            }
+                            _ => schedule.running.is_empty(),
+                        }
+                    })
+                };
+                match position
+                    .and_then(|index| schedule.queue.remove(index))
+                    .and_then(|operation_id| {
+                        let pending = schedule.pending.get_mut(&operation_id)?;
+                        pending.failed_blockers = pending
+                            .work
+                            .as_ref()
+                            .zip(readiness.as_ref())
+                            .and_then(|(work, readiness)| {
+                                readiness.blockers_failed.get(&work.id).cloned()
+                            })
+                            .unwrap_or_default();
+                        let pending = pending.clone();
+                        let waited = pending
+                            .waited_on
+                            .iter()
+                            .filter_map(|item| schedule.completed_results.get(item).cloned())
+                            .collect::<Vec<_>>();
+                        schedule.running.insert(operation_id.clone());
+                        Some((
+                            operation_id,
+                            pending,
+                            waited,
+                            Arc::clone(&schedule.append_lane),
+                        ))
+                    }) {
+                    Some(next) => Some(next),
+                    None => {
+                        // Nothing can start on this pass: tell the user once
+                        // about each item still waiting for a slot or a
+                        // dependency. Deferred items carry their own narration.
+                        let running_ahead = schedule.running.len();
+                        let lane = Arc::clone(&schedule.append_lane);
+                        let queued = schedule.queue.iter().cloned().collect::<Vec<_>>();
+                        let mut waiting = Vec::new();
+                        for operation_id in queued {
+                            if let Some(pending) = schedule.pending.get_mut(&operation_id)
+                                && !pending.deferred
+                                && !pending.queued_narrated
+                            {
+                                pending.queued_narrated = true;
+                                waiting.push(NarrationSubject::from_pending(
+                                    pending,
+                                    Arc::clone(&lane),
+                                ));
+                            }
+                        }
+                        for subject in waiting {
+                            self.spawn_narration(
+                                subject,
+                                LiveDelegationNarrationKind::Queued,
+                                running_ahead,
+                                Vec::new(),
+                                false,
+                            );
+                        }
+                        None
+                    }
+                }
+            };
+            let Some((operation_id, pending, waited, lane)) = next else {
+                return;
+            };
+            match self
+                .start_scheduled_delegation(channel_key, &pending, waited, Arc::clone(&lane))
+                .await
+            {
+                Ok(()) => {
+                    self.spawn_narration(
+                        NarrationSubject::from_pending(&pending, lane),
+                        LiveDelegationNarrationKind::Claimed,
+                        0,
+                        Vec::new(),
+                        false,
+                    );
+                }
+                Err(ScheduledStartFailure::SourceBusy {
+                    source_identity,
+                    waited_ms,
+                }) => {
+                    tracing::info!(
+                        operation_id = %operation_id,
+                        %source_identity,
+                        waited_ms,
+                        "source member is mid-turn; voice delegation deferred for a later start"
+                    );
+                    self.defer_delegation(
+                        channel_key,
+                        &operation_id,
+                        &pending,
+                        lane,
+                        Some(LiveDelegationNarrationKind::SourceBusy),
+                        SOURCE_BUSY_RETRY_DELAY,
+                    )
+                    .await;
+                }
+                Err(ScheduledStartFailure::WorkGraph(error)) => {
+                    let attempts = pending.start_attempts.saturating_add(1);
+                    if attempts <= WORKGRAPH_START_ATTEMPTS {
+                        tracing::info!(
+                            %error,
+                            operation_id = %operation_id,
+                            attempts,
+                            "voice work item refused the scheduler's claim; retrying shortly"
+                        );
+                        self.defer_delegation(
+                            channel_key,
+                            &operation_id,
+                            &pending,
+                            lane,
+                            None,
+                            WORKGRAPH_START_RETRY_DELAY,
+                        )
+                        .await;
+                    } else {
+                        tracing::warn!(
+                            %error,
+                            operation_id = %operation_id,
+                            attempts,
+                            "voice work item kept refusing the scheduler's claim; the request is retired"
+                        );
+                        self.retire_unstartable_delegation(
+                            channel_key,
+                            &operation_id,
+                            &pending,
+                            lane,
+                        )
+                        .await;
+                    }
+                }
+                Err(ScheduledStartFailure::Failed(error)) => {
+                    tracing::warn!(
+                        %error,
+                        operation_id = %operation_id,
+                        "scheduled live delegation failed to start"
+                    );
+                    self.retire_unstartable_delegation(channel_key, &operation_id, &pending, lane)
+                        .await;
+                }
+            }
+        }
+    }
+
+    /// Return a delegation that could not start yet to its channel queue,
+    /// marked deferred so the current pass moves on to other ready items, and
+    /// wake the schedule again after `delay`. A start the machine recorded as
+    /// failed (the executor refused with a busy source) is requeued in the
+    /// machine first; a deferral before any worker authority was requested
+    /// leaves the machine untouched. `narration`, when given, tells the user
+    /// why the request has not started.
+    async fn defer_delegation(
+        &self,
+        channel_key: &ActiveChannelKey,
+        operation_id: &OperationId,
+        pending: &PendingDelegation,
+        lane: Arc<Mutex<()>>,
+        narration: Option<LiveDelegationNarrationKind>,
+        delay: std::time::Duration,
+    ) {
+        let state = self
+            .runtime
+            .live_delegation_schedule_state(pending.runtime_binding.session_id(), operation_id)
+            .await
+            .ok()
+            .flatten();
+        if state == Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Failed)
+            && let Err(error) = self
+                .runtime
+                .requeue_live_delegation(&pending.runtime_binding, &pending.operation)
+                .await
+        {
+            tracing::warn!(%error, %operation_id, "deferred delegation could not be requeued in the machine");
+            self.retire_unstartable_delegation(channel_key, operation_id, pending, lane)
+                .await;
+            return;
+        }
+        {
+            let mut schedules = self.schedules.lock().await;
+            let Some(schedule) = schedules.get_mut(channel_key) else {
+                return;
+            };
+            schedule.running.remove(operation_id);
+            if let Some(entry) = schedule.pending.get_mut(operation_id) {
+                entry.blocked = false;
+                entry.deferred = true;
+                entry.start_attempts = entry.start_attempts.saturating_add(1);
+                entry.transcript = pending.transcript.clone();
+                entry.work = pending.work.clone();
+            }
+            if !schedule.queue.contains(operation_id) {
+                schedule.queue.push_back(operation_id.clone());
+            }
+        }
+        if let Some(kind) = narration {
+            self.spawn_narration(
+                NarrationSubject::from_pending(pending, lane),
+                kind,
+                0,
+                Vec::new(),
+                false,
+            );
+        }
+        let coordinator = self.clone();
+        let key = channel_key.clone();
+        let operation_id = operation_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            if let Some(schedule) = coordinator.schedules.lock().await.get_mut(&key)
+                && let Some(entry) = schedule.pending.get_mut(&operation_id)
+            {
+                entry.deferred = false;
+            }
+            coordinator.pump_channel_schedule(&key).await;
+        });
+    }
+
+    /// Commit the delegation's canonical transcript if that has not happened
+    /// yet, bind its WorkGraph item to the worker, and start the worker.
+    ///
+    /// The transcript commit waits at most the source turn bound for the
+    /// member's turn-finalization boundary and reports a busy source instead
+    /// of blocking behind a running turn. The committed evidence is kept on
+    /// the pending item so a later retry never commits twice.
+    async fn start_scheduled_delegation(
+        &self,
+        channel_key: &ActiveChannelKey,
+        pending: &PendingDelegation,
+        waited: Vec<(String, String)>,
+        append_lane: Arc<Mutex<()>>,
+    ) -> Result<(), ScheduledStartFailure> {
+        let operation_id = pending.operation.operation_id().clone();
+        if pending.blocked {
+            self.runtime
+                .requeue_live_delegation(&pending.runtime_binding, &pending.operation)
+                .await
+                .map_err(|error| ScheduledStartFailure::Failed(error.to_string()))?;
+            if let Some(schedule) = self.schedules.lock().await.get_mut(channel_key)
+                && let Some(entry) = schedule.pending.get_mut(&operation_id)
+            {
+                entry.blocked = false;
+            }
+        }
+        let transcript = match pending.transcript.clone() {
+            Some(transcript) => transcript,
+            None => {
+                let transcript = self.commit_delegation_transcript(pending).await?;
+                if let Some(schedule) = self.schedules.lock().await.get_mut(channel_key)
+                    && let Some(entry) = schedule.pending.get_mut(&operation_id)
+                {
+                    entry.transcript = Some(transcript.clone());
+                }
+                transcript
+            }
+        };
+        let worker_identity = self
+            .execution_policy
+            .worker_identity(&pending.source_identity, &operation_id);
+        let mut member = DelegationMemberOptions::default();
+        let mut work = pending.work.clone();
+        if self.execution_policy == LiveDelegationExecutionPolicy::DurableFork
+            && let Some(current) = work.as_ref()
+        {
+            let workgraph = pending.workgraph.as_ref().ok_or_else(|| {
+                ScheduledStartFailure::Failed(
+                    "voice work item exists without a WorkGraph service".to_string(),
+                )
+            })?;
+            if !pending.failed_blockers.is_empty() {
+                let replacement = workgraph
+                    .replace_after_failed_blockers(
+                        current,
+                        &pending.failed_blockers,
+                        pending.provider_binding.channel_id(),
+                        pending.provider_binding.session_id(),
+                        pending.delegation.adapter_key(),
+                        &pending.executor_input.request_transcript,
+                    )
+                    .await
+                    .map_err(ScheduledStartFailure::WorkGraph)?;
+                if let Some(schedule) = self.schedules.lock().await.get_mut(channel_key)
+                    && let Some(entry) = schedule.pending.get_mut(&operation_id)
+                {
+                    entry.work = Some(replacement.clone());
+                }
+                work = Some(replacement);
+            }
+            let item = work.as_ref().ok_or_else(|| {
+                ScheduledStartFailure::Failed("voice work item vanished before claim".to_string())
+            })?;
+            workgraph
+                .claim(&item.id, worker_identity.as_str())
+                .await
+                .map_err(ScheduledStartFailure::WorkGraph)?;
+            member.additional_instructions = Some(vec![fork_work_instructions(item)]);
+            member.grant_workgraph_tools = true;
+        }
+        let task = task_after_failed_blockers(
+            &task_with_waited_results(&delegation_request_text(&pending.executor_input), &waited),
+            &pending.failed_blockers,
+        );
+        self.start_admitted_delegation(
+            &pending.provider_binding,
+            Arc::clone(&pending.control),
+            channel_key.clone(),
+            pending.operation.clone(),
+            pending.provisional.clone(),
+            pending.runtime_binding.clone(),
+            pending.mob_handle.clone(),
+            pending.source_identity.clone(),
+            pending.delegation.clone(),
+            transcript.final_evidence,
+            transcript.reconciliation,
+            pending.workgraph.clone(),
+            work,
+            pending.title.clone(),
+            task,
+            member,
+            append_lane,
+        )
+        .await
+        .map_err(ScheduledStartFailure::from)
+    }
+
+    /// Commit the provider-final transcript to the canonical session through
+    /// the session owner, bounded by the source turn wait, and reconcile it
+    /// with the generated machine. Only `Confirmed` reconciliation lets the
+    /// delegation proceed to a worker.
+    async fn commit_delegation_transcript(
+        &self,
+        pending: &PendingDelegation,
+    ) -> Result<ConfirmedTranscript, ScheduledStartFailure> {
+        let session_id = pending.provider_binding.session_id();
         let final_event = meerkat_core::RealtimeTranscriptEvent::UserTranscriptFinal {
-            item_id: turn.adapter_key().to_string(),
+            item_id: pending.turn.adapter_key().to_string(),
             previous_item_id: None,
             content_index: 0,
-            text: final_transcript.clone(),
+            text: pending.final_transcript.clone(),
         };
-        let final_evidence = self
+        let committed = self
             .mobs
             .session_service()
-            .commit_live_delegation_final_transcript(
+            .commit_live_delegation_final_transcript_at_turn_boundary(
                 &self.runtime,
                 session_id,
-                provisional.clone(),
+                pending.provisional.clone(),
                 final_event,
+                DelegationExecutionService::SOURCE_TURN_BOUNDARY_WAIT,
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ScheduledStartFailure::Failed(error.to_string()))?;
+        let final_evidence = match committed {
+            meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary::Committed(evidence) => evidence,
+            meerkat_core::LiveFinalTranscriptCommitAtTurnBoundary::SourceBusy { waited } => {
+                return Err(ScheduledStartFailure::SourceBusy {
+                    source_identity: pending.source_identity.clone(),
+                    waited_ms: u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
+                });
+            }
+        };
         tracing::debug!(
-            operation_id = %operation.operation_id(),
+            operation_id = %pending.operation.operation_id(),
             "client-context control committed canonical final transcript"
         );
-
         let reconciliation = self
             .runtime
             .reconcile_live_delegation_transcript(
                 session_id,
-                runtime_binding.runtime_id(),
-                runtime_binding.fence_token(),
-                runtime_binding.generation(),
-                &operation,
-                &provisional,
+                pending.runtime_binding.runtime_id(),
+                pending.runtime_binding.fence_token(),
+                pending.runtime_binding.generation(),
+                &pending.operation,
+                &pending.provisional,
                 &final_evidence,
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ScheduledStartFailure::Failed(error.to_string()))?;
         tracing::debug!(
-            operation_id = %operation.operation_id(),
+            operation_id = %pending.operation.operation_id(),
             disposition = ?reconciliation.disposition(),
             "client-context control reconciled canonical transcript"
         );
         if reconciliation.disposition() != LiveHandoffReconciliation::Confirmed {
-            return Err(
+            return Err(ScheduledStartFailure::Failed(
                 "canonical final transcript did not confirm the client delegation".to_string(),
-            );
+            ));
         }
-        let started = self
-            .start_admitted_delegation(
-                provider_binding,
-                control,
-                channel_key,
-                operation,
-                provisional,
-                runtime_binding,
-                mob_handle,
-                source_identity,
-                delegation,
-                final_evidence,
-                reconciliation,
-                executor_input,
+        Ok(ConfirmedTranscript {
+            final_evidence,
+            reconciliation,
+        })
+    }
+
+    /// Drop a delegation that cannot start: cancel it in the machine when it
+    /// is still queued, fail its WorkGraph item, and tell the user. The
+    /// narration is authorized only once the machine holds the item as
+    /// Failed or Cancelled, so an unstartable request is never silent.
+    async fn retire_unstartable_delegation(
+        &self,
+        channel_key: &ActiveChannelKey,
+        operation_id: &OperationId,
+        pending: &PendingDelegation,
+        lane: Arc<Mutex<()>>,
+    ) {
+        if let Some(schedule) = self.schedules.lock().await.get_mut(channel_key) {
+            schedule.running.remove(operation_id);
+            schedule.pending.remove(operation_id);
+        }
+        let state = self
+            .runtime
+            .live_delegation_schedule_state(pending.runtime_binding.session_id(), operation_id)
+            .await
+            .ok()
+            .flatten();
+        if matches!(
+            state,
+            Some(
+                meerkat_runtime::live_execution::LiveDelegationScheduleState::Created
+                    | meerkat_runtime::live_execution::LiveDelegationScheduleState::Blocked
             )
-            .await;
-        if started.is_ok() {
-            self.completed_delegation_turns
-                .lock()
-                .await
-                .remove(&completed_key);
+        ) && let Err(error) = self
+            .runtime
+            .cancel_queued_live_delegation(&pending.runtime_binding, &pending.operation)
+            .await
+        {
+            tracing::warn!(%error, %operation_id, "unstartable live delegation could not be cancelled");
         }
-        started
+        if let (Some(workgraph), Some(work)) = (pending.workgraph.as_ref(), pending.work.as_ref())
+            && let Err(error) = workgraph
+                .close(&work.id, meerkat::WorkStatus::Failed, None)
+                .await
+        {
+            tracing::warn!(%error, %operation_id, "unstartable voice work item could not be closed");
+        }
+        self.narrate(
+            NarrationSubject::from_pending(pending, lane),
+            LiveDelegationNarrationKind::Failed,
+            0,
+            Vec::new(),
+            false,
+        )
+        .await;
+    }
+
+    fn spawn_narration(
+        &self,
+        subject: NarrationSubject,
+        kind: LiveDelegationNarrationKind,
+        running_ahead: usize,
+        blockers: Vec<String>,
+        explicit_block: bool,
+    ) {
+        let coordinator = self.clone();
+        tokio::spawn(async move {
+            coordinator
+                .narrate(subject, kind, running_ahead, blockers, explicit_block)
+                .await;
+        });
+    }
+
+    /// Release one templated narration under generated authority, taking the
+    /// channel's delegation append lane for the dispatch.
+    async fn narrate(
+        &self,
+        subject: NarrationSubject,
+        kind: LiveDelegationNarrationKind,
+        running_ahead: usize,
+        blockers: Vec<String>,
+        explicit_block: bool,
+    ) {
+        let lane = Arc::clone(&subject.lane);
+        let _lane = lane.lock().await;
+        self.narrate_on_held_lane(&subject, kind, running_ahead, blockers, explicit_block)
+            .await;
+    }
+
+    /// [`Self::narrate`] for a caller that already holds the channel's
+    /// delegation append lane. The machine refuses kinds that do not match
+    /// the item's schedule state and repeats of the last released kind; a
+    /// refusal is not an error here.
+    async fn narrate_on_held_lane(
+        &self,
+        subject: &NarrationSubject,
+        kind: LiveDelegationNarrationKind,
+        running_ahead: usize,
+        blockers: Vec<String>,
+        explicit_block: bool,
+    ) {
+        // Lifecycle facts first: a stopped session or a channel that is no
+        // longer this worker's active binding cannot grant narration
+        // authority, and asking the machine anyway would only surface a
+        // guard rejection for a condition already known here.
+        if let Err(skip) = self
+            .runtime
+            .live_delegation_narration_eligibility(&subject.runtime_binding)
+            .await
+        {
+            tracing::debug!(%skip, ?kind, "live delegation narration skipped");
+            return;
+        }
+        let authority = match self
+            .runtime
+            .authorize_live_delegation_narration(&subject.runtime_binding, &subject.operation, kind)
+            .await
+        {
+            Ok(authority) => authority,
+            Err(error) => {
+                tracing::debug!(%error, ?kind, "live delegation narration was not authorized");
+                return;
+            }
+        };
+        let text = narration_text(
+            kind,
+            &subject.title,
+            running_ahead,
+            &blockers,
+            explicit_block,
+        );
+        match subject
+            .control
+            .narrate_delegation(authority, subject.delegation.clone(), text)
+            .await
+        {
+            Ok(ExperimentalGptLiveNarrationDispatch::AwaitingAcknowledgement(waiter)) => {
+                if let Err(error) = waiter.resolve().await {
+                    tracing::debug!(%error, ?kind, "live delegation narration lost its acknowledgement");
+                }
+            }
+            Ok(ExperimentalGptLiveNarrationDispatch::Resolved(_)) => {}
+            Err(error) => {
+                tracing::debug!(%error, ?kind, "live delegation narration was not delivered");
+            }
+        }
+    }
+
+    /// The channel closed under a retained result. Stop further provider
+    /// delivery attempts and, for an owned fork whose result never crossed
+    /// the provider boundary, merge it into the source member exactly once.
+    /// The result text is taken under the lock, so whichever of the close
+    /// sweep and the delivery task reaches this first merges and the other
+    /// finds nothing, whatever order the machine close and the transport
+    /// retirement arrive in.
+    async fn merge_result_after_channel_close(&self, retained: &Arc<RetainedDelegation>) {
+        let undelivered = {
+            let mut result = retained.result.lock().await;
+            result.terminal_ineligible = true;
+            if result.dispatch_crossed {
+                None
+            } else {
+                result.result_text.take()
+            }
+        };
+        if retained.admission.worker_ownership() == LiveDelegationWorkerOwnership::OwnedMember
+            && let Some(text) = undelivered
+        {
+            self.merge_result_into_source(retained, &text).await;
+        }
+        self.remove_retained_delegation(retained).await;
+    }
+
+    /// A worker that finished after its voice channel closed still merges:
+    /// its result is queued on the source member as ordinary internal work.
+    async fn merge_result_into_source(&self, retained: &RetainedDelegation, result_text: &str) {
+        let result_spec =
+            match BoundedResultSpec::new("gpt_live_delegation_merge", LIVE_DELEGATION_RESULT_BYTES)
+            {
+                Ok(spec) => spec,
+                Err(error) => {
+                    tracing::warn!(%error, "post-close voice result merge has no result spec");
+                    return;
+                }
+            };
+        let work = WorkSpec::new(
+            post_close_merge_text(&retained.title, result_text),
+            WorkOrigin::Internal,
+        );
+        let Some(mob_handle) = retained.mob_handle.as_ref() else {
+            tracing::warn!(
+                operation_id = %retained.operation.operation_id(),
+                "post-close voice delegation result has no source mob handle to merge into"
+            );
+            return;
+        };
+        match mob_handle
+            .start_work_for_identity_bounded(
+                retained.source_identity.clone(),
+                work,
+                meerkat_core::types::HandlingMode::Queue,
+                result_spec,
+            )
+            .await
+        {
+            Ok(_) => tracing::info!(
+                operation_id = %retained.operation.operation_id(),
+                "post-close voice delegation result merged into the source member"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                operation_id = %retained.operation.operation_id(),
+                "post-close voice delegation result could not be merged"
+            ),
+        }
     }
 
     #[allow(
@@ -3169,18 +4064,73 @@ impl ExperimentalLiveDelegationCoordinator {
         delegation: LiveSidebandDelegationRef,
         final_evidence: FinalLiveUserTranscriptCommitEvidence,
         reconciliation: LiveHandoffReconciliationReceipt,
-        executor_input: LiveDelegationExecutorInput,
-    ) -> Result<(), String> {
+        workgraph: Option<VoiceWorkGraph>,
+        work: Option<VoiceWorkItem>,
+        title: String,
+        task: String,
+        member: DelegationMemberOptions,
+        append_lane: Arc<Mutex<()>>,
+    ) -> Result<(), LiveDelegationStartFailure> {
+        self.start_admitted_delegation_inner(
+            provider_binding,
+            control,
+            channel_key,
+            operation,
+            provisional,
+            runtime_binding,
+            mob_handle,
+            source_identity,
+            delegation,
+            final_evidence,
+            reconciliation,
+            workgraph,
+            work,
+            title,
+            task,
+            member,
+            append_lane,
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "this exact delegation boundary carries independent provider, runtime, fork, and operation authorities"
+    )]
+    async fn start_admitted_delegation_inner(
+        &self,
+        provider_binding: &ProviderWebrtcBinding,
+        control: Arc<dyn ExperimentalGptLiveControlPlane>,
+        channel_key: ActiveChannelKey,
+        operation: ExactOperationIdentity<LiveUserTurnCorrelation>,
+        provisional: ProvisionalLiveHandoff,
+        runtime_binding: meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+        mob_handle: MobHandle,
+        source_identity: AgentIdentity,
+        delegation: LiveSidebandDelegationRef,
+        final_evidence: FinalLiveUserTranscriptCommitEvidence,
+        reconciliation: LiveHandoffReconciliationReceipt,
+        workgraph: Option<VoiceWorkGraph>,
+        work: Option<VoiceWorkItem>,
+        title: String,
+        task: String,
+        member: DelegationMemberOptions,
+        append_lane: Arc<Mutex<()>>,
+    ) -> Result<(), LiveDelegationStartFailure> {
+        let other = LiveDelegationStartFailure::Failed;
         let session_id = provider_binding.session_id();
 
         if reconciliation.disposition() != LiveHandoffReconciliation::Confirmed {
-            return Err(
+            return Err(other(
                 "live delegation worker start requires Confirmed reconciliation".to_string(),
-            );
+            ));
         }
         let committed_message_count =
             final_evidence.committed_message_count().ok_or_else(|| {
-                "confirmed live delegation is missing its exact transcript boundary".to_string()
+                other(
+                    "confirmed live delegation is missing its exact transcript boundary"
+                        .to_string(),
+                )
             })?;
 
         let worker_identity = self
@@ -3203,7 +4153,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 self.execution_policy.worker_ownership(),
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| other(error.to_string()))?;
         tracing::debug!(
             operation_id = %operation.operation_id(),
             "client-context control received generated worker-start authority"
@@ -3219,33 +4169,31 @@ impl ExperimentalLiveDelegationCoordinator {
                 &reconciliation,
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| other(error.to_string()))?;
         tracing::debug!(
             operation_id = %operation.operation_id(),
             "client-context control received consequential-effect authority"
         );
         admission
             .release_tool_execution(&consequential)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| other(error.to_string()))?;
         let result_spec =
             BoundedResultSpec::new("gpt_live_delegation", LIVE_DELEGATION_RESULT_BYTES)
-                .map_err(|error| error.to_string())?;
-        let service = DelegationExecutionService::new(mob_handle);
-        // The canonical row (`provisional.executor_input()`) confirmed the
-        // digest chain above; the task the worker acts on is the provider
-        // window since the previous delegation, composed through one seam.
+                .map_err(|error| other(error.to_string()))?;
+        let service = DelegationExecutionService::new(mob_handle.clone());
         let request = DelegationExecutionRequest::new_live(
             worker_identity.clone(),
-            delegation_request_text(&executor_input),
+            task,
             result_spec,
             admission.clone(),
         );
-        let request = match self.execution_policy {
+        let mut request = match self.execution_policy {
             LiveDelegationExecutionPolicy::DurableFork => {
-                request.with_durable_fork(source_identity, Some(committed_message_count))
+                request.with_durable_fork(source_identity.clone(), Some(committed_message_count))
             }
             LiveDelegationExecutionPolicy::ExistingMember => request.with_existing_member(),
         };
+        request.member = member;
         tracing::debug!(
             operation_id = %operation.operation_id(),
             "client-context control entering durable delegation service"
@@ -3254,6 +4202,22 @@ impl ExperimentalLiveDelegationCoordinator {
             Ok(execution) => execution,
             Err(error) => {
                 let failure = LiveDelegationStartFailure::from(&error);
+                if let LiveDelegationStartFailure::SourceBusy { .. } = &failure {
+                    // Nothing physical exists: the fork was never cut.
+                    // Record the failed start so the machine can requeue the
+                    // exact operation; no child retirement is owed.
+                    retry_reconciled_cleanup_step("busy-source-start-report", || {
+                        self.runtime.resolve_live_delegation_worker_start(
+                            runtime_binding.runtime_id(),
+                            runtime_binding.fence_token(),
+                            runtime_binding.generation(),
+                            &admission,
+                            false,
+                        )
+                    })
+                    .await;
+                    return Err(failure);
+                }
                 tracing::warn!(
                     operation_id = %operation.operation_id(),
                     kind = failure.kind(),
@@ -3295,20 +4259,40 @@ impl ExperimentalLiveDelegationCoordinator {
                     .flatten()
                     .map(|error| format!("; generated failed-start report pending retry: {error}"))
                     .unwrap_or_default();
-                return Err(format!("{start_error}{report_error}"));
+                return Err(other(format!("{start_error}{report_error}")));
             }
         };
         tracing::debug!(
             operation_id = %operation.operation_id(),
             "durable live delegation worker accepted its bounded turn"
         );
+        let retained = Arc::new(RetainedDelegation {
+            operation,
+            provisional,
+            runtime_binding,
+            admission,
+            delegation,
+            control,
+            result: Mutex::new(RetainedDelegationResult {
+                reconciliation: Some(reconciliation),
+                ..RetainedDelegationResult::default()
+            }),
+            work,
+            workgraph,
+            title,
+            append_lane,
+            mob_handle: Some(mob_handle),
+            source_identity,
+        });
         let Some(cancellation) = execution.cancellation_handle() else {
-            let operation_id = operation.operation_id().clone();
+            let operation_id = retained.operation.operation_id().clone();
             let cleanup_operation_id = operation_id.clone();
             let cleanup_tasks = Arc::clone(&self.failed_start_cleanups);
             let cleanup_runtime = Arc::clone(&self.runtime);
-            let cleanup_binding = runtime_binding.clone();
-            let cleanup_admission = admission.clone();
+            let cleanup_binding = retained.runtime_binding.clone();
+            let cleanup_admission = retained.admission.clone();
+            let cleanup_coordinator = self.clone();
+            let cleanup_retained = Arc::clone(&retained);
             let (cleanup_start_tx, cleanup_start_rx) = oneshot::channel();
             let cleanup = tokio::spawn(async move {
                 let _ = cleanup_start_rx.await;
@@ -3323,9 +4307,8 @@ impl ExperimentalLiveDelegationCoordinator {
                 })
                 .await;
                 let _ = realize_terminal(
-                    cleanup_runtime,
-                    &cleanup_binding,
-                    &cleanup_admission,
+                    &cleanup_coordinator,
+                    &cleanup_retained,
                     &service,
                     execution.await_terminal().await,
                 )
@@ -3335,34 +4318,22 @@ impl ExperimentalLiveDelegationCoordinator {
             self.failed_start_cleanups.lock().await.insert(
                 operation_id,
                 OwnedDelegationCleanup {
-                    binding: runtime_binding.clone(),
+                    binding: retained.runtime_binding.clone(),
                     task: cleanup,
                 },
             );
             let _ = cleanup_start_tx.send(());
-            return Err(
+            return Err(other(
                 "live execution lost cancellation binding; terminal cleanup retained".to_string(),
-            );
+            ));
         };
-        let retained = Arc::new(RetainedDelegation {
-            operation,
-            provisional,
-            runtime_binding,
-            admission,
-            delegation,
-            control,
-            result: Mutex::new(RetainedDelegationResult {
-                reconciliation: Some(reconciliation),
-                ..RetainedDelegationResult::default()
-            }),
-        });
         self.retained.lock().await.insert(
             retained.operation.operation_id().clone(),
             Arc::clone(&retained),
         );
         let task_coordinator = Arc::new(self.clone());
-        let task_runtime = Arc::clone(&self.runtime);
         let task_retained = Arc::clone(&retained);
+        let task_channel_key = channel_key.clone();
         let task_cancellation = cancellation.clone();
         let (task_start_tx, task_start_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -3372,9 +4343,8 @@ impl ExperimentalLiveDelegationCoordinator {
                 StartedDelegationTaskCommand::CleanupAfterStartPublicationFailure
             ) {
                 cleanup_started_execution_after_publication_failure(
-                    Arc::clone(&task_runtime),
-                    &task_retained.runtime_binding,
-                    &task_retained.admission,
+                    task_coordinator.as_ref(),
+                    &task_retained,
                     &service,
                     &task_cancellation,
                     execution,
@@ -3386,9 +4356,8 @@ impl ExperimentalLiveDelegationCoordinator {
                 return;
             }
             let terminal = realize_terminal(
-                task_runtime,
-                &task_retained.runtime_binding,
-                &task_retained.admission,
+                task_coordinator.as_ref(),
+                &task_retained,
                 &service,
                 execution.await_terminal().await,
             )
@@ -3397,14 +4366,16 @@ impl ExperimentalLiveDelegationCoordinator {
                 operation_id = %task_retained.operation.operation_id(),
                 result_present = terminal.result_text.is_some(),
                 terminal_ineligible = terminal.terminal_ineligible,
+                terminal = ?terminal.terminal,
+                channel_closed = terminal.channel_closed,
                 "durable live delegation worker reached realized terminality"
             );
             task_coordinator
-                .record_terminal_realization(&task_retained, terminal)
+                .record_terminal_realization(&task_channel_key, &task_retained, terminal)
                 .await;
         });
         self.active.lock().await.insert(
-            channel_key,
+            retained.operation.operation_id().clone(),
             ActiveDelegation {
                 retained: Arc::clone(&retained),
                 cancellation,
@@ -3424,9 +4395,9 @@ impl ExperimentalLiveDelegationCoordinator {
         {
             let _ = task_start_tx
                 .send(StartedDelegationTaskCommand::CleanupAfterStartPublicationFailure);
-            return Err(format!(
+            return Err(other(format!(
                 "generated successful worker-start publication failed; cleanup retained: {error}"
-            ));
+            )));
         }
         let _ = task_start_tx.send(StartedDelegationTaskCommand::Run);
         Ok(())
@@ -3434,19 +4405,93 @@ impl ExperimentalLiveDelegationCoordinator {
 
     async fn record_terminal_realization(
         &self,
+        channel_key: &ActiveChannelKey,
         retained: &Arc<RetainedDelegation>,
         terminal: RealizedDelegationTerminal,
     ) {
+        let operation_id = retained.operation.operation_id().clone();
         {
             let mut result = retained.result.lock().await;
-            result.result_text = terminal.result_text;
+            result.result_text = terminal.result_text.clone();
             result.terminal_ineligible |= terminal.terminal_ineligible;
         }
-        if retained.result.lock().await.terminal_ineligible {
-            self.remove_retained_delegation(retained).await;
-            return;
+        let blocker_titles = terminal
+            .blockers
+            .iter()
+            .map(|(_, title)| title.clone())
+            .collect::<Vec<_>>();
+        {
+            let mut schedules = self.schedules.lock().await;
+            if let Some(schedule) = schedules.get_mut(channel_key) {
+                schedule.running.remove(&operation_id);
+                if terminal.terminal == LiveDelegationWorkerTerminalKind::Blocked {
+                    if let Some(pending) = schedule.pending.get_mut(&operation_id) {
+                        pending.blocked = true;
+                        pending.waited_on =
+                            terminal.blockers.iter().map(|(id, _)| id.clone()).collect();
+                    }
+                    if !schedule.queue.contains(&operation_id) {
+                        schedule.queue.push_back(operation_id.clone());
+                    }
+                } else {
+                    schedule.pending.remove(&operation_id);
+                    if terminal.terminal == LiveDelegationWorkerTerminalKind::Completed
+                        && let (Some(work), Some(text)) =
+                            (retained.work.as_ref(), terminal.result_text.as_ref())
+                    {
+                        schedule
+                            .completed_results
+                            .insert(work.id.clone(), (retained.title.clone(), text.clone()));
+                    }
+                }
+            }
         }
-        self.schedule_result_delivery(Arc::clone(retained)).await;
+        match terminal.terminal {
+            LiveDelegationWorkerTerminalKind::Blocked => {
+                self.narrate(
+                    NarrationSubject::from_retained(retained),
+                    LiveDelegationNarrationKind::Blocked,
+                    0,
+                    blocker_titles,
+                    terminal.explicit_block,
+                )
+                .await;
+                self.remove_retained_delegation(retained).await;
+            }
+            LiveDelegationWorkerTerminalKind::Completed if terminal.channel_closed => {
+                // An existing member executed the turn in its own canonical
+                // session; only an owned fork's result needs merging back.
+                if retained.admission.worker_ownership()
+                    == LiveDelegationWorkerOwnership::OwnedMember
+                    && let Some(text) = terminal.result_text.as_deref()
+                {
+                    self.merge_result_into_source(retained, text).await;
+                }
+                self.remove_retained_delegation(retained).await;
+            }
+            LiveDelegationWorkerTerminalKind::Completed if !terminal.terminal_ineligible => {
+                // The Completed sentence and the result are released under one
+                // hold of the channel's delegation append lane (see
+                // `try_release_retained_result`), so another worker's
+                // narration or result cannot land between them.
+                self.schedule_result_delivery(Arc::clone(retained)).await;
+            }
+            LiveDelegationWorkerTerminalKind::Failed if !terminal.channel_closed => {
+                self.narrate(
+                    NarrationSubject::from_retained(retained),
+                    LiveDelegationNarrationKind::Failed,
+                    0,
+                    Vec::new(),
+                    false,
+                )
+                .await;
+                self.remove_retained_delegation(retained).await;
+            }
+            _ => {
+                self.remove_retained_delegation(retained).await;
+            }
+        }
+        self.pump_channel_schedule(channel_key).await;
     }
 
     async fn schedule_result_delivery(&self, retained: Arc<RetainedDelegation>) {
@@ -3482,6 +4527,29 @@ impl ExperimentalLiveDelegationCoordinator {
                 {
                     Ok(()) => break,
                     Err(error) => {
+                        // The provider binding may be gone for good: a worker
+                        // whose terminal landed after the transport retired
+                        // but before the machine recorded the close. Once the
+                        // machine no longer holds the channel active, the
+                        // result takes the post-close path (merged into the
+                        // source member) instead of retrying forever against
+                        // a channel that will never come back.
+                        // An unreadable machine state is unknown, not
+                        // inactive: the attempt is retried, never merged.
+                        if coordinator
+                            .runtime
+                            .live_channel_activity_for_session(
+                                task_retained.runtime_binding.session_id(),
+                                task_retained.runtime_binding.channel_id(),
+                            )
+                            .await
+                            == Some(false)
+                        {
+                            coordinator
+                                .merge_result_after_channel_close(&task_retained)
+                                .await;
+                            break;
+                        }
                         tracing::warn!(%error, %task_operation_id, "owned live result delivery retry remains pending");
                         tokio::time::sleep(retry_delay).await;
                         retry_delay = retry_delay
@@ -3609,16 +4677,12 @@ impl ExperimentalLiveDelegationCoordinator {
         }
         drop(retained_by_operation);
 
-        let channel_key = (
-            retained.runtime_binding.session_id().clone(),
-            retained.runtime_binding.channel_id().clone(),
-        );
         let mut active = self.active.lock().await;
         if active
-            .get(&channel_key)
+            .get(operation_id)
             .is_some_and(|current| Arc::ptr_eq(&current.retained, retained))
         {
-            active.remove(&channel_key);
+            active.remove(operation_id);
         }
     }
 
@@ -3735,6 +4799,24 @@ impl ExperimentalLiveDelegationCoordinator {
             }
         };
         let ambiguity_authority = delivery.clone();
+        // One delegation-lane append in flight per session: narration and
+        // results of every worker on this channel share this lane. The
+        // Completed sentence and the result it introduces go out under the
+        // same hold, so nothing from another worker interleaves.
+        let lane_guard = retained.append_lane.lock().await;
+        if retained.result.lock().await.terminal_ineligible {
+            retained.result.lock().await.release_delivery(reservation);
+            return Ok(());
+        }
+        self.narrate_on_held_lane(
+            &NarrationSubject::from_retained(retained),
+            LiveDelegationNarrationKind::Completed,
+            0,
+            Vec::new(),
+            false,
+        )
+        .await;
+        retained.result.lock().await.dispatch_crossed = true;
         let (dispatch, projection_evidence) = Self::release_exact_delegation_result_projection(
             retained.control.as_ref(),
             ExactDelegationResultProjection::new(
@@ -3746,7 +4828,9 @@ impl ExperimentalLiveDelegationCoordinator {
         .await;
         let resolution = match dispatch {
             Err(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable) => {
-                retained.result.lock().await.release_delivery(reservation);
+                let mut result = retained.result.lock().await;
+                result.dispatch_crossed = false;
+                result.release_delivery(reservation);
                 return Err("exact provider binding is temporarily unavailable".to_string());
             }
             Err(error) => {
@@ -3770,6 +4854,7 @@ impl ExperimentalLiveDelegationCoordinator {
             }
             Ok(ExperimentalGptLiveResultDeliveryDispatch::Resolved(resolution)) => resolution,
         };
+        drop(lane_guard);
         let (authority, observation) = resolution.into_parts();
         if observation == LiveDelegationResultDeliveryObservation::Delivered {
             tracing::info!(
@@ -3833,7 +4918,6 @@ impl ExperimentalLiveDelegationCoordinator {
         &self,
         evidence: FinalLiveUserTranscriptCommitEvidence,
     ) -> Result<(), String> {
-        let channel_key = (evidence.session_id().clone(), evidence.channel_id().clone());
         let retained = self
             .retained
             .lock()
@@ -3898,7 +4982,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 .active
                 .lock()
                 .await
-                .get(&channel_key)
+                .get(retained.operation.operation_id())
                 .filter(|active| Arc::ptr_eq(&active.retained, &retained))
                 .map(|active| active.cancellation.clone())
                 .ok_or_else(|| {
@@ -3937,49 +5021,48 @@ impl ExperimentalLiveDelegationCoordinator {
         self.cancel_responses_executions_for_binding(binding).await;
         self.settle_result_recovery_tasks(binding).await;
         self.settle_failed_start_cleanups(binding).await;
-        if let Some(active) = self.active.lock().await.remove(&key) {
-            if active.retained.runtime_binding.session_id() != binding.session_id()
-                || active.retained.runtime_binding.channel_id() != binding.channel_id()
-                || active.retained.runtime_binding.generation()
-                    != binding.runtime_generation().get()
-                || active.retained.runtime_binding.fence_token() != binding.runtime_fence().get()
-            {
-                self.active.lock().await.insert(key.clone(), active);
-            } else {
-                active.retained.result.lock().await.terminal_ineligible = true;
-                let runtime_binding = &active.retained.runtime_binding;
-                if let Ok(directive) = self
-                    .runtime
-                    .abandon_live_delegation(
-                        runtime_binding.runtime_id(),
-                        runtime_binding.fence_token(),
-                        runtime_binding.generation(),
-                        &active.retained.admission,
-                    )
-                    .await
-                    && let LiveDelegationCancellationDirective::CancellationAuthorized(authority) =
-                        directive
-                {
-                    let outcome = active
-                        .cancellation
-                        .cancel(&authority)
-                        .await
-                        .unwrap_or(LiveDelegationCancellationOutcome::Failed);
-                    let _ = self
-                        .runtime
-                        .resolve_live_delegation_cancellation(
-                            runtime_binding.runtime_id(),
-                            runtime_binding.fence_token(),
-                            runtime_binding.generation(),
-                            &authority,
-                            outcome,
-                        )
-                        .await;
+        // Channel close cancels only work that never started: queued items
+        // and blocked items awaiting requeue. Running forks keep their
+        // machine custody and finish; their results merge into the source
+        // member instead of reaching the closed provider channel.
+        let (queued, running) = {
+            let mut schedules = self.schedules.lock().await;
+            match schedules.remove(&key) {
+                Some(schedule) => {
+                    let queued = schedule
+                        .queue
+                        .iter()
+                        .filter_map(|operation_id| schedule.pending.get(operation_id).cloned())
+                        .collect::<Vec<_>>();
+                    (queued, schedule.running)
                 }
-                let _ = active.task.await;
-                self.settle_result_delivery_task(active.retained.operation.operation_id())
-                    .await;
-                self.remove_retained_delegation(&active.retained).await;
+                None => (Vec::new(), std::collections::BTreeSet::new()),
+            }
+        };
+        for pending in queued {
+            if pending.runtime_binding.generation() != binding.runtime_generation().get()
+                || pending.runtime_binding.fence_token() != binding.runtime_fence().get()
+            {
+                continue;
+            }
+            if let Err(error) = self
+                .runtime
+                .cancel_queued_live_delegation(&pending.runtime_binding, &pending.operation)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    operation_id = %pending.operation.operation_id(),
+                    "queued live delegation could not be cancelled at channel close"
+                );
+            }
+            if let (Some(workgraph), Some(work)) =
+                (pending.workgraph.as_ref(), pending.work.as_ref())
+                && let Err(error) = workgraph
+                    .close(&work.id, meerkat::WorkStatus::Cancelled, None)
+                    .await
+            {
+                tracing::warn!(%error, "queued voice work item could not be cancelled");
             }
         }
         let retained = self
@@ -3992,14 +5075,19 @@ impl ExperimentalLiveDelegationCoordinator {
                     && retained.runtime_binding.channel_id() == binding.channel_id()
                     && retained.runtime_binding.generation() == binding.runtime_generation().get()
                     && retained.runtime_binding.fence_token() == binding.runtime_fence().get()
+                    && !running.contains(retained.operation.operation_id())
             })
             .cloned()
             .collect::<Vec<_>>();
         for retained in retained {
+            // Stop further delivery attempts, let an attempt already in
+            // flight settle, then decide under the lock whether the result
+            // ever reached the provider. A result that crossed the boundary
+            // (delivered or ambiguous) is never also merged into the source.
             retained.result.lock().await.terminal_ineligible = true;
             self.settle_result_delivery_task(retained.operation.operation_id())
                 .await;
-            self.remove_retained_delegation(&retained).await;
+            self.merge_result_after_channel_close(&retained).await;
         }
         self.settle_responses_retirement_debt_for_binding(binding)
             .await;
@@ -4054,7 +5142,7 @@ impl meerkat::experimental_gpt_live::ExperimentalLiveBoundChannelActivator
     async fn observe_provider_lifecycle(
         &self,
         observation: &LiveSidebandObservation,
-    ) -> Result<(), String> {
+    ) -> Result<(), ExperimentalLiveLifecycleObservationError> {
         ExperimentalLiveDelegationCoordinator::observe_provider_lifecycle(self, observation).await
     }
 
@@ -4145,13 +5233,15 @@ async fn retire_failed_start_with_retry(
 }
 
 async fn cleanup_started_execution_after_publication_failure(
-    runtime: Arc<meerkat_runtime::MeerkatMachine>,
-    binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
-    admission: &LiveDelegationExecutionAdmission,
+    coordinator: &ExperimentalLiveDelegationCoordinator,
+    retained: &RetainedDelegation,
     service: &DelegationExecutionService,
     cancellation: &DelegationCancellationHandle,
     execution: DelegationExecutionHandle,
 ) {
+    let runtime = coordinator.runtime.as_ref();
+    let binding = &retained.runtime_binding;
+    let admission = &retained.admission;
     retry_reconciled_cleanup_step("successful-start-report", || {
         runtime.resolve_live_delegation_worker_start(
             binding.runtime_id(),
@@ -4197,9 +5287,8 @@ async fn cleanup_started_execution_after_publication_failure(
         }
     }
     let _ = realize_terminal(
-        runtime,
-        binding,
-        admission,
+        coordinator,
+        retained,
         service,
         execution.await_terminal().await,
     )
@@ -4209,65 +5298,320 @@ async fn cleanup_started_execution_after_publication_failure(
 struct RealizedDelegationTerminal {
     result_text: Option<String>,
     terminal_ineligible: bool,
+    terminal: LiveDelegationWorkerTerminalKind,
+    blockers: Vec<(meerkat::WorkItemId, String)>,
+    explicit_block: bool,
+    /// The provider channel unbound before the terminal could be recorded
+    /// under its binding; the worker was reconciled as revoked instead.
+    channel_closed: bool,
+}
+
+/// Retry a binding-fenced step while the worker's channel is still bound.
+/// `None` means the channel unbound and the caller must switch to the
+/// revoked-worker path instead of retrying forever.
+async fn retry_while_channel_active<T, E, F, Fut>(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
+    label: &'static str,
+    mut step: F,
+) -> Option<T>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut retry_delay = LIVE_DELEGATION_CLEANUP_RETRY_DELAY;
+    loop {
+        match step().await {
+            Ok(value) => return Some(value),
+            Err(error) => {
+                if !runtime
+                    .live_channel_is_active_for_session(binding.session_id(), binding.channel_id())
+                    .await
+                {
+                    tracing::info!(
+                        cleanup_step = label,
+                        "live channel unbound; switching to revoked worker reconciliation"
+                    );
+                    return None;
+                }
+                tracing::warn!(%error, cleanup_step = label, "live delegation cleanup remains pending");
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(LIVE_DELEGATION_CLEANUP_RETRY_MAX_DELAY);
+            }
+        }
+    }
+}
+
+async fn retry_bounded<T, E, F, Fut>(label: &'static str, attempts: usize, mut step: F) -> Option<T>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut retry_delay = LIVE_DELEGATION_CLEANUP_RETRY_DELAY;
+    for attempt in 1..=attempts {
+        match step().await {
+            Ok(value) => return Some(value),
+            Err(error) if attempt == attempts => {
+                tracing::error!(%error, cleanup_step = label, attempts, "post-close live delegation step gave up");
+            }
+            Err(error) => {
+                tracing::warn!(%error, cleanup_step = label, attempt, "post-close live delegation step remains pending");
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = retry_delay
+                    .saturating_mul(2)
+                    .min(LIVE_DELEGATION_CLEANUP_RETRY_MAX_DELAY);
+            }
+        }
+    }
+    None
+}
+
+/// Combine the Mob bounded-turn terminal with the exact WorkGraph facts the
+/// worker left behind. Only statuses, edges, and readiness are read.
+async fn classify_worker_terminal(
+    retained: &RetainedDelegation,
+    mob_terminal: LiveDelegationWorkerTerminalKind,
+    result_text: Option<&str>,
+) -> (
+    LiveDelegationWorkerTerminalKind,
+    Vec<(meerkat::WorkItemId, String)>,
+    bool,
+) {
+    let (Some(workgraph), Some(work)) = (retained.workgraph.as_ref(), retained.work.as_ref())
+    else {
+        return (mob_terminal, Vec::new(), false);
+    };
+    let disposition = match workgraph.disposition_after_worker_turn(&work.id).await {
+        Ok(disposition) => disposition,
+        Err(error) => {
+            tracing::warn!(%error, "voice work item state unavailable; using the Mob terminal alone");
+            return (mob_terminal, Vec::new(), false);
+        }
+    };
+    let close = |status: meerkat::WorkStatus, summary: Option<&str>| {
+        let workgraph = workgraph.clone();
+        let item = work.id.clone();
+        let summary = summary.map(str::to_string);
+        async move {
+            if let Err(error) = workgraph.close(&item, status, summary.as_deref()).await {
+                tracing::warn!(%error, "voice work item could not be closed after its worker ended");
+            }
+        }
+    };
+    match (mob_terminal, disposition) {
+        (LiveDelegationWorkerTerminalKind::Completed, WorkItemDisposition::Completed) => (
+            LiveDelegationWorkerTerminalKind::Completed,
+            Vec::new(),
+            false,
+        ),
+        (
+            LiveDelegationWorkerTerminalKind::Completed,
+            WorkItemDisposition::InProgress | WorkItemDisposition::ReleasedReady,
+        ) => {
+            close(meerkat::WorkStatus::Completed, result_text).await;
+            (
+                LiveDelegationWorkerTerminalKind::Completed,
+                Vec::new(),
+                false,
+            )
+        }
+        (LiveDelegationWorkerTerminalKind::Completed, WorkItemDisposition::Failed) => {
+            (LiveDelegationWorkerTerminalKind::Failed, Vec::new(), false)
+        }
+        (LiveDelegationWorkerTerminalKind::Completed, WorkItemDisposition::Cancelled) => (
+            LiveDelegationWorkerTerminalKind::Cancelled,
+            Vec::new(),
+            false,
+        ),
+        (
+            LiveDelegationWorkerTerminalKind::Completed,
+            WorkItemDisposition::Waiting {
+                blockers,
+                explicit_block,
+            },
+        ) => (
+            LiveDelegationWorkerTerminalKind::Blocked,
+            blockers,
+            explicit_block,
+        ),
+        (terminal, disposition) => {
+            if !disposition.is_terminal() {
+                let status = if terminal == LiveDelegationWorkerTerminalKind::Cancelled {
+                    meerkat::WorkStatus::Cancelled
+                } else {
+                    meerkat::WorkStatus::Failed
+                };
+                close(status, None).await;
+            }
+            (terminal, Vec::new(), false)
+        }
+    }
 }
 
 async fn realize_terminal(
-    runtime: Arc<meerkat_runtime::MeerkatMachine>,
-    binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
-    admission: &LiveDelegationExecutionAdmission,
+    coordinator: &ExperimentalLiveDelegationCoordinator,
+    retained: &RetainedDelegation,
     service: &DelegationExecutionService,
     terminalized: DelegationTerminalizedExecution,
 ) -> RealizedDelegationTerminal {
-    let terminal_kind = match terminalized.terminal() {
+    let runtime = coordinator.runtime.as_ref();
+    let binding = &retained.runtime_binding;
+    let admission = &retained.admission;
+    let mob_terminal = match terminalized.terminal() {
         DelegationTurnTerminal::Completed(_) => LiveDelegationWorkerTerminalKind::Completed,
-        DelegationTurnTerminal::Failed(error) => live_worker_failure_terminal(error.failure()),
+        DelegationTurnTerminal::Failed(error) => {
+            tracing::warn!(
+                operation_id = %admission.operation().operation_id(),
+                %error,
+                "live delegation worker turn failed"
+            );
+            live_worker_failure_terminal(error.failure())
+        }
         _ => LiveDelegationWorkerTerminalKind::Failed,
     };
-    let result_text = match terminalized.terminal() {
+    let mob_result_text = match terminalized.terminal() {
         DelegationTurnTerminal::Completed(turn) => Some(turn.result().result().text().to_string()),
         DelegationTurnTerminal::Failed(_) => None,
         _ => None,
     };
-    let terminal_receipt = retry_reconciled_cleanup_step("worker-terminal-record", || {
-        runtime.record_live_delegation_worker_terminal(
-            binding.runtime_id(),
-            binding.fence_token(),
-            binding.generation(),
-            admission,
-            terminal_kind,
+    let (terminal_kind, blockers, explicit_block) =
+        classify_worker_terminal(retained, mob_terminal, mob_result_text.as_deref()).await;
+    if runtime
+        .live_channel_is_active_for_session(binding.session_id(), binding.channel_id())
+        .await
+        && let Some(terminal_receipt) =
+            retry_while_channel_active(runtime, binding, "worker-terminal-record", || {
+                runtime.record_live_delegation_worker_terminal(
+                    binding.runtime_id(),
+                    binding.fence_token(),
+                    binding.generation(),
+                    admission,
+                    terminal_kind,
+                )
+            })
+            .await
+        && let Some(retirement) =
+            retry_while_channel_active(runtime, binding, "worker-retirement-authority", || {
+                runtime.authorize_live_delegation_worker_retirement(
+                    binding.runtime_id(),
+                    binding.fence_token(),
+                    binding.generation(),
+                    admission,
+                )
+            })
+            .await
+    {
+        retry_reconciled_cleanup_step("worker-physical-retirement", || {
+            service.retire_live_terminalized(&terminalized, &retirement)
+        })
+        .await;
+        let resolved =
+            retry_while_channel_active(runtime, binding, "worker-retirement-resolution", || {
+                runtime.resolve_live_delegation_worker_retirement(
+                    binding.runtime_id(),
+                    binding.fence_token(),
+                    binding.generation(),
+                    &retirement,
+                    true,
+                )
+            })
+            .await;
+        if resolved.is_some() {
+            let result_text = retain_terminal_result(
+                true,
+                terminal_kind,
+                terminal_receipt.late(),
+                mob_result_text,
+            );
+            return RealizedDelegationTerminal {
+                terminal_ineligible: result_text.is_none(),
+                result_text,
+                terminal: terminal_kind,
+                blockers,
+                explicit_block,
+                channel_closed: false,
+            };
+        }
+    }
+    realize_terminal_after_channel_close(
+        coordinator,
+        retained,
+        terminal_kind,
+        blockers,
+        explicit_block,
+        mob_result_text,
+    )
+    .await
+}
+
+/// The provider channel is gone. Release executor custody the way restart
+/// reconciliation does: retire the owned child, then record the durable
+/// terminal as revoked (late, never provider-eligible). The result itself
+/// is returned so the caller can merge it into the source member.
+async fn realize_terminal_after_channel_close(
+    coordinator: &ExperimentalLiveDelegationCoordinator,
+    retained: &RetainedDelegation,
+    terminal_kind: LiveDelegationWorkerTerminalKind,
+    blockers: Vec<(meerkat::WorkItemId, String)>,
+    explicit_block: bool,
+    mob_result_text: Option<String>,
+) -> RealizedDelegationTerminal {
+    let runtime = coordinator.runtime.as_ref();
+    let session_id = retained.runtime_binding.session_id();
+    let operation_id = retained.operation.operation_id().clone();
+    if retained.admission.worker_ownership() == LiveDelegationWorkerOwnership::OwnedMember
+        && let Some(mob_handle) = retained.mob_handle.as_ref()
+        && let Err(error) = mob_handle
+            .retire(AgentIdentity::from(retained.admission.worker_identity()))
+            .await
+    {
+        tracing::debug!(%error, %operation_id, "post-close voice worker retirement reported an error");
+    }
+    let snapshot = retry_bounded(
+        "post-close-worker-snapshot",
+        POST_CLOSE_RECONCILE_ATTEMPTS,
+        || async {
+            runtime
+                .live_delegation_recovery_snapshots(session_id)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|snapshots| {
+                    snapshots
+                        .into_iter()
+                        .find(|snapshot| snapshot.operation_id() == &operation_id)
+                        .ok_or_else(|| "worker operation has no durable snapshot".to_string())
+                })
+        },
+    )
+    .await;
+    if let Some(snapshot) = snapshot {
+        retry_bounded(
+            "post-close-revoked-worker-reconciliation",
+            POST_CLOSE_RECONCILE_ATTEMPTS,
+            || {
+                runtime.reconcile_revoked_live_delegation_worker_after_restart(
+                    &snapshot,
+                    terminal_kind,
+                )
+            },
         )
-    })
-    .await;
-    let retirement = retry_reconciled_cleanup_step("worker-retirement-authority", || {
-        runtime.authorize_live_delegation_worker_retirement(
-            binding.runtime_id(),
-            binding.fence_token(),
-            binding.generation(),
-            admission,
-        )
-    })
-    .await;
-    retry_reconciled_cleanup_step("worker-physical-retirement", || {
-        service.retire_live_terminalized(&terminalized, &retirement)
-    })
-    .await;
-    retry_reconciled_cleanup_step("worker-retirement-resolution", || {
-        runtime.resolve_live_delegation_worker_retirement(
-            binding.runtime_id(),
-            binding.fence_token(),
-            binding.generation(),
-            &retirement,
-            true,
-        )
-    })
-    .await;
-    let retired = true;
-    let result_text =
-        retain_terminal_result(retired, terminal_kind, terminal_receipt.late(), result_text);
-    let terminal_ineligible = result_text.is_none();
+        .await;
+    }
+    let result_text = (terminal_kind == LiveDelegationWorkerTerminalKind::Completed)
+        .then_some(mob_result_text)
+        .flatten()
+        .filter(|text| !text.trim().is_empty());
     RealizedDelegationTerminal {
         result_text,
-        terminal_ineligible,
+        terminal_ineligible: true,
+        terminal: terminal_kind,
+        blockers,
+        explicit_block,
+        channel_closed: true,
     }
 }
 
@@ -4297,7 +5641,7 @@ mod tests {
         feature = "experimental-gpt-live-gate0-harness",
         not(target_arch = "wasm32")
     ))]
-    mod supersession;
+    mod parallel;
 
     #[test]
     fn delegation_request_text_keeps_assistant_speech_as_a_labelled_section() {
@@ -5410,6 +6754,22 @@ mod tests {
     #[derive(Default)]
     struct ExactProjectionControl {
         capture: Mutex<Option<ExactProjectionControlCapture>>,
+        narrations: Mutex<Vec<(LiveDelegationNarrationKind, String)>>,
+        /// Every released result as (delegation adapter key, text), in order.
+        releases: Mutex<Vec<(String, String)>>,
+        /// Narrations and result releases in the order the provider saw them.
+        events: Mutex<Vec<ExactProjectionControlEvent>>,
+        /// The provider transport has been retired: every release and
+        /// narration reports `ActiveBindingUnavailable`, as the real control
+        /// plane does between the physical close and the machine's close.
+        binding_unavailable: std::sync::atomic::AtomicBool,
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum ExactProjectionControlEvent {
+        Narration(LiveDelegationNarrationKind, String),
+        Release(String),
     }
 
     #[cfg(feature = "experimental-gpt-live-gate0-harness")]
@@ -5486,6 +6846,22 @@ mod tests {
             text: String,
         ) -> Result<ExperimentalGptLiveResultDeliveryDispatch, ExperimentalGptLiveBridgeError>
         {
+            if self
+                .binding_unavailable
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable);
+            }
+            self.releases
+                .lock()
+                .await
+                .push((delegation.adapter_key().to_string(), text.clone()));
+            self.events
+                .lock()
+                .await
+                .push(ExactProjectionControlEvent::Release(
+                    delegation.adapter_key().to_string(),
+                ));
             *self.capture.lock().await = Some(ExactProjectionControlCapture {
                 authority: authority.clone(),
                 delegation_matches_authority: delegation.adapter_key()
@@ -5506,6 +6882,34 @@ mod tests {
                     authority,
                     LiveDelegationResultDeliveryObservation::Delivered,
                 ),
+            ))
+        }
+
+        async fn narrate_delegation(
+            &self,
+            authority: meerkat_runtime::live_execution::LiveDelegationNarrationAuthority,
+            _delegation: LiveSidebandDelegationRef,
+            text: String,
+        ) -> Result<ExperimentalGptLiveNarrationDispatch, ExperimentalGptLiveBridgeError> {
+            if self
+                .binding_unavailable
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(ExperimentalGptLiveBridgeError::ActiveBindingUnavailable);
+            }
+            self.narrations
+                .lock()
+                .await
+                .push((authority.kind(), text.clone()));
+            self.events
+                .lock()
+                .await
+                .push(ExactProjectionControlEvent::Narration(
+                    authority.kind(),
+                    text,
+                ));
+            Ok(ExperimentalGptLiveNarrationDispatch::Resolved(
+                meerkat_core::LiveAppendDeliveryOutcome::Acknowledged,
             ))
         }
     }
@@ -5792,6 +7196,12 @@ mod tests {
                 result_text: Some(exact_result.clone()),
                 ..RetainedDelegationResult::default()
             }),
+            work: None,
+            workgraph: None,
+            title: "exact result projection".to_string(),
+            append_lane: Arc::new(Mutex::new(())),
+            mob_handle: None,
+            source_identity: AgentIdentity::from("exact-result-source"),
         });
         let coordinator = ExperimentalLiveDelegationCoordinator::new(
             Arc::clone(&runtime),

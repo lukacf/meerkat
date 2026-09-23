@@ -6178,6 +6178,9 @@ impl MeerkatMachine {
                     crate::meerkat_machine::dsl::LiveDelegationWorkerTerminalKind::Failed => {
                         crate::live_execution::LiveDelegationWorkerTerminalKind::Failed
                     }
+                    crate::meerkat_machine::dsl::LiveDelegationWorkerTerminalKind::Blocked => {
+                        crate::live_execution::LiveDelegationWorkerTerminalKind::Blocked
+                    }
                 });
             snapshots.push(crate::live_execution::LiveDelegationRecoverySnapshot::new(
                 session_id.clone(),
@@ -8803,6 +8806,267 @@ impl MeerkatMachine {
         ))
     }
 
+    /// Read the generated schedule state of one exact live delegation.
+    pub async fn live_delegation_schedule_state(
+        &self,
+        session_id: &SessionId,
+        operation_id: &meerkat_core::OperationId,
+    ) -> Result<Option<crate::live_execution::LiveDelegationScheduleState>, RuntimeDriverError>
+    {
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        Ok(state
+            .live_delegation_schedule_state_by_operation
+            .get(&crate::meerkat_machine::dsl::OperationId::from_domain(
+                operation_id,
+            ))
+            .copied())
+    }
+
+    /// Return a blocked live delegation, or one whose worker start failed
+    /// before anything physical existed, to `Created` so the same exact
+    /// operation may bind a fresh worker.
+    pub async fn requeue_live_delegation(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+        operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+            meerkat_core::LiveUserTurnCorrelation,
+        >,
+    ) -> Result<(), RuntimeDriverError> {
+        let session_id = binding.session_id();
+        let correlation = operation.domain_correlation();
+        if correlation.channel_id() != binding.channel_id() {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "live delegation requeue does not match the exact runtime binding"
+                    .to_string(),
+            });
+        }
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let operation_id =
+            crate::meerkat_machine::dsl::OperationId::from_domain(operation.operation_id());
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::RequeueLiveDelegation {
+                    channel_id: correlation.channel_id().to_string(),
+                    runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                        binding.runtime_id(),
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken::from_domain(
+                        binding.fence_token(),
+                    ),
+                    generation: crate::meerkat_machine::dsl::Generation::from_domain(
+                        binding.generation(),
+                    ),
+                    interaction_id: correlation.interaction_id().to_string(),
+                    operation_id: operation_id.clone(),
+                },
+                "RequeueLiveDelegation",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(session_id, "RequeueLiveDelegation")
+            .await?;
+        if effects.as_slice().iter().any(|effect| {
+            matches!(
+                effect,
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveDelegationRequeued {
+                    operation_id: requeued,
+                    ..
+                } if requeued == &operation_id
+            )
+        }) {
+            Ok(())
+        } else {
+            Err(RuntimeDriverError::Internal(
+                "generated live delegation requeue emitted no matching effect".to_string(),
+            ))
+        }
+    }
+
+    /// Cancel one queued or blocked live delegation that has no live worker.
+    /// A channel that already unbound is accepted without a binding fence.
+    pub async fn cancel_queued_live_delegation(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+        operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+            meerkat_core::LiveUserTurnCorrelation,
+        >,
+    ) -> Result<(), RuntimeDriverError> {
+        let session_id = binding.session_id();
+        let correlation = operation.domain_correlation();
+        if correlation.channel_id() != binding.channel_id() {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "live delegation cancellation does not match the exact runtime binding"
+                    .to_string(),
+            });
+        }
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let operation_id =
+            crate::meerkat_machine::dsl::OperationId::from_domain(operation.operation_id());
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::CancelQueuedLiveDelegation {
+                    channel_id: correlation.channel_id().to_string(),
+                    runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                        binding.runtime_id(),
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken::from_domain(
+                        binding.fence_token(),
+                    ),
+                    generation: crate::meerkat_machine::dsl::Generation::from_domain(
+                        binding.generation(),
+                    ),
+                    interaction_id: correlation.interaction_id().to_string(),
+                    operation_id: operation_id.clone(),
+                },
+                "CancelQueuedLiveDelegation",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(session_id, "CancelQueuedLiveDelegation")
+            .await?;
+        if effects.as_slice().iter().any(|effect| {
+            matches!(
+                effect,
+                crate::meerkat_machine::dsl::MeerkatMachineEffect::LiveDelegationQueuedCancelled {
+                    operation_id: cancelled,
+                    ..
+                } if cancelled == &operation_id
+            )
+        }) {
+            Ok(())
+        } else {
+            Err(RuntimeDriverError::Internal(
+                "generated queued live delegation cancellation emitted no matching effect"
+                    .to_string(),
+            ))
+        }
+    }
+
+    /// Mint the one-use authority for a templated executor-state narration.
+    /// The machine refuses kinds that do not match the generated schedule
+    /// state and repeats of the last released kind.
+    /// Whether a delegation narration on this binding can be authorized at
+    /// all, on lifecycle grounds alone. `AuthorizeLiveDelegationNarration`
+    /// runs only in the `Idle`, `Attached` and `Running` phases and only on the
+    /// channel's current execution binding; a coordinator that reads this
+    /// first skips the narration with the typed reason instead of receiving a
+    /// guard rejection. The item's schedule state is not consulted here: that
+    /// refusal stays with the machine.
+    #[cfg(feature = "live")]
+    pub async fn live_delegation_narration_eligibility(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+    ) -> Result<(), crate::live_execution::LiveDelegationNarrationSkip> {
+        use crate::live_execution::LiveDelegationNarrationSkip;
+        use crate::meerkat_machine::dsl::MeerkatPhase;
+
+        let session_id = binding.session_id();
+        let state = self
+            .session_dsl_state(session_id)
+            .await
+            .map_err(|_| LiveDelegationNarrationSkip::SessionGone)?;
+        match state.lifecycle_phase {
+            MeerkatPhase::Idle | MeerkatPhase::Attached | MeerkatPhase::Running => {}
+            phase => {
+                return Err(LiveDelegationNarrationSkip::SessionLifecycle(format!(
+                    "{phase:?}"
+                )));
+            }
+        }
+        let channel = binding.channel_id().to_string();
+        let channel_is_active = state
+            .live_active_channel_by_session
+            .get(&session_id.to_string())
+            .is_some_and(|active| *active == channel);
+        let binding_matches = state.live_execution_runtime_id_by_channel.get(&channel)
+            == Some(&crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                binding.runtime_id(),
+            ))
+            && state
+                .live_execution_fence_by_channel
+                .get(&channel)
+                .is_some_and(|fence| fence.0 == binding.fence_token())
+            && state
+                .live_execution_generation_by_channel
+                .get(&channel)
+                .is_some_and(|generation| generation.0 == binding.generation());
+        if !channel_is_active || !binding_matches {
+            return Err(LiveDelegationNarrationSkip::ChannelInactive);
+        }
+        Ok(())
+    }
+
+    pub async fn authorize_live_delegation_narration(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+        operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+            meerkat_core::LiveUserTurnCorrelation,
+        >,
+        kind: crate::live_execution::LiveDelegationNarrationKind,
+    ) -> Result<crate::live_execution::LiveDelegationNarrationAuthority, RuntimeDriverError> {
+        let session_id = binding.session_id();
+        let correlation = operation.domain_correlation();
+        if correlation.channel_id() != binding.channel_id() {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "live delegation narration does not match the exact runtime binding"
+                    .to_string(),
+            });
+        }
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        let (_, effects) = self
+            .apply_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::AuthorizeLiveDelegationNarration {
+                    channel_id: correlation.channel_id().to_string(),
+                    runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                        binding.runtime_id(),
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken::from_domain(
+                        binding.fence_token(),
+                    ),
+                    generation: crate::meerkat_machine::dsl::Generation::from_domain(
+                        binding.generation(),
+                    ),
+                    interaction_id: correlation.interaction_id().to_string(),
+                    operation_id: crate::meerkat_machine::dsl::OperationId::from_domain(
+                        operation.operation_id(),
+                    ),
+                    provider_turn_correlation: correlation.provider().user_turn_id().to_string(),
+                    kind,
+                },
+                "AuthorizeLiveDelegationNarration",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        for effect in effects.as_slice() {
+            if let Some(authority) =
+                crate::live_execution::LiveDelegationNarrationAuthority::from_generated_effect(
+                    session_id, operation, kind, effect,
+                )
+                .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?
+            {
+                return Ok(authority);
+            }
+        }
+        Err(RuntimeDriverError::Internal(
+            "generated live delegation narration emitted no matching authority effect".to_string(),
+        ))
+    }
+
     fn live_delegation_cancellation_authority_from_effects(
         &self,
         admission: &crate::live_execution::LiveDelegationExecutionAdmission,
@@ -9025,6 +9289,9 @@ impl MeerkatMachine {
                 }
                 crate::meerkat_machine::dsl::LiveDelegationWorkerTerminalKind::Failed => {
                     crate::live_execution::LiveDelegationWorkerTerminalKind::Failed
+                }
+                crate::meerkat_machine::dsl::LiveDelegationWorkerTerminalKind::Blocked => {
+                    crate::live_execution::LiveDelegationWorkerTerminalKind::Blocked
                 }
             };
             if recorded_terminal != terminal {
@@ -11289,16 +11556,101 @@ impl MeerkatMachine {
         session_id: &SessionId,
         channel_id: &meerkat_live::LiveChannelId,
     ) -> bool {
+        self.live_channel_activity_for_session(session_id, channel_id)
+            .await
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "live")]
+    /// Record that `channel_id`'s close-time assistant playback settlement
+    /// was deferred past a running member turn. Refused while the channel
+    /// is still bound: the debt exists only for a closed channel.
+    pub async fn defer_live_close_settlement(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<(), RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        self.apply_session_dsl_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::DeferLiveCloseSettlement {
+                session_id: session_id.to_string(),
+                channel_id: channel_id.to_string(),
+            },
+            "DeferLiveCloseSettlement",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(session_id, "DeferLiveCloseSettlement")
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "live")]
+    /// The deferred close-time playback settlement for `channel_id` ran.
+    pub async fn resolve_live_close_settlement(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Result<(), RuntimeDriverError> {
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        self.apply_session_dsl_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::ResolveLiveCloseSettlement {
+                session_id: session_id.to_string(),
+                channel_id: channel_id.to_string(),
+            },
+            "ResolveLiveCloseSettlement",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        #[cfg(feature = "live")]
+        self.persist_live_bridge_recovery_state(session_id, "ResolveLiveCloseSettlement")
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "live")]
+    /// Closed channels of `session_id` whose playback settlement is still
+    /// deferred.
+    pub async fn live_close_settlement_deferred_channels(
+        &self,
+        session_id: &SessionId,
+    ) -> Vec<meerkat_live::LiveChannelId> {
         self.session_dsl_state(session_id)
             .await
-            .ok()
-            .and_then(|state| {
+            .map(|state| {
                 state
-                    .live_active_channel_by_session
-                    .get(&session_id.to_string())
-                    .cloned()
+                    .live_close_settlement_deferred_channels
+                    .iter()
+                    .map(|channel| meerkat_live::LiveChannelId::new(channel.clone()))
+                    .collect()
             })
-            .is_some_and(|active| active == channel_id.to_string())
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "live")]
+    /// Whether `channel_id` is the session's active live channel, or `None`
+    /// when the session's machine state could not be read. A caller that
+    /// acts on "inactive" (for example by merging a delegation result into
+    /// the source member) must treat `None` as unknown and retry instead.
+    pub async fn live_channel_activity_for_session(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Option<bool> {
+        let state = self.session_dsl_state(session_id).await.ok()?;
+        Some(
+            state
+                .live_active_channel_by_session
+                .get(&session_id.to_string())
+                .is_some_and(|active| *active == channel_id.to_string()),
+        )
     }
 
     #[cfg(feature = "live")]

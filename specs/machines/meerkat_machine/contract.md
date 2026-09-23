@@ -219,9 +219,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_assistant_turn_channel_by_ref`: `Map<String, String>`
 - `live_assistant_playback_segment_by_turn`: `Map<String, u64>`
 - `live_abandoned_interactions`: `Set<String>`
-- `live_delegation_interaction_by_channel`: `Map<String, String>`
-- `live_delegation_operation_by_channel`: `Map<String, OperationId>`
-- `live_delegation_provider_turn_by_channel`: `Map<String, String>`
+- `live_delegation_operation_by_interaction`: `Map<String, OperationId>`
+- `live_delegation_channel_by_operation`: `Map<OperationId, String>`
+- `live_delegation_schedule_state_by_operation`: `Map<OperationId, LiveDelegationScheduleState>`
+- `live_delegation_active_worker_count_by_channel`: `Map<String, u64>`
+- `live_delegation_channel_worker_cap`: `u64`
+- `live_delegation_last_narration_by_operation`: `Map<OperationId, LiveDelegationNarrationKind>`
 - `live_delegation_interaction_by_operation`: `Map<OperationId, String>`
 - `live_delegation_provider_turn_by_operation`: `Map<OperationId, String>`
 - `live_delegation_reconciliation_by_operation`: `Map<OperationId, LiveDelegationReconciliation>`
@@ -321,6 +324,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_close_result_sequence`: `u64`
 - `live_close_observation_sequence_by_channel`: `Map<String, u64>`
 - `live_close_status_by_channel`: `Map<String, LiveClosePublicStatus>`
+- `live_close_settlement_deferred_channels`: `Set<String>`
 - `live_command_result_sequence`: `u64`
 - `live_command_acceptance_sequence_by_channel`: `Map<String, u64>`
 - `live_command_kind_by_channel`: `Map<String, LiveCommandPublicKind>`
@@ -695,6 +699,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReconcileRevokedLiveDelegationWorkerAfterRestart`(session_id: String, channel_id: String, interaction_id: String, operation_id: OperationId, worker_identity: String, terminal: LiveDelegationWorkerTerminalKind)
 - `AuthorizeLiveDelegationWorkerRetirement`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String)
 - `ResolveLiveDelegationWorkerRetirement`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, worker_identity: String, retired: Bool)
+- `RequeueLiveDelegation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId)
+- `CancelQueuedLiveDelegation`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId)
+- `AuthorizeLiveDelegationNarration`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, kind: LiveDelegationNarrationKind)
 - `AbandonLiveInteraction`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String)
 - `CompleteLiveInteraction`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, provider_turn_ref: String)
 - `AuthorizeLiveConsequentialEffect`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, interaction_id: String, operation_id: OperationId, authority_id: String)
@@ -735,6 +742,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AbandonLiveOpenAdmission`(session_id: String, channel_id: String)
 - `RecordLiveRefreshQueued`(channel_id: String, queue_acceptance_sequence: u64)
 - `RecordLiveCloseClosed`(session_id: String, channel_id: String, close_observation_sequence: u64)
+- `DeferLiveCloseSettlement`(session_id: String, channel_id: String)
+- `ResolveLiveCloseSettlement`(session_id: String, channel_id: String)
 - `RecordLiveCommandAccepted`(channel_id: String, command: LiveCommandPublicKind, command_acceptance_sequence: u64)
 - `RecordLiveCommandRejected`(channel_id: String, command: LiveCommandPublicKind, rejection: LiveCommandRejectionReason)
 - `RecordLiveChannelRequestRejected`(channel_id: String, request: LiveChannelRequestPublicKind, rejection: LiveChannelRequestRejectionReason)
@@ -994,6 +1003,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LiveAssistantPlaybackSegmentAdvanced`(channel_id: String, interaction_id: String, assistant_turn_ref: String, segment: u64)
 - `LiveProviderTurnFinished`(channel_id: String, interaction_id: String, provider_turn_ref: String)
 - `LiveConsequentialEffectAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, authority_id: String)
+- `LiveCloseSettlementDeferred`(session_id: String, channel_id: String)
+- `LiveCloseSettlementResolved`(session_id: String, channel_id: String)
+- `LiveDelegationRequeued`(channel_id: String, interaction_id: String, operation_id: OperationId)
+- `LiveDelegationQueuedCancelled`(channel_id: String, interaction_id: String, operation_id: OperationId)
+- `LiveDelegationNarrationAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, kind: LiveDelegationNarrationKind)
 - `LiveDelegationResultReleaseAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, disposition: LiveDelegationResultDisposition)
 - `LiveDelegationResultDeliveryAuthorized`(channel_id: String, interaction_id: String, operation_id: OperationId, provider_turn_correlation: String, result_digest: String, disposition: LiveDelegationResultDisposition)
 - `LiveDelegationResultDeliveryResolved`(channel_id: String, operation_id: OperationId, result_digest: String, disposition: LiveDelegationResultDisposition, observation: LiveDelegationResultDeliveryObservation, speech_disposition: LiveDelegationResultSpeechDisposition, retry_allowed: Bool, recovery_required: Bool)
@@ -1334,7 +1348,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_active_interaction_is_exactly_channel_bound`
 - `live_provider_turn_occupancy_has_exact_interaction`
 - `live_assistant_turn_has_frozen_typed_attribution`
-- `live_pending_delegation_is_serialized_and_complete`
+- `live_delegation_items_are_channel_bound_and_capped`
+- `live_close_settlement_deferral_is_for_closed_channels`
 - `live_delegation_operation_has_exact_join_identity`
 - `live_delegation_worker_binding_is_exact`
 - `live_delegation_existing_member_has_worker_binding`
@@ -14555,7 +14570,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches`
   - `interaction_is_active`
   - `interaction_not_abandoned`
-  - `one_pending_delegation`
+  - `one_delegation_per_interaction`
   - `exact_actionable_join`
   - `operation_not_known`
 - Emits: `LiveDelegationAdmitted`
@@ -14571,7 +14586,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches`
   - `interaction_is_active`
   - `interaction_not_abandoned`
-  - `one_pending_delegation`
+  - `one_delegation_per_interaction`
   - `exact_actionable_join`
   - `operation_not_known`
 - Emits: `LiveDelegationAdmitted`
@@ -14587,7 +14602,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches`
   - `interaction_is_active`
   - `interaction_not_abandoned`
-  - `one_pending_delegation`
+  - `one_delegation_per_interaction`
   - `exact_actionable_join`
   - `operation_not_known`
 - Emits: `LiveDelegationAdmitted`
@@ -14602,7 +14617,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
-  - `channel_has_no_active_interaction_or_delegation`
+  - `channel_has_no_active_interaction`
   - `exact_actionable_join`
   - `identities_are_fresh`
 - Emits: `LiveInteractionDelegationAdmitted`
@@ -14617,7 +14632,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
-  - `channel_has_no_active_interaction_or_delegation`
+  - `channel_has_no_active_interaction`
   - `exact_actionable_join`
   - `identities_are_fresh`
 - Emits: `LiveInteractionDelegationAdmitted`
@@ -14632,7 +14647,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_binding_matches`
   - `fence_binding_matches`
   - `generation_binding_matches`
-  - `channel_has_no_active_interaction_or_delegation`
+  - `channel_has_no_active_interaction`
   - `exact_actionable_join`
   - `identities_are_fresh`
 - Emits: `LiveInteractionDelegationAdmitted`
@@ -14649,6 +14664,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_operation_join`
   - `canonical_final_transcript_confirmed`
   - `worker_unbound`
+  - `schedule_state_is_created`
+  - `channel_worker_slot_available`
 - Emits: `LiveDelegationWorkerStartAuthorized`
 - To: `Idle`
 
@@ -14663,6 +14680,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_operation_join`
   - `canonical_final_transcript_confirmed`
   - `worker_unbound`
+  - `schedule_state_is_created`
+  - `channel_worker_slot_available`
 - Emits: `LiveDelegationWorkerStartAuthorized`
 - To: `Attached`
 
@@ -14677,6 +14696,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_operation_join`
   - `canonical_final_transcript_confirmed`
   - `worker_unbound`
+  - `schedule_state_is_created`
+  - `channel_worker_slot_available`
 - Emits: `LiveDelegationWorkerStartAuthorized`
 - To: `Running`
 
@@ -15088,7 +15109,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches`
   - `generation_binding_matches`
   - `interaction_is_active`
-  - `pending_delegation_absent_or_owned`
   - `no_cancellable_worker`
 - Emits: `LiveInteractionAbandoned`
 - To: `Idle`
@@ -15101,7 +15121,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches`
   - `generation_binding_matches`
   - `interaction_is_active`
-  - `pending_delegation_absent_or_owned`
   - `no_cancellable_worker`
 - Emits: `LiveInteractionAbandoned`
 - To: `Attached`
@@ -15114,7 +15133,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches`
   - `generation_binding_matches`
   - `interaction_is_active`
-  - `pending_delegation_absent_or_owned`
   - `no_cancellable_worker`
 - Emits: `LiveInteractionAbandoned`
 - To: `Running`
@@ -15127,7 +15145,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches`
   - `generation_binding_matches`
   - `interaction_is_active`
-  - `pending_delegation_absent_or_owned`
   - `no_cancellable_worker`
 - Emits: `LiveInteractionAbandoned`
 - To: `Retired`
@@ -15140,68 +15157,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches`
   - `generation_binding_matches`
   - `interaction_is_active`
-  - `pending_delegation_absent_or_owned`
   - `no_cancellable_worker`
-- Emits: `LiveInteractionAbandoned`
-- To: `Stopped`
-
-### `AbandonLiveInteractionPreservingEarlierDelegationIdle`
-- From: `Idle`
-- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
-- Guards:
-  - `runtime_binding_matches`
-  - `fence_binding_matches`
-  - `generation_binding_matches`
-  - `interaction_is_active`
-  - `earlier_delegation_is_pending`
-- Emits: `LiveInteractionAbandoned`
-- To: `Idle`
-
-### `AbandonLiveInteractionPreservingEarlierDelegationAttached`
-- From: `Attached`
-- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
-- Guards:
-  - `runtime_binding_matches`
-  - `fence_binding_matches`
-  - `generation_binding_matches`
-  - `interaction_is_active`
-  - `earlier_delegation_is_pending`
-- Emits: `LiveInteractionAbandoned`
-- To: `Attached`
-
-### `AbandonLiveInteractionPreservingEarlierDelegationRunning`
-- From: `Running`
-- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
-- Guards:
-  - `runtime_binding_matches`
-  - `fence_binding_matches`
-  - `generation_binding_matches`
-  - `interaction_is_active`
-  - `earlier_delegation_is_pending`
-- Emits: `LiveInteractionAbandoned`
-- To: `Running`
-
-### `AbandonLiveInteractionPreservingEarlierDelegationRetired`
-- From: `Retired`
-- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
-- Guards:
-  - `runtime_binding_matches`
-  - `fence_binding_matches`
-  - `generation_binding_matches`
-  - `interaction_is_active`
-  - `earlier_delegation_is_pending`
-- Emits: `LiveInteractionAbandoned`
-- To: `Retired`
-
-### `AbandonLiveInteractionPreservingEarlierDelegationStopped`
-- From: `Stopped`
-- On: `AbandonLiveInteraction`(channel_id, runtime_id, fence_token, generation, interaction_id)
-- Guards:
-  - `runtime_binding_matches`
-  - `fence_binding_matches`
-  - `generation_binding_matches`
-  - `interaction_is_active`
-  - `earlier_delegation_is_pending`
 - Emits: `LiveInteractionAbandoned`
 - To: `Stopped`
 
@@ -15293,6 +15249,61 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_binding_matches`
   - `generation_binding_matches`
   - `exact_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Stopped`
+
+### `ResolveLiveDelegationCancellationAfterTerminalIdle`
+- From: `Idle`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_settled_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Idle`
+
+### `ResolveLiveDelegationCancellationAfterTerminalAttached`
+- From: `Attached`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_settled_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Attached`
+
+### `ResolveLiveDelegationCancellationAfterTerminalRunning`
+- From: `Running`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_settled_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Running`
+
+### `ResolveLiveDelegationCancellationAfterTerminalRetired`
+- From: `Retired`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_settled_cancel_authority`
+- Emits: `LiveDelegationCancellationResolved`
+- To: `Retired`
+
+### `ResolveLiveDelegationCancellationAfterTerminalStopped`
+- From: `Stopped`
+- On: `ResolveLiveDelegationCancellation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, worker_identity, outcome)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_settled_cancel_authority`
 - Emits: `LiveDelegationCancellationResolved`
 - To: `Stopped`
 
@@ -15610,6 +15621,187 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `exact_retirement_authority`
 - Emits: `LiveDelegationWorkerRetirementResolved`
 - To: `Stopped`
+
+### `RequeueBlockedLiveDelegationIdle`
+- From: `Idle`
+- On: `RequeueLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `interaction_not_abandoned`
+  - `schedule_state_is_blocked`
+  - `blocked_worker_is_retired`
+- Emits: `LiveDelegationRequeued`
+- To: `Idle`
+
+### `RequeueBlockedLiveDelegationAttached`
+- From: `Attached`
+- On: `RequeueLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `interaction_not_abandoned`
+  - `schedule_state_is_blocked`
+  - `blocked_worker_is_retired`
+- Emits: `LiveDelegationRequeued`
+- To: `Attached`
+
+### `RequeueBlockedLiveDelegationRunning`
+- From: `Running`
+- On: `RequeueLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `interaction_not_abandoned`
+  - `schedule_state_is_blocked`
+  - `blocked_worker_is_retired`
+- Emits: `LiveDelegationRequeued`
+- To: `Running`
+
+### `RequeueUnstartedLiveDelegationIdle`
+- From: `Idle`
+- On: `RequeueLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `interaction_not_abandoned`
+  - `schedule_state_is_failed`
+  - `worker_never_started`
+- Emits: `LiveDelegationRequeued`
+- To: `Idle`
+
+### `RequeueUnstartedLiveDelegationAttached`
+- From: `Attached`
+- On: `RequeueLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `interaction_not_abandoned`
+  - `schedule_state_is_failed`
+  - `worker_never_started`
+- Emits: `LiveDelegationRequeued`
+- To: `Attached`
+
+### `RequeueUnstartedLiveDelegationRunning`
+- From: `Running`
+- On: `RequeueLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `interaction_not_abandoned`
+  - `schedule_state_is_failed`
+  - `worker_never_started`
+- Emits: `LiveDelegationRequeued`
+- To: `Running`
+
+### `CancelQueuedLiveDelegationIdle`
+- From: `Idle`
+- On: `CancelQueuedLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id)
+- Guards:
+  - `binding_matches_or_channel_unbound`
+  - `exact_operation_join`
+  - `schedule_state_is_queued`
+  - `no_live_worker`
+- Emits: `LiveDelegationQueuedCancelled`
+- To: `Idle`
+
+### `CancelQueuedLiveDelegationAttached`
+- From: `Attached`
+- On: `CancelQueuedLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id)
+- Guards:
+  - `binding_matches_or_channel_unbound`
+  - `exact_operation_join`
+  - `schedule_state_is_queued`
+  - `no_live_worker`
+- Emits: `LiveDelegationQueuedCancelled`
+- To: `Attached`
+
+### `CancelQueuedLiveDelegationRunning`
+- From: `Running`
+- On: `CancelQueuedLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id)
+- Guards:
+  - `binding_matches_or_channel_unbound`
+  - `exact_operation_join`
+  - `schedule_state_is_queued`
+  - `no_live_worker`
+- Emits: `LiveDelegationQueuedCancelled`
+- To: `Running`
+
+### `CancelQueuedLiveDelegationRetired`
+- From: `Retired`
+- On: `CancelQueuedLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id)
+- Guards:
+  - `binding_matches_or_channel_unbound`
+  - `exact_operation_join`
+  - `schedule_state_is_queued`
+  - `no_live_worker`
+- Emits: `LiveDelegationQueuedCancelled`
+- To: `Retired`
+
+### `CancelQueuedLiveDelegationStopped`
+- From: `Stopped`
+- On: `CancelQueuedLiveDelegation`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id)
+- Guards:
+  - `binding_matches_or_channel_unbound`
+  - `exact_operation_join`
+  - `schedule_state_is_queued`
+  - `no_live_worker`
+- Emits: `LiveDelegationQueuedCancelled`
+- To: `Stopped`
+
+### `AuthorizeLiveDelegationNarrationIdle`
+- From: `Idle`
+- On: `AuthorizeLiveDelegationNarration`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, kind)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `interaction_not_abandoned`
+  - `narration_matches_schedule_state`
+  - `narration_advances`
+- Emits: `LiveDelegationNarrationAuthorized`
+- To: `Idle`
+
+### `AuthorizeLiveDelegationNarrationAttached`
+- From: `Attached`
+- On: `AuthorizeLiveDelegationNarration`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, kind)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `interaction_not_abandoned`
+  - `narration_matches_schedule_state`
+  - `narration_advances`
+- Emits: `LiveDelegationNarrationAuthorized`
+- To: `Attached`
+
+### `AuthorizeLiveDelegationNarrationRunning`
+- From: `Running`
+- On: `AuthorizeLiveDelegationNarration`(channel_id, runtime_id, fence_token, generation, interaction_id, operation_id, provider_turn_correlation, kind)
+- Guards:
+  - `runtime_binding_matches`
+  - `fence_binding_matches`
+  - `generation_binding_matches`
+  - `exact_operation_join`
+  - `interaction_not_abandoned`
+  - `narration_matches_schedule_state`
+  - `narration_advances`
+- Emits: `LiveDelegationNarrationAuthorized`
+- To: `Running`
 
 ### `AuthorizeLiveConsequentialEffectIdle`
 - From: `Idle`
@@ -17700,6 +17892,106 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `channel_binding_matches_if_present`
   - `close_observation_sequence_advances`
 - Emits: `LiveCloseResultResolved`
+- To: `Stopped`
+
+### `DeferLiveCloseSettlementIdle`
+- From: `Idle`
+- On: `DeferLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `channel_is_closed`
+  - `not_already_deferred`
+- Emits: `LiveCloseSettlementDeferred`
+- To: `Idle`
+
+### `DeferLiveCloseSettlementAttached`
+- From: `Attached`
+- On: `DeferLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `channel_is_closed`
+  - `not_already_deferred`
+- Emits: `LiveCloseSettlementDeferred`
+- To: `Attached`
+
+### `DeferLiveCloseSettlementRunning`
+- From: `Running`
+- On: `DeferLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `channel_is_closed`
+  - `not_already_deferred`
+- Emits: `LiveCloseSettlementDeferred`
+- To: `Running`
+
+### `DeferLiveCloseSettlementRetired`
+- From: `Retired`
+- On: `DeferLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `channel_is_closed`
+  - `not_already_deferred`
+- Emits: `LiveCloseSettlementDeferred`
+- To: `Retired`
+
+### `DeferLiveCloseSettlementStopped`
+- From: `Stopped`
+- On: `DeferLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `channel_id_present`
+  - `channel_is_closed`
+  - `not_already_deferred`
+- Emits: `LiveCloseSettlementDeferred`
+- To: `Stopped`
+
+### `ResolveLiveCloseSettlementIdle`
+- From: `Idle`
+- On: `ResolveLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `settlement_is_deferred`
+- Emits: `LiveCloseSettlementResolved`
+- To: `Idle`
+
+### `ResolveLiveCloseSettlementAttached`
+- From: `Attached`
+- On: `ResolveLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `settlement_is_deferred`
+- Emits: `LiveCloseSettlementResolved`
+- To: `Attached`
+
+### `ResolveLiveCloseSettlementRunning`
+- From: `Running`
+- On: `ResolveLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `settlement_is_deferred`
+- Emits: `LiveCloseSettlementResolved`
+- To: `Running`
+
+### `ResolveLiveCloseSettlementRetired`
+- From: `Retired`
+- On: `ResolveLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `settlement_is_deferred`
+- Emits: `LiveCloseSettlementResolved`
+- To: `Retired`
+
+### `ResolveLiveCloseSettlementStopped`
+- From: `Stopped`
+- On: `ResolveLiveCloseSettlement`(session_id, channel_id)
+- Guards:
+  - `session_id_present`
+  - `settlement_is_deferred`
+- Emits: `LiveCloseSettlementResolved`
 - To: `Stopped`
 
 ### `RecordLiveCommandAcceptedIdle`

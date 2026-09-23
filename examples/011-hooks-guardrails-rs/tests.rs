@@ -41,9 +41,9 @@ async fn documented_cost_tracker_runs_through_hook_engine() {
     // Resolve the documented repo-relative script and substitute only the
     // explicitly caller-owned log destination, not the observer implementation.
     let mut runtime = serde_json::to_value(&config.hooks.entries[0].runtime).unwrap();
-    runtime["args"][0] = json!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../examples/011-hooks-guardrails-rs/cost_tracker.py"
+    runtime["args"][0] = json!(format!(
+        "{}/../examples/011-hooks-guardrails-rs/cost_tracker.py",
+        std::env::var("CARGO_MANIFEST_DIR").unwrap()
     ));
     runtime["args"][1] = json!(log);
     config.hooks.entries[0].runtime = serde_json::from_value(runtime).unwrap();

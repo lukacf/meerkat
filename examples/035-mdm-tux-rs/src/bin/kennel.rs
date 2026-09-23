@@ -1514,7 +1514,7 @@ mod tests {
     fn teardown_is_unconditional_incarnation_fenced_and_unwires_retired_peers() {
         meerkat_runtime::host_stack::run_host("kennel-cleanup-test", || async {
             use tokio::io::AsyncWriteExt;
-            let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let root = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
             let comms = meerkat_comms::ResolvedCommsConfig {
                 enabled: true,
                 name: "hive".into(),

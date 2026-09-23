@@ -9,7 +9,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::mpsc};
 
 mod test_support {
-    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/test_support.rs"));
+    include!("../src/test_support.rs");
 }
 
 fn comms_config(root: &Path) -> ResolvedCommsConfig {
@@ -99,7 +99,7 @@ async fn client(
 #[test]
 fn managed_runtime_rpc_stream_and_restart_share_durable_authority() {
     meerkat_runtime::host_stack::run_host("mdm-runtime-test", || async {
-        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let root = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
         let mut first_id = None;
         let mut blob = None;
         let mut schedule = None;
@@ -119,7 +119,7 @@ fn managed_runtime_rpc_stream_and_restart_share_durable_authority() {
                         "python3",
                         vec![format!(
                             "{}/tests/fixture_mcp.py",
-                            env!("CARGO_MANIFEST_DIR")
+                            std::env::var("CARGO_MANIFEST_DIR").unwrap()
                         )],
                         Default::default(),
                     )],
@@ -390,7 +390,7 @@ impl meerkat::LlmClient for GatedClient {
 #[test]
 fn real_rpc_turn_start_uses_owner_admission_when_a_turn_is_active() {
     meerkat_runtime::host_stack::run_host("mdm-busy-test", || async {
-        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let root = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
         let host = ManagedRpcHost::open(root.path(), Default::default(), comms_config(root.path()))
             .await
             .unwrap();
@@ -468,7 +468,7 @@ fn real_rpc_turn_start_uses_owner_admission_when_a_turn_is_active() {
 #[test]
 fn deferred_seam_refuses_missing_archived_and_busy() {
     meerkat_runtime::host_stack::run_host("mdm-deferred-test", || async {
-        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let root = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
         let host = ManagedRpcHost::open(root.path(), Default::default(), comms_config(root.path()))
             .await
             .unwrap();
@@ -539,7 +539,7 @@ fn deferred_seam_refuses_missing_archived_and_busy() {
 
 #[test]
 fn failed_no_turn_creation_releases_anonymous_staging_and_capacity() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
     let path = root.path().to_path_buf();
     meerkat_runtime::host_stack::run_host("mdm-rollback-test", move || async move {
         let runtime = isolated_runtime(&path, 1).await;
@@ -571,7 +571,7 @@ fn failed_no_turn_creation_releases_anonymous_staging_and_capacity() {
 
 #[test]
 fn cold_no_turn_resume_preserves_durable_build_state_without_resupply() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
     let path = root.path().to_path_buf();
     meerkat_runtime::host_stack::run_host("mdm-build-state-test", move || async move {
         let runtime = isolated_runtime(&path, 1).await;
@@ -745,7 +745,7 @@ fn cold_no_turn_resume_preserves_durable_build_state_without_resupply() {
 
 #[test]
 fn cold_no_turn_resume_obeys_recovery_override_admission() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
     let path = root.path().to_path_buf();
     meerkat_runtime::host_stack::run_host("mdm-resume-admission-test", move || async move {
         let runtime = isolated_runtime(&path, 1).await;
@@ -799,7 +799,7 @@ fn cold_no_turn_resume_obeys_recovery_override_admission() {
 fn managed_peer_ingress_and_schedule_use_the_rpc_session_owner() {
     meerkat_runtime::host_stack::run_host("mdm-ingress-test", || async {
         use meerkat_core::agent::CommsRuntime as _;
-        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let root = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
         let mut hosts = Vec::new();
         let mut ids = Vec::new();
         let namespace = uuid::Uuid::new_v4().to_string();
@@ -942,7 +942,7 @@ fn managed_peer_ingress_and_schedule_use_the_rpc_session_owner() {
 
 #[tokio::test]
 async fn actual_target_boot_and_restart_advertise_the_same_rpc_session() {
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
     std::fs::create_dir(root.path().join(".rkat")).unwrap();
     std::fs::write(root.path().join(".rkat/config.toml"), "").unwrap();
     let broker = TcpListener::bind("127.0.0.1:0").await.unwrap();

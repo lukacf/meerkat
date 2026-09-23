@@ -78,7 +78,7 @@ impl LlmClient for CaptureClient {
 fn fixture() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix(".audit-fixture-")
-        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
         .unwrap()
 }
 

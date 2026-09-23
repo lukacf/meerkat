@@ -256,7 +256,7 @@ async fn runtime_skill_refs_reach_canonical_history_and_provider_bytes() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::Builder::new()
             .prefix(".runtime-skills-")
-            .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+            .tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
             .unwrap();
         let names = ["runtime-invoke-regression", "runtime-second-regression"];
         for (name, body) in names.iter().zip([BODY, SECOND_BODY]) {

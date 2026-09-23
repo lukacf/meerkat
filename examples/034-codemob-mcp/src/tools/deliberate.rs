@@ -708,7 +708,7 @@ mod tests {
         use meerkat::surface::{noop_request_action, SurfaceRequestExecutor};
         let dir = tempfile::Builder::new()
             .prefix(".audit-setup-")
-            .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+            .tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
             .unwrap();
         let client = Arc::new(crate::tests::CaptureClient::default());
         let state = ForceState::with_test_client(dir.path(), client.clone());

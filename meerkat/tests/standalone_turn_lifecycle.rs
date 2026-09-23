@@ -154,7 +154,7 @@ fn fixture_with_config(
 ) {
     let directory = tempfile::Builder::new()
         .prefix(".standalone-lifecycle-")
-        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
         .unwrap();
     let client = Arc::new(Client {
         replies: Mutex::new(replies.into_iter().collect()),

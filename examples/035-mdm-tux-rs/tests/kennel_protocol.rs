@@ -81,7 +81,7 @@ async fn spawn_kennel() -> anyhow::Result<(String, tokio::process::Child, tempfi
     let kennel = kennel_binary();
 
     for attempt in 0..10 {
-        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+        let temp = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())?;
         std::fs::create_dir(temp.path().join(".rkat"))?;
         std::fs::write(temp.path().join(".rkat/config.toml"), "")?;
 

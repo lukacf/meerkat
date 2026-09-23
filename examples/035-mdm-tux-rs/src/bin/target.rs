@@ -2206,7 +2206,7 @@ fn parse_provider_override(args: &[String]) -> anyhow::Result<Option<ProviderKin
 #[cfg(test)]
 mod tests {
     mod test_support {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/test_support.rs"));
+        include!("../test_support.rs");
     }
 
     use super::{
@@ -2764,7 +2764,7 @@ mod tests {
         managed: bool,
         topology: BackgroundShellTopology,
     ) {
-        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let temp = tempfile::tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
         let path = temp.path().to_path_buf();
         // Keep the fixture outside the host thread through runtime shutdown.
         meerkat_runtime::host_stack::run_host("mdm-shell-probe", move || async move {

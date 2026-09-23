@@ -79,7 +79,7 @@ fn turn() -> StartTurnRequest {
 async fn assert_two_turns(initial_turn: InitialTurnPolicy) {
     let directory = tempfile::Builder::new()
         .prefix(".root02-control-")
-        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
         .unwrap();
     let client = Arc::new(SyntheticClient::default());
     let factory =

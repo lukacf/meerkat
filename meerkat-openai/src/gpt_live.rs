@@ -877,6 +877,10 @@ impl GptLiveBrokerSessionState {
                 delegation: pending.delegation,
                 target: GptLiveDelegationTarget::Client,
                 turn,
+                // The experimental protocol carries provider turn identity,
+                // so the joined turn is the whole request.
+                request_transcript: transcript.clone(),
+                assistant_context: String::new(),
                 transcript,
             });
     }
@@ -1615,6 +1619,7 @@ mod tests {
                 target: GptLiveDelegationTarget::Client,
                 turn,
                 transcript,
+                ..
             }) if delegation.__opaque_provider_id() == "item_EGKFFURbWV7QZwDEWG06L"
                 && turn.__opaque_provider_id() == turn_id
                 && transcript == "authoritative final"
@@ -1874,6 +1879,7 @@ mod tests {
                 target: GptLiveDelegationTarget::Client,
                 turn,
                 transcript,
+                ..
             }) if turn.__opaque_provider_id() == "private_user_turn"
                 && transcript == "authoritative user final" =>
             {

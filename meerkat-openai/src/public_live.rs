@@ -273,26 +273,39 @@ enum PublicLiveContextSeed {
 }
 
 impl PublicLiveContextSeed {
-    /// Real prior dialogue turns are the only seed that belongs in the
-    /// session's `input`. A factual summary or a pending notice is startup
-    /// knowledge, not a user utterance; seeding it as a user-role item made
-    /// the provider answer it with a fresh greeting.
+    /// Prefix of the developer-role startup item that carries a summary.
+    pub(crate) const SUMMARY_ITEM_PREFIX: &'static str = "Factual summary of the background agent's context at voice-channel open (context data, not a new user request):";
+
+    /// History belongs in the session's startup `input`: real prior dialogue
+    /// turns under their own roles, and a factual summary as one
+    /// `developer`-role item. The provider documents `input` as the history
+    /// carrier (up to 128 text messages) and it is read before the session
+    /// starts, so it prompts no speech. A summary is never a user-role item:
+    /// a user item at session start made the provider answer it with a fresh
+    /// greeting. The pending notice is availability state, not history, and
+    /// stays with the instructions.
     fn initial_input(&self) -> Option<Vec<InitialItem>> {
         match self {
             Self::History(items) => (!items.is_empty()).then(|| items.clone()),
-            Self::Absent | Self::FactualSummary(_) | Self::HistoricalContextPending => None,
+            Self::FactualSummary(summary) => Some(vec![InitialItem {
+                role: InitialRole::Developer,
+                content: vec![InitialText {
+                    text: format!("{}\n{summary}", Self::SUMMARY_ITEM_PREFIX),
+                    text_type: Some(InitialTextType::InputText),
+                }],
+                id: Field::Absent,
+                status: Field::Absent,
+                item_type: Some(MessageType::Message),
+            }]),
+            Self::Absent | Self::HistoricalContextPending => None,
         }
     }
 
-    /// Startup knowledge for the instructions lane, appended after the
-    /// caller's own instructions. The text and its framing are unchanged
-    /// from the former user-role seed; only the lane differs.
+    /// Startup state for the instructions lane, appended after the caller's
+    /// own instructions.
     fn instructions_context(&self) -> Option<String> {
         match self {
-            Self::Absent | Self::History(_) => None,
-            Self::FactualSummary(summary) => Some(format!(
-                "Factual summary of the background agent's context at voice-channel open (context data, not a new user request):\n{summary}"
-            )),
+            Self::Absent | Self::History(_) | Self::FactualSummary(_) => None,
             Self::HistoricalContextPending => Some(
                 "Voice-channel context availability (factual state, not a new user request):\nHistorical session context is being prepared and is not yet available."
                     .to_string(),
@@ -416,8 +429,10 @@ impl PublicLiveOpenConfig {
         self
     }
 
-    /// Lower an owner-generated factual summary as unprivileged startup data.
-    /// This never changes the catalog-owned behavior instructions.
+    /// Lower an owner-generated factual summary as unprivileged startup
+    /// history: one `developer`-role item in the session's startup `input`.
+    /// This never changes the catalog-owned behavior instructions and asks
+    /// for no speech.
     #[must_use]
     pub fn with_context_summary(mut self, summary: &str) -> Self {
         self.context_seed = PublicLiveContextSeed::FactualSummary(summary.to_owned());
@@ -786,13 +801,13 @@ impl PublicLiveBrokerSession {
         text: impl Into<String>,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
         let text = require_context(text)?;
-        let fragments = thinking_fragments(&text);
-        let count = fragments
-            .clone()
-            .take(SessionState::MAX_PENDING_APPENDS + 1)
-            .count();
-        let token = self.state.lock().await.reserve_thinking_append(count)?;
-        for (index, content) in fragments.enumerate() {
+        let fragments = context_fragments(&text);
+        let token = self
+            .state
+            .lock()
+            .await
+            .reserve_thinking_append(fragments.len())?;
+        for (index, content) in fragments.into_iter().enumerate() {
             let event = Self::thinking_event(token, index, content.to_owned());
             self.deliver_append(token, event).await?;
         }
@@ -809,15 +824,38 @@ impl PublicLiveBrokerSession {
         &self,
         text: impl Into<String>,
     ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
-        let text = require_context(text)?;
-        let fragments = thinking_fragments(&text);
-        let count = fragments
-            .clone()
-            .take(SessionState::MAX_PENDING_APPENDS + 1)
-            .count();
-        let token = self.state.lock().await.reserve_instructions_append(count)?;
-        for (index, content) in fragments.enumerate() {
-            let event = Self::instructions_event(token, index, content.to_owned());
+        self.append_instructions_context_sections(vec![text.into()])
+            .await
+    }
+
+    /// Append trusted knowledge as ordered sections that never share a
+    /// fragment: every section starts at a fragment boundary, so a framing
+    /// preface is acknowledged as its own fragment(s) and the knowledge it
+    /// frames arrives intact from the first byte of the next fragment
+    /// (measured against gpt-live-1: a summary sentence cut mid-word across
+    /// the framing's fragment boundary was recalled about half the time).
+    /// Blank sections are skipped; the total must be non-empty. One token,
+    /// exact receipts, and the same rejection and close semantics as
+    /// [`Self::append_instructions_context`].
+    pub async fn append_instructions_context_sections(
+        &self,
+        sections: Vec<String>,
+    ) -> Result<GptLiveAppendToken, GptLiveBrokerError> {
+        let fragments: Vec<String> = sections
+            .iter()
+            .filter(|section| !section.trim().is_empty())
+            .flat_map(|section| context_fragments(section).into_iter().map(str::to_owned))
+            .collect();
+        if fragments.is_empty() {
+            return Err(GptLiveBrokerError::MissingContext);
+        }
+        let token = self
+            .state
+            .lock()
+            .await
+            .reserve_instructions_append(fragments.len())?;
+        for (index, content) in fragments.into_iter().enumerate() {
+            let event = Self::instructions_event(token, index, content);
             self.deliver_append(token, event).await?;
         }
         Ok(token)
@@ -1130,14 +1168,67 @@ struct OpenTurn {
     role: GptLiveTurnRole,
     /// Transcript deltas in arrival order.
     segments: Vec<String>,
+    /// Index of the first segment that arrived after the most recent
+    /// `session.delegation.created`; earlier segments belong to the
+    /// previous delegation window.
+    window_start: usize,
+}
+
+impl OpenTurn {
+    fn window_transcript(&self) -> String {
+        join_segments(self.segments.iter().skip(self.window_start))
+    }
 }
 
 fn join_segments<'a>(segments: impl IntoIterator<Item = &'a String>) -> String {
     segments.into_iter().map(String::as_str).collect()
 }
 
+/// Whole-turn transcripts separated by one space; blank turns are skipped.
+/// Deltas inside one turn are joined exactly; the separator only marks a
+/// synthesized turn boundary inside the window.
+fn join_window_chunks<'a>(chunks: impl IntoIterator<Item = &'a str>) -> String {
+    let mut joined = String::new();
+    for chunk in chunks {
+        let chunk = chunk.trim();
+        if chunk.is_empty() {
+            continue;
+        }
+        if !joined.is_empty() {
+            joined.push(' ');
+        }
+        joined.push_str(chunk);
+    }
+    joined
+}
+
 struct FinishedUserTurn {
     transcript: String,
+}
+
+/// Transcript received since the previous `session.delegation.created` (or
+/// since open), by role, as whole-turn chunks in arrival order. This is the
+/// executor-input rule: the provider defines no turn boundary and its
+/// backchannels are designed behaviour, so assistant output never ends the
+/// user's request. Turn synthesis stays a display concern.
+#[derive(Default)]
+struct DelegationWindow {
+    user_chunks: Vec<String>,
+    assistant_chunks: Vec<String>,
+}
+
+impl DelegationWindow {
+    fn push(&mut self, role: GptLiveTurnRole, chunk: String) {
+        if chunk.trim().is_empty() {
+            return;
+        }
+        match role {
+            GptLiveTurnRole::User => self.user_chunks.push(chunk),
+            GptLiveTurnRole::Assistant | GptLiveTurnRole::Unknown => {
+                self.assistant_chunks.push(chunk);
+            }
+        }
+    }
 }
 
 struct SessionState {
@@ -1148,6 +1239,10 @@ struct SessionState {
     next_transcript_item: u64,
     open_turn: Option<OpenTurn>,
     last_user_turn: Option<FinishedUserTurn>,
+    /// The previous delegation's executor request, re-presented when a
+    /// delegation arrives without any new user transcript in its window.
+    last_request: Option<String>,
+    window: DelegationWindow,
     seen_delegation_ids: HashSet<String>,
     queued_observations: VecDeque<GptLiveBrokerObservation>,
     reflected_output_audio_frames: u64,
@@ -1165,6 +1260,8 @@ impl Default for SessionState {
             next_transcript_item: 0,
             open_turn: None,
             last_user_turn: None,
+            last_request: None,
+            window: DelegationWindow::default(),
             seen_delegation_ids: HashSet::new(),
             queued_observations: VecDeque::new(),
             reflected_output_audio_frames: 0,
@@ -1506,6 +1603,7 @@ impl SessionState {
             provider_ref: turn.0.clone(),
             role,
             segments: Vec::new(),
+            window_start: 0,
         });
         turn
     }
@@ -1527,6 +1625,7 @@ impl SessionState {
             return;
         };
         let transcript = join_segments(&open.segments);
+        self.window.push(open.role, open.window_transcript());
         if open.role == GptLiveTurnRole::User {
             self.last_user_turn = Some(FinishedUserTurn {
                 transcript: transcript.clone(),
@@ -1555,6 +1654,8 @@ impl SessionState {
         self.seen_delegation_ids.insert(delegation.id.clone());
         let reference = GptLiveDelegationRef(delegation.id);
         if delegation.target != DelegationTarget::Client {
+            // No executor input is produced, so the window stays open: the
+            // user's words are not drained by a delegation nobody acts on.
             self.queued_observations.push_back(
                 GptLiveBrokerObservation::DelegationActionableInputUnsupported {
                     delegation: reference,
@@ -1562,31 +1663,20 @@ impl SessionState {
             );
             return Ok(());
         }
-        // Join the delegation to the open user turn, which it terminates. The
-        // joined request is the whole turn: `offset_ms` is the model's
-        // decision point on the session timeline, not the end of the
-        // utterance (measured against gpt-live-1, the final word starts at
-        // the offset), so speech at and after the offset stays part of the
-        // request. A delegation arriving after the user turn already closed
-        // (the assistant spoke) re-presents the most recent frozen user
-        // transcript under a fresh detached turn so the facade's
-        // start/finish pairing stays exact and any open assistant turn
-        // continues undisturbed.
-        //
-        // The join is defined by arrival: a transcript delta arriving after
-        // it is a separate utterance and opens a new user turn like any
-        // other, so its words always reach the durable transcript (a
-        // following delegation takes that turn as its input). The public
-        // protocol carries no per-utterance completion, item lifecycle, or
-        // speech start/stop event that could say otherwise.
-        let (turn_ref, transcript) = match self.open_turn.take() {
-            Some(open) if open.role == GptLiveTurnRole::User => {
-                let transcript = join_segments(&open.segments);
-                (open.provider_ref, transcript)
-            }
-            other => {
-                self.open_turn = other;
-                let Some(last) = self.last_user_turn.as_ref() else {
+        // The executor-input window is anchored on this protocol event: it
+        // holds every transcript delta received since the previous client
+        // `session.delegation.created` (or since open).
+        let (request_transcript, assistant_context) = self.take_delegation_window();
+        // The executor request is the whole window's user transcript. The
+        // provider's backchannels ("mm-hm", "sure") are designed behaviour
+        // and carry no turn boundary, so an assistant delta between two
+        // parts of one request does not split it; what the assistant said
+        // in the window travels separately as context. A delegation with
+        // no new user transcript re-presents the previous request.
+        let request_transcript = if request_transcript.is_empty() {
+            match self.last_request.as_ref() {
+                Some(previous) => previous.clone(),
+                None => {
                     // No user input exists to become the task.
                     self.queued_observations.push_back(
                         GptLiveBrokerObservation::DelegationActionableInputUnsupported {
@@ -1594,8 +1684,38 @@ impl SessionState {
                         },
                     );
                     return Ok(());
-                };
-                let transcript = last.transcript.clone();
+                }
+            }
+        } else {
+            request_transcript
+        };
+        // Canonical rows are unchanged by the window rule. The delegation
+        // terminates the open user turn, whose transcript is its row.
+        // `offset_ms` is the model's decision point on the session timeline,
+        // not the end of the utterance (measured against gpt-live-1, the
+        // final word starts at the offset), so speech at and after the
+        // offset stays part of the turn. When no user turn is open (the
+        // assistant spoke first) the most recent user transcript is
+        // re-presented under a fresh detached turn so the facade's
+        // start/finish pairing stays exact and any open assistant turn
+        // continues undisturbed.
+        //
+        // The join is defined by arrival: a transcript delta arriving after
+        // it opens a new user turn like any other, so its words always
+        // reach the durable transcript and the next delegation's window.
+        // The public protocol carries no per-utterance completion, item
+        // lifecycle, or speech start/stop event that could say otherwise.
+        let (turn_ref, transcript) = match self.open_turn.take() {
+            Some(open) if open.role == GptLiveTurnRole::User => {
+                let transcript = join_segments(&open.segments);
+                (open.provider_ref, transcript)
+            }
+            other => {
+                self.open_turn = other;
+                let transcript = self.last_user_turn.as_ref().map_or_else(
+                    || request_transcript.clone(),
+                    |last| last.transcript.clone(),
+                );
                 (self.mint_turn(GptLiveTurnRole::User).0, transcript)
             }
         };
@@ -1606,14 +1726,33 @@ impl SessionState {
         self.last_user_turn = Some(FinishedUserTurn {
             transcript: transcript.clone(),
         });
+        self.last_request = Some(request_transcript.clone());
         self.queued_observations
             .push_back(GptLiveBrokerObservation::ClientDelegationFinal {
                 delegation: reference,
                 target: GptLiveDelegationTarget::Client,
                 turn: GptLiveTurnRef(turn_ref),
                 transcript,
+                request_transcript,
+                assistant_context,
             });
         Ok(())
+    }
+
+    /// Close the delegation window at a `session.delegation.created`: return
+    /// its user and assistant transcript and start the next window. The open
+    /// turn keeps its identity; only its later segments belong to the next
+    /// window.
+    fn take_delegation_window(&mut self) -> (String, String) {
+        let mut window = std::mem::take(&mut self.window);
+        if let Some(open) = self.open_turn.as_mut() {
+            window.push(open.role, open.window_transcript());
+            open.window_start = open.segments.len();
+        }
+        (
+            join_window_chunks(window.user_chunks.iter().map(String::as_str)),
+            join_window_chunks(window.assistant_chunks.iter().map(String::as_str)),
+        )
     }
 }
 
@@ -1629,16 +1768,41 @@ fn instructions_event_id(token: GptLiveAppendToken, index: usize) -> String {
     format!("meerkat-instructions-{}-{index}", token.0)
 }
 
-fn thinking_fragments(mut text: &str) -> impl Iterator<Item = &str> + Clone {
-    std::iter::from_fn(move || {
-        if text.is_empty() {
-            return None;
+/// Largest payload of one fragmented append, a conservative byte bound for
+/// the provider's 500-token append limit.
+const CONTEXT_FRAGMENT_MAX_BYTES: usize = 500;
+
+/// Split `text` into ordered fragments of at most [`CONTEXT_FRAGMENT_MAX_BYTES`]
+/// whose concatenation is exactly `text`. A fragment ends at the end of the
+/// last whitespace run inside its window, so no word (or number, or quoted
+/// phrase) is cut in two and the next fragment starts on a non-blank
+/// character; fragments are therefore often shorter than the bound. A single
+/// token longer than the bound has no whitespace to cut at and falls back to
+/// a byte split on a UTF-8 character boundary, which the provider still
+/// accepts (the bound is what matters on the wire, the seam only matters for
+/// recall). The result is bounded by the caller's pending-append limit.
+fn context_fragments(mut text: &str) -> Vec<&str> {
+    let mut fragments = Vec::new();
+    while !text.is_empty() {
+        if text.len() <= CONTEXT_FRAGMENT_MAX_BYTES {
+            fragments.push(text);
+            break;
         }
-        let end = text.floor_char_boundary(text.len().min(500));
-        let (fragment, remaining) = text.split_at(end);
+        let window = text.floor_char_boundary(CONTEXT_FRAGMENT_MAX_BYTES);
+        // End of the last whitespace run that finishes inside the window:
+        // the cut lands after the blank, before the next non-blank char.
+        let cut = text[..window]
+            .char_indices()
+            .rev()
+            .filter(|(_, ch)| ch.is_whitespace())
+            .map(|(index, ch)| index + ch.len_utf8())
+            .find(|end| text[*end..].starts_with(|ch: char| !ch.is_whitespace()))
+            .unwrap_or(window);
+        let (fragment, remaining) = text.split_at(cut);
+        fragments.push(fragment);
         text = remaining;
-        Some(fragment)
-    })
+    }
+    fragments
 }
 
 fn map_live_error(error: LiveError) -> GptLiveBrokerError {
@@ -1973,7 +2137,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_summary_is_instructions_context_not_a_user_item_or_a_canonical_replay() {
+    fn startup_summary_is_a_developer_input_item_not_a_user_item_or_instructions() {
         let config = PublicLiveOpenConfig::new("v=0", "marin")
             .unwrap()
             .with_instructions("Speak briefly.")
@@ -1983,18 +2147,28 @@ mod tests {
             OpenAiBackendKind::OpenAiApi,
         ))
         .unwrap();
-        let encoded = serde_json::to_value(factory.session_config(&config)).unwrap();
-        // The summary rides the instructions lane after the caller's own
-        // instructions. It is never a user-role input item: a user item at
-        // session start made the provider open the call with a greeting.
-        assert!(
-            encoded.get("input").is_none(),
-            "no startup input items: {encoded}"
-        );
-        let instructions = encoded["instructions"].as_str().unwrap();
-        assert!(instructions.starts_with("Speak briefly.\n\n"));
-        assert!(instructions.contains("context data, not a new user request"));
-        assert!(instructions.ends_with("The agent is comparing two tables."));
+        let session = factory.session_config(&config);
+        session
+            .validate()
+            .expect("pinned SDK accepts a developer-role startup input item");
+        let encoded = serde_json::to_value(session).unwrap();
+        // The summary is history and rides the documented history carrier,
+        // the startup `input`, as one developer-role item. It is never a
+        // user-role item (a user item at session start made the provider
+        // open the call with a greeting) and it never touches the
+        // instructions, which stay the caller's own.
+        assert_eq!(encoded["instructions"], "Speak briefly.");
+        let input = encoded["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1, "one developer item: {encoded}");
+        assert_eq!(input[0]["role"], "developer");
+        assert_eq!(input[0]["type"], "message");
+        let content = input[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "input_text");
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.starts_with(PublicLiveContextSeed::SUMMARY_ITEM_PREFIX));
+        assert!(text.contains("context data, not a new user request"));
+        assert!(text.ends_with("\nThe agent is comparing two tables."));
         assert!(!format!("{config:?}").contains("two tables"));
     }
 
@@ -2036,9 +2210,12 @@ mod tests {
             PublicLiveContextSeed::FactualSummary(_)
         ));
         let summary = serde_json::to_value(factory.session_config(&summarized)).unwrap();
-        assert!(summary.get("input").is_none());
-        let text = summary["instructions"].as_str().unwrap();
-        assert!(text.starts_with("Catalog behavior.\n\nFactual summary"));
+        assert_eq!(
+            summary["instructions"], "Catalog behavior.",
+            "a ready summary leaves the instructions alone"
+        );
+        let text = summary["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("Factual summary"));
         assert!(!text.contains("not yet available"));
         assert!(text.ends_with("Prepared facts."));
     }
@@ -2171,8 +2348,9 @@ mod tests {
         assert_eq!(joined.len(), 1, "the join is the sole terminal observation");
         assert!(matches!(
             &joined[0],
-            GptLiveBrokerObservation::ClientDelegationFinal { delegation, target: GptLiveDelegationTarget::Client, turn, transcript }
+            GptLiveBrokerObservation::ClientDelegationFinal { delegation, target: GptLiveDelegationTarget::Client, turn, transcript, request_transcript, assistant_context }
                 if delegation.__opaque_provider_id() == "dlg_1" && turn == user_turn && transcript == "book a table"
+                    && request_transcript == "book a table" && assistant_context.is_empty()
         ));
         // The assistant reply starts a new turn without a second user finish.
         state.apply_frame(frame(output_delta("sure"))).unwrap();
@@ -2388,7 +2566,7 @@ mod tests {
             "🦀日本語 é\n".repeat(150),
             format!("{}🦀tail", "x".repeat(499)),
         ] {
-            let fragments = thinking_fragments(&text).collect::<Vec<_>>();
+            let fragments = context_fragments(&text);
             assert_eq!(fragments.concat(), text);
             assert!(fragments.len() > 1);
             for (index, &fragment) in fragments.iter().enumerate() {
@@ -2417,9 +2595,9 @@ mod tests {
                 assert!(!format!("{event:?}").contains(fragment));
             }
         }
-        assert_eq!(thinking_fragments("").count(), 0);
-        assert_eq!(thinking_fragments(&"x".repeat(500)).count(), 1);
-        assert_eq!(thinking_fragments(&"x".repeat(501)).count(), 2);
+        assert_eq!(context_fragments("").len(), 0);
+        assert_eq!(context_fragments(&"x".repeat(500)).len(), 1);
+        assert_eq!(context_fragments(&"x".repeat(501)).len(), 2);
     }
 
     #[test]
@@ -2745,6 +2923,401 @@ mod tests {
             state.open_turn.is_none(),
             "no second user turn for the final word"
         );
+    }
+
+    #[test]
+    fn assistant_interjection_mid_request_does_not_split_the_executor_request() {
+        // S100 shape: the model backchannels while the user is still asking.
+        // Turn synthesis still alternates (display), but the executor
+        // request is every user delta since open; the backchannel travels
+        // as labelled context.
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(input_delta_at(
+                "please write the standup notes",
+                1000.0,
+            )))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta_span("mm-hm", 1800.0, 2000.0)))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta_at(" with two headings", 2100.0)))
+            .unwrap();
+        let before = drain(&mut state);
+        let second_user_turn = before
+            .iter()
+            .filter_map(|o| match o {
+                GptLiveBrokerObservation::TurnStarted {
+                    turn,
+                    role: GptLiveTurnRole::User,
+                } => Some(turn.clone()),
+                _ => None,
+            })
+            .nth(1)
+            .expect("the backchannel opened a second user turn");
+        state
+            .apply_frame(frame(delegation_created_at("dlg_split", "client", 2600.0)))
+            .unwrap();
+        let joined = drain(&mut state);
+        let [
+            GptLiveBrokerObservation::ClientDelegationFinal {
+                turn,
+                transcript,
+                request_transcript,
+                assistant_context,
+                ..
+            },
+        ] = joined.as_slice()
+        else {
+            panic!("one join: {joined:?}");
+        };
+        assert_eq!(
+            turn, &second_user_turn,
+            "the canonical row is the open turn"
+        );
+        assert_eq!(
+            transcript, " with two headings",
+            "canonical rows keep their segmentation"
+        );
+        assert_eq!(
+            request_transcript, "please write the standup notes with two headings",
+            "the executor request spans the interjection"
+        );
+        assert_eq!(assistant_context, "mm-hm");
+    }
+
+    #[test]
+    fn non_client_delegation_leaves_the_window_open() {
+        // A delegation nobody acts on produces no executor input, so it must
+        // not drain the user's words: the next client delegation still sees
+        // everything since open.
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(input_delta("first half ")))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_r", "responses")))
+            .unwrap();
+        assert!(matches!(
+            drain(&mut state).last(),
+            Some(GptLiveBrokerObservation::DelegationActionableInputUnsupported { .. })
+        ));
+        state
+            .apply_frame(frame(input_delta("second half")))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_c", "client")))
+            .unwrap();
+        let joined: Vec<_> = drain(&mut state)
+            .into_iter()
+            .filter(|o| matches!(o, GptLiveBrokerObservation::ClientDelegationFinal { .. }))
+            .collect();
+        assert!(matches!(
+            joined.as_slice(),
+            [GptLiveBrokerObservation::ClientDelegationFinal { request_transcript, .. }]
+                if request_transcript == "first half second half"
+        ));
+    }
+
+    #[test]
+    fn two_requests_without_assistant_speech_are_separate_windows() {
+        let mut state = SessionState::default();
+        state.apply_frame(frame(input_delta("first task"))).unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_a", "client")))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(input_delta(" second task")))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_b", "client")))
+            .unwrap();
+        let joined: Vec<_> = drain(&mut state)
+            .into_iter()
+            .filter(|o| matches!(o, GptLiveBrokerObservation::ClientDelegationFinal { .. }))
+            .collect();
+        assert!(matches!(
+            joined.as_slice(),
+            [GptLiveBrokerObservation::ClientDelegationFinal { transcript, request_transcript, assistant_context, .. }]
+                if transcript == " second task"
+                    && request_transcript == "second task"
+                    && assistant_context.is_empty()
+        ));
+    }
+
+    #[test]
+    fn native_answer_between_two_requests_is_context_not_request() {
+        // S103 shape: request, executor delegation, the user asks something
+        // the model answers natively, then a new request. The second window
+        // holds both user utterances since the first delegation as the
+        // request; the native answer is context, never part of the request.
+        let mut state = SessionState::default();
+        state
+            .apply_frame(frame(input_delta("write the report")))
+            .unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_1", "client")))
+            .unwrap();
+        state.apply_frame(frame(output_delta("on it"))).unwrap();
+        state
+            .apply_frame(frame(input_delta("what day is it")))
+            .unwrap();
+        state
+            .apply_frame(frame(output_delta("it is Tuesday")))
+            .unwrap();
+        state
+            .apply_frame(frame(input_delta("also add a summary")))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created("dlg_2", "client")))
+            .unwrap();
+        let joined = drain(&mut state);
+        let [
+            GptLiveBrokerObservation::ClientDelegationFinal {
+                transcript,
+                request_transcript,
+                assistant_context,
+                ..
+            },
+        ] = joined.as_slice()
+        else {
+            panic!("one join: {joined:?}");
+        };
+        assert_eq!(transcript, "also add a summary");
+        assert_eq!(request_transcript, "what day is it also add a summary");
+        assert_eq!(
+            assistant_context, "on it it is Tuesday",
+            "assistant speech in the window is context, including the reply to the first request"
+        );
+        // The window closed: later assistant speech belongs to the next one.
+        state.apply_frame(frame(output_delta("sure"))).unwrap();
+        state
+            .apply_frame(frame(input_delta("and email it")))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created("dlg_3", "client")))
+            .unwrap();
+        assert!(matches!(
+            drain(&mut state).as_slice(),
+            [GptLiveBrokerObservation::ClientDelegationFinal { request_transcript, assistant_context, .. }]
+                if request_transcript == "and email it" && assistant_context == "sure"
+        ));
+    }
+
+    #[test]
+    fn assistant_turn_open_across_a_delegation_splits_its_context_by_window() {
+        // The assistant is mid-sentence when the delegation arrives; only
+        // the part spoken after it belongs to the next window, while the
+        // synthesized assistant turn keeps one identity.
+        let mut state = SessionState::default();
+        state.apply_frame(frame(input_delta("book it"))).unwrap();
+        state.apply_frame(frame(output_delta("let me "))).unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created("dlg_open", "client")))
+            .unwrap();
+        let first = drain(&mut state);
+        assert!(matches!(
+            first.as_slice(),
+            [
+                GptLiveBrokerObservation::TurnStarted { role: GptLiveTurnRole::User, .. },
+                GptLiveBrokerObservation::ClientDelegationFinal { transcript, request_transcript, assistant_context, .. },
+            ] if transcript == "book it" && request_transcript == "book it" && assistant_context == "let me"
+        ));
+        let assistant_turn = state.open_turn.as_ref().unwrap().provider_ref.clone();
+        state.apply_frame(frame(output_delta("book that"))).unwrap();
+        state.apply_frame(frame(input_delta("and a taxi"))).unwrap();
+        drain(&mut state);
+        assert_eq!(
+            state.open_turn.as_ref().unwrap().role,
+            GptLiveTurnRole::User
+        );
+        state
+            .apply_frame(frame(delegation_created("dlg_next", "client")))
+            .unwrap();
+        assert!(matches!(
+            drain(&mut state).as_slice(),
+            [GptLiveBrokerObservation::ClientDelegationFinal { request_transcript, assistant_context, .. }]
+                if request_transcript == "and a taxi" && assistant_context == "book that"
+        ));
+        let _ = assistant_turn;
+    }
+
+    #[test]
+    fn delegation_without_new_user_transcript_re_presents_the_previous_request() {
+        let mut state = SessionState::default();
+        state.apply_frame(frame(input_delta("first "))).unwrap();
+        state.apply_frame(frame(output_delta("uh-huh"))).unwrap();
+        state.apply_frame(frame(input_delta("half"))).unwrap();
+        state
+            .apply_frame(frame(delegation_created("dlg_1", "client")))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(output_delta("working on it")))
+            .unwrap();
+        drain(&mut state);
+        state
+            .apply_frame(frame(delegation_created("dlg_2", "client")))
+            .unwrap();
+        let again = drain(&mut state);
+        assert!(matches!(
+            again.as_slice(),
+            [
+                GptLiveBrokerObservation::TurnStarted { role: GptLiveTurnRole::User, .. },
+                GptLiveBrokerObservation::ClientDelegationFinal { transcript, request_transcript, assistant_context, .. },
+            ] if transcript == "half"
+                && request_transcript == "first half"
+                && assistant_context == "working on it"
+        ));
+    }
+
+    #[test]
+    fn context_fragments_cut_at_whitespace_and_rejoin_exactly() {
+        let text = "alpha ".repeat(120) + "omega";
+        let fragments = context_fragments(&text);
+        assert!(fragments.len() >= 2);
+        assert_eq!(fragments.concat(), text, "byte-exact join");
+        for fragment in &fragments {
+            assert!(fragment.len() <= CONTEXT_FRAGMENT_MAX_BYTES);
+        }
+        for fragment in &fragments[..fragments.len() - 1] {
+            assert!(
+                fragment.ends_with(' '),
+                "a fragment ends at the end of a whitespace run"
+            );
+        }
+        for fragment in &fragments[1..] {
+            assert!(
+                fragment.starts_with(|ch: char| !ch.is_whitespace()),
+                "the next fragment starts on a word"
+            );
+        }
+        // Short text is one fragment, untouched.
+        assert_eq!(context_fragments("short text"), vec!["short text"]);
+    }
+
+    #[test]
+    fn context_fragments_fall_back_to_a_byte_split_for_one_long_token() {
+        // No whitespace anywhere: the only legal cut is a UTF-8 boundary at
+        // the bound. Multi-byte characters never straddle a fragment.
+        let text = "ü".repeat(600);
+        let fragments = context_fragments(&text);
+        assert_eq!(fragments.concat(), text);
+        assert!(
+            fragments
+                .iter()
+                .all(|f| f.len() <= CONTEXT_FRAGMENT_MAX_BYTES)
+        );
+        assert_eq!(fragments.len(), 3);
+        assert_eq!(fragments[0].len(), 500);
+        // A long token after some words: the words go first, the token is
+        // byte-split on its own.
+        let mixed = format!("lead words {}", "x".repeat(900));
+        let fragments = context_fragments(&mixed);
+        assert_eq!(fragments.concat(), mixed);
+        assert_eq!(fragments[0], "lead words ");
+        assert_eq!(fragments[1].len(), 500);
+    }
+
+    #[tokio::test]
+    async fn instructions_sections_never_share_a_fragment() {
+        // A framing preface followed by a summary: the preface is its own
+        // fragment even though both would fit one window together, the
+        // summary starts intact at the next fragment boundary, and the
+        // wire bytes concatenate to exactly preface + summary.
+        let capture = Arc::new(std::sync::Mutex::new(Capture::default()));
+        let attach_instructions =
+            move |State(capture): State<SharedCapture>, upgrade: WebSocketUpgrade| async move {
+                upgrade.on_upgrade(move |mut socket| async move {
+                    let mut commands = Vec::new();
+                    for _ in 0..3 {
+                        let event = recv_json(&mut socket, &capture).await;
+                        assert_eq!(event["type"], "session.instructions.append");
+                        commands.push(event);
+                    }
+                    for command in &commands {
+                        let mut ack = ack(command["event_id"].as_str());
+                        ack["type"] = json!("session.instructions.appended");
+                        send_json(&mut socket, ack).await;
+                    }
+                    let mute = recv_json(&mut socket, &capture).await;
+                    assert_eq!(mute["type"], "session.input_audio.mute");
+                    let close = recv_json(&mut socket, &capture).await;
+                    assert_eq!(close["type"], "session.close");
+                    send_json(&mut socket, session_closed()).await;
+                })
+            };
+        let app = Router::new()
+            .route("/v1/live/sessions", post(create_session))
+            .route(
+                "/v1/live/sessions/{session_id}/attach",
+                get(attach_instructions),
+            )
+            .with_state(Arc::clone(&capture));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let factory = PublicLiveBrokerFactory::__try_from_target_with_base_url(
+            realtime_target("gpt-live-1", OpenAiBackendKind::OpenAiApi),
+            &format!("http://{address}/v1/"),
+        )
+        .unwrap();
+        let (_, session) = factory
+            .open(PublicLiveOpenConfig::new("v=0", "marin").unwrap())
+            .await
+            .unwrap()
+            .into_parts();
+        let framing = "Frame this. ".to_string();
+        let summary = "Historical vault phrase: copper otter. ".repeat(20);
+        let token = session
+            .append_instructions_context_sections(vec![framing.clone(), summary.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            session.state.lock().await.outstanding_receipt_count(),
+            3,
+            "one receipt reserved per fragment"
+        );
+        loop {
+            match session.next_observation().await.unwrap() {
+                Some(GptLiveBrokerObservation::InstructionsContextAppendAcknowledged {
+                    token: acknowledged,
+                }) => {
+                    assert_eq!(acknowledged, token);
+                    break;
+                }
+                Some(_) => {}
+                None => panic!("stream ended before the acknowledgement"),
+            }
+        }
+        let sent: Vec<String> = capture
+            .lock()
+            .unwrap()
+            .client_events
+            .iter()
+            .filter(|event| event["type"] == "session.instructions.append")
+            .map(|event| event["content"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[0], framing, "the framing is fragment 0 alone");
+        assert!(sent[1].starts_with("Historical vault phrase"));
+        assert!(sent[1].ends_with(' '), "the summary is cut at whitespace");
+        assert!(
+            sent[2].starts_with(|ch: char| !ch.is_whitespace()),
+            "the next fragment starts on a word"
+        );
+        assert!(sent.iter().all(|f| f.len() <= CONTEXT_FRAGMENT_MAX_BYTES));
+        assert_eq!(sent.concat(), format!("{framing}{summary}"), "bytes exact");
+        session.close().await.unwrap();
+        while session.next_observation().await.unwrap().is_some() {}
+        server.abort();
     }
 
     #[test]

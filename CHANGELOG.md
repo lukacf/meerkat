@@ -120,6 +120,42 @@ them.
 
 ### Changed
 
+- GPT Live (gpt-live-1) history carrier. A context summary that is ready
+  when the provider session is created (`LiveContextBootstrapMode::BeforeOpen`,
+  and every reopen whose summary is ready before the provider session is
+  created) now rides the documented startup history carrier: one
+  `developer`-role item in `session.input` (`PublicLiveOpenConfig::with_context_summary`),
+  instead of being appended to `session.instructions`; `LIVE_CONTEXT_BOOTSTRAP_FRAMING`
+  is then sent once inside the startup `session.instructions`. A summary
+  prepared concurrently (`LiveContextBootstrapMode::Concurrent`) keeps the
+  instructions-lane append with its framing, unchanged. Measured against
+  gpt-live-1 on 2026-09-23 (public e2e S104 silence hold, S99 recall): the
+  quiet `session.thinking.append` lane recalls the summary (2/2) but the
+  model spoke unprompted 3/3, reciting it about one second after the append;
+  the framed instructions append spoke unprompted 2/9 historically and 0/1 in
+  the same session; the startup `input` item is not a speech trigger and was
+  not exercised by the concurrent scenarios. The thinking lane is therefore
+  not used for history; spawning the summary job before the provider open so
+  a concurrent summary could also ride `input` was considered and not done.
+  (behaviour change, not measured by the semver gate)
+- GPT Live (gpt-live-1) executor input rule, full duplex. The public broker
+  no longer treats an assistant transcript delta as the end of the user's
+  request. The delegated executor input is every user transcript delta
+  received since the previous `session.delegation.created` on the channel (or
+  since open for the first one), regardless of assistant output in between;
+  the assistant transcript received in that same window is passed to the
+  executor as a separately labelled "assistant already said" section
+  (`meerkat-mob-mcp` `delegation_request_text`), never merged into the
+  request. No timing thresholds and no content inspection: the rule is
+  anchored on the protocol event and channel state. Canonical transcript rows
+  keep their segmentation (turn synthesis by role alternation is a display
+  concern), and the canonical row still confirms the digest chain; only the
+  worker task text changes. A backchannel ("mm-hm") mid-request no longer
+  splits the request across two delegations, and a request answered natively
+  between two delegations is visible to the executor as context. A delegation
+  that arrives with no new user transcript in its window re-presents the
+  previous request, as before. (behaviour change, not measured by the semver
+  gate)
 - Concurrent (open-media-first) GPT Live context bootstrap no longer reads the
   committed transcript body on the open path. The strict open admits the
   summary against the body-free committed boundary and hands back the pending
@@ -344,6 +380,12 @@ them.
   `PersistentSessionService::repair_whole_blob_audited_endpoint` and
   `meerkat_runtime::store::whole_blob_repair::repair_whole_blob_audited_endpoint`
   take an `accept_shorter: bool` parameter.
+- `meerkat_openai::gpt_live_broker::GptLiveBrokerObservation::ClientDelegationFinal`
+  gains the fields `request_transcript: String` and `assistant_context: String`
+  (exhaustive struct patterns must name them or use `..`).
+- `meerkat_live::LiveSidebandObservationKind::DelegationRequested` gains the
+  fields `request_transcript: String` and `assistant_context: String`
+  (exhaustive struct patterns must name them or use `..`).
 
 - `PublicGptLiveOpenAuthorityConfig` gains the public field
   `session_instructions_preface: Option<Arc<dyn PublicGptLiveInstructionsPreface>>`

@@ -5020,13 +5020,18 @@ const S104_SEED_TOKEN: &str = "Bartleby";
 /// Silence hold after each (re)open with summary: no greeting allowed.
 const S104_SILENCE_HOLD_MS: u64 = 4000;
 
-/// Delegation policy for S104: ExistingMember by default (the committed
-/// scenario); `GPT_LIVE_E2E_S104_POLICY=durable_fork` runs the production
-/// DurableFork policy as a variant (shared host composed for it).
+/// Delegation policy for S104: the production DurableFork policy by
+/// default (the job runs on an owned fork, so the source member stays free
+/// for the typed turn during the closure); `GPT_LIVE_E2E_S104_POLICY=
+/// existing_member` runs the same scenario on the ExistingMember path
+/// (the executor turn occupies the source member, and the typed turn waits
+/// behind it).
 fn s104_policy() -> LiveDelegationExecutionPolicy {
     match std::env::var("GPT_LIVE_E2E_S104_POLICY").as_deref() {
-        Ok("durable_fork") | Ok("DurableFork") => LiveDelegationExecutionPolicy::DurableFork,
-        _ => LiveDelegationExecutionPolicy::ExistingMember,
+        Ok("existing_member") | Ok("ExistingMember") => {
+            LiveDelegationExecutionPolicy::ExistingMember
+        }
+        _ => LiveDelegationExecutionPolicy::DurableFork,
     }
 }
 
@@ -5062,14 +5067,21 @@ async fn wait_for_summary_appends(
 /// new summary (again no greeting during a 4 s hold) and the user asks what
 /// happened.
 ///
+/// Runs under the production DurableFork policy by default; set
+/// `GPT_LIVE_E2E_S104_POLICY=existing_member` for the ExistingMember path
+/// (see `s104_policy`). The typed turn's latency while the voice job runs is
+/// recorded and printed, not bounded (7.8 s under DurableFork, 20.9-25.4 s
+/// under ExistingMember in the acceptance runs): the design has no bound for
+/// it and none is invented here.
+///
 /// Deterministic: the close converges within the 20 s bound (recorded, one
 /// attempt); the job reaches realized terminality during the closure and its
-/// executor input plus answer are committed; the typed turn commits its user
-/// and assistant rows; the reopen connects within 30 s and the first spoken
-/// question is answered natively (no delegation); the second channel closes
-/// gracefully. Tolerant: the post-reopen answer window carries the job's
-/// planted result token and the typed fact; open -> connected < 5 s per
-/// channel.
+/// answer is committed to the source (under ExistingMember also its executor
+/// input row); the typed turn commits its user and assistant rows; the reopen
+/// connects within 30 s and the first spoken question is answered natively
+/// (no delegation); the second channel closes gracefully. Tolerant: the
+/// post-reopen answer window carries the job's planted result token and the
+/// typed fact; open -> connected < 5 s per channel.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_104_gpt_live_public_handoff_voice_typed_voice()

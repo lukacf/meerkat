@@ -46,6 +46,14 @@ them.
 
 ### Changed
 
+- Repository layout: every workspace crate now lives under `crates/<name>`
+  (for example `crates/meerkat-core`, `crates/meerkat-cli`, `crates/xtask`),
+  test crates and fixtures under `tests/` (`tests/integration`,
+  `tests/fixtures/*`, replacing `test-fixtures/`), internal documentation
+  under `docs/internal`, and Bazel and SDK-builder inputs under `tools/`.
+  Published crate names and versions are unchanged. Path dependencies,
+  `[patch]` sections and scripts that referenced `<checkout>/meerkat-<crate>`
+  must point at `<checkout>/crates/meerkat-<crate>`.
 - The default Anthropic model is `claude-opus-5-5` (was `claude-opus-5`). The
   global catalog default stays `gpt-6-astra`.
 

@@ -287,7 +287,7 @@ jobs:
     name: Native submitter
     needs: [control-plane-up, executors-up, prebuild-submit]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
       BUILDBUDDY_HTTP_URL: ${{ needs.control-plane-up.outputs.http_url }}

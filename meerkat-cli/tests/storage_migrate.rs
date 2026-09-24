@@ -1535,10 +1535,30 @@ fn ledger_baseline_read_failures_and_future_versions_are_refusals_not_missing_ro
     assert_eq!(future_rows[0]["before"], 9_223_372_036_854_775_807_i64);
 }
 
+/// The archive fault is injected by removing write permission from the third
+/// root, which the kernel does not enforce for the superuser. Bazel remote
+/// executors run tests as root, so the scenario cannot be exercised there and
+/// the test says so instead of asserting an outcome the injection could not
+/// produce; the non-root PR and nightly lanes keep the full assertion.
+#[cfg(unix)]
+fn permission_fault_injection_is_effective() -> bool {
+    let uid = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .expect("run `id -u`");
+    String::from_utf8_lossy(&uid.stdout).trim() != "0"
+}
+
 #[cfg(unix)]
 #[test]
 fn partial_archive_failure_reports_archive_failed_with_completed_archives_visible() {
     use std::os::unix::fs::PermissionsExt as _;
+    if !permission_fault_injection_is_effective() {
+        eprintln!(
+            "skipping: running as root, so removing write permission from root-c cannot make its archive rename fail"
+        );
+        return;
+    }
     let temp = TempDir::new().unwrap();
     let root_a = temp.path().join("root-a");
     let root_b = temp.path().join("root-b");

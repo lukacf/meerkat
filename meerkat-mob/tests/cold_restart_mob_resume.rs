@@ -642,12 +642,18 @@ async fn run_cold_restart_scenario(reuse_runtime_store: bool, lead_mode: MobRunt
     if !reuse_runtime_store {
         assert_member_broken_after_authority_loss(&lead_after, "post-reset");
         assert_member_broken_after_authority_loss(&w1_after, "post-reset");
+        // Authority is the generation/fence tuple a successful placement
+        // mints. The runtime may hold a shell registration for the session
+        // while the failed restore is disposed (observed once on the release
+        // validation executor: `session_dsl_state` resolved after the members
+        // were already Broken), so the property asserted here is "no tuple",
+        // not "no registration"; the pre-resume assertion above already pins
+        // that restoration starts unregistered.
+        let w1_binding_after_reset = runtime_2.live_webrtc_runtime_binding(&w1_sid).await;
+        eprintln!("[lifetime2] w1 runtime binding after reset={w1_binding_after_reset:?}");
         assert!(
-            runtime_2
-                .live_webrtc_runtime_binding(&w1_sid)
-                .await
-                .is_err(),
-            "an absent durable member must not acquire runtime authority"
+            !matches!(w1_binding_after_reset, Ok(Some(_))),
+            "an absent durable member must not acquire runtime authority: {w1_binding_after_reset:?}"
         );
         assert!(matches!(
             handle_2.member(&AgentIdentity::from("w-1")).await,

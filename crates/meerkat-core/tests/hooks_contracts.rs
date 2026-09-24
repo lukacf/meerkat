@@ -325,7 +325,7 @@ fn run_override_schema_roundtrip_contract() -> Result<(), Box<dyn std::error::Er
 #[test]
 fn run_override_fixture_contract() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../tests/fixtures/hooks/run_override.json");
+        .join("../../tests/fixtures/hooks/run_override.json");
     let payload = std::fs::read_to_string(fixture)?;
     let overrides: HookRunOverrides = serde_json::from_str(&payload)?;
 

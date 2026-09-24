@@ -6208,7 +6208,7 @@ mod tests {
         assert!(
             refusal.contains(
                 "Bazel e2e artifact for meerkat-mob:smoke_mob_idle_burn \
-                 (bazel-out/darwin_arm64-fastbuild/bin/meerkat-mob/smoke_mob_idle_burn_test) \
+                 (bazel-out/darwin_arm64-fastbuild/bin/crates/meerkat-mob/smoke_mob_idle_burn_test) \
                  is not an output of foundation invocation abc"
             ),
             "{refusal}"

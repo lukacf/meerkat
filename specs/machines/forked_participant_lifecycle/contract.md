@@ -1242,7 +1242,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `forked_participant_lifecycle` (machine `ForkedParticipantLifecycleMachine`): `meerkat-mob/src/machines/forked_participant_lifecycle.rs` — ForkedParticipantLifecycleMachine owns one source-owned capability record: reservation identity, durable fork activation identity, bounded single-holder attachment admission, revocation, expiry, and cleanup debt
+- `forked_participant_lifecycle` (machine `ForkedParticipantLifecycleMachine`): `crates/meerkat-mob/src/machines/forked_participant_lifecycle.rs` — ForkedParticipantLifecycleMachine owns one source-owned capability record: reservation identity, durable fork activation identity, bounded single-holder attachment admission, revocation, expiry, and cleanup debt
 
 ### Scenarios
 - `forked_participant_reservation_and_activation_identity` — A reservation binds one request fingerprint and a positive reuse budget, exact reserve replay converges, a conflicting fingerprint is a typed reject, and a create-failure keeps the SAME request retryable without letting a different request steal the identity

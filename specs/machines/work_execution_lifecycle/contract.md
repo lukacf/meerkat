@@ -337,7 +337,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `work_execution_lifecycle` (machine `WorkExecutionLifecycleMachine`): `meerkat-workgraph/src/execution_machine.rs` — WorkExecutionMachine owns the durable bind, launch uncertainty, Flow observation, evidence projection, and WorkGraph closure handoff lifecycle
+- `work_execution_lifecycle` (machine `WorkExecutionLifecycleMachine`): `crates/meerkat-workgraph/src/execution_machine.rs` — WorkExecutionMachine owns the durable bind, launch uncertainty, Flow observation, evidence projection, and WorkGraph closure handoff lifecycle
 
 ### Scenarios
 - `work_execution_recovery_and_completion` — A binding commits before launch, ambiguous launch remains fail-closed, Flow success requests idempotent evidence, and closure feedback records either WorkClosed or EvidenceProjected

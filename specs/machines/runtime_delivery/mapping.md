@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RuntimeDeliveryMachine`
 
 ### Code Anchors
-- `runtime_delivery_authority` (machine `RuntimeDeliveryMachine`): `meerkat-runtime/src/delivery_inbox.rs` — generated runtime delivery identity, sequence, and ordered application authority with mechanical store CAS
+- `runtime_delivery_authority` (machine `RuntimeDeliveryMachine`): `crates/meerkat-runtime/src/delivery_inbox.rs` — generated runtime delivery identity, sequence, and ordered application authority with mechanical store CAS
 
 ### Scenarios
 - `runtime_delivery_idempotent_commit` — a stable delivery identity receives one generated sequence and exact replay reuses it

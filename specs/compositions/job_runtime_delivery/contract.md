@@ -36,10 +36,10 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `job_outbox_projector` (route `job_terminal_enters_runtime_inbox`): `meerkat/src/job_delivery.rs` — mechanical job outbox projector submits stable delivery identity into runtime-owned durable authority before acknowledging the job
-- `job_notification_outbox_projector` (route `job_notification_enters_runtime_inbox`): `meerkat/src/job_delivery.rs` — mechanical notification outbox projection uses a job-scoped stable runtime delivery identity
-- `runtime_delivery_inbox` (route `runtime_delivery_commit_acknowledges_job_outbox`): `meerkat-runtime/src/delivery_inbox.rs` — generated runtime delivery commit and exact reuse provide the only acknowledgements accepted by the job projector
-- `job_runtime_delivery_schema` (route `runtime_delivery_reuse_acknowledges_job_outbox`): `meerkat-machine-schema/src/catalog/compositions.rs` — formal enqueued two-store job and runtime delivery composition
+- `job_outbox_projector` (route `job_terminal_enters_runtime_inbox`): `crates/meerkat/src/job_delivery.rs` — mechanical job outbox projector submits stable delivery identity into runtime-owned durable authority before acknowledging the job
+- `job_notification_outbox_projector` (route `job_notification_enters_runtime_inbox`): `crates/meerkat/src/job_delivery.rs` — mechanical notification outbox projection uses a job-scoped stable runtime delivery identity
+- `runtime_delivery_inbox` (route `runtime_delivery_commit_acknowledges_job_outbox`): `crates/meerkat-runtime/src/delivery_inbox.rs` — generated runtime delivery commit and exact reuse provide the only acknowledgements accepted by the job projector
+- `job_runtime_delivery_schema` (route `runtime_delivery_reuse_acknowledges_job_outbox`): `crates/meerkat-machine-schema/src/catalog/compositions.rs` — formal enqueued two-store job and runtime delivery composition
 
 ### Scenarios
 - `runtime-delivery-first-commit` — terminal job outbox commit enters runtime delivery authority and is acknowledged only after the durable runtime insert

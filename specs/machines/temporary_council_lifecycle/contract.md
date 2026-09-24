@@ -1130,7 +1130,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `temporary_council_lifecycle` (machine `TemporaryCouncilLifecycleMachine`): `meerkat-mob/src/machines/temporary_council_lifecycle.rs` — TemporaryCouncilLifecycleMachine owns one temporary-council record: request-identity binding, discussion/merge advance, immutable result sealing (executed or coordinator-interrupted), cleanup settlement versus retained debt, and the recovery-sweep verdict
+- `temporary_council_lifecycle` (machine `TemporaryCouncilLifecycleMachine`): `crates/meerkat-mob/src/machines/temporary_council_lifecycle.rs` — TemporaryCouncilLifecycleMachine owns one temporary-council record: request-identity binding, discussion/merge advance, immutable result sealing (executed or coordinator-interrupted), cleanup settlement versus retained debt, and the recovery-sweep verdict
 
 ### Scenarios
 - `temporary_council_request_identity_binding` — One council id binds exactly one canonical request fingerprint: the exact request replays, a materially different request is a typed conflict that never rebinds the identity, and an empty fingerprint is refused outright

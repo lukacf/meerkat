@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `WorkAttentionLifecycleMachine`
 
 ### Code Anchors
-- `work_attention_lifecycle` (machine `WorkAttentionLifecycleMachine`): `meerkat-workgraph/src/machine.rs` — WorkAttentionMachine domain-facing lifecycle transition seam over Pause, Resume, Stop, and Supersede; effects AttentionPaused, AttentionResumed, AttentionStopped, AttentionSuperseded; invariants live_has_no_terminal_time, paused_has_pause_state, superseded_records_successor; Paused may have no deadline; revision, timed pause eligibility, stopped state, and supersession target ownership
+- `work_attention_lifecycle` (machine `WorkAttentionLifecycleMachine`): `crates/meerkat-workgraph/src/machine.rs` — WorkAttentionMachine domain-facing lifecycle transition seam over Pause, Resume, Stop, and Supersede; effects AttentionPaused, AttentionResumed, AttentionStopped, AttentionSuperseded; invariants live_has_no_terminal_time, paused_has_pause_state, superseded_records_successor; Paused may have no deadline; revision, timed pause eligibility, stopped state, and supersession target ownership
 
 ### Scenarios
 - `work_attention_pause_resume_stop` — PauseActive, PausePaused, ResumePaused, SupersedeActive, SupersedePaused, StopActive, StopPaused, AttentionPaused, AttentionResumed, AttentionSuperseded, AttentionStopped, live_has_no_terminal_time, paused_has_pause_state, superseded_records_successor, timed pause eligibility, CAS revision, and terminal work item attention stop stay under WorkAttentionLifecycleMachine authority

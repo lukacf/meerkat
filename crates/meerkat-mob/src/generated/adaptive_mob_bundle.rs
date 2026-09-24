@@ -1,7 +1,7 @@
 // @generated — composition module for `adaptive_mob_bundle`
 // DO NOT EDIT. Emitted by meerkat_machine_codegen::render_composition_driver.
 // Source of truth: catalog::compositions::adaptive_mob_bundle
-// Driver: `adaptive_mob_bundle_driver` (rust path: `meerkat-mob/src/generated/adaptive_mob_bundle.rs`).
+// Driver: `adaptive_mob_bundle_driver` (rust path: `crates/meerkat-mob/src/generated/adaptive_mob_bundle.rs`).
 #![allow(clippy::expect_used)]
 
 use meerkat_machine_schema::identity::{

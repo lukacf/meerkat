@@ -8,7 +8,7 @@ members = [
     "tests/fixtures/machine-dsl-tests",
 ]
 [workspace.package]
-version = "0.8.41"
+version = "0.8.42"
 edition = "2024"
 rust-version = "1.94.0"
 license = "MIT OR Apache-2.0"
@@ -93,50 +93,50 @@ subtle = "2.6"
 tempfile = "3.14"
 
 # Internal crates
-meerkat-agent-build-authority = { version = "0.8.41", path = "crates/meerkat-agent-build-authority" }
-meerkat-sqlite = { version = "0.8.41", path = "crates/meerkat-sqlite" }
-meerkat-core = { version = "0.8.41", path = "crates/meerkat-core" }
-meerkat-atif = { version = "0.8.41", path = "crates/meerkat-atif" }
-meerkat-models = { version = "0.8.41", path = "crates/meerkat-models" }
-meerkat-capabilities = { version = "0.8.41", path = "crates/meerkat-capabilities" }
-meerkat-llm-core = { version = "0.8.41", path = "crates/meerkat-llm-core" }
-meerkat-auth-core = { version = "0.8.41", path = "crates/meerkat-auth-core", default-features = false }
-meerkat-client = { version = "0.8.41", path = "crates/meerkat-client", default-features = false }
-meerkat-providers = { version = "0.8.41", path = "crates/meerkat-providers", default-features = false }
-meerkat-anthropic = { version = "0.8.41", path = "crates/meerkat-anthropic", default-features = false }
-meerkat-openai = { version = "0.8.41", path = "crates/meerkat-openai", default-features = false }
-meerkat-gemini = { version = "0.8.41", path = "crates/meerkat-gemini", default-features = false }
-meerkat-copilot = { version = "0.8.41", path = "crates/meerkat-copilot", default-features = false }
-meerkat-schedule = { version = "0.8.41", path = "crates/meerkat-schedule" }
-meerkat-jobs = { version = "0.8.41", path = "crates/meerkat-jobs" }
-meerkat-workgraph = { version = "0.8.41", path = "crates/meerkat-workgraph" }
-meerkat-tools = { version = "0.8.41", path = "crates/meerkat-tools", default-features = false }
-meerkat-mcp = { version = "0.8.41", path = "crates/meerkat-mcp" }
-meerkat-mcp-server = { version = "0.8.41", path = "crates/meerkat-mcp-server" }
-meerkat-cli = { version = "0.8.41", path = "crates/meerkat-cli" }
-meerkat-rest = { version = "0.8.41", path = "crates/meerkat-rest" }
-meerkat = { version = "0.8.41", path = "crates/meerkat", default-features = false }
-meerkat-comms = { version = "0.8.41", path = "crates/meerkat-comms", default-features = false }
-meerkat-hooks = { version = "0.8.41", path = "crates/meerkat-hooks" }
-meerkat-rpc = { version = "0.8.41", path = "crates/meerkat-rpc", default-features = false }
-meerkat-live = { version = "0.8.41", path = "crates/meerkat-live" }
-meerkat-runtime = { version = "0.8.41", path = "crates/meerkat-runtime", default-features = false }
-meerkat-session = { version = "0.8.41", path = "crates/meerkat-session", default-features = false }
-meerkat-memory = { version = "0.8.41", path = "crates/meerkat-memory", default-features = false }
-meerkat-contracts = { version = "0.8.41", path = "crates/meerkat-contracts", default-features = false }
-meerkat-skills = { version = "0.8.41", path = "crates/meerkat-skills" }
-meerkat-mob = { version = "0.8.41", path = "crates/meerkat-mob" }
-meerkat-mob-adaptive = { version = "0.8.41", path = "crates/meerkat-mob-adaptive" }
-meerkat-mob-pack = { version = "0.8.41", path = "crates/meerkat-mob-pack" }
-meerkat-mob-mcp = { version = "0.8.41", path = "crates/meerkat-mob-mcp" }
-meerkat-machine-schema = { version = "0.8.41", path = "crates/meerkat-machine-schema" }
-meerkat-machine-codegen = { version = "0.8.41", path = "crates/meerkat-machine-codegen" }
-meerkat-machine-kernels = { version = "0.8.41", path = "crates/meerkat-machine-kernels" }
-meerkat-machine-derive = { version = "0.8.41", path = "crates/meerkat-machine-derive" }
-meerkat-machine-dsl = { version = "0.8.41", path = "crates/meerkat-machine-dsl" }
-meerkat-machine-dsl-core = { version = "0.8.41", path = "crates/meerkat-machine-dsl-core" }
-meerkat-store = { version = "0.8.41", path = "crates/meerkat-store", default-features = false }
-meerkat-store-conformance = { version = "0.8.41", path = "crates/meerkat-store-conformance" }
+meerkat-agent-build-authority = { version = "0.8.42", path = "crates/meerkat-agent-build-authority" }
+meerkat-sqlite = { version = "0.8.42", path = "crates/meerkat-sqlite" }
+meerkat-core = { version = "0.8.42", path = "crates/meerkat-core" }
+meerkat-atif = { version = "0.8.42", path = "crates/meerkat-atif" }
+meerkat-models = { version = "0.8.42", path = "crates/meerkat-models" }
+meerkat-capabilities = { version = "0.8.42", path = "crates/meerkat-capabilities" }
+meerkat-llm-core = { version = "0.8.42", path = "crates/meerkat-llm-core" }
+meerkat-auth-core = { version = "0.8.42", path = "crates/meerkat-auth-core", default-features = false }
+meerkat-client = { version = "0.8.42", path = "crates/meerkat-client", default-features = false }
+meerkat-providers = { version = "0.8.42", path = "crates/meerkat-providers", default-features = false }
+meerkat-anthropic = { version = "0.8.42", path = "crates/meerkat-anthropic", default-features = false }
+meerkat-openai = { version = "0.8.42", path = "crates/meerkat-openai", default-features = false }
+meerkat-gemini = { version = "0.8.42", path = "crates/meerkat-gemini", default-features = false }
+meerkat-copilot = { version = "0.8.42", path = "crates/meerkat-copilot", default-features = false }
+meerkat-schedule = { version = "0.8.42", path = "crates/meerkat-schedule" }
+meerkat-jobs = { version = "0.8.42", path = "crates/meerkat-jobs" }
+meerkat-workgraph = { version = "0.8.42", path = "crates/meerkat-workgraph" }
+meerkat-tools = { version = "0.8.42", path = "crates/meerkat-tools", default-features = false }
+meerkat-mcp = { version = "0.8.42", path = "crates/meerkat-mcp" }
+meerkat-mcp-server = { version = "0.8.42", path = "crates/meerkat-mcp-server" }
+meerkat-cli = { version = "0.8.42", path = "crates/meerkat-cli" }
+meerkat-rest = { version = "0.8.42", path = "crates/meerkat-rest" }
+meerkat = { version = "0.8.42", path = "crates/meerkat", default-features = false }
+meerkat-comms = { version = "0.8.42", path = "crates/meerkat-comms", default-features = false }
+meerkat-hooks = { version = "0.8.42", path = "crates/meerkat-hooks" }
+meerkat-rpc = { version = "0.8.42", path = "crates/meerkat-rpc", default-features = false }
+meerkat-live = { version = "0.8.42", path = "crates/meerkat-live" }
+meerkat-runtime = { version = "0.8.42", path = "crates/meerkat-runtime", default-features = false }
+meerkat-session = { version = "0.8.42", path = "crates/meerkat-session", default-features = false }
+meerkat-memory = { version = "0.8.42", path = "crates/meerkat-memory", default-features = false }
+meerkat-contracts = { version = "0.8.42", path = "crates/meerkat-contracts", default-features = false }
+meerkat-skills = { version = "0.8.42", path = "crates/meerkat-skills" }
+meerkat-mob = { version = "0.8.42", path = "crates/meerkat-mob" }
+meerkat-mob-adaptive = { version = "0.8.42", path = "crates/meerkat-mob-adaptive" }
+meerkat-mob-pack = { version = "0.8.42", path = "crates/meerkat-mob-pack" }
+meerkat-mob-mcp = { version = "0.8.42", path = "crates/meerkat-mob-mcp" }
+meerkat-machine-schema = { version = "0.8.42", path = "crates/meerkat-machine-schema" }
+meerkat-machine-codegen = { version = "0.8.42", path = "crates/meerkat-machine-codegen" }
+meerkat-machine-kernels = { version = "0.8.42", path = "crates/meerkat-machine-kernels" }
+meerkat-machine-derive = { version = "0.8.42", path = "crates/meerkat-machine-derive" }
+meerkat-machine-dsl = { version = "0.8.42", path = "crates/meerkat-machine-dsl" }
+meerkat-machine-dsl-core = { version = "0.8.42", path = "crates/meerkat-machine-dsl-core" }
+meerkat-store = { version = "0.8.42", path = "crates/meerkat-store", default-features = false }
+meerkat-store-conformance = { version = "0.8.42", path = "crates/meerkat-store-conformance" }
 oai-rt-rs = { version = "=0.5.1", features = ["experimental-gpt-live"] }
 
 [profile.dev]

@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.42] - 2026-09-24
+
 ### Added
 
 - Model catalog: Claude Opus 5.5 (`claude-opus-5-5`: 1M context, 128K output,
@@ -11977,7 +11979,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.41...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.42...HEAD
+[0.8.42]: https://github.com/lukacf/meerkat/compare/v0.8.41...v0.8.42
 [0.8.41]: https://github.com/lukacf/meerkat/compare/v0.8.40...v0.8.41
 [0.8.40]: https://github.com/lukacf/meerkat/compare/v0.8.39...v0.8.40
 [0.8.39]: https://github.com/lukacf/meerkat/compare/v0.8.38...v0.8.39

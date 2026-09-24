@@ -35,19 +35,6 @@ them.
 
 ## [Unreleased]
 
-### Fixed
-
-- The BuildBuddy cargo-equivalent lanes' workspace copy now carries every
-  package's `BUILD.bazel` and the `tools/buildbuddy` lane scripts. The root
-  `//:workspace_runfiles` glob cannot see inside Bazel packages and excludes
-  BUILD files, so the xtask static-lane tests (`xtask/BUILD.bazel`,
-  `tools/buildbuddy/BUILD.bazel`) and the facade policy canary
-  (`tools/buildbuddy/cargo_lane_test.sh`) read files that did not exist in
-  the sandbox and failed the v0.8.41 release validation (run 35928492478).
-  Each generated package BUILD exports a `:build_file` filegroup and the
-  root runfiles list them with `//tools/buildbuddy:build_file` and
-  `:lane_scripts`.
-
 ## [0.8.41] - 2026-09-23
 
 ### Added
@@ -386,6 +373,17 @@ them.
   Archive names and layout are unchanged.
 
 ### Fixed
+
+- The BuildBuddy cargo-equivalent lanes' workspace copy now carries every
+  package's `BUILD.bazel` and the `tools/buildbuddy` lane scripts. The root
+  `//:workspace_runfiles` glob cannot see inside Bazel packages and excludes
+  BUILD files, so the xtask static-lane tests (`xtask/BUILD.bazel`,
+  `tools/buildbuddy/BUILD.bazel`) and the facade policy canary
+  (`tools/buildbuddy/cargo_lane_test.sh`) read files that did not exist in
+  the sandbox and failed the v0.8.41 release validation (run 35928492478).
+  Each generated package BUILD exports a `:build_file` filegroup and the
+  root runfiles list them with `//tools/buildbuddy:build_file` and
+  `:lane_scripts`.
 
 - Live close no longer waits on an owned context append whose provider
   acknowledgement is outstanding (`meerkat`, S99 channel 1: a thinking append

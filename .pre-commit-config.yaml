@@ -84,12 +84,12 @@ repos:
         # Vendored third-party sources (incl. crate_universe-rendered BUILD
         # files, which repin regenerates byte-exact with trailing whitespace)
         # must also stay untouched or the pre-push clean-tree gate refuses.
-        exclude: '^(crates/meerkat-runtime/tests/fixtures/v0_8_10_released_realm/corpus/realm/|crates/meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/corpus/|crates/meerkat-core/tests/fixtures/v0_8_10_ob3_recovery_migration_session\.json$|third-party/)'
+        exclude: '^(crates/meerkat-runtime/tests/fixtures/v0_8_10_released_realm/corpus/realm/|crates/meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/corpus/|crates/meerkat-core/tests/fixtures/v0_8_10_ob3_recovery_migration_session\.json$|tools/third-party/)'
         stages: [pre-push]
       - id: end-of-file-fixer
         # Released fixture bytes are manifest-hashed and must not be rewritten.
         # Vendored third-party sources must stay byte-exact (see above).
-        exclude: '^(crates/meerkat-runtime/tests/fixtures/v0_8_10_released_realm/corpus/realm/|crates/meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/corpus/|crates/meerkat-core/tests/fixtures/v0_8_10_ob3_recovery_migration_session\.json$|third-party/)'
+        exclude: '^(crates/meerkat-runtime/tests/fixtures/v0_8_10_released_realm/corpus/realm/|crates/meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/corpus/|crates/meerkat-core/tests/fixtures/v0_8_10_ob3_recovery_migration_session\.json$|tools/third-party/)'
         stages: [pre-push]
       - id: check-yaml
         stages: [pre-push]

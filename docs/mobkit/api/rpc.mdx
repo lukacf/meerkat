@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for MobKit runtime operations: gating, memor
 icon: "plug"
 ---
 
-*Mirrored from MobKit main at [fc242fe9ddd7](https://github.com/lukacf/meerkat-mobkit/commit/fc242fe9ddd7cc3ca488afd5e1ee9434f2f59c3c) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
 
 MobKit exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `mobkit/capabilities` on the surface you use.
 
@@ -418,7 +418,13 @@ Result:
 | `identity` | `string` | The durable identity |
 
 Broken or suspended identities are refused (`-32603`, invalid
-state); they need the reconcile/repair paths. Retired identities return
+state); they need the reconcile/repair paths. The one exception is a Broken
+identity parked with a `session_repair_required` hold (below): for it,
+`reload_member` IS the repair path. After the operator has run the two
+`rkat session repair-wholeblob` commands the hold names, the same verb with
+no extra flag re-attempts the resume of the same durable session (same
+`session_id`, same `generation`) and clears the hold; a document that is
+still refused re-parks the identity typed. Retired identities return
 `not_current` without being revived. The primitive's `not_current` is also a
 no-op, not a fallback to retire/rematerialize. Worker-plane members are
 refused: the worker plane has no non-destructive reload. Two typed failures
@@ -428,6 +434,36 @@ registration is retained, and sends stay reload-required) and a timeout
 naming the stage it reached (`MEMBER_RELOAD_TOTAL_TIMEOUT`, 45 s; inspect the
 member before retrying). Both are visible afterwards in
 `mobkit/member_health.last_reload`.
+
+A third, non-retryable failure is meerkat's typed audited-endpoint divergence
+(`SessionError::WholeBlobAuditedEndpointDivergence`, JSON-RPC `-32013`, resume
+hold `audited_endpoint_divergence`): the member's committed WholeBlob document
+keeps every message, but its live transcript no longer preserves the
+graph-proved audited endpoint, so every read refuses and no reload, heal, or
+reconcile can change that. MobKit reads the hold typed (never from error
+text), parks the identity Broken with a `session_repair_required` hold, and
+returns `-32603` with `error.data`:
+
+```json
+{
+  "kind": "mob_member_session_repair_required",
+  "durable_resume_hold": "audited_endpoint_divergence",
+  "session_id": "01a000bb-b69e-7570-933d-ffd5d61d51ee",
+  "content_retained": true,
+  "retryable": false,
+  "operator_path": ["session repair-wholeblob", "mobkit/reload_member"]
+}
+```
+
+`durable_resume_hold` is the same key and token meerkat puts on its own
+refusal, so a caller classifies both the same way. The continuity repair
+supervisor skips a held identity (no heal call, no reconcile retry, no
+re-attempted resume), and `mobkit/member_health.last_reload.outcome` records
+the attempt as `repair_required`. Operator path: run
+`session_repair_required.diagnose_command`, then
+`session_repair_required.apply_command` (add `--accept-shorter` only when the
+diagnose report says the live transcript is shorter than the audited
+endpoint), then `mobkit/reload_member` on the identity.
 
 ### `mobkit/member_health`
 
@@ -450,11 +486,12 @@ Result (`MemberHealthReport`):
 | `materialization_in_flight` | `bool` | True while a materialization is running |
 | `session_id`, `generation` | `string?`, `integer?` | Current continuity binding |
 | `last_delivery_error` | `object?` | `{class, detail, data?, at_unix_ms}`; `class` is `reload_required`, `actor_loop_stalled`, `actor_terminated`, `admission_timeout`, `admission_backlog_full` (retryable per-member backpressure), `reload_refused` (store not healthy yet, retry later), `reload_timed_out` (inspect before retrying), `admission_failed`, or `completion`; cleared by the next successful delivery |
-| `last_reload` | `object?` | `{outcome, detail?, data?, at_unix_ms}` for the most recent reload attempt (verb or automatic); `outcome` is `discarded`, `not_degraded`, `not_current`, `refused` (detail = meerkat's reason), `timed_out` (detail = reload stage or actor timeout observation), or `failed`; `data` preserves structured actor timeout/probe observations |
+| `last_reload` | `object?` | `{outcome, detail?, data?, at_unix_ms}` for the most recent reload attempt (verb or automatic); `outcome` is `discarded`, `not_degraded`, `not_current`, `refused` (detail = meerkat's reason), `timed_out` (detail = reload stage or actor timeout observation), `repair_required` (the durable session needs the sanctioned audited-endpoint repair; `data` carries the typed hold), or `failed`; `data` preserves structured actor timeout/probe observations |
 | `actor_loop` | `object` | The shared probe verdict `{state: "live" \| "stalled" \| "terminated" \| "unobserved", stall_id?, stalled_for_secs?, detail?}` |
 | `open_stall_id` | `integer?` | The open `actor_loop_stalled` correlation id while a stall is open |
 | `durability` | `"ready" \| {reload_required: {operation, reason}}` | A bridge-observed durability verdict; absent when unobservable. The built-in bridge reports degradation only: an absent `durability_reload_required` marker also covers absent registrations and cannot establish `ready` |
 | `continuity_unrecoverable` | `object?` | Terminal heal verdict for a Broken identity |
+| `session_repair_required` | `object?` | Typed "session needs repair" hold for a Broken identity whose durable session fails meerkat's audited-endpoint guard: `{session_id, hold: "audited_endpoint_divergence", diagnose_command, apply_command, detail}`. The two commands are the exact `rkat session repair-wholeblob <session_id> [--apply] --json` invocations for this session, scoped to the runtime store this runtime opened: `--runtime-store <state_dir>/runtime.sqlite` for the default persistent layout, `rkat --state-root <state_dir> --realm mobkit ...` for a composite storage provider's meerkat-level realm; `<state-root>` / `<realm>` stay as placeholders only when the runtime opened no persistent runtime store. Present until the operator repairs the document and `mobkit/reload_member` resumes it |
 
 Actor timeouts preserve `{kind: "mob_actor_command_timed_out", command_kind,
 stage, deadline_reached: true}` in RPC `error.data`, console error data, and
@@ -524,7 +561,7 @@ List identities known to the console aggregator.
 
 ### `mobkit/console/inspect_identity`
 
-Return `{identity: ConsoleIdentityRecord, peers: string[]}` for one console identity. The record includes health and addressability; affordances are projected by `/console/experience`, not this response. Older servers may only support the legacy `mobkit/inspect_identity`; the headless console controller keeps that as a compatibility fallback.
+Return `{identity: ConsoleIdentityRecord, peers: string[]}` for one console identity. The record includes health and addressability; affordances are projected by `/console/experience`, not this response. A Broken identity parked with a `session_repair_required` hold reports `health: "needs_repair"`, and the console status and inspect payloads carry the hold as `session_repair` (the same object as `mobkit/member_health.session_repair_required`), which the console renders as the **needs repair** state with the two repair commands. Older servers may only support the legacy `mobkit/inspect_identity`; the headless console controller keeps that as a compatibility fallback.
 
 ### `mobkit/console/query_timeline`
 
@@ -1078,6 +1115,17 @@ service's default namespace. One active (or paused) binding per target is
 enforced across `goal/create`, `attention/reassign`, and `attention/resume`; a
 second returns `-32042` naming the occupant.
 
+Member-bound targets are realm-bound. A mob member resolves its attention
+bindings in its mob's realm (`mob.<mob_id>`) and nowhere else, and this
+runtime's service is scoped to its own mob's realm, so a target that lowers to
+a member of this mob (`{kind:"identity"}`, a member session, or the member's
+`owner` key) is stored where the member reads it. A target whose owner key
+names a member of another mob is refused with `-32602` and
+`data.kind = "attention_target_realm_mismatch"` before anything is written;
+create that work through the other mob's own runtime. Bindings that predate
+this rule are moved at bootstrap; `mobkit/capabilities` reports the result
+under `workgraph_realm_migration`.
+
 ### Errors
 
 | Code | Meaning | `data.kind` |
@@ -1086,6 +1134,7 @@ second returns `-32042` naming the occupant.
 | `-32042` | revision conflict or target already bound; refetch the revision and retry | `workgraph_conflict` (`data.detail` carries the upstream message) |
 | `-32000` | other WorkGraph error | `workgraph_error` |
 | `-32602` | invalid params (including `realm_id`, a non-default namespace where refused, or `limit` above 1000) | none |
+| `-32602` | the target of `goal/create`, `attention/reassign` or `attention/break_glass_reassign` names a member of another mob; its bindings live only in that mob's realm (`mob.<mob_id>`), so the write is refused before it happens | `attention_target_realm_mismatch` (`data.owner_key`, `data.mob_id`, `data.required_realm_id`, `data.realm_id`) |
 | `-32030` | ABAC denial on the console surface | `access_denied` |
 
 SDK method names are the RPC names with the `mobkit/workgraph/` prefix

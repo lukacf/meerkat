@@ -4,7 +4,7 @@ description: "Why the gateways bind loopback, how to publish them behind a rever
 icon: "server"
 ---
 
-*Mirrored from MobKit main at [fc242fe9ddd7](https://github.com/lukacf/meerkat-mobkit/commit/fc242fe9ddd7cc3ca488afd5e1ee9434f2f59c3c) on 2026-09-22; MobKit workspace version 0.8.40 at that commit.*
+*Mirrored from MobKit main at [eb16bba0b154](https://github.com/lukacf/meerkat-mobkit/commit/eb16bba0b154fc485ad79d338d3e3b40de1cc2f2) on 2026-09-24; MobKit workspace version 0.8.41 at that commit.*
 
 Both bundled gateways, the console/admin `mobkit_gateway` and the SDK-facing
 `rpc_gateway`, bind `127.0.0.1` on an ephemeral port unless the launch selects
@@ -247,6 +247,33 @@ init says so. A resumed launch (same fingerprint) reports the `http_base_url`
 and `http_public_base_url` the live runtime was started with, which are by
 construction the ones you declared.
 
+## Repairing a refused durable session
+
+A member whose committed WholeBlob document fails meerkat's audited-endpoint
+guard (`SessionError::WholeBlobAuditedEndpointDivergence`) is parked with a
+typed `session_repair_required` hold instead of retrying: it shows as
+`needs_repair` in the console and on `mobkit/member_health`, and the hold
+carries the two exact `rkat` commands for the runtime store this gateway
+opened. Both gateways derive that scope from their own storage composition,
+never from a guess:
+
+- the default persistent launch opens `<state_dir>/runtime.sqlite`, so the
+  commands are `rkat session repair-wholeblob <session_id> --runtime-store
+  <state_dir>/runtime.sqlite --json` (diagnose) and the same with
+  `--apply --json` (repair; add `--accept-shorter` only when the diagnose
+  report says the live transcript is shorter than the audited endpoint);
+- a composite storage provider's meerkat-level realm renders as
+  `rkat --state-root <state_dir> --realm mobkit session repair-wholeblob
+  <session_id> ...`;
+- an in-memory or declared-ephemeral runtime store has no document to repair,
+  so no scope is derived and the commands keep explicit `<state-root>` /
+  `<realm>` placeholders.
+
+Stop nothing: the member is already parked. Run the diagnose command, then
+the apply command, then `mobkit/reload_member` on the identity; the same
+verb, with no extra flag, resumes the same session and generation and clears
+the hold.
+
 ## Reading a gateway exit
 
 Both gateways log on stderr, through `tracing`, at the default filter (no
@@ -297,6 +324,60 @@ How to read a gateway that is gone:
 - No line at all: the process was killed from outside (SIGKILL, an OOM kill,
   a stack overflow) or aborted. The exit status names which; `137` is SIGKILL,
   `139` is a segfault or stack overflow, `134` is an abort.
+
+## WorkGraph realms for mob members
+
+Meerkat builds every mob member in the realm `mob.<mob_id>` and rescopes the
+WorkGraph service the gateway hands the mob runtime to that realm, so a member
+resolves its attention bindings there and nowhere else. The gateway's own
+WorkGraph service is scoped to the same realm at construction, which is why a
+goal bound to a member from the console or the RPC surface lands where the
+member reads it.
+
+Two consequences matter to an operator:
+
+- A goal, binding or reassignment whose target names a member of another mob
+  (an explicit `owner` key of the form `mob/<other>/agent/<identity>`) is
+  refused with JSON-RPC `-32602` and `data.kind =
+  "attention_target_realm_mismatch"`. It is not stored anywhere. Create that
+  work through the other mob's own runtime.
+- Bindings written before this rule existed are moved at bootstrap. A child
+  mob spawned by an agent tool used to share the parent runtime's service
+  unscoped, so a goal bound to a child-mob member lived in the parent realm
+  and the child member found it there; it no longer does. On every bootstrap
+  the runtime scans its realm for active or paused bindings whose owner key
+  names another mob, re-creates each in that mob's realm over the same store
+  (title, description, mode, policies, priority, labels, timing fields,
+  external and evidence refs, delegated authority, projection policy and the
+  paused state carried; edges of the original item are not), and cancels the
+  original goal, which stops its binding. A second bootstrap finds nothing to
+  move. `mobkit/capabilities` reports the run under `workgraph_realm_migration`
+  (`mode`, `scanned_bindings`, `skipped_terminal`, `migrated[]` with the old
+  and new binding and item ids, and an `outcome` that records a failed scan or
+  write instead of aborting the launch). Library hosts choose the mode with
+  `MobBootstrapSpec::with_workgraph_realm_migration` (`apply`, `dry_run`,
+  `off`).
+
+## Blob ids are not meerkat content blob ids
+
+A MobKit blob store applies one of two digest recipes depending on how an
+object enters it. Images that arrive through meerkat's `BlobStore` face
+(`Base64BlobStoreAdapter::put_image`, used by the gateway, the unified runtime
+and the console voice host) and images uploaded through the console
+(`mobkit/blob/upload`, multipart `image_upload` placeholders) are addressed
+with meerkat's `content_blob_id`, `sha256(canonical_media_type || 0x00 ||
+base64_text)` over the base64 form, so meerkat's read-back verification
+(durable fork preflight, realtime image hydration) accepts them. Objects
+written through MobKit's native `BinaryBlobStore::put_bytes` (non-image
+`mobkit/blob/*` objects), and image blobs written by MobKit builds that
+predate this rule, carry MobKit's own address, `sha256(media_type || 0x00 ||
+raw_bytes)` over the decoded bytes (`meerkat-mobkit/src/blob_store.rs`,
+`compute_blob_id`). Both render as `sha256:<64 hex digits>`, so the same PNG
+under the two recipes carries two visually indistinguishable ids. The store
+resolves both forms through both faces, so references written before the rule
+keep hydrating; still, compare ids only within one recipe. The side by side
+recipe, provenance rules and the planned unification are documented in the
+meerkat storage operations runbook under "Blob digests in meerkat and MobKit".
 
 ## See also
 

@@ -14,7 +14,7 @@ const LOCK_DIR = path.resolve(
 );
 const LOCK_OWNER_FILE = path.join(LOCK_DIR, "owner.json");
 const LOCK_HEARTBEAT_FILE = path.join(LOCK_DIR, "heartbeat");
-const CRATE_DIR = path.resolve(SDK_DIR, "../../meerkat-web-runtime");
+const CRATE_DIR = path.resolve(SDK_DIR, "../../crates/meerkat-web-runtime");
 const WORKSPACE_DIR = path.resolve(SDK_DIR, "../..");
 const CACHE_MANIFEST = path.join(OUT_DIR, ".meerkat-wasm-build.json");
 const WASM_PACK_BIN =

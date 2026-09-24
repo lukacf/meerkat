@@ -728,7 +728,7 @@ fn test_regression_global_config_path_should_not_be_cwd() {
     assert!(
         identity_path
             .to_string_lossy()
-            .contains(".config/crates/meerkat/.rkat/identity"),
+            .contains(".config/meerkat/.rkat/identity"),
         "Identity path should be under global config dir"
     );
 }

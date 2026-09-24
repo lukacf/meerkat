@@ -1,0 +1,354 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+rust_library(
+    name = "meerkat_skills",
+    aliases = aliases(package_name = "meerkat-skills"),
+    crate_name = "meerkat_skills",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "capability",
+        "skills-http",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-skills",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-skills",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-core:meerkat_core",
+    ] + all_crate_deps(
+        package_name = "meerkat-skills",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_skills_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-skills"),
+    crate_name = "meerkat_skills",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "capability",
+        "skills-http",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-skills",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-skills",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat:meerkat_capabilities_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-skills",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "meerkat_skills_unit_test",
+    aliases = aliases(
+        package_name = "meerkat-skills",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "meerkat_skills",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "capability",
+        "skills-http",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-skills",
+    },
+    tags = [
+        "fast",
+        "unit",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-skills",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-core:meerkat_core",
+    ] + all_crate_deps(
+        package_name = "meerkat-skills",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "filesystem_source_test",
+    aliases = aliases(
+        package_name = "meerkat-skills",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "filesystem_source",
+    crate_root = "tests/filesystem_source.rs",
+    crate_features = [
+        "capability",
+        "skills-http",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/resolve.rs",
+        "src/source/git.rs",
+        "src/source/http.rs",
+        "src/source/protocol.rs",
+    ],
+    srcs = [
+        "tests/filesystem_source.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "filesystem_source",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-skills",
+    },
+    tags = [
+        "system",
+    ],
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-skills",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-skills:meerkat_skills",
+    ] + all_crate_deps(
+        package_name = "meerkat-skills",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "resolver_precedence_test",
+    aliases = aliases(
+        package_name = "meerkat-skills",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "resolver_precedence",
+    crate_root = "tests/resolver_precedence.rs",
+    crate_features = [
+        "capability",
+        "skills-http",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/resolve.rs",
+        "src/source/git.rs",
+        "src/source/http.rs",
+        "src/source/protocol.rs",
+    ],
+    srcs = [
+        "tests/resolver_precedence.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "resolver_precedence",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-skills",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-skills",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-skills:meerkat_skills",
+    ] + all_crate_deps(
+        package_name = "meerkat-skills",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "transport_sources_test",
+    aliases = aliases(
+        package_name = "meerkat-skills",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "transport_sources",
+    crate_root = "tests/transport_sources.rs",
+    crate_features = [
+        "capability",
+        "skills-http",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/resolve.rs",
+        "src/source/git.rs",
+        "src/source/http.rs",
+        "src/source/protocol.rs",
+    ],
+    srcs = [
+        "tests/transport_sources.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "transport_sources",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-skills",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-skills",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-skills:meerkat_skills",
+    ] + all_crate_deps(
+        package_name = "meerkat-skills",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+test_suite(
+    name = "fast_tests",
+    tests = [
+        ":meerkat_skills_unit_test",
+        ":resolver_precedence_test",
+        ":transport_sources_test",
+    ],
+)

@@ -1,0 +1,293 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+exports_files(
+
+    [
+        "src/generated/meerkat.rs",
+        "src/generated/mob.rs",
+    ],
+
+    visibility = [
+        "//crates/meerkat-machine-codegen:__pkg__",
+    ],
+
+)
+
+
+
+rust_library(
+    name = "meerkat_machine_kernels",
+    aliases = aliases(package_name = "meerkat-machine-kernels"),
+    crate_name = "meerkat_machine_kernels",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "test-oracle",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-kernels",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-kernels",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-kernels",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_machine_kernels_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-machine-kernels"),
+    crate_name = "meerkat_machine_kernels",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "test-oracle",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-kernels",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-kernels",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_machine_schema_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-kernels",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "meerkat_machine_kernels_unit_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-kernels",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "meerkat_machine_kernels",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "test-oracle",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-kernels",
+    },
+    tags = [
+        "fast",
+        "unit",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-kernels",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-kernels",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "content_shape_wire_contract_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-kernels",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "content_shape_wire_contract",
+    crate_root = "tests/content_shape_wire_contract.rs",
+    crate_features = [
+        "test-oracle",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/content_shape_wire_contract.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "content_shape_wire_contract",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-kernels",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-kernels",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-kernels:meerkat_machine_kernels",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-kernels",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "kernel_typed_round_trip_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-kernels",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "kernel_typed_round_trip",
+    crate_root = "tests/kernel_typed_round_trip.rs",
+    crate_features = [
+        "test-oracle",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/kernel_typed_round_trip.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "kernel_typed_round_trip",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-kernels",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-kernels",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-kernels:meerkat_machine_kernels",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-kernels",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+test_suite(
+    name = "fast_tests",
+    tests = [
+        ":content_shape_wire_contract_test",
+        ":kernel_typed_round_trip_test",
+        ":meerkat_machine_kernels_unit_test",
+    ],
+)

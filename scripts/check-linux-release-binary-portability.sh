@@ -2,8 +2,8 @@
 # check-linux-release-binary-portability.sh - fail closed when a packaged
 # Linux GNU release binary would not load on the oldest supported distro.
 #
-# The floor comes from the release build environment: //platforms:linux_x86_64
-# and //platforms:linux_arm64 in platforms/BUILD.bazel pin
+# The floor comes from the release build environment: //tools/bazel/platforms:linux_x86_64
+# and //tools/bazel/platforms:linux_arm64 in tools/bazel/platforms/BUILD.bazel pin
 # buildpack-deps:bullseye (glibc 2.31), and the GitHub-hosted fallback lane in
 # .github/workflows/release.yml builds inside the same image. This gate exists
 # so a container or runner bump that silently raises the floor fails the

@@ -3,18 +3,18 @@
 // distinct modules); the multi_host_* lanes reach it via `super::support`.
 // The file's own inner attributes carry the test-lint allows.
 #[cfg(not(target_arch = "wasm32"))]
-#[path = "../../../meerkat-mob/tests/support/mod.rs"]
+#[path = "../../../crates/meerkat-mob/tests/support/mod.rs"]
 mod support;
 
 #[cfg(not(target_arch = "wasm32"))]
-#[path = "../../../meerkat-mob-mcp/tests/support/mod.rs"]
+#[path = "../../../crates/meerkat-mob-mcp/tests/support/mod.rs"]
 mod council_support;
 
 // Phase 6b: the live-plane fixture half (support/live_plane.rs is
 // deliberately NOT declared inside support/mod.rs — only live-capable test
 // roots compose it).
 #[cfg(not(target_arch = "wasm32"))]
-#[path = "../../../meerkat-mob/tests/support/live_plane.rs"]
+#[path = "../../../crates/meerkat-mob/tests/support/live_plane.rs"]
 mod live_support;
 
 #[cfg(not(target_arch = "wasm32"))]

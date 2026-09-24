@@ -48,13 +48,24 @@ for (const pkg of allFeaturesMetadata.packages.filter((pkg) => pkg.source !== nu
   externalByName.get(pkg.name).push(pkg);
 }
 const packageDir = (pkg) => dirname(pkg.manifest_path);
+// Workspace crates live under crates/<name>; their key is the bare
+// directory name (== crate name) so the per-crate rules below stay stable.
+// Test crates keep their tests/... path as key.
+const CRATES_DIR = "crates";
 const packageKey = (pkg) => {
   const dir = relative(root, packageDir(pkg));
+  if (dir.startsWith(`${CRATES_DIR}/`)) return dir.slice(CRATES_DIR.length + 1);
   return dir.includes("/") || dir !== pkg.name ? dir : pkg.name;
 };
+const packageDirForKey = (key) => {
+  const pkg = byKeyRef.get(key);
+  return pkg ? relative(root, packageDir(pkg)) : key;
+};
+const byKeyRef = new Map();
 const packageLabel = (pkg) => `//${relative(root, packageDir(pkg))}:${crateName(pkg.name)}`;
 const crateName = (name) => name.replaceAll("-", "_");
 const byKey = new Map([...localPackages.values()].map((pkg) => [packageKey(pkg), pkg]));
+for (const [k, v] of byKey) byKeyRef.set(k, v);
 const q = (value) => JSON.stringify(value);
 const cargoPackageVersionEnv = (pkg) => `        "CARGO_PKG_VERSION": ${q(pkg.version)},`;
 const generatedAuthorityBridgeSymbolSuffix = "bazel_private_generated_authority_bridge";
@@ -435,7 +446,7 @@ function reverseDependencyKeys(includeDev) {
 const localNormalReverseDependencyKeys = reverseDependencyKeys(false);
 const localAllReverseDependencyKeys = reverseDependencyKeys(true);
 const publicDownstreamFixtureKeys = new Set([
-  "test-fixtures/surface-build-fixtures",
+  "tests/fixtures/surface-build-fixtures",
 ]);
 
 const runtimeTestSupportPackageKeys = new Set();
@@ -452,7 +463,7 @@ const runtimeTestSupportPackageKeys = new Set();
 }
 
 function packageVisibilityLabel(key) {
-  return key === "." ? "//:__pkg__" : `//${key}:__pkg__`;
+  return key === "." ? "//:__pkg__" : `//${packageDirForKey(key)}:__pkg__`;
 }
 
 function shouldGenerateRuntimeTestSupportVariantForKey(key) {
@@ -582,7 +593,7 @@ const agentFactoryFacadeVariantAliasVisibility = listExpr(
     ...agentFactoryTestConsumerKeys,
   ])]
     .filter((key) => key !== ".")
-    .map((key) => `//${key}:__pkg__`)
+    .map((key) => `//${packageDirForKey(key)}:__pkg__`)
     .sort(),
 );
 
@@ -782,7 +793,7 @@ function needsWorkspaceRunfiles(target) {
     "workspace_root",
     "rev-parse",
     ".github/",
-    "test-fixtures",
+    "tests/fixtures",
     "scan_for_manual_input_schema_literals",
     "meerkat-runtime/",
     "meerkat-machine-schema/",
@@ -806,7 +817,7 @@ function needsPackageRunfiles(target) {
     "SKILL.md",
     "AGENTS.md",
     "Cargo.toml",
-    "test-fixtures",
+    "tests/fixtures",
     ".github/",
     "scripts/",
     "docs/",
@@ -869,11 +880,11 @@ function workspaceDataLabels(target, source = targetScanSource(target)) {
   if (source.includes("tools/buildbuddy/")) {
     labels.add("//tools/buildbuddy:lane_scripts");
   }
-  if (source.includes("test-fixtures")) {
+  if (source.includes("tests/fixtures")) {
     labels.add("//:test_fixtures");
-    labels.add("//test-fixtures/machine-dsl-tests:package_runfiles");
-    labels.add("//test-fixtures/mcp-test-server:package_runfiles");
-    labels.add("//test-fixtures/surface-build-fixtures:package_runfiles");
+    labels.add("//tests/fixtures/machine-dsl-tests:package_runfiles");
+    labels.add("//tests/fixtures/mcp-test-server:package_runfiles");
+    labels.add("//tests/fixtures/surface-build-fixtures:package_runfiles");
   }
   if (target.name === "protocol_codegen_drift") {
     for (const label of packageRunfileLabels) labels.add(label);
@@ -939,11 +950,11 @@ function externalTestSourceLabel(path) {
   if (owner) {
     const ownerRoot = packageDir(owner);
     const source = relative(ownerRoot, path).replaceAll("\\", "/");
-    return `//${packageKey(owner)}:${source}`;
+    return `//${relative(root, ownerRoot).replaceAll("\\", "/")}:${source}`;
   }
 
   const workspacePath = relative(root, path).replaceAll("\\", "/");
-  if (workspacePath === "test-fixtures/live_smoke/support.rs") {
+  if (workspacePath === "tests/fixtures/live_smoke/support.rs") {
     return "//:live_smoke_support";
   }
   throw new Error(`test source ${workspacePath} is outside its Cargo package without a Bazel input owner`);
@@ -974,7 +985,7 @@ function registerExternalInput(owner, consumer, absolute) {
     externalTestSourcesByOwner.set(owner.id, entry);
   }
   entry.paths.add(relative(packageDir(owner), absolute).replaceAll("\\", "/"));
-  entry.visibility.add(`//${packageKey(consumer)}:__pkg__`);
+  entry.visibility.add(`//${packageDirForKey(packageKey(consumer))}:__pkg__`);
 }
 const includeMacroRe = /\binclude_(?:str|bytes)!\(\s*"([^"]+)"\s*\)|\binclude!\(\s*"([^"]+)"\s*\)/g;
 for (const consumer of localPackages.values()) {
@@ -1064,7 +1075,7 @@ function compileData(target, packageRoot, includeTests) {
         const owner = localPackageOwningSource(absolute);
         if (owner) {
           const rel = relative(packageDir(owner), absolute).replaceAll("\\", "/");
-          labels.add(`//${packageKey(owner)}:${rel}`);
+          labels.add(`//${packageDirForKey(packageKey(owner))}:${rel}`);
         } else if (absolute.startsWith(`${root}/`)) {
           // Not a workspace member's file. If the root package owns it, the
           // root BUILD exports it; a file under some other BUILD has no owner
@@ -1083,7 +1094,7 @@ function compileData(target, packageRoot, includeTests) {
         }
       }
     }
-    if (source.includes("../../test-fixtures/live_smoke/support.rs")) {
+    if (source.includes("../../../tests/fixtures/live_smoke/support.rs")) {
       labels.add("//:live_smoke_support");
     }
   }
@@ -1235,8 +1246,8 @@ const LARGE_UNIT_TEST_PACKAGES = new Set([
   "xtask",
 ]);
 
-const WORKSPACE_LINTS_BZL = "workspace_lints.bzl";
-const WORKSPACE_LINTS_LOAD = `load("//:${WORKSPACE_LINTS_BZL}", "WORKSPACE_LINT_RUSTC_FLAGS")`;
+const WORKSPACE_LINTS_BZL = "tools/bazel/workspace_lints.bzl";
+const WORKSPACE_LINTS_LOAD = `load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")`;
 
 function writeWorkspaceLintsBzl() {
   const { flags, skipped } = workspaceLintRustcFlags();
@@ -1304,7 +1315,7 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     ``,
     `filegroup(`,
     `    name = "workspace_cargo_manifests",`,
-    `    srcs = glob(["Cargo.toml", "*/Cargo.toml", "*/*/Cargo.toml"], allow_empty = True),`,
+    `    srcs = glob(["Cargo.toml", "*/Cargo.toml", "*/*/Cargo.toml", "*/*/*/Cargo.toml"], allow_empty = True),`,
     `    visibility = ["//visibility:public"],`,
     `)`,
     ``,
@@ -1331,17 +1342,17 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     ``,
     `filegroup(`,
     `    name = "live_smoke_support",`,
-    `    srcs = ["test-fixtures/live_smoke/support.rs"],`,
+    `    srcs = ["tests/fixtures/live_smoke/support.rs"],`,
     `    visibility = ["//visibility:public"],`,
     `)`,
     ``,
     `filegroup(`,
     `    name = "test_fixtures",`,
     `    srcs = glob(`,
-    `        ["test-fixtures/**"],`,
+    `        ["tests/fixtures/**"],`,
     `        exclude = [`,
-    `            "test-fixtures/**/BUILD",`,
-    `            "test-fixtures/**/BUILD.bazel",`,
+    `            "tests/fixtures/**/BUILD",`,
+    `            "tests/fixtures/**/BUILD.bazel",`,
     `        ],`,
     `        allow_empty = True,`,
     `    ),`,

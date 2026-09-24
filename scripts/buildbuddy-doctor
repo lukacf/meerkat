@@ -90,7 +90,7 @@ else
   bad ".bazelrc is missing buildbuddy-macos-rbe config"
 fi
 
-if grep -q 'platforms=//platforms:macos_arm64' .bazelrc &&
+if grep -q 'platforms=//tools/bazel/platforms:macos_arm64' .bazelrc &&
   grep -q 'OSFamily=darwin' .bazelrc &&
   grep -q 'Arch=arm64' .bazelrc; then
   pass "BuildBuddy RBE config targets macOS arm64 executors"
@@ -243,10 +243,10 @@ oai_rt_rs_version="$(awk -F'"' '/^oai-rt-rs = / { print $2; exit }' Cargo.toml)"
 if [[ "${oai_rt_rs_version}" == "=0.4.1" ]] &&
   grep -Fq 'features = ["experimental-gpt-live"]' Cargo.toml &&
   ! grep -Fq 'oai-rt-rs = { path = ' Cargo.toml &&
-  [[ ! -e third-party/oai-rt-rs/Cargo.toml ]] &&
+  [[ ! -e tools/third-party/oai-rt-rs/Cargo.toml ]] &&
   ! grep -Fq 'crate = "oai-rt-rs"' MODULE.bazel &&
   grep -Fq 'crates__oai-rt-rs-0.4.1' MODULE.bazel.lock &&
-  ! grep -Fq 'third-party/oai-rt-rs' MODULE.bazel.lock; then
+  ! grep -Fq 'tools/third-party/oai-rt-rs' MODULE.bazel.lock; then
   pass "oai-rt-rs resolves the published experimental GPT Live crate"
 else
   bad "oai-rt-rs is not locked to the published experimental GPT Live crate"

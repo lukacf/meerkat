@@ -1,1 +1,0 @@
-../../../../.claude/skills/meerkat-platform/references/mobs.md

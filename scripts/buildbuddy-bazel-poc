@@ -487,7 +487,7 @@ case "${command}" in
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
     default_target="//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
-    extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel --platforms=//platforms:macos_x86_64)
+    extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel --platforms=//tools/bazel/platforms:macos_x86_64)
     ;;
   release-build-linux-x86)
     command="build"
@@ -909,7 +909,7 @@ if [[ "${config}" == buildbuddy-macos-rbe* ]]; then
     --macos_sdk_version="${macos_sdk_version}"
     --macos_minimum_os="${macos_minimum_os}"
     --host_macos_minimum_os="${macos_minimum_os}"
-    --xcode_version_config=//platforms:rbe_xcodes
+    --xcode_version_config=//tools/bazel/platforms:rbe_xcodes
     --xcode_version="${xcode_version}"
   )
 fi

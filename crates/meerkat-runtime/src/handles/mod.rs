@@ -207,7 +207,7 @@ impl HandleDslAuthority {
     /// Apply a DSL input under the shared authority's mutex.
     ///
     /// This is the shared authority entrypoint used by every intra-machine
-    /// handle in `meerkat-runtime/src/handles/*`. Handles target the
+    /// handle in `crates/meerkat-runtime/src/handles/*`. Handles target the
     /// meerkat DSL directly — there is no route to resolve, so a
     /// `CompositionDispatcher` (the cross-machine seam closed by
     /// wave-c C-6c) is not applicable here. Routed inputs delivered by

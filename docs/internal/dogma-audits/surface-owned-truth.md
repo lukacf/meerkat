@@ -92,13 +92,13 @@ reconstruction. *Small; folds into C1.*
 ### C3 — Rust surface fabricates/duplicates a runtime-config-owned default
 **`fabricated_default` · Medium · rpc + mcp-server · ids 1,4**
 
-- **F1** (`meerkat-rpc/src/handlers/session.rs:291`): `default_model("anthropic").unwrap_or("claude-sonnet-4-5")`.
+- **F1** (`crates/meerkat-rpc/src/handlers/session.rs:291`): `default_model("anthropic").unwrap_or("claude-sonnet-4-5")`.
   **Verified:** `default_model("anthropic")` always returns `Some(DEFAULT_ANTHROPIC)` where
-  `DEFAULT_ANTHROPIC = "claude-opus-4-8"` (`meerkat-core/src/model_profile/catalog.rs:128,238`) — so the literal
+  `DEFAULT_ANTHROPIC = "claude-opus-4-8"` (`crates/meerkat-core/src/model_profile/catalog.rs:128,238`) — so the literal
   is both **unreachable** *and* **disagrees** with the catalog default, and it hardcodes `"anthropic"` rather than
   the configured provider. **Repair:** delete the literals; treat absent `config_runtime` as an error (match REST's
   non-optional shape) or derive any fallback from `default_model(<configured provider>)`. *Trivial.*
-- **F4** (`meerkat-mcp-server/src/lib.rs:260`): a surface-local `default_structured_output_retries() -> 2`
+- **F4** (`crates/meerkat-mcp-server/src/lib.rs:260`): a surface-local `default_structured_output_retries() -> 2`
   duplicated in RPC (`handlers/session.rs:161`). **Repair:** flip `SessionBuildOptions.structured_output_retries`
   to `Option<u32>`, resolve `None` against config inside `AgentFactory`, delete both surface constants. *Medium —
   crosses the shared `SessionBuildOptions` contract.*
@@ -106,12 +106,12 @@ reconstruction. *Small; folds into C1.*
 ### C4 — Surface duplicates / locally composes a shared runtime mechanism
 **`bypass_shared_seam` · Medium · mcp-server + mob-mcp · ids 9,11 (contested-but-real)**
 
-- **F9** (`meerkat-mcp-server/.../runtime_ingress.rs:44`): MCP re-implements the pre-admission RAII seam
+- **F9** (`crates/meerkat-mcp-server/.../runtime_ingress.rs:44`): MCP re-implements the pre-admission RAII seam
   (`McpRuntimePreAdmissionEntry`/`Registration`/`RegistrationLockLease`) **verbatim** instead of importing the
   shared `meerkat::session_runtime::admission` module whose doc names MCP as an intended consumer and which RPC
   already uses. Semantic facts lower correctly; only the *mechanism* is duplicated. **Repair:** delete the `Mcp*`
   types, implement `RuntimePreAdmissionRestore` exactly as RPC does.
-- **F11** (`meerkat-mob-mcp/.../agent_tools.rs:1069`): `dispatch_mob_list` composes the per-mob admission verdict
+- **F11** (`crates/meerkat-mob-mcp/.../agent_tools.rs:1069`): `dispatch_mob_list` composes the per-mob admission verdict
   locally (`.filter(can_manage_mob)`) while every sibling mutating dispatch lowers the same observation through
   `resolve_current_mob_admission` into `MobMachine`. A real asymmetry with no list-admission seam (fail-closed,
   read-model-ish → Low). **Repair:** lower per-mob through `resolve_current_mob_admission`, or add a `MobMachine`
@@ -120,7 +120,7 @@ reconstruction. *Small; folds into C1.*
 ### C5 — WASM/SDK advertises a JS affordance the runtime never exports
 **`capability_advertise_vs_deliver_drift` · Medium · wasm + sdk-web · id 13**
 
-**Verified clean hit.** `meerkat-web-runtime/src/lib.rs:53-54` advertises `comms_peers(session_id)` and
+**Verified clean hit.** `crates/meerkat-web-runtime/src/lib.rs:53-54` advertises `comms_peers(session_id)` and
 `comms_send(session_id, params_json)` under a "### Comms (placeholder)" doc heading — but **neither has any
 `#[wasm_bindgen]`/`pub fn` anywhere** (the names exist only in the comment). `@rkat/web` then declares **both as
 required** members of the `WasmModule` interface (`sdks/web/src/runtime.ts:153-154`), asserting the bundle exports

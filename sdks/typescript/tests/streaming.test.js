@@ -266,7 +266,7 @@ describe("RPC error payload parsing", () => {
       required_action: "reload_member_registration",
     };
     const response = client.registerRequest(requestId);
-    // The real wire shape (`meerkat-mob/src/error.rs` `mob_call_error`, no
+    // The real wire shape (`crates/meerkat-mob/src/error.rs` `mob_call_error`, no
     // `wire_detail()` match): `error.data` is the BARE structured_data()
     // dict directly — no {code, message, details} envelope.
     client.handleLine(

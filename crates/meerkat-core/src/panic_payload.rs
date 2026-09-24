@@ -2,8 +2,8 @@
 //! `catch_unwind` boundaries.
 //!
 //! Shared by the meerkat-runtime machine attachment boundaries
-//! (`meerkat-runtime/src/panic_boundary.rs`) and the meerkat-mob actor task
-//! boundaries (`meerkat-mob/src/runtime/panic_capture.rs`). std-only on
+//! (`crates/meerkat-runtime/src/panic_boundary.rs`) and the meerkat-mob actor task
+//! boundaries (`crates/meerkat-mob/src/runtime/panic_capture.rs`). std-only on
 //! purpose: this must stay reachable from every crate that catches a panic.
 //!
 //! WHY (field incident, 2026-07-29): a panic inside a member-provisioning

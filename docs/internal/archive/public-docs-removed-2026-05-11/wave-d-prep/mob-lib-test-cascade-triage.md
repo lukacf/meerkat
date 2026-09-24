@@ -44,17 +44,17 @@ Single-test reproduction with in-place panic logging on the `flush_routed_effect
 !!! ACTOR RUN() RETURNED Ok
 ```
 
-After `l-1` spawn completes, the routed `PrepareBindings` effect fires; the consumer surface rejects; actor `run` returns; the `command_rx` sender-side lives on in the handle but nobody is draining — next `handle.spawn(w-1)` sees `command_tx.send(...).await` fail with `Err(SendError)`, surfaced as `Internal("actor task dropped")` (`meerkat-mob/src/runtime/handle.rs:927`).
+After `l-1` spawn completes, the routed `PrepareBindings` effect fires; the consumer surface rejects; actor `run` returns; the `command_rx` sender-side lives on in the handle but nobody is draining — next `handle.spawn(w-1)` sees `command_tx.send(...).await` fail with `Err(SendError)`, surfaced as `Internal("actor task dropped")` (`crates/meerkat-mob/src/runtime/handle.rs:927`).
 
 ### Structural trace
 
 1. `MobHandle::spawn(..).await` sends `MobCommand::Spawn` into the actor's mpsc channel.
-2. Actor handles Spawn, updates DSL authority via `MobMachineMutator::apply(...)`, pushes any routed effects into `self.pending_routed_effects` via `queue_routed_effects_from(...)` (`meerkat-mob/src/runtime/actor.rs:2044-2054`).
+2. Actor handles Spawn, updates DSL authority via `MobMachineMutator::apply(...)`, pushes any routed effects into `self.pending_routed_effects` via `queue_routed_effects_from(...)` (`crates/meerkat-mob/src/runtime/actor.rs:2044-2054`).
 3. At the bottom of the loop body (`actor.rs:2749-2768`), actor calls `self.flush_routed_effects().await`.
 4. `flush_routed_effects` (`actor.rs:769-787`) drains each queued `MobSeamEffect` through `super::composition::dispatch_routed_effect(&self.composition_binding, effect)`.
 5. In `create_test_mob`, `MockSessionService::enable_runtime_adapter()` is called, which means `MobBuilder::with_session_service` seeds `self.runtime_adapter = Some(...)` (`builder.rs:220-224`). The `composition_binding` branch at `builder.rs:1428-1432` then picks `CompositionBinding::Wired(...)` via `wired_binding_from_runtime_adapter`.
 6. `dispatch_routed_effect` (`composition.rs:318-335`) routes the `MobSeamEffect::PrepareBindings { agent_runtime_id: "l-1:0", fence_token, generation }` to the `CatalogCompositionDispatcher`, which invokes `MeerkatConsumerSurface::apply_routed_input`.
-7. `MeerkatConsumerSurface::apply_routed_input` (`meerkat-runtime/src/meerkat_machine/composition.rs:179-227`) calls `self.resolve_session(&projected)`.
+7. `MeerkatConsumerSurface::apply_routed_input` (`crates/meerkat-runtime/src/meerkat_machine/composition.rs:179-227`) calls `self.resolve_session(&projected)`.
 8. `resolve_session` (`composition.rs:103-129`) sees `pinned_session: None` and a projected `agent_runtime_id = "l-1:0"`; hits the `(None, Some(rt)) => SessionId::parse(&rt)` arm; `SessionId::parse` expects UUID or `urn:uuid:<uuid>`; rejects.
 9. Rejection returns `Err(String)` back through the dispatcher as `DispatchRefusal::ConsumerRefused { reason }`, which `dispatch_refusal_to_mob_error` (`composition.rs:337-395`) lifts to `MobError::Internal(...)`.
 10. `flush_routed_effects` propagates that `Err`. The actor's `run` loop at `actor.rs:2760-2767` terminates the task via bare `return;`.
@@ -62,21 +62,21 @@ After `l-1` spawn completes, the routed `PrepareBindings` effect fires; the cons
 
 ### The type mismatch
 
-- **Producer side**: `MobMachine` DSL projects `agent_runtime_id` as `mob_dsl::AgentRuntimeId(String)` with the canonical display form `"{identity}:{generation}"` (`meerkat-mob/src/ids.rs:288-292`; shell domain `AgentRuntimeId::Display` is `"worker:0"` style).
-- **Consumer side**: `MeerkatConsumerSurface::resolve_session` treats the projected field as a session UUID and parses via `SessionId::parse` (`meerkat-runtime/src/meerkat_machine/composition.rs:120-122`).
+- **Producer side**: `MobMachine` DSL projects `agent_runtime_id` as `mob_dsl::AgentRuntimeId(String)` with the canonical display form `"{identity}:{generation}"` (`crates/meerkat-mob/src/ids.rs:288-292`; shell domain `AgentRuntimeId::Display` is `"worker:0"` style).
+- **Consumer side**: `MeerkatConsumerSurface::resolve_session` treats the projected field as a session UUID and parses via `SessionId::parse` (`crates/meerkat-runtime/src/meerkat_machine/composition.rs:120-122`).
 - These are two different identifier spaces: mob's `AgentRuntimeId` is `"identity:generation"`; `SessionId` is a UUID. The routed binding between them is broken by design on this code path — the mob produces the former, the consumer expects the latter, and there's no translation layer.
 
 ### Origin commit
 
 `a52571dd1` (2026-04-23) "wave-c C-6c: consumer surface + dispatcher wiring + handle annotations" introduced:
-- `MeerkatConsumerSurface` with `SessionId::parse(rt)` on `agent_runtime_id` (`meerkat-runtime/src/meerkat_machine/composition.rs`).
-- `wired_binding_from_runtime_adapter` in mob builder path (`meerkat-mob/src/runtime/composition.rs`).
+- `MeerkatConsumerSurface` with `SessionId::parse(rt)` on `agent_runtime_id` (`crates/meerkat-runtime/src/meerkat_machine/composition.rs`).
+- `wired_binding_from_runtime_adapter` in mob builder path (`crates/meerkat-mob/src/runtime/composition.rs`).
 
 Prior to `a52571dd1`, the composition binding path was `Standalone` for test harness, which made `dispatch_routed_effect` return `Ok(None)` via the early-exit at `composition.rs:322-324` — no dispatch, no consumer parse, no actor exit. C-6c wiring on the same test code path closed the spine (good for production) but exposed the `AgentRuntimeId` vs `SessionId` type mismatch.
 
 ### Why it wasn't caught at C-6c merge
 
-The C-6c merge test-coverage was at the unit level on `MeerkatConsumerSurface` (with `pinned_session: Some(sid)` — the pinned-session arm of `resolve_session`, which bypasses the UUID parse). Every actor-level mob spawn test uses `pinned_session: None` and sends `agent_runtime_id = "identity:generation"` — that combination is never tested in `meerkat-runtime/src/meerkat_machine/composition.rs:230-303`.
+The C-6c merge test-coverage was at the unit level on `MeerkatConsumerSurface` (with `pinned_session: Some(sid)` — the pinned-session arm of `resolve_session`, which bypasses the UUID parse). Every actor-level mob spawn test uses `pinned_session: None` and sends `agent_runtime_id = "identity:generation"` — that combination is never tested in `crates/meerkat-runtime/src/meerkat_machine/composition.rs:230-303`.
 
 ### Fix shape
 
@@ -96,14 +96,14 @@ This requires either (a) per-effect `MeerkatConsumerSurface` construction with t
 fix(mob): translate routed agent_runtime_id to pinned session at consumer surface (#31 Class A1)
 
 The mob MobMachine projects `agent_runtime_id` as the canonical display
-form `"identity:generation"` (meerkat-mob/src/ids.rs:288-292). The
+form `"identity:generation"` (crates/meerkat-mob/src/ids.rs:288-292). The
 `MeerkatConsumerSurface::resolve_session` at
-meerkat-runtime/src/meerkat_machine/composition.rs:120-122 parses the
+crates/meerkat-runtime/src/meerkat_machine/composition.rs:120-122 parses the
 projected field as a `SessionId` UUID when no session is pinned — which
 is always the case in mob routing — and every `PrepareBindings` routed
 effect is refused. The mob actor terminates on the first refusal via
 `flush_routed_effects` error propagation at
-meerkat-mob/src/runtime/actor.rs:2760-2767, which cascades to all
+crates/meerkat-mob/src/runtime/actor.rs:2760-2767, which cascades to all
 downstream tests as `Internal("actor task dropped")`.
 
 Introduced by `a52571dd1` (wave-c C-6c). Coverage gap: C-6c unit tests
@@ -122,7 +122,7 @@ All 173 Class A failures plus 2 Class E, 1 Class G, and ~19 Class Z singletons t
 
 ```
 thread 'runtime::tests::test_external_spawn_with_binding_uses_real_identity' panicked at
-    meerkat-mob/src/runtime/tests.rs:18450:54:
+    crates/meerkat-mob/src/runtime/tests.rs:18450:54:
     spawn with binding: CommsError(PeerNotFound(
         "test-mob-external-spawn-real-identity-<uuid>/worker/w-real"
     ))
@@ -164,7 +164,7 @@ comms directory contains the expected external peer.
 
 ```
 thread 'tests::contracts::contract_mob_002_peer_request_response_round_trip' panicked at
-    meerkat-mob/src/tests/contracts.rs:75:10:
+    crates/meerkat-mob/src/tests/contracts.rs:75:10:
     PeerRequest send should succeed: AdmissionDropped { reason: UntrustedSender }
 ```
 
@@ -202,7 +202,7 @@ Align the two derivations on the same site.
 
 ```
 thread 'runtime::provisioner::tests::validated_external_peer_spec_preserves_the_validated_peer_name'
-    panicked at meerkat-mob/src/runtime/provisioner.rs:498:10:
+    panicked at crates/meerkat-mob/src/runtime/provisioner.rs:498:10:
     external peer spec should validate:
     WiringError("invalid external peer spec for 'mob/worker/member-1':
         invalid peer_id: invalid peer id \"ed25519:member-1\":
@@ -224,7 +224,7 @@ Add `TrustedPeerDescriptor::test_only_unsigned_typed(name, peer_id: PeerId, addr
 
 ### Scope estimate
 
-1 lib-code commit (adding typed helper in `meerkat-core/src/comms.rs`) + 1 test-migration commit touching 7 sites. Mechanical after the helper exists.
+1 lib-code commit (adding typed helper in `crates/meerkat-core/src/comms.rs`) + 1 test-migration commit touching 7 sites. Mechanical after the helper exists.
 
 ### Commit message preamble
 
@@ -267,11 +267,11 @@ Both fail on `matches!(result, Err(<specific variant>))`. The actual `result` is
 
 ```
 thread 'runtime::handle::tests::helper_result_serializes_identity_native_runtime_fields'
-    panicked at meerkat-mob/src/runtime/handle.rs:3640:9:
+    panicked at crates/meerkat-mob/src/runtime/handle.rs:3640:9:
     assertion `left == right` failed
 
 thread 'runtime::handle::tests::member_projection_types_omit_bridge_session_fields_in_serialized_output'
-    panicked at meerkat-mob/src/runtime/handle.rs:3544:9:
+    panicked at crates/meerkat-mob/src/runtime/handle.rs:3544:9:
     assertion failed: !snapshot_value["agent_runtime_id"].is_null()
 ```
 
@@ -282,7 +282,7 @@ These are pure serialization shape tests — they build domain structs (no mob r
 - Specific equality between `receipt_value["agent_runtime_id"]` and `serde_json::to_value(&runtime_id)`
 - `bridge_session_id` absent (this passes)
 
-`AgentRuntimeId` at `meerkat-mob/src/ids.rs:263-286` is `struct { identity, generation }` with `#[derive(Serialize, Deserialize)]` — produces JSON `{"identity":"worker","generation":0}`.
+`AgentRuntimeId` at `crates/meerkat-mob/src/ids.rs:263-286` is `struct { identity, generation }` with `#[derive(Serialize, Deserialize)]` — produces JSON `{"identity":"worker","generation":0}`.
 
 The tests assert field layout that matches earlier behavior. The assertions may be passing on the presence side (`!is_null()`) and failing on the equality side — the equality check at `handle.rs:3608` and `3640` is `receipt_value["agent_runtime_id"] == serde_json::to_value(&runtime_id)`. If that fails, the serialized shape on the receipt side diverges from the runtime_id-standalone shape — most likely a serde rename or flatten difference between the `MemberRespawnReceipt`/`HelperResult` struct field and direct `AgentRuntimeId` serialization.
 

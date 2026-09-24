@@ -98,7 +98,7 @@ def main() -> int:
         return 2
 
     root = pathlib.Path(sys.argv[1])
-    router_path = root / "meerkat-rest" / "src" / "lib.rs"
+    router_path = root / "crates" / "meerkat-rest" / "src" / "lib.rs"
     openapi_path = root / "artifacts" / "schemas" / "rest-openapi.json"
 
     router_text = router_path.read_text(encoding="utf-8")

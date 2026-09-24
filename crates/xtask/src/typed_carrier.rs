@@ -49,7 +49,7 @@ pub const TYPED_CARRIER_REGISTRY: &[CarrierEntry] = &[
     // `RuntimeTurnMetadata` is the canonical per-turn runtime metadata seam.
     // Its docstring asserts "`serde_json::Value` does not appear anywhere in
     // this shape" — these locks enforce exactly that invariant per field.
-    // meerkat-core/src/lifecycle/run_primitive.rs
+    // crates/meerkat-core/src/lifecycle/run_primitive.rs
     ("RuntimeTurnMetadata", "model", "ModelId"),
     ("RuntimeTurnMetadata", "provider", "Provider"),
     ("RuntimeTurnMetadata", "self_hosted_server_id", "String"),
@@ -74,29 +74,29 @@ pub const TYPED_CARRIER_REGISTRY: &[CarrierEntry] = &[
     // meerkat-core (domain) and meerkat-contracts (wire projection); both carry
     // the typed `CommsPeerRequestIntent` at HEAD, so this entry locks the field
     // on every declaration (keyed by type ident, not path).
-    // meerkat-core/src/comms.rs + meerkat-contracts/src/wire/comms.rs
+    // crates/meerkat-core/src/comms.rs + crates/meerkat-contracts/src/wire/comms.rs
     ("CommsCommandRequest", "intent", "CommsPeerRequestIntent"),
     // BY-DESIGN opaque — NOT enforced and MUST NOT be migrated. These three
     // carry arbitrary provider-native knobs and are a deliberate §3 opaque
     // pass-through at the durable/config boundary: `provider_params` only
     // becomes interpretable once provider context exists (projected to a typed
-    // `ProviderTag` at build time in meerkat/src/factory.rs). Typing them at
+    // `ProviderTag` at build time in crates/meerkat/src/factory.rs). Typing them at
     // this seam breaks the intentional byte-for-byte session-storage contract
-    // in meerkat-session/tests/persistence_compat.rs (fixture #4 "Anthropic
+    // in crates/meerkat-session/tests/persistence_compat.rs (fixture #4 "Anthropic
     // thinking canary", fixture #5 scalar round-trip). `ProviderParamsOverride`
     // is NOT serde(transparent) and has no merge owner, so it cannot replace the
     // opaque Value here. Confirmed by keystone-carrier (2026-06-09); see the
     // post-execution recalibration in the PR759 re-verification report. The
     // codex ledger and the 531-agent verification both over-flagged these as
     // active STRING_JSON; they are OVERFLAGGED_BY_DESIGN.
-    //   AgentConfig.provider_params         => Option<serde_json::Value>  (meerkat-core/src/config.rs)
-    //   SessionBuildOptions.provider_params => Option<serde_json::Value>  (meerkat-core/src/service/mod.rs)
-    //   SessionMetadata.provider_params     => Option<serde_json::Value>  (meerkat-core/src/session.rs)
+    //   AgentConfig.provider_params         => Option<serde_json::Value>  (crates/meerkat-core/src/config.rs)
+    //   SessionBuildOptions.provider_params => Option<serde_json::Value>  (crates/meerkat-core/src/service/mod.rs)
+    //   SessionMetadata.provider_params     => Option<serde_json::Value>  (crates/meerkat-core/src/session.rs)
     // PENDING (intentionally `String` on the wire seam — wire types do not carry
     // the strict `Provider` enum, so these are NOT carrier reversions):
-    //   LoginStartParams.provider     => String  (meerkat-contracts/src/wire/connection.rs)
-    //   WireBackendProfile.provider   => String  (meerkat-contracts/src/wire/connection.rs)
-    //   WireAuthProfile.provider      => String  (meerkat-contracts/src/wire/connection.rs)
+    //   LoginStartParams.provider     => String  (crates/meerkat-contracts/src/wire/connection.rs)
+    //   WireBackendProfile.provider   => String  (crates/meerkat-contracts/src/wire/connection.rs)
+    //   WireAuthProfile.provider      => String  (crates/meerkat-contracts/src/wire/connection.rs)
 ];
 
 /// Normalize a declared type to a stable, whitespace-free token string.
@@ -257,7 +257,7 @@ mod tests {
     fn findings(source: &str) -> Vec<Finding> {
         let parsed = syn::parse_file(source).expect("parse typed-carrier fixture");
         let mut visitor = TypedCarrierAdoptionVisitor::with_registry(
-            "meerkat-core/src/x.rs",
+            "crates/meerkat-core/src/x.rs",
             source,
             TEST_REGISTRY,
         );

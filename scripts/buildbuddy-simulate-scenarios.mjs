@@ -176,14 +176,14 @@ async function sameWorktree(root) {
       root,
       { RUST_LANE_ID: "same-a" },
       "owned-build",
-      ["meerkat-machine-dsl-core/src/lib.rs"],
+      ["crates/meerkat-machine-dsl-core/src/lib.rs"],
       ["--jobs=64", "--color=no", "--curses=no"],
     ),
     repoCommand(
       root,
       { RUST_LANE_ID: "same-b" },
       "owned-fast-test",
-      ["meerkat-mob/tests/member_session_bindings.rs"],
+      ["crates/meerkat-mob/tests/member_session_bindings.rs"],
       ["--jobs=64"],
     ),
   ];
@@ -199,14 +199,14 @@ async function sameCommand(root) {
       root,
       { RUST_LANE_ID: "same-command-a" },
       "owned-fast-test",
-      ["meerkat-mob/tests/member_session_bindings.rs"],
+      ["crates/meerkat-mob/tests/member_session_bindings.rs"],
       ["--jobs=64"],
     ),
     repoCommand(
       root,
       { RUST_LANE_ID: "same-command-b" },
       "owned-fast-test",
-      ["meerkat-machine-schema/tests/schema_contracts.rs"],
+      ["crates/meerkat-machine-schema/tests/schema_contracts.rs"],
       ["--jobs=64"],
     ),
   ];
@@ -217,7 +217,7 @@ async function sameCommand(root) {
 
 async function supportFile(root) {
   console.log("\n== support-file ==");
-  const path = "meerkat/tests/support/test_session_store.rs";
+  const path = "crates/meerkat/tests/support/test_session_store.rs";
   const results = [
     await repoCommand(root, {}, "owned-fast-test", [path], ["--jobs=64"]),
     await repoCommand(root, {}, "owned-fast-test-local", [path], ["--color=no", "--curses=no"]),
@@ -233,14 +233,14 @@ async function changedClippy(root) {
       root,
       { RUST_LANE_ID: "changed-clippy-source" },
       "owned-clippy-rbe",
-      ["meerkat-machine-dsl-core/src/lib.rs"],
+      ["crates/meerkat-machine-dsl-core/src/lib.rs"],
       ["--jobs=64", "--color=no", "--curses=no"],
     ),
     repoCommand(
       root,
       { RUST_LANE_ID: "changed-clippy-support" },
       "owned-clippy-rbe",
-      ["meerkat/tests/support/test_session_store.rs"],
+      ["crates/meerkat/tests/support/test_session_store.rs"],
       ["--jobs=64", "--color=no", "--curses=no"],
     ),
   ]);
@@ -252,7 +252,7 @@ async function changedGate(root) {
   console.log("\n== changed-gate ==");
   const result = await run(
     "./scripts/buildbuddy-changed-gate",
-    ["--owned", "meerkat/tests/support/test_session_store.rs"],
+    ["--owned", "crates/meerkat/tests/support/test_session_store.rs"],
     { cwd: root, env: { RUST_LANE_ID: "scenario-changed-gate" }, label: "buildbuddy-changed-gate support" },
   );
   printResult(result);
@@ -263,7 +263,7 @@ async function requiredFeatureGate(root) {
   console.log("\n== required-feature-gate ==");
   const result = await run(
     "./scripts/buildbuddy-changed-gate",
-    ["--owned", "--local-test", "meerkat-cli/tests/cli_mobpack_live_smoke.rs"],
+    ["--owned", "--local-test", "crates/meerkat-cli/tests/cli_mobpack_live_smoke.rs"],
     {
       cwd: root,
       env: { RUST_LANE_ID: "scenario-required-feature-gate" },
@@ -278,7 +278,7 @@ async function optionalRequiredFeatureGate(root) {
   console.log("\n== optional-required-feature-gate ==");
   const result = await run(
     "./scripts/buildbuddy-changed-gate",
-    ["--owned", "--local-test", "xtask/tests/machines_contracts.rs"],
+    ["--owned", "--local-test", "crates/xtask/tests/machines_contracts.rs"],
     {
       cwd: root,
       env: { RUST_LANE_ID: "scenario-optional-required-feature-gate" },
@@ -293,7 +293,7 @@ async function agentGate(root) {
   console.log("\n== agent-gate ==");
   const result = await run(
     "./scripts/buildbuddy-agent-gate",
-    ["--owned", "meerkat-runtime/src/input_ledger.rs"],
+    ["--owned", "crates/meerkat-runtime/src/input_ledger.rs"],
     { cwd: root, env: { RUST_LANE_ID: "scenario-agent-gate" }, label: "buildbuddy-agent-gate source" },
   );
   printResult(result);
@@ -315,7 +315,7 @@ async function sourceGate(root) {
   console.log("\n== source-gate ==");
   const result = await run(
     "./scripts/buildbuddy-changed-gate",
-    ["--owned", "meerkat-machine-dsl-core/src/lib.rs"],
+    ["--owned", "crates/meerkat-machine-dsl-core/src/lib.rs"],
     { cwd: root, env: { RUST_LANE_ID: "scenario-source-gate" }, label: "buildbuddy-changed-gate source" },
   );
   printResult(result);
@@ -327,12 +327,12 @@ async function parallelGates(root) {
   const results = await Promise.all([
     run(
       "./scripts/buildbuddy-changed-gate",
-      ["--owned", "meerkat/tests/support/test_session_store.rs"],
+      ["--owned", "crates/meerkat/tests/support/test_session_store.rs"],
       { cwd: root, env: { RUST_LANE_ID: "parallel-gate-support" }, label: "changed-gate support" },
     ),
     run(
       "./scripts/buildbuddy-changed-gate",
-      ["--owned", "meerkat-mob/tests/member_session_bindings.rs"],
+      ["--owned", "crates/meerkat-mob/tests/member_session_bindings.rs"],
       { cwd: root, env: { RUST_LANE_ID: "parallel-gate-test" }, label: "changed-gate test" },
     ),
   ]);
@@ -345,12 +345,12 @@ async function parallelGatesAuto(root) {
   const results = await Promise.all([
     run(
       "./scripts/buildbuddy-changed-gate",
-      ["--owned", "meerkat/tests/support/test_session_store.rs"],
+      ["--owned", "crates/meerkat/tests/support/test_session_store.rs"],
       { cwd: root, label: "changed-gate support auto-lane" },
     ),
     run(
       "./scripts/buildbuddy-changed-gate",
-      ["--owned", "meerkat-mob/tests/member_session_bindings.rs"],
+      ["--owned", "crates/meerkat-mob/tests/member_session_bindings.rs"],
       { cwd: root, label: "changed-gate test auto-lane" },
     ),
   ]);
@@ -365,21 +365,21 @@ function editProbeCases() {
       env: { RUST_LANE_ID: "edit-source" },
       extra: ["--jobs=64", "--color=no", "--curses=no"],
       marker: "\n// BuildBuddy edit probe: source-owned-build.\n",
-      path: "meerkat-machine-dsl-core/src/lib.rs",
+      path: "crates/meerkat-machine-dsl-core/src/lib.rs",
     },
     {
       command: "owned-fast-test",
       env: { RUST_LANE_ID: "edit-test" },
       extra: ["--jobs=64"],
       marker: "\n// BuildBuddy edit probe: exact-test-remote.\n",
-      path: "meerkat-mob/tests/member_session_bindings.rs",
+      path: "crates/meerkat-mob/tests/member_session_bindings.rs",
     },
     {
       command: "owned-fast-test-local",
       env: { RUST_LANE_ID: "edit-support-local" },
       extra: ["--color=no", "--curses=no"],
       marker: "\n// BuildBuddy edit probe: support-local.\n",
-      path: "meerkat/tests/support/test_session_store.rs",
+      path: "crates/meerkat/tests/support/test_session_store.rs",
     },
   ];
 }
@@ -441,14 +441,14 @@ async function multiWorktree(root) {
         a,
         { RUST_LANE_ID: "wt-a" },
         "owned-build",
-        ["meerkat-machine-dsl-core/src/lib.rs"],
+        ["crates/meerkat-machine-dsl-core/src/lib.rs"],
         ["--jobs=64", "--color=no", "--curses=no"],
       ),
       repoCommand(
         b,
         { RUST_LANE_ID: "wt-b" },
         "owned-fast-test",
-        ["meerkat-mob/tests/member_session_bindings.rs"],
+        ["crates/meerkat-mob/tests/member_session_bindings.rs"],
         ["--jobs=64"],
       ),
     ]);
@@ -480,12 +480,12 @@ async function multiWorktreeGates(root) {
     const results = await Promise.all([
       run(
         "./scripts/buildbuddy-changed-gate",
-        ["--owned", "meerkat-machine-dsl-core/src/lib.rs"],
+        ["--owned", "crates/meerkat-machine-dsl-core/src/lib.rs"],
         { cwd: a, label: "worktree-a source gate" },
       ),
       run(
         "./scripts/buildbuddy-changed-gate",
-        ["--owned", "meerkat/tests/support/test_session_store.rs"],
+        ["--owned", "crates/meerkat/tests/support/test_session_store.rs"],
         { cwd: b, label: "worktree-b support gate" },
       ),
     ]);
@@ -598,7 +598,7 @@ async function ciDispatchArtifacts(root) {
   try {
     const result = await run(
       "./scripts/buildbuddy-ci-dispatch",
-      ["--mode", "changed-paths", "--paths", "meerkat-runtime/src/input_ledger.rs", "--dry-run"],
+      ["--mode", "changed-paths", "--paths", "crates/meerkat-runtime/src/input_ledger.rs", "--dry-run"],
       {
         cwd: root,
         env: { MEERKAT_BUILDBUDDY_LOG_ROOT: temp },

@@ -68,7 +68,7 @@ echo "==> Stamping CHANGELOG.md for $VERSION"
 "$PYTHON" "$ROOT/scripts/stamp-changelog-release.py" "$ROOT/CHANGELOG.md" "$VERSION"
 
 # 2. Bump ContractVersion::CURRENT in version.rs to match package version
-VERSION_RS="$ROOT/meerkat-contracts/src/version.rs"
+VERSION_RS="$ROOT/crates/meerkat-contracts/src/version.rs"
 V_CORE="${VERSION%%-*}"
 V_PRE=""
 if [[ "$VERSION" == *-* ]]; then
@@ -139,7 +139,7 @@ git add \
     "$ROOT/.claude/skills/meerkat-platform/SKILL.md" \
     "$ROOT/docs/" \
     "$ROOT/MODULE.bazel.lock" \
-    "$ROOT/meerkat-contracts/src/version.rs" \
+    "$ROOT/crates/meerkat-contracts/src/version.rs" \
     "$ROOT/sdks/python/pyproject.toml" \
     "$ROOT/sdks/typescript/package.json" \
     "$ROOT/sdks/web/package.json" \

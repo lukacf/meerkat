@@ -196,7 +196,7 @@ impl Envelope {
     ///
     /// `PubKey` is encoded as a CBOR byte string (major type 2), not an array.
     ///
-    /// TWIN ALGORITHM: `meerkat-contracts/src/wire/spec_digest.rs` carries a
+    /// TWIN ALGORITHM: `crates/meerkat-contracts/src/wire/spec_digest.rs` carries a
     /// byte-identical copy of this canonicalizer for the portable-member-spec
     /// digest (the crates cannot share code without a dependency cycle). Any
     /// RFC 8949 edge-case fix must land in BOTH; the contracts side pins the

@@ -10,6 +10,7 @@ use std::path::Path;
 fn workspace_root() -> Result<&'static Path, String> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(std::path::Path::parent)
         .ok_or_else(|| "meerkat-runtime crate should live below workspace root".to_string())
 }
 
@@ -79,30 +80,33 @@ fn derive_attribute_before<'a>(contents: &'a str, marker: &str) -> Result<&'a st
 fn core_apply_terminal_truth_has_one_authority() -> Result<(), String> {
     let root = workspace_root()?;
     let core_executor =
-        fs::read_to_string(root.join("meerkat-core/src/lifecycle/core_executor.rs"))
+        fs::read_to_string(root.join("crates/meerkat-core/src/lifecycle/core_executor.rs"))
             .map_err(|err| format!("read core executor source: {err}"))?;
-    let runtime_loop = fs::read_to_string(root.join("meerkat-runtime/src/runtime_loop.rs"))
+    let runtime_loop = fs::read_to_string(root.join("crates/meerkat-runtime/src/runtime_loop.rs"))
         .map_err(|err| format!("read runtime loop source: {err}"))?;
     let runtime_driver =
-        fs::read_to_string(root.join("meerkat-runtime/src/meerkat_machine/driver.rs"))
+        fs::read_to_string(root.join("crates/meerkat-runtime/src/meerkat_machine/driver.rs"))
             .map_err(|err| format!("read runtime driver source: {err}"))?;
-    let completion_source = fs::read_to_string(root.join("meerkat-runtime/src/completion.rs"))
-        .map_err(|err| format!("read completion source: {err}"))?;
+    let completion_source =
+        fs::read_to_string(root.join("crates/meerkat-runtime/src/completion.rs"))
+            .map_err(|err| format!("read completion source: {err}"))?;
     let persistent_driver =
-        fs::read_to_string(root.join("meerkat-runtime/src/driver/persistent.rs"))
+        fs::read_to_string(root.join("crates/meerkat-runtime/src/driver/persistent.rs"))
             .map_err(|err| format!("read persistent driver source: {err}"))?;
-    let ephemeral_driver = fs::read_to_string(root.join("meerkat-runtime/src/driver/ephemeral.rs"))
-        .map_err(|err| format!("read ephemeral driver source: {err}"))?;
-    let meerkat_machine_schema =
-        fs::read_to_string(root.join("meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs"))
-            .map_err(|err| format!("read MeerkatMachine schema source: {err}"))?;
+    let ephemeral_driver =
+        fs::read_to_string(root.join("crates/meerkat-runtime/src/driver/ephemeral.rs"))
+            .map_err(|err| format!("read ephemeral driver source: {err}"))?;
+    let meerkat_machine_schema = fs::read_to_string(
+        root.join("crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs"),
+    )
+    .map_err(|err| format!("read MeerkatMachine schema source: {err}"))?;
     let meerkat_machine_model =
         fs::read_to_string(root.join("specs/machines/meerkat_machine/model.tla"))
             .map_err(|err| format!("read MeerkatMachine TLA source: {err}"))?;
     let meerkat_machine_contract =
         fs::read_to_string(root.join("specs/machines/meerkat_machine/contract.md"))
             .map_err(|err| format!("read MeerkatMachine contract source: {err}"))?;
-    let accept_source = fs::read_to_string(root.join("meerkat-runtime/src/accept.rs"))
+    let accept_source = fs::read_to_string(root.join("crates/meerkat-runtime/src/accept.rs"))
         .map_err(|err| format!("read accept source: {err}"))?;
 
     let output_struct = extract_braced_item(&core_executor, "pub struct CoreApplyOutput")?;
@@ -509,7 +513,7 @@ fn core_apply_terminal_truth_has_one_authority() -> Result<(), String> {
 #[test]
 fn runtime_loop_terminal_snapshot_failures_are_fail_closed() -> Result<(), String> {
     let root = workspace_root()?;
-    let runtime_loop = fs::read_to_string(root.join("meerkat-runtime/src/runtime_loop.rs"))
+    let runtime_loop = fs::read_to_string(root.join("crates/meerkat-runtime/src/runtime_loop.rs"))
         .map_err(|err| format!("read runtime loop source: {err}"))?;
 
     assert!(
@@ -523,10 +527,11 @@ fn runtime_loop_terminal_snapshot_failures_are_fail_closed() -> Result<(), Strin
 #[test]
 fn terminal_notices_flow_through_canonical_typed_appends() -> Result<(), String> {
     let root = workspace_root()?;
-    let runtime_backed = fs::read_to_string(root.join("meerkat/src/surface/runtime_backed.rs"))
-        .map_err(|err| format!("read runtime-backed surface source: {err}"))?;
+    let runtime_backed =
+        fs::read_to_string(root.join("crates/meerkat/src/surface/runtime_backed.rs"))
+            .map_err(|err| format!("read runtime-backed surface source: {err}"))?;
     let mcp_runtime_ingress =
-        fs::read_to_string(root.join("meerkat-mcp-server/src/runtime_ingress.rs"))
+        fs::read_to_string(root.join("crates/meerkat-mcp-server/src/runtime_ingress.rs"))
             .map_err(|err| format!("read MCP runtime ingress source: {err}"))?;
 
     let runtime_backed_apply = extract_braced_item(&runtime_backed, "async fn apply")?;

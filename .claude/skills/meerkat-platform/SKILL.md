@@ -494,7 +494,7 @@ Practical caveats:
   refuses rather than dropping that context.
 - Provider-native web search and tool-calling capability is per-model; check `ModelProfile` flat fields like `supports_web_search` if a tool unexpectedly disappears under a realtime model.
 
-Wire types: see `LiveOpenParams`, `LiveOpenResult`, `WireLiveChannelCapabilities`, `LiveStatusResult`, `LiveSendInputParams`, `LiveTruncateParams`, `WireLiveAdapterStatus`, `WireLiveAdapterErrorCode`, and `WireLiveAdapterObservation` in `meerkat-contracts/src/wire/live.rs`.
+Wire types: see `LiveOpenParams`, `LiveOpenResult`, `WireLiveChannelCapabilities`, `LiveStatusResult`, `LiveSendInputParams`, `LiveTruncateParams`, `WireLiveAdapterStatus`, `WireLiveAdapterErrorCode`, and `WireLiveAdapterObservation` in `crates/meerkat-contracts/src/wire/live.rs`.
 
 ### Mob lifecycle (standard/default usage)
 
@@ -737,7 +737,7 @@ OccurrenceLifecycleMachine - occurrence state-transition authority
 ScheduleStore           — persistence (Memory, SQLite)
 ```
 
-**Delivery**: The driver claims due occurrences, probes target availability, dispatches delivery (creates session + runs prompt), and monitors completion. The schedule host surface (`meerkat/src/surface/schedule_host.rs`) bridges delivery to `MeerkatMachine`.
+**Delivery**: The driver claims due occurrences, probes target availability, dispatches delivery (creates session + runs prompt), and monitors completion. The schedule host surface (`crates/meerkat/src/surface/schedule_host.rs`) bridges delivery to `MeerkatMachine`.
 
 **Planning**: On create/update/resume, `ScheduleService` projects occurrences within a horizon (30 days or 64 occurrences). Old occurrences are superseded atomically via `atomic_plan_mutation()`.
 

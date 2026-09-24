@@ -100,7 +100,7 @@ pub(crate) enum TurnUsageIdentityVerdict {
 /// # What this cannot see
 ///
 /// Every in-tree adapter mints its accounting from the model it lowered into
-/// the request (`meerkat-anthropic/src/client.rs`, `meerkat-gemini`,
+/// the request (`crates/meerkat-anthropic/src/client.rs`, `meerkat-gemini`,
 /// `meerkat-openai` both surfaces), so both sides of this comparison echo the
 /// same identity and no in-tree stream reaches `Disputed`. The check exists
 /// for host-implemented `AgentLlmClient`s and for adapters that later account

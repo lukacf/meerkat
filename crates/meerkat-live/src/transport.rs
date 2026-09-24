@@ -1454,7 +1454,7 @@ async fn handle_live_socket(
                         // and byte-compatible for known variants — see
                         // `wire_live_adapter_observation_byte_compatible_with_core_for_audio_chunk`
                         // / `_command_rejected` in
-                        // `meerkat-contracts/src/wire/live.rs`.
+                        // `crates/meerkat-contracts/src/wire/live.rs`.
                         let close_observation = observation_requires_generated_close(&obs);
                         let publish_observation = should_publish_observation(&obs);
 
@@ -1584,7 +1584,7 @@ pub async fn serve_live_ws_listener(
 }
 
 // TODO(wire-handlers): `mint_token` now returns `LiveTokenString` (URL-safe
-// invariant). The caller in `meerkat-rpc/src/handlers/live.rs` interpolates
+// invariant). The caller in `crates/meerkat-rpc/src/handlers/live.rs` interpolates
 // it via `format!("…?token={token}")`; that continues to work because
 // `LiveTokenString` implements `Display`. When wire-handlers next touches
 // that file, prefer storing the typed value end-to-end (e.g. in

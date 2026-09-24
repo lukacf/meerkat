@@ -1175,6 +1175,7 @@ mod scenario_21_sdk_builder {
                 std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
             let workspace_root = std::path::Path::new(&manifest_dir)
                 .parent()
+                .and_then(std::path::Path::parent)
                 .expect("workspace root");
             workspace_root.join("tools/sdk-builder/build.py")
         };

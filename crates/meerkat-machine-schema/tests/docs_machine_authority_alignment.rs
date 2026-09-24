@@ -3,7 +3,7 @@
 //!
 //! `docs/reference/machine-authority.mdx` hand-maintains a "Canonical Machines"
 //! table. The canonical authority is `canonical_machine_schemas()` in
-//! `meerkat-machine-schema/src/catalog/mod.rs`. Without this gate the doc table
+//! `crates/meerkat-machine-schema/src/catalog/mod.rs`. Without this gate the doc table
 //! silently drifts from the registry (it previously listed 7 of 10 machines).
 //! This test binds the table to the registry: every canonical machine must be
 //! documented and the table must not list a machine the registry does not own.
@@ -18,6 +18,7 @@ fn workspace_root() -> PathBuf {
         .unwrap_or_else(|| {
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
+                .and_then(Path::parent)
                 .expect("workspace root")
                 .to_path_buf()
         })
@@ -217,7 +218,7 @@ fn doctrine_count_claims_match_canonical_registry() {
     let composition_count = canonical_composition_schemas().len();
 
     let mut files = Vec::new();
-    for tree in ["docs", "docs-internal", ".claude/skills"] {
+    for tree in ["docs", "docs/internal", ".claude/skills"] {
         let dir = repo_root.join(tree);
         if dir.is_dir() {
             markdown_files(&dir, &mut files);

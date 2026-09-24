@@ -85,6 +85,7 @@ fn repo_root() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     path.pop();
+    path.pop();
     if path.as_os_str().is_empty() {
         PathBuf::from(".")
     } else {
@@ -358,7 +359,7 @@ fn downstream_safe_code_cannot_forge_factory_policy_finalizer() -> std::io::Resu
         "agent-builder-policy-downstream",
         &dependencies,
         &repo_file(
-            "meerkat/tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
+            "crates/meerkat/tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
         ),
         DownstreamCargoAction::Check,
     )?
@@ -402,7 +403,7 @@ meerkat-runtime = {{ path = "{}" }}"#,
         "agent-builder-policy-downstream-unsafe-finalizer",
         &dependencies,
         &repo_file(
-            "meerkat/tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+            "crates/meerkat/tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         ),
         DownstreamCargoAction::Run,
     )?
@@ -455,7 +456,7 @@ meerkat-core = {{ path = "{}" }}"#,
         "agent-builder-policy-downstream-public-facade-smoke",
         &dependencies,
         &repo_file(
-            "meerkat/tests/fixtures/agent_builder_policy/downstream_public_facade_agentbuilder.rs",
+            "crates/meerkat/tests/fixtures/agent_builder_policy/downstream_public_facade_agentbuilder.rs",
         ),
         DownstreamCargoAction::Run,
     )?
@@ -557,7 +558,7 @@ async fn public_facade_rejects_forged_session_runtime_binding_authority() {
 
 #[test]
 fn core_agent_builder_does_not_expose_public_build_bypass() {
-    let builder = repo_file("meerkat-core/src/agent/builder.rs");
+    let builder = repo_file("crates/meerkat-core/src/agent/builder.rs");
 
     assert!(
         !builder.contains("pub async fn build<"),
@@ -661,14 +662,14 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
 
 #[test]
 fn core_test_turn_state_handle_is_not_public_authority() {
-    let agent_mod = repo_file("meerkat-core/src/agent.rs");
+    let agent_mod = repo_file("crates/meerkat-core/src/agent.rs");
     assert!(
         agent_mod.contains("#[cfg(test)]\n#[doc(hidden)]\npub(crate) mod test_turn_state_handle;"),
         "core test turn-state handle must be cfg(test) and crate-private so downstream \
          crates cannot substitute a handwritten lifecycle reducer for runtime machine authority"
     );
 
-    let test_handle = repo_file("meerkat-core/src/agent/test_turn_state_handle.rs");
+    let test_handle = repo_file("crates/meerkat-core/src/agent/test_turn_state_handle.rs");
     assert!(
         test_handle.contains("pub(crate) struct TestTurnStateHandle")
             && !test_handle.contains("pub struct TestTurnStateHandle")
@@ -678,8 +679,8 @@ fn core_test_turn_state_handle_is_not_public_authority() {
     );
 
     for fixture in [
-        "meerkat/tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
-        "meerkat/tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "crates/meerkat/tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
+        "crates/meerkat/tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
     ] {
         let source = repo_file(fixture);
         assert!(
@@ -692,10 +693,10 @@ fn core_test_turn_state_handle_is_not_public_authority() {
 
 #[test]
 fn core_factory_authority_token_is_not_reexported() {
-    let agent_mod = repo_file("meerkat-core/src/agent.rs");
-    let lib = repo_file("meerkat-core/src/lib.rs");
-    let facade_lib = repo_file("meerkat/src/lib.rs");
-    let authority = repo_file("meerkat-agent-build-authority/src/lib.rs");
+    let agent_mod = repo_file("crates/meerkat-core/src/agent.rs");
+    let lib = repo_file("crates/meerkat-core/src/lib.rs");
+    let facade_lib = repo_file("crates/meerkat/src/lib.rs");
+    let authority = repo_file("crates/meerkat-agent-build-authority/src/lib.rs");
 
     assert!(
         !agent_mod.contains("pub use builder::build_agent_after_factory_policy")
@@ -753,7 +754,8 @@ fn core_factory_authority_token_is_not_reexported() {
 
 #[test]
 fn bazel_factory_authority_target_is_not_publicly_visible() {
-    let Some(authority_bazel) = try_repo_file("meerkat-agent-build-authority/BUILD.bazel") else {
+    let Some(authority_bazel) = try_repo_file("crates/meerkat-agent-build-authority/BUILD.bazel")
+    else {
         // Cargo-only source layouts may not include generated Bazel files.
         return;
     };
@@ -766,7 +768,11 @@ fn bazel_factory_authority_target_is_not_publicly_visible() {
          downstream Bazel target can depend on the public core target, add the \
          authority target directly, and call the factory-policy finalizer"
     );
-    for label in ["//:__pkg__", "//meerkat-core:__pkg__", "//meerkat:__pkg__"] {
+    for label in [
+        "//:__pkg__",
+        "//crates/meerkat-core:__pkg__",
+        "//crates/meerkat:__pkg__",
+    ] {
         assert!(
             authority_library.contains(label),
             "authority target visibility must still allow the canonical \
@@ -777,9 +783,9 @@ fn bazel_factory_authority_target_is_not_publicly_visible() {
 
 #[test]
 fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
-    let authority_build = repo_file("meerkat-agent-build-authority/build.rs");
-    let core_build = try_repo_file("meerkat-core/build.rs");
-    let facade_build = try_repo_file("meerkat/build.rs");
+    let authority_build = repo_file("crates/meerkat-agent-build-authority/build.rs");
+    let core_build = try_repo_file("crates/meerkat-core/build.rs");
+    let facade_build = try_repo_file("crates/meerkat/build.rs");
 
     assert!(
         !authority_build.contains("cargo:metadata=")
@@ -804,8 +810,8 @@ fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
         );
     }
     for (name, build_script) in [
-        ("meerkat-core/build.rs", core_build.as_deref()),
-        ("meerkat/build.rs", facade_build.as_deref()),
+        ("crates/meerkat-core/build.rs", core_build.as_deref()),
+        ("crates/meerkat/build.rs", facade_build.as_deref()),
     ] {
         let Some(build_script) = build_script else {
             continue;
@@ -838,7 +844,7 @@ fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
 
 #[test]
 fn facade_build_script_prefers_exact_registry_core_package() {
-    let facade_build = repo_file("meerkat/build.rs");
+    let facade_build = repo_file("crates/meerkat/build.rs");
 
     assert!(
         facade_build.contains("CARGO_PKG_VERSION")
@@ -853,8 +859,8 @@ fn facade_build_script_prefers_exact_registry_core_package() {
 
 #[test]
 fn facade_cargo_does_not_feature_unify_standalone_builder_by_default() {
-    let cargo = repo_file("meerkat/Cargo.toml");
-    let core_cargo = repo_file("meerkat-core/Cargo.toml");
+    let cargo = repo_file("crates/meerkat/Cargo.toml");
+    let core_cargo = repo_file("crates/meerkat-core/Cargo.toml");
     let repo_cargo = repo_file("scripts/repo-cargo");
     let buildbuddy_cargo_lane = repo_file("tools/buildbuddy/cargo_lane_test.sh");
     let buildbuddy_full_lane = repo_file("tools/buildbuddy/full_lane_test.sh");
@@ -908,7 +914,7 @@ fn facade_cargo_does_not_feature_unify_standalone_builder_by_default() {
 
 #[test]
 fn public_bazel_core_target_does_not_expose_build_bypass_features() {
-    let Some(core_bazel) = try_repo_file("meerkat-core/BUILD.bazel") else {
+    let Some(core_bazel) = try_repo_file("crates/meerkat-core/BUILD.bazel") else {
         // Cargo-only source layouts may not include generated Bazel files.
         return;
     };
@@ -935,15 +941,15 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
     assert!(
         internal_core.contains("meerkat_internal_agent_factory_build")
             && internal_core.contains("rustc_flags")
-            && internal_core.contains("\"//meerkat:__pkg__\"")
+            && internal_core.contains("\"//crates/meerkat:__pkg__\"")
             && !internal_core.contains("//visibility:public"),
         "the Bazel AgentFactory core variant must carry the internal factory \
          cfg but be visible only to the facade package"
     );
     for forbidden_package in [
-        "//meerkat-cli:__pkg__",
-        "//meerkat-comms:__pkg__",
-        "//meerkat-runtime:__pkg__",
+        "//crates/meerkat-cli:__pkg__",
+        "//crates/meerkat-comms:__pkg__",
+        "//crates/meerkat-runtime:__pkg__",
         "//tests/integration:__pkg__",
     ] {
         assert!(
@@ -954,17 +960,18 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
         );
     }
 
-    if let Some(facade_bazel) = try_repo_file("meerkat/BUILD.bazel") {
+    if let Some(facade_bazel) = try_repo_file("crates/meerkat/BUILD.bazel") {
         assert!(
             facade_bazel.contains("name = \"meerkat_core_agent_factory_build\"")
-                && facade_bazel
-                    .contains("actual = \"//meerkat-core:meerkat_core_agent_factory_build\""),
+                && facade_bazel.contains(
+                    "actual = \"//crates/meerkat-core:meerkat_core_agent_factory_build\""
+                ),
             "the facade package must own the Bazel alias that routes private \
              core factory-build graph consumers through the canonical facade \
              package"
         );
         assert!(
-            !facade_bazel.contains("//meerkat:meerkat_agent_factory_build"),
+            !facade_bazel.contains("//crates/meerkat:meerkat_agent_factory_build"),
             "the facade package must not rewrite self-dependencies to a \
              nonexistent private facade variant"
         );
@@ -974,12 +981,14 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
 #[test]
 fn non_facade_bazel_targets_do_not_directly_select_core_factory_variant() {
     let root = repo_root();
-    for entry in
-        fs::read_dir(&root).unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()))
+    let crates_dir = root.join("crates");
+    for entry in fs::read_dir(&crates_dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", crates_dir.display()))
     {
         let entry = entry.unwrap_or_else(|err| panic!("failed to read repo entry: {err}"));
         let path = entry.path().join("BUILD.bazel");
-        if path == root.join("meerkat/BUILD.bazel") || path == root.join("meerkat-core/BUILD.bazel")
+        if path == root.join("crates/meerkat/BUILD.bazel")
+            || path == root.join("crates/meerkat-core/BUILD.bazel")
         {
             continue;
         }
@@ -987,7 +996,7 @@ fn non_facade_bazel_targets_do_not_directly_select_core_factory_variant() {
             continue;
         };
         assert!(
-            !build_file.contains("\"//meerkat-core:meerkat_core_agent_factory_build\""),
+            !build_file.contains("\"//crates/meerkat-core:meerkat_core_agent_factory_build\""),
             "non-facade Bazel package must not depend on the actual core \
              AgentFactory bridge target directly: {}",
             path.display()
@@ -998,8 +1007,8 @@ fn non_facade_bazel_targets_do_not_directly_select_core_factory_variant() {
 #[test]
 fn ordinary_bazel_core_dependents_do_not_use_internal_factory_variant() {
     for (build_file, target) in [
-        ("meerkat-comms/BUILD.bazel", "meerkat_comms"),
-        ("meerkat-runtime/BUILD.bazel", "meerkat_runtime"),
+        ("crates/meerkat-comms/BUILD.bazel", "meerkat_comms"),
+        ("crates/meerkat-runtime/BUILD.bazel", "meerkat_runtime"),
     ] {
         let Some(bazel) = try_repo_file(build_file) else {
             // Cargo-only source layouts may not include generated Bazel files.
@@ -1009,7 +1018,7 @@ fn ordinary_bazel_core_dependents_do_not_use_internal_factory_variant() {
             .unwrap_or_else(|| panic!("{build_file} must contain {target} rust_library"));
 
         assert!(
-            library.contains("\"//meerkat-core:meerkat_core\""),
+            library.contains("\"//crates/meerkat-core:meerkat_core\""),
             "{target} must depend on the public core Bazel target, not the \
              internal factory-build variant"
         );
@@ -1024,41 +1033,68 @@ fn ordinary_bazel_core_dependents_do_not_use_internal_factory_variant() {
 #[test]
 fn bazel_facade_consumers_do_not_mix_public_core_with_factory_graph() {
     for (build_file, target) in [
-        ("meerkat-cli/BUILD.bazel", "rkat"),
-        ("meerkat-cli/BUILD.bazel", "rkat_surface_session_store_bin"),
+        ("crates/meerkat-cli/BUILD.bazel", "rkat"),
         (
-            "meerkat-cli/BUILD.bazel",
+            "crates/meerkat-cli/BUILD.bazel",
+            "rkat_surface_session_store_bin",
+        ),
+        (
+            "crates/meerkat-cli/BUILD.bazel",
             "rkat_surface_session_store_mcp_bin",
         ),
         (
-            "meerkat-cli/BUILD.bazel",
+            "crates/meerkat-cli/BUILD.bazel",
             "rkat_surface_session_store_comms_mcp_bin",
         ),
-        ("meerkat-mcp-server/BUILD.bazel", "meerkat_mcp_server"),
         (
-            "meerkat-mcp-server/BUILD.bazel",
+            "crates/meerkat-mcp-server/BUILD.bazel",
+            "meerkat_mcp_server",
+        ),
+        (
+            "crates/meerkat-mcp-server/BUILD.bazel",
             "meerkat_mcp_server_surface_min",
         ),
         (
-            "meerkat-mcp-server/BUILD.bazel",
+            "crates/meerkat-mcp-server/BUILD.bazel",
             "meerkat_mcp_server_surface_comms",
         ),
-        ("meerkat-mcp-server/BUILD.bazel", "rkat_mcp_surface_min_bin"),
         (
-            "meerkat-mcp-server/BUILD.bazel",
+            "crates/meerkat-mcp-server/BUILD.bazel",
+            "rkat_mcp_surface_min_bin",
+        ),
+        (
+            "crates/meerkat-mcp-server/BUILD.bazel",
             "rkat_mcp_surface_comms_bin",
         ),
-        ("meerkat-mob/BUILD.bazel", "meerkat_mob"),
-        ("meerkat-rest/BUILD.bazel", "meerkat_rest"),
-        ("meerkat-rest/BUILD.bazel", "meerkat_rest_surface_min"),
-        ("meerkat-rest/BUILD.bazel", "meerkat_rest_surface_comms"),
-        ("meerkat-rest/BUILD.bazel", "rkat_rest_surface_min_bin"),
-        ("meerkat-rest/BUILD.bazel", "rkat_rest_surface_comms_bin"),
-        ("meerkat-rpc/BUILD.bazel", "meerkat_rpc"),
-        ("meerkat-rpc/BUILD.bazel", "meerkat_rpc_surface_min"),
-        ("meerkat-rpc/BUILD.bazel", "meerkat_rpc_surface_comms_mcp"),
-        ("meerkat-rpc/BUILD.bazel", "rkat_rpc_surface_min_bin"),
-        ("meerkat-rpc/BUILD.bazel", "rkat_rpc_surface_comms_mcp_bin"),
+        ("crates/meerkat-mob/BUILD.bazel", "meerkat_mob"),
+        ("crates/meerkat-rest/BUILD.bazel", "meerkat_rest"),
+        (
+            "crates/meerkat-rest/BUILD.bazel",
+            "meerkat_rest_surface_min",
+        ),
+        (
+            "crates/meerkat-rest/BUILD.bazel",
+            "meerkat_rest_surface_comms",
+        ),
+        (
+            "crates/meerkat-rest/BUILD.bazel",
+            "rkat_rest_surface_min_bin",
+        ),
+        (
+            "crates/meerkat-rest/BUILD.bazel",
+            "rkat_rest_surface_comms_bin",
+        ),
+        ("crates/meerkat-rpc/BUILD.bazel", "meerkat_rpc"),
+        ("crates/meerkat-rpc/BUILD.bazel", "meerkat_rpc_surface_min"),
+        (
+            "crates/meerkat-rpc/BUILD.bazel",
+            "meerkat_rpc_surface_comms_mcp",
+        ),
+        ("crates/meerkat-rpc/BUILD.bazel", "rkat_rpc_surface_min_bin"),
+        (
+            "crates/meerkat-rpc/BUILD.bazel",
+            "rkat_rpc_surface_comms_mcp_bin",
+        ),
     ] {
         let Some(bazel) = try_repo_file(build_file) else {
             // Cargo-only source layouts may not include generated Bazel files.
@@ -1066,18 +1102,18 @@ fn bazel_facade_consumers_do_not_mix_public_core_with_factory_graph() {
         };
         let build_target = bazel_target_block(&bazel, target)
             .unwrap_or_else(|| panic!("{build_file} must contain {target} target"));
-        if !build_target.contains("\"//meerkat:meerkat\"") {
+        if !build_target.contains("\"//crates/meerkat:meerkat\"") {
             continue;
         }
 
         assert!(
-            build_target.contains("\"//meerkat:meerkat_core_agent_factory_build\""),
+            build_target.contains("\"//crates/meerkat:meerkat_core_agent_factory_build\""),
             "{target} consumes the facade and must use the same facade-owned \
              private core variant alias as the facade to avoid duplicate \
              meerkat_core types"
         );
         assert!(
-            !build_target.contains("\"//meerkat-core:meerkat_core\","),
+            !build_target.contains("\"//crates/meerkat-core:meerkat_core\","),
             "{target} must not mix the public core target with the facade's \
              private factory dependency graph"
         );
@@ -1100,7 +1136,7 @@ fn public_downstream_bazel_fixtures_do_not_use_private_factory_targets() {
              depend on private AgentFactory build targets"
         );
         assert!(
-            build_target.contains("\"//meerkat:meerkat\""),
+            build_target.contains("\"//crates/meerkat:meerkat\""),
             "{target} must still exercise the public facade label"
         );
     }
@@ -1108,11 +1144,11 @@ fn public_downstream_bazel_fixtures_do_not_use_private_factory_targets() {
 
 #[test]
 fn core_factory_authority_is_not_publicly_forgeable() {
-    let builder = repo_file("meerkat-core/src/agent/builder.rs");
-    let agent_mod = repo_file("meerkat-core/src/agent.rs");
-    let runtime_epoch = repo_file("meerkat-core/src/runtime_epoch.rs");
-    let factory = repo_file("meerkat/src/factory.rs");
-    let runtime = repo_file("meerkat-runtime/src/lib.rs");
+    let builder = repo_file("crates/meerkat-core/src/agent/builder.rs");
+    let agent_mod = repo_file("crates/meerkat-core/src/agent.rs");
+    let runtime_epoch = repo_file("crates/meerkat-core/src/runtime_epoch.rs");
+    let factory = repo_file("crates/meerkat/src/factory.rs");
+    let runtime = repo_file("crates/meerkat-runtime/src/lib.rs");
 
     assert!(
         !builder.contains("std::any::type_name")
@@ -1206,9 +1242,10 @@ fn production_crates_do_not_adopt_standalone_builder_seam() {
     let root = repo_root();
     let mut production_files = Vec::new();
     let mut scanned_crates = BTreeSet::new();
+    let crates_dir = root.join("crates");
 
-    for entry in
-        fs::read_dir(&root).unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()))
+    for entry in fs::read_dir(&crates_dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", crates_dir.display()))
     {
         let entry = entry.unwrap_or_else(|err| panic!("failed to read repo entry: {err}"));
         let path = entry.path();
@@ -1225,7 +1262,7 @@ fn production_crates_do_not_adopt_standalone_builder_seam() {
         }
     }
     scanned_crates.insert("meerkat".to_string());
-    rust_files_under(&root.join("meerkat/src"), &mut production_files);
+    rust_files_under(&root.join("crates/meerkat/src"), &mut production_files);
 
     for required in ["meerkat-runtime", "meerkat-rest", "meerkat-rpc"] {
         assert!(
@@ -1255,7 +1292,7 @@ fn production_crates_do_not_adopt_standalone_builder_seam() {
              core factory-token seam: {}",
             path.display()
         );
-        if path != root.join("meerkat/src/factory.rs") {
+        if path != root.join("crates/meerkat/src/factory.rs") {
             assert!(
                 !source.contains("build_agent_after_factory_policy")
                     && !source.contains("build_after_factory_policy"),
@@ -1270,8 +1307,8 @@ fn production_crates_do_not_adopt_standalone_builder_seam() {
                 path.display()
             );
         }
-        if path != root.join("meerkat/src/factory.rs")
-            && path != root.join("meerkat-core/src/agent/builder.rs")
+        if path != root.join("crates/meerkat/src/factory.rs")
+            && path != root.join("crates/meerkat-core/src/agent/builder.rs")
         {
             assert!(
                 !source.contains("__meerkat_agent_factory_policy_build_v3")
@@ -1286,7 +1323,7 @@ fn production_crates_do_not_adopt_standalone_builder_seam() {
 
 #[test]
 fn bazel_canary_runfiles_include_required_production_crates() {
-    let Some(bazel) = try_repo_file("meerkat/BUILD.bazel") else {
+    let Some(bazel) = try_repo_file("crates/meerkat/BUILD.bazel") else {
         // Cargo-equivalent feature-matrix harnesses may execute this package
         // test from a reduced source layout without generated Bazel metadata.
         // The ordinary Cargo canary and Bazel unit lanes include this file.
@@ -1300,9 +1337,9 @@ fn bazel_canary_runfiles_include_required_production_crates() {
     );
 
     for label in [
-        "//meerkat-runtime:package_runfiles",
-        "//meerkat-rest:package_runfiles",
-        "//meerkat-rpc:package_runfiles",
+        "//crates/meerkat-runtime:package_runfiles",
+        "//crates/meerkat-rest:package_runfiles",
+        "//crates/meerkat-rpc:package_runfiles",
         "@rules_rust//rust/toolchain:current_cargo_files",
         "@rules_rust//rust/toolchain:current_rust_stdlib_files",
         "@rules_rust//rust/toolchain:current_rustc_files",
@@ -1319,7 +1356,7 @@ fn bazel_canary_runfiles_include_required_production_crates() {
 
 #[test]
 fn bazel_canary_runs_in_required_ci_lanes() {
-    let Some(bazel) = try_repo_file("meerkat/BUILD.bazel") else {
+    let Some(bazel) = try_repo_file("crates/meerkat/BUILD.bazel") else {
         return;
     };
     let canary = bazel_target_block(&bazel, "agent_builder_policy_canary_test")
@@ -1334,8 +1371,8 @@ fn bazel_canary_runs_in_required_ci_lanes() {
 
 #[test]
 fn production_like_callers_do_not_call_core_builder_build_directly() {
-    let factory = repo_file("meerkat/src/factory.rs");
-    let comms_agent = repo_file("meerkat-comms/src/agent/mod.rs");
+    let factory = repo_file("crates/meerkat/src/factory.rs");
+    let comms_agent = repo_file("crates/meerkat-comms/src/agent/mod.rs");
 
     assert!(
         !factory.contains("builder.build(llm_adapter, tools, store_adapter)"),
@@ -1377,27 +1414,27 @@ fn production_like_callers_do_not_call_core_builder_build_directly() {
 /// feature environment variables its lookup is gated behind.
 const BRIDGE_SUFFIX_BUILD_SCRIPTS: [(&str, &str, &[&str]); 5] = [
     (
-        "meerkat/build.rs",
+        "crates/meerkat/build.rs",
         "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX",
         &[],
     ),
     (
-        "meerkat-runtime/build.rs",
+        "crates/meerkat-runtime/build.rs",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX",
         &[],
     ),
     (
-        "meerkat-session/build.rs",
+        "crates/meerkat-session/build.rs",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX",
         &[],
     ),
     (
-        "meerkat-mob/build.rs",
+        "crates/meerkat-mob/build.rs",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX",
         &[],
     ),
     (
-        "meerkat-live/build.rs",
+        "crates/meerkat-live/build.rs",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX",
         &["CARGO_FEATURE___MEERKAT_GENERATED_AUTHORITY_BRIDGE"],
     ),
@@ -1679,7 +1716,7 @@ fn dependent_build_scripts_derive_the_suffix_core_exports() {
     let out_dir = workspace_layout(scratch.path());
     let core_manifest_dir = repo_root().join("meerkat-core");
 
-    let core_binary = compile_build_script("meerkat-core/build.rs", scratch.path());
+    let core_binary = compile_build_script("crates/meerkat-core/build.rs", scratch.path());
     let core = run_build_script(
         &core_binary,
         &core_manifest_dir,
@@ -1689,14 +1726,14 @@ fn dependent_build_scripts_derive_the_suffix_core_exports() {
     );
     assert!(
         core.status.success(),
-        "meerkat-core/build.rs failed; stderr:\n{}",
+        "crates/meerkat-core/build.rs failed; stderr:\n{}",
         core.stderr
     );
     let core_without_features =
         run_build_script(&core_binary, &core_manifest_dir, &out_dir, &[], &[]);
     assert!(
         core_without_features.status.success(),
-        "meerkat-core/build.rs failed without bridge features; stderr:\n{}",
+        "crates/meerkat-core/build.rs failed without bridge features; stderr:\n{}",
         core_without_features.stderr
     );
     for run in [&core, &core_without_features] {
@@ -1714,7 +1751,7 @@ fn dependent_build_scripts_derive_the_suffix_core_exports() {
     for (script, env_name, feature_envs) in BRIDGE_SUFFIX_BUILD_SCRIPTS {
         let exported = core.rustc_env(env_name).unwrap_or_else(|| {
             panic!(
-                "meerkat-core/build.rs did not export {env_name}; stdout:\n{}",
+                "crates/meerkat-core/build.rs did not export {env_name}; stdout:\n{}",
                 core.stdout
             )
         });

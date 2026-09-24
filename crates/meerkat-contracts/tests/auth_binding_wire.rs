@@ -1,6 +1,6 @@
 //! Phase 4c T12 contract proof — wire-type round-trips.
 //!
-//! Plan §Top-down integration tests T12 (meerkat-contracts/tests/
+//! Plan §Top-down integration tests T12 (crates/meerkat-contracts/tests/
 //! auth_binding_wire.rs) asserts that every wire projection the SDK
 //! codegen consumes round-trips through `serde_json`, and — under the
 //! `schema` feature — emits a non-trivial JsonSchema. Unit tests in

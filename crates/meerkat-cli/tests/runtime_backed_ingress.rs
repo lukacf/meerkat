@@ -13,6 +13,7 @@ fn candidate_binaries() -> Vec<PathBuf> {
 
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(std::path::Path::parent)
         .expect("workspace root")
         .to_path_buf();
     vec![

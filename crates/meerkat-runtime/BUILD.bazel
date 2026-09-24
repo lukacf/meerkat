@@ -184,7 +184,7 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
-        "//meerkat:__pkg__",
+        "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.41",
@@ -199,15 +199,15 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat:meerkat_auth_core_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_live_agent_factory_build",
-        "//meerkat:meerkat_llm_core_agent_factory_build",
-        "//meerkat:meerkat_machine_kernels_agent_factory_build",
-        "//meerkat:meerkat_machine_schema_agent_factory_build",
-        "//meerkat:meerkat_sqlite_agent_factory_build",
-        "//meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_auth_core_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_live_agent_factory_build",
+        "//crates/meerkat:meerkat_llm_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_kernels_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_sqlite_agent_factory_build",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-runtime",
         normal = True,
@@ -236,7 +236,7 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
-        "//meerkat:__pkg__",
+        "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.41",
@@ -251,15 +251,15 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat:meerkat_auth_core_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_live_agent_factory_build",
-        "//meerkat:meerkat_llm_core_agent_factory_build",
-        "//meerkat:meerkat_machine_kernels_agent_factory_build",
-        "//meerkat:meerkat_machine_schema_agent_factory_build",
-        "//meerkat:meerkat_sqlite_agent_factory_build",
-        "//meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_auth_core_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_live_agent_factory_build",
+        "//crates/meerkat:meerkat_llm_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_kernels_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_sqlite_agent_factory_build",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-runtime",
         normal = True,
@@ -306,6 +306,9 @@ rust_test(
     size = "large",
     data = [
         "//:test_fixtures",
+        "//crates/meerkat-machine-kernels:package_runfiles",
+        "//crates/meerkat-machine-schema:package_runfiles",
+        "//crates/meerkat-mob:package_runfiles",
         "//tests/fixtures/machine-dsl-tests:package_runfiles",
         "//tests/fixtures/mcp-test-server:package_runfiles",
         "//tests/fixtures/surface-build-fixtures:package_runfiles",
@@ -383,6 +386,7 @@ rust_test(
     ],
     size = "medium",
     data = [
+        "//crates/meerkat-core:package_runfiles",
         "//tests/integration:package_runfiles",
     ],
     env = {
@@ -754,6 +758,10 @@ rust_test(
         ":package_runfiles",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
+        "//crates/meerkat-core:package_runfiles",
+        "//crates/meerkat-machine-schema:package_runfiles",
+        "//crates/meerkat-mcp-server:package_runfiles",
+        "//crates/meerkat:package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -1260,6 +1268,7 @@ rust_test(
         ":package_runfiles",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
+        "//crates/meerkat-runtime:cargo_manifest",
     ],
     env = {
         "RUST_MIN_STACK": "8388608",
@@ -1332,7 +1341,9 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//crates/meerkat-mob:package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
@@ -2140,7 +2151,9 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//crates/meerkat-core:package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
@@ -2430,7 +2443,10 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        ":package_runfiles",
+        "//crates/meerkat-comms:package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
@@ -2502,7 +2518,10 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        ":package_runfiles",
+        "//crates/meerkat-comms:package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",

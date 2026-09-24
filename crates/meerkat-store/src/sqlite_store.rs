@@ -9196,11 +9196,12 @@ mod tests {
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
                     .parent()
+                    .and_then(std::path::Path::parent)
                     .expect("meerkat-store manifest has a workspace parent")
                     .to_path_buf()
             });
         let source = workspace_root.join(
-            "meerkat-runtime/tests/fixtures/v0_8_10_released_realm/corpus/realm/sessions.sqlite3",
+            "crates/meerkat-runtime/tests/fixtures/v0_8_10_released_realm/corpus/realm/sessions.sqlite3",
         );
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("sessions.sqlite3");

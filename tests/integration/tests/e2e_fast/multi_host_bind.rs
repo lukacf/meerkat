@@ -7,7 +7,7 @@
 //!
 //! TDD-first: compiles once Lanes W0..W3 land. The fixture family is shared
 //! with the meerkat-mob integration tests via a cross-crate `#[path]`
-//! include of `meerkat-mob/tests/support/mod.rs`, composed ONCE at the
+//! include of `crates/meerkat-mob/tests/support/mod.rs`, composed ONCE at the
 //! e2e_fast_lane binary root (single composition, no duplicate — design
 //! §W4.2).
 
@@ -68,7 +68,7 @@ async fn two_hosts_bind_to_one_mob_and_demux_round_trips() {
     // the FLAG-3 durable `MobHostAuthorityRecord` per bound host. (MobHandle
     // exposes no public machine-state read; record↔machine-map equality is
     // pinned in-crate by
-    // meerkat-mob/src/runtime/tests.rs::test_bind_host_commits_machine_facts_and_persists_record.)
+    // crates/meerkat-mob/src/runtime/tests.rs::test_bind_host_commits_machine_facts_and_persists_record.)
     for report in [&report_a, &report_b] {
         assert!(
             !report.capabilities.engine_version.is_empty(),

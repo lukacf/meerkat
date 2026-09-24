@@ -646,7 +646,7 @@ jobs:
         github.event.inputs.publish_release_assets_only == 'true'))
     runs-on: ${{ matrix.runs-on }}
     # Linux GNU binaries must keep the same glibc floor as the BuildBuddy lane
-    # (buildpack-deps:bullseye = glibc 2.31, see platforms/BUILD.bazel);
+    # (buildpack-deps:bullseye = glibc 2.31, see tools/bazel/platforms/BUILD.bazel);
     # building directly on the hosted runner (Ubuntu 24.04, glibc 2.39) would
     # silently reintroduce the v0.8.21 Bullseye loader failure whenever this
     # fallback lane is active. Non-Linux matrix entries get no container.
@@ -1003,10 +1003,10 @@ jobs:
             echo "::warning::BuildBuddy build completed but BES upload failed; validating downloaded outputs before continuing"
             BAZEL_BIN="${BUILDBUDDY_OUTPUT_BASE}/execroot/_main/bazel-out"
             declare -A BIN_PATHS=(
-              [rkat]="meerkat-cli/rkat"
-              [rkat-rpc]="meerkat-rpc/rkat_rpc_bin"
-              [rkat-rest]="meerkat-rest/rkat_rest_bin"
-              [rkat-mcp]="meerkat-mcp-server/rkat_mcp_bin"
+              [rkat]="crates/meerkat-cli/rkat"
+              [rkat-rpc]="crates/meerkat-rpc/rkat_rpc_bin"
+              [rkat-rest]="crates/meerkat-rest/rkat_rest_bin"
+              [rkat-mcp]="crates/meerkat-mcp-server/rkat_mcp_bin"
             )
             for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
               rel_path="${BIN_PATHS[$bin]}"
@@ -1041,10 +1041,10 @@ jobs:
           trap 'rm -rf "${STAGE_ROOT}"' EXIT
 
           declare -A BIN_PATHS=(
-            [rkat]="meerkat-cli/rkat"
-            [rkat-rpc]="meerkat-rpc/rkat_rpc_bin"
-            [rkat-rest]="meerkat-rest/rkat_rest_bin"
-            [rkat-mcp]="meerkat-mcp-server/rkat_mcp_bin"
+            [rkat]="crates/meerkat-cli/rkat"
+            [rkat-rpc]="crates/meerkat-rpc/rkat_rpc_bin"
+            [rkat-rest]="crates/meerkat-rest/rkat_rest_bin"
+            [rkat-mcp]="crates/meerkat-mcp-server/rkat_mcp_bin"
           )
 
           for bin in rkat rkat-rpc rkat-rest rkat-mcp; do

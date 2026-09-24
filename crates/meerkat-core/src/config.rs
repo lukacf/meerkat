@@ -3980,7 +3980,7 @@ max_request_bytes = 9000000
     // Plan §6.9 deleted the ProviderConfig enum and the
     // `test_provider_config_serialization` test that exercised its
     // serde discriminator. Realm-based credential configs are round-
-    // tripped by tests in meerkat-contracts/tests/auth_binding_wire.rs.
+    // tripped by tests in crates/meerkat-contracts/tests/auth_binding_wire.rs.
 
     #[test]
     fn test_budget_config_serialization() {

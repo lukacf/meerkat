@@ -9,9 +9,9 @@
 //! conversion from that flat form into the typed record
 //! `{ realm: RealmId, binding: BindingId, profile: Option<ProfileId> }`.
 //!
-//! The tripwire at `meerkat-cli/tests/auth_binding_single_parser.rs`
+//! The tripwire at `crates/meerkat-cli/tests/auth_binding_single_parser.rs`
 //! enforces that exactly one parser function with this symbol lives
-//! under `meerkat-cli/src/`. That is the structural guard against
+//! under `crates/meerkat-cli/src/`. That is the structural guard against
 //! ad-hoc colon-split parsing drifting back into handler code.
 //!
 //! ### Scope

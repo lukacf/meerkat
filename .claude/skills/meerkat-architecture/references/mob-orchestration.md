@@ -21,7 +21,7 @@ MobBuilder::new(definition, storage)
 
 ## Member Launch Modes
 
-`MemberLaunchMode` (in `meerkat-mob/src/launch.rs`):
+`MemberLaunchMode` (in `crates/meerkat-mob/src/launch.rs`):
 
 - `Fresh` — new session (default)
 - `Resume { bridge_session_id, resume_from_role }` - resume the exact bridge
@@ -66,7 +66,7 @@ Profile source rule: agent-internal surfaces inherit from caller config. Non-age
 ## Agent-Facing Delegation Tools
 
 When composed with generated operator authority, `AgentMobToolSurface`
-(`meerkat-mob-mcp/src/agent_tools.rs`) provides
+(`crates/meerkat-mob-mcp/src/agent_tools.rs`) provides
 `delegate`, `conclude_objective`, `fork_off`, `council`, `mob_create`, `mob_destroy`,
 `mob_spawn_member`, `mob_retire_member`, `mob_check_member`,
 `mob_list_members`, `mob_list`, `mob_wire`, and `mob_unwire`. When a realm
@@ -155,7 +155,7 @@ Definition has `WiringRules` with `role_wiring: [{a, b}]`. At spawn time, `MobAc
 
 `delegate` auto-wiring is capability-based, not a promise. Report actual wired/not-wired results and never claim bidirectional comms unless both trust edges were established.
 
-Recipient-side trust is a machine-owned obligation, not fire-and-forget: MobMachine tracks `pending_recipient_trust: Set<PeerId>` so an unacknowledged recipient trust edge stays an explicit pending fact until resolved. Trust entries themselves are `PeerId`-keyed via `TrustStore` (meerkat-comms/src/trust.rs); duplicate `PeerId` inserts are structurally rejected.
+Recipient-side trust is a machine-owned obligation, not fire-and-forget: MobMachine tracks `pending_recipient_trust: Set<PeerId>` so an unacknowledged recipient trust edge stays an explicit pending fact until resolved. Trust entries themselves are `PeerId`-keyed via `TrustStore` (crates/meerkat-comms/src/trust.rs); duplicate `PeerId` inserts are structurally rejected.
 
 `mob_wire` / `mob_unwire` agent tools: create and remove peer-to-peer comms trust between mob members. For local members (both in roster), wiring is bidirectional. For external members, the supervisor bridge binds against the external runtime using the typed bootstrap token and signed comms identity. A remote `rkat run --comms-listen-tcp ... --comms-binding-out <path>` process can now supply the binding directly; `rkat-rpc --tcp` remains JSON-RPC host transport and is not the peer/comms listener.
 
@@ -163,9 +163,9 @@ Recipient-side trust is a machine-owned obligation, not fire-and-forget: MobMach
 
 - Flat DAG steps still exist, but `FlowSpec.root: FrameSpec` and `RepeatUntilSpec` enable frame-based execution.
 - Frame execution is owned by MobMachine DSL: frame-local state, loop iteration lifecycle, scheduler grants (`GrantNodeSlot`, `GrantBodyFrameStart`), frame-step projection, and terminalization all live in the MobMachine DSL as transitions. `FlowEngine` is the thin execution shell.
-- `flow_run`, `flow_frame`, and `loop_iteration` under `meerkat-mob/src/run/` are MobMachine-owned fail-closed projection reducers. They define the persisted `MobRun` shape and reducer vocabulary, but every semantic reducer command must be authorized by a MobMachine input/effect path.
+- `flow_run`, `flow_frame`, and `loop_iteration` under `crates/meerkat-mob/src/run/` are MobMachine-owned fail-closed projection reducers. They define the persisted `MobRun` shape and reducer vocabulary, but every semantic reducer command must be authorized by a MobMachine input/effect path.
 - `FlowEngine::execute_step_with_all_guards()` is the single canonical step path used by both flat-step execution and the frame adapter. `FlowTurnExecutorAdapter` is intentionally thin.
-- Recovery lives in `meerkat-mob/src/runtime/recovery.rs`: repairs ready-frame / pending-body-frame drift when possible and returns typed incompatibility for pre-v2 active runs when not.
+- Recovery lives in `crates/meerkat-mob/src/runtime/recovery.rs`: repairs ready-frame / pending-body-frame drift when possible and returns typed incompatibility for pre-v2 active runs when not.
 - Gotcha: never append step/failure/event projections from a parallel executor path if the DSL already owns that projection.
 
 ## Actor Decomposition
@@ -191,23 +191,23 @@ Mob no longer owns a separate task-board service. Durable cross-agent
 commitments live in WorkGraph; mob-owned services stay focused on orchestration,
 member lifecycle, flow execution, wiring, and runtime bridges.
 
-The `*_authority.rs` modules under `meerkat-mob/src/runtime/` are bounded
+The `*_authority.rs` modules under `crates/meerkat-mob/src/runtime/` are bounded
 shell helpers, projections, or sealed mutation adapters, not competing state
 machines. Canonical transition match tables live in MobMachine DSL.
 
 ## Key files
 
-- `meerkat-mob/src/definition.rs` — `MobDefinition`, `FrameSpec`, `RepeatUntilSpec`, `owner_bridge_session_id`, `is_implicit`
-- `meerkat-mob/src/build.rs` — mob profile → `AgentBuildConfig`, operator capability gating
-- `meerkat-mob/src/launch.rs` — `MemberLaunchMode`, `ForkContext`
-- `meerkat-mob/src/storage.rs` — `MobStorage`, SQLite/custom storage seams
-- `meerkat-mob/src/backend.rs` — `MobBackendKind`, `RuntimeBinding`
-- `meerkat-mob/src/runtime/handle.rs` — `MobHandle`, `SpawnMemberSpec`, `MobMemberSnapshot`
-- `meerkat-mob/src/runtime/actor.rs` — `MobActor` (spawn, wire, flow, kickoff)
-- `meerkat-mob/src/runtime/flow.rs` — canonical step execution path
-- `meerkat-mob/src/runtime/flow_frame_engine.rs` — frame runtime executor
-- `meerkat-mob/src/runtime/recovery.rs` — frame/loop recovery and incompatibility checks
-- `meerkat-mob/src/runtime/tools.rs` — operator mob tool surface
-- `meerkat-mob-mcp/src/agent_tools.rs` — agent-facing delegation/orchestration tool surface
-- `meerkat-mob-pack/src/lib.rs` — mobpack archive format, signing, trust
-- `meerkat-machine-schema/src/catalog/dsl/mob_machine.rs` — MobMachine DSL (source of truth)
+- `crates/meerkat-mob/src/definition.rs` — `MobDefinition`, `FrameSpec`, `RepeatUntilSpec`, `owner_bridge_session_id`, `is_implicit`
+- `crates/meerkat-mob/src/build.rs` — mob profile → `AgentBuildConfig`, operator capability gating
+- `crates/meerkat-mob/src/launch.rs` — `MemberLaunchMode`, `ForkContext`
+- `crates/meerkat-mob/src/storage.rs` — `MobStorage`, SQLite/custom storage seams
+- `crates/meerkat-mob/src/backend.rs` — `MobBackendKind`, `RuntimeBinding`
+- `crates/meerkat-mob/src/runtime/handle.rs` — `MobHandle`, `SpawnMemberSpec`, `MobMemberSnapshot`
+- `crates/meerkat-mob/src/runtime/actor.rs` — `MobActor` (spawn, wire, flow, kickoff)
+- `crates/meerkat-mob/src/runtime/flow.rs` — canonical step execution path
+- `crates/meerkat-mob/src/runtime/flow_frame_engine.rs` — frame runtime executor
+- `crates/meerkat-mob/src/runtime/recovery.rs` — frame/loop recovery and incompatibility checks
+- `crates/meerkat-mob/src/runtime/tools.rs` — operator mob tool surface
+- `crates/meerkat-mob-mcp/src/agent_tools.rs` — agent-facing delegation/orchestration tool surface
+- `crates/meerkat-mob-pack/src/lib.rs` — mobpack archive format, signing, trust
+- `crates/meerkat-machine-schema/src/catalog/dsl/mob_machine.rs` — MobMachine DSL (source of truth)

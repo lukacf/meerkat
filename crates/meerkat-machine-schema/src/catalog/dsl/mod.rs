@@ -1034,7 +1034,7 @@ runtime_internal_inputs!(
 
 /// Non-canonical scoped-authority schema (plan §21.5): the member host's
 /// mob-keyed binding/admission/dedup authority. Registered for production-
-/// schema parity via `meerkat-mob/tests/mob_host_binding_authority.rs`
+/// schema parity via `crates/meerkat-mob/tests/mob_host_binding_authority.rs`
 /// (`production_schema_matches_catalog_schema`), not for canonical gates.
 pub fn dsl_mob_host_binding_authority_machine() -> MachineSchema {
     mob_host_binding_authority_schema_metadata()

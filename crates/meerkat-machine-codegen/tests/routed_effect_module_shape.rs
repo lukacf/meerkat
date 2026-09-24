@@ -35,7 +35,7 @@ fn attach_stub_driver(
     schema.driver = Some(CompositionDriver {
         name: CompositionDriverId::parse("meerkat_mob_seam_driver").expect("driver slug"),
         rust: CompositionDriverRustBinding {
-            module_path: "meerkat-runtime/src/generated/meerkat_mob_seam.rs".into(),
+            module_path: "crates/meerkat-runtime/src/generated/meerkat_mob_seam.rs".into(),
             driver_type: "MeerkatMobSeamDriver".into(),
             store_plan_type: "MeerkatMobSeamStorePlan".into(),
             work_type: "MeerkatMobSeamWork".into(),

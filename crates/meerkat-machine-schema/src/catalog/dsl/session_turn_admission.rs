@@ -6,7 +6,7 @@
 //! (`Idle`/`Admitted`/`Running`/`Completing`/`ShuttingDown`) and the
 //! start-turn disposition / interrupt / shutdown / dispatch-authorization
 //! decisions. It was previously an inline `machine!` in
-//! `meerkat-session/src/turn_admission.rs` with no TLA model; it is now a
+//! `crates/meerkat-session/src/turn_admission.rs` with no TLA model; it is now a
 //! canonical machine with a generated schema-free authority and a standalone
 //! TLA spec (LUC-524, P0 Dogma Invariant 1).
 //!

@@ -1679,10 +1679,10 @@ macro_rules! mob_host_binding_authority_dsl {
             // Native reducer helpers. The Rust bodies live here (expanded into
             // both the catalog and production authorities); their TLA+
             // operator definitions live in
-            // `meerkat-machine-codegen/src/artifacts.rs`
+            // `crates/meerkat-machine-codegen/src/artifacts.rs`
             // (`render_mob_host_binding_authority_native_helpers`) and the
             // names are registered in the native-helper allow-list in
-            // `meerkat-machine-schema/src/machine.rs`.
+            // `crates/meerkat-machine-schema/src/machine.rs`.
 
             // Retains only the member rows whose key names a different mob —
             // RevokeHostBinding's mob-scoped clear (A14 isolation).

@@ -156,7 +156,7 @@ CREATE TABLE IF NOT EXISTS runtime_compaction_projection_outbox (
 )";
 
     // Exact runtime catalog created by the pre-ledger opener across the whole
-    // 0.7.x line. Copied verbatim from `meerkat-runtime/src/store/sqlite.rs`
+    // 0.7.x line. Copied verbatim from `crates/meerkat-runtime/src/store/sqlite.rs`
     // at commit 9bc314778 (2026-06-16), and confirmed byte-identical in the
     // realms written by the published 0.7.5, 0.7.19, 0.7.21 and 0.7.28 `rkat`
     // binaries. `runtime_retired_ops_epochs` and

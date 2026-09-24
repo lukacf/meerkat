@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const PUBLIC_CONTRACT_TRIGGER_PREFIXES: &[&str] = &["meerkat-contracts/src/", "artifacts/schemas/"];
+const PUBLIC_CONTRACT_TRIGGER_PREFIXES: &[&str] =
+    &["crates/meerkat-contracts/src/", "artifacts/schemas/"];
 const PUBLIC_DOC_PREFIXES: &[&str] = &["docs/api/", "docs/sdks/", "docs/rust/", "examples/"];
 const PYTHON_BINDINGS_PREFIX: &str = "sdks/python/meerkat/generated/";
 const TYPESCRIPT_BINDINGS_PREFIX: &str = "sdks/typescript/src/generated/";
@@ -84,6 +85,7 @@ pub fn repo_root() -> Result<PathBuf> {
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(Path::parent)
         .map(Path::to_path_buf)
         .ok_or_else(|| anyhow::anyhow!("failed to resolve repo root from xtask manifest dir"))
 }

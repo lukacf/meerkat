@@ -5305,7 +5305,7 @@ impl SessionRuntime {
     /// registered model ownership, failing closed.
     ///
     /// This is the RPC mirror of REST's `resolve_validation_identity`
-    /// (`meerkat-rest/src/lib.rs`): an explicit provider is validated against
+    /// (`crates/meerkat-rest/src/lib.rs`): an explicit provider is validated against
     /// the catalog owner via `provider_override_mismatch_reason`; otherwise
     /// the registered model owner (`entry.provider`) supplies the provider.
     /// When neither an explicit provider nor a registered owner is present we
@@ -17651,6 +17651,7 @@ mod tests {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
         let workspace_root = PathBuf::from(manifest_dir)
             .parent()
+            .and_then(std::path::Path::parent)
             .expect("workspace root")
             .to_path_buf();
         workspace_root

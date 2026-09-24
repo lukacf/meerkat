@@ -1,6 +1,6 @@
 # D-j design note — PendingSession lifecycle → canonical owner
 
-Context: `meerkat-rpc/src/session_runtime.rs` holds an RPC-local
+Context: `crates/meerkat-rpc/src/session_runtime.rs` holds an RPC-local
 `PendingSession` + `PendingSessionPhase::{Staged, Promoting}` two-phase
 lifecycle for sessions that have been created (ID returned) but not yet
 materialized in the service. Ten branching sites read `.phase` inside
@@ -84,7 +84,7 @@ Why this is right for Meerkat:
 - The build bundle stays where it belongs (live Arc references in the
   service layer), with no DSL-shell shadow pair.
 
-- The catching assertion from the task (`rg 'PendingSession' meerkat-rpc/src/`
+- The catching assertion from the task (`rg 'PendingSession' crates/meerkat-rpc/src/`
   zero production hits; canonical owner holds the staged phase) is
   fully satisfied: after closure the RPC surface has no local staged
   storage and no `.phase`-branching code paths — every entry point
@@ -105,12 +105,12 @@ agent-construction authority**: the `meerkat` facade itself.
 
 ### Refined shape
 
-- `meerkat-core/src/service/mod.rs` — trait extension on
+- `crates/meerkat-core/src/service/mod.rs` — trait extension on
   `SessionService` (default `Unsupported`) for `stage_session /
   promote_session / abandon_staged`. Methods operate on an opaque
   build-handle keyed by `SessionId`; the trait remains object-safe.
 
-- `meerkat/src/service_factory.rs` (facade) — new typed
+- `crates/meerkat/src/service_factory.rs` (facade) — new typed
   `StagedSessionRegistry` holding `DashMap<SessionId, StagedSlot>`.
   Each `StagedSlot` carries the fully-typed `AgentBuildConfig`,
   `SessionLlmIdentity`, labels, deferred prompt, timestamps, and the
@@ -121,7 +121,7 @@ agent-construction authority**: the `meerkat` facade itself.
   authority and already owns `AgentFactory`, `FactoryAgentBuilder`,
   and `build_ephemeral_service`.
 
-- `meerkat-rpc/src/session_runtime.rs` — `PendingSession`,
+- `crates/meerkat-rpc/src/session_runtime.rs` — `PendingSession`,
   `PendingSessionPhase`, and the `pending:
   RwLock<IndexMap<SessionId, PendingSession>>` field are deleted.
   Every callsite is rewritten to call through the facade-owned
@@ -130,9 +130,9 @@ agent-construction authority**: the `meerkat` facade itself.
   `registry.abandon_promote(session_id)` that restages the slot.
 
 - Catching assertion: `rg 'PendingSession|PendingSessionPhase'
-  meerkat-rpc/src/` returns zero production hits.
+  crates/meerkat-rpc/src/` returns zero production hits.
 
-- Tests: the registry ships with unit tests in `meerkat/tests/` for
+- Tests: the registry ships with unit tests in `crates/meerkat/tests/` for
   stage → promote, stage → abandon, stage → promote concurrency
   gate, `append_system_context` mutation during Staged and
   Promoting, and list/read exposure. RPC integration tests
@@ -154,8 +154,8 @@ holds zero staged state after the change.
 ### Scope widen notes
 
 Per the architectural-prerequisite rule, this widens scope to
-`meerkat-core/src/service/mod.rs` (trait methods) and
-`meerkat/src/service_factory.rs` (registry authority) rather than
+`crates/meerkat-core/src/service/mod.rs` (trait methods) and
+`crates/meerkat/src/service_factory.rs` (registry authority) rather than
 splitting the work. No DSL schema change; no codegen regen; no
 workspace codegen cascade. Cascade is limited to the two crates
 above plus `meerkat-rpc` callsite rewrites.

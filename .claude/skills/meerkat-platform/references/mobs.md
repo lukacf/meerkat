@@ -557,7 +557,7 @@ depends_on_mode = "all"
 ### Agent-facing delegation tools
 
 With generated authority, `AgentMobToolSurface`
-(`meerkat-mob-mcp/src/agent_tools.rs`) exposes thirteen base definitions:
+(`crates/meerkat-mob-mcp/src/agent_tools.rs`) exposes thirteen base definitions:
 
 | Tool | Purpose |
 |------|---------|

@@ -1,7 +1,7 @@
 //! Meerkat-native schema abstraction and normalization.
 //!
 //! Provider-specific lowering lives in the adapter crates
-//! (`meerkat-client/src/anthropic.rs`, `meerkat-client/src/gemini.rs`).
+//! (`crates/meerkat-client/src/anthropic.rs`, `crates/meerkat-client/src/gemini.rs`).
 
 use crate::Provider;
 use serde::{Deserialize, Serialize};

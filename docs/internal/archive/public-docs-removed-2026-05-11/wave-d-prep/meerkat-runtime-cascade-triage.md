@@ -79,7 +79,7 @@ Consumer-side rejection at `MeerkatConsumerSurface::resolve_session` — same co
 
 ### Root cause
 
-The `meerkat_mob_seam` composition schema in `meerkat-machine-schema/src/catalog/` (or `meerkat-runtime/src/generated/meerkat_mob_seam.rs` generated file) declares three routes. `#31 A1` extended `PrepareBindings` / `Retire` / `Destroy` to carry a typed `session_id` field. The fourth route — `binding_request_reaches_meerkat` carrying variant `RequestRuntimeBinding` — was missed.
+The `meerkat_mob_seam` composition schema in `crates/meerkat-machine-schema/src/catalog/` (or `crates/meerkat-runtime/src/generated/meerkat_mob_seam.rs` generated file) declares three routes. `#31 A1` extended `PrepareBindings` / `Retire` / `Destroy` to carry a typed `session_id` field. The fourth route — `binding_request_reaches_meerkat` carrying variant `RequestRuntimeBinding` — was missed.
 
 ### `git log -S` root
 
@@ -193,7 +193,7 @@ Alternative: the snapshot reader at `meerkat_machine_spine_snapshot()` reads fro
 Candidates to trace:
 - `git log --oneline -S "meerkat_machine_spine_snapshot" --all`
 - `git log --oneline -S "phase: RuntimeState::" --all`
-- Recent changes to `meerkat-runtime/src/meerkat_machine/control_plane.rs` or wherever `retire`/`destroy`/`stop_runtime_executor` emit DSL inputs.
+- Recent changes to `crates/meerkat-runtime/src/meerkat_machine/control_plane.rs` or wherever `retire`/`destroy`/`stop_runtime_executor` emit DSL inputs.
 
 Not traced in this pass. 27 tests is a large enough cluster that dedicated investigation is warranted.
 
@@ -328,7 +328,7 @@ called `Result::unwrap()` on an `Err` value:
    followed by [0-9a-fA-F-], found `p` at 1"
 ```
 
-Same class as #32 Class W5.3: hardcoded `"peer-id"` literals in `TrustedPeerDescriptor::test_only_unsigned(...)` calls rejected by post-#24 typed `PeerId::parse`. Two sites: `meerkat-runtime/src/ops_lifecycle.rs:1863, 2279`.
+Same class as #32 Class W5.3: hardcoded `"peer-id"` literals in `TrustedPeerDescriptor::test_only_unsigned(...)` calls rejected by post-#24 typed `PeerId::parse`. Two sites: `crates/meerkat-runtime/src/ops_lifecycle.rs:1863, 2279`.
 
 ### Fix applied
 

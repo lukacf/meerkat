@@ -148,9 +148,9 @@ the prebuilt runtime and mobpack into the browser bundle.
 | `web/src/config.ts` / `types.ts` | Provider/model selection / game and runtime types |
 | `web/src/styles.css` | War-room grid and territory map styling |
 | `examples.sh` | Build script (mobpack + prebuilt WASM + Vite) |
-| `../../meerkat-web-runtime/src/lib.rs` | WASM exports powering the runtime |
-| `../../meerkat-mob/src/runtime/flow_frame_engine.rs` | Flow engine (narrator uses this) |
-| `../../meerkat-comms/src/router.rs` | Cross-namespace inproc routing |
+| `../../crates/meerkat-web-runtime/src/lib.rs` | WASM exports powering the runtime |
+| `../../crates/meerkat-mob/src/runtime/flow_frame_engine.rs` | Flow engine (narrator uses this) |
+| `../../crates/meerkat-comms/src/router.rs` | Cross-namespace inproc routing |
 
 ## Notes
 

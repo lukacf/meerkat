@@ -37,7 +37,7 @@ Non-test implementation:
   as an inert compatibility projection. `MobMemberSnapshot` now preserves the
   generated member-status fields `current_session_id`,
   `realtime_attachment_status`, and `external_member`.
-- `meerkat-web-runtime/src/lib.rs` emits generated `status` and respawn
+- `crates/meerkat-web-runtime/src/lib.rs` emits generated `status` and respawn
   `receipt.member_ref` fields, and `mob_list()` now emits the generated
   `MobListResult` envelope. It also emits generated `mob_id` on
   `mob_member_send()` and wraps `mob_flow_status()` as generated
@@ -45,8 +45,8 @@ Non-test implementation:
   required by the SDK.
 - `tools/sdk-codegen/generate.py` emits the Web mob generated type slice.
 - The branch is rebased onto current `origin/main`; the exact-head two-dot diff
-  no longer contains the stale `meerkat-runtime/src/driver/persistent.rs` or
-  `meerkat-session/src/persistent.rs` regressions called out in rework.
+  no longer contains the stale `crates/meerkat-runtime/src/driver/persistent.rs` or
+  `crates/meerkat-session/src/persistent.rs` regressions called out in rework.
 
 Tests:
 - `sdks/web/tests/mob_payload.unit.mjs` adds negative fixtures for missing mob

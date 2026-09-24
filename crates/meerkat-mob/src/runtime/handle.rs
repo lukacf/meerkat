@@ -9998,7 +9998,7 @@ impl MobHandle {
     /// one rotation broadcast), so a scoping parameter would be
     /// fictional. Per dogma principle #1 ("one semantic fact, one
     /// owner") the signature already matches the data model.
-    /// Regression coverage lives in `meerkat-mob/src/runtime/tests.rs`:
+    /// Regression coverage lives in `crates/meerkat-mob/src/runtime/tests.rs`:
     /// `test_rotate_supervisor_updates_runtime_metadata`,
     /// `test_rotate_supervisor_timeout_keeps_durable_operation_and_retry_reuses_id`,
     /// and the focused supervisor-delivery tests.
@@ -11642,7 +11642,7 @@ impl MobHandle {
     /// `test_reset_clears_roster_events_and_returns_to_running`,
     /// `test_reset_allows_spawn_after_reset`, and the
     /// supervisor-escalation reset tests in
-    /// `meerkat-mob/src/runtime/tests.rs`.
+    /// `crates/meerkat-mob/src/runtime/tests.rs`.
     pub async fn reset(&self) -> Result<(), MobError> {
         match self
             .execute_machine_command(MobMachineCommand::Reset)

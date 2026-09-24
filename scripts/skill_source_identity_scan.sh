@@ -29,14 +29,14 @@ PATTERNS=(
 )
 
 SCAN_PATHS=(
-  "meerkat-skills/src/resolve.rs"
-  "meerkat-skills/src/source/filesystem.rs"
-  "meerkat-rest/src/lib.rs"
-  "meerkat-rpc/src/session_runtime.rs"
-  "meerkat-rpc/src/handlers/session.rs"
-  "meerkat-rpc/src/handlers/config.rs"
-  "meerkat-rpc/src/main.rs"
-  "meerkat-cli/src/main.rs"
+  "crates/meerkat-skills/src/resolve.rs"
+  "crates/meerkat-skills/src/source/filesystem.rs"
+  "crates/meerkat-rest/src/lib.rs"
+  "crates/meerkat-rpc/src/session_runtime.rs"
+  "crates/meerkat-rpc/src/handlers/session.rs"
+  "crates/meerkat-rpc/src/handlers/config.rs"
+  "crates/meerkat-rpc/src/main.rs"
+  "crates/meerkat-cli/src/main.rs"
 )
 
 BLOCKED=()

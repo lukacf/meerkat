@@ -55,7 +55,7 @@ pub(crate) enum MobMachineCommand {
     /// `MobHandle::ensure_member` (runtime/handle.rs:2291) and matched in
     /// `MobHandle::execute_machine_command` (runtime/handle.rs:864);
     /// surfaced on the RPC `mob.ensure_member` verb
-    /// (meerkat-rpc/src/handlers/mob.rs:1707).
+    /// (crates/meerkat-rpc/src/handlers/mob.rs:1707).
     EnsureMember {
         spec: Box<crate::runtime::SpawnMemberSpec>,
     },

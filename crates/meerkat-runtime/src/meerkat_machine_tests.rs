@@ -47068,7 +47068,7 @@ async fn registration_shell_identity(
 /// The degraded shell emits a demand for a registration-authorized cold
 /// reload, and registration is the only authority that can mint one. A mob
 /// member gets that reload because the mob retire ladder calls the disposal
-/// path (meerkat-mob/src/runtime/provisioner.rs:2207). A plain CLI/RPC session
+/// path (crates/meerkat-mob/src/runtime/provisioner.rs:2207). A plain CLI/RPC session
 /// used to get nothing: `register_session_with_executor` read the same durable
 /// fact and returned the demand back to a caller with no capability to satisfy
 /// it, forever. One fact, two consequences, decided by who owned the caller.

@@ -9,19 +9,19 @@ commit that includes this file.
 
 ## Implementation Churn
 
-- `meerkat-mob-mcp/src/lib.rs`
+- `crates/meerkat-mob-mcp/src/lib.rs`
   - Added `MobMcpState::mob_lifecycle_action`, a typed dispatch helper that
     accepts `WireMobLifecycleAction`.
   - Agent MCP `mob_lifecycle` now deserializes `MobLifecycleParams` from
     `meerkat-contracts` and dispatches through `mob_lifecycle_action`.
   - The agent MCP `mob_lifecycle` tool schema is emitted from
     `MobLifecycleParams`.
-- `meerkat-mob-mcp/src/public_mcp.rs`
+- `crates/meerkat-mob-mcp/src/public_mcp.rs`
   - Public MCP `meerkat_mob_lifecycle` now deserializes `MobLifecycleParams`
     from `meerkat-contracts`.
   - Public MCP lifecycle results are emitted as `MobLifecycleResult`.
   - Public MCP dispatches through `MobMcpState::mob_lifecycle_action`.
-- `meerkat-web-runtime/src/lib.rs`
+- `crates/meerkat-web-runtime/src/lib.rs`
   - WASM `mob_lifecycle(mob_id, action)` keeps its JS string carrier only as
     a compatibility ABI.
   - The string carrier is immediately deserialized into
@@ -38,17 +38,17 @@ commit that includes this file.
 
 ## Test Churn
 
-- `meerkat-contracts/src/wire/mob.rs`
+- `crates/meerkat-contracts/src/wire/mob.rs`
   - Added fixtures proving unknown lifecycle action strings are rejected by
     `MobLifecycleParams` deserialization.
   - Added a typed lifecycle result round-trip fixture.
-- `meerkat-mob-mcp/src/lib.rs`
+- `crates/meerkat-mob-mcp/src/lib.rs`
   - Added agent MCP fixtures for unknown action rejection at contract parse
     time and valid typed contract params dispatch.
-- `meerkat-mob-mcp/src/public_mcp.rs`
+- `crates/meerkat-mob-mcp/src/public_mcp.rs`
   - Added public MCP fixtures for unknown action rejection at contract parse
     time and valid typed contract params dispatch.
-- `meerkat-web-runtime/src/lib.rs`
+- `crates/meerkat-web-runtime/src/lib.rs`
   - Added a WASM/runtime string-carrier fixture proving the carrier is parsed
     through `WireMobLifecycleAction` and rejects unknown values.
 

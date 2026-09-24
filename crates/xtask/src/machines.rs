@@ -806,9 +806,9 @@ fn attr_is_cfg_test(attr: &syn::Attribute) -> bool {
 pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Result<Vec<String>> {
     let mut mismatches = Vec::new();
     let boundary_files = [
-        "meerkat-runtime/src/accept.rs",
-        "meerkat-runtime/src/input.rs",
-        "meerkat-runtime/src/runtime_loop.rs",
+        "crates/meerkat-runtime/src/accept.rs",
+        "crates/meerkat-runtime/src/input.rs",
+        "crates/meerkat-runtime/src/runtime_loop.rs",
     ];
 
     for rel in boundary_files {
@@ -838,9 +838,9 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
         mismatches.extend(visitor.mismatches);
     }
 
-    let core_projection_owner = root.join("meerkat-core/src/handles.rs");
+    let core_projection_owner = root.join("crates/meerkat-core/src/handles.rs");
     if core_projection_owner.exists() {
-        let rel = "meerkat-core/src/handles.rs";
+        let rel = "crates/meerkat-core/src/handles.rs";
         let contents = fs::read_to_string(&core_projection_owner).with_context(|| {
             format!(
                 "read peer-response terminal core projection owner {}",
@@ -851,10 +851,10 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
     }
 
     let shell_boundary_files = [
-        "meerkat-contracts/src/wire/runtime.rs",
-        "meerkat-rest/src/lib.rs",
-        "meerkat-rpc/src/handlers/event.rs",
-        "meerkat-rpc/src/session_runtime.rs",
+        "crates/meerkat-contracts/src/wire/runtime.rs",
+        "crates/meerkat-rest/src/lib.rs",
+        "crates/meerkat-rpc/src/handlers/event.rs",
+        "crates/meerkat-rpc/src/session_runtime.rs",
     ];
 
     for rel in shell_boundary_files {
@@ -2202,7 +2202,7 @@ fn structural_type_path_segments(ty: &syn::Type) -> Vec<String> {
 }
 
 pub fn collect_mob_runtime_catalog_command_gate_mismatches(root: &Path) -> Result<Vec<String>> {
-    let actor_path = root.join("meerkat-mob/src/runtime/actor.rs");
+    let actor_path = root.join("crates/meerkat-mob/src/runtime/actor.rs");
     if !actor_path.exists() {
         return Ok(Vec::new());
     }
@@ -2626,7 +2626,7 @@ impl FlowReducerFamily {
 /// captured at the hit: the enclosing function name, the structural
 /// `authority.require(MobMachineFlowAuthorityKind::..)` facts seen earlier
 /// in that body, the enclosing `impl` self type, and the structural return
-/// type. Two shapes are allowed, both only in `meerkat-mob/src/run.rs`:
+/// type. Two shapes are allowed, both only in `crates/meerkat-mob/src/run.rs`:
 ///
 /// 1. the reducer-owned apply wrapper — a `transition` use inside the
 ///    family's `apply_mob_machine_<family>_command` function after that
@@ -2638,7 +2638,7 @@ fn flow_reducer_direct_use_is_structurally_allowed(
     module: &str,
     hit: &FlowReducerHit,
 ) -> bool {
-    if path != "meerkat-mob/src/run.rs" {
+    if path != "crates/meerkat-mob/src/run.rs" {
         return false;
     }
     let Some(family) = FlowReducerFamily::from_module(module) else {
@@ -2689,7 +2689,7 @@ fn flow_reducer_projection_commit_is_structurally_allowed(
         })
     };
     match path {
-        "meerkat-mob/src/runtime/flow.rs" => {
+        "crates/meerkat-mob/src/runtime/flow.rs" => {
             let has_authority_setup = context
                 .preceding_callee_idents
                 .contains("project_machine_input")
@@ -2719,7 +2719,7 @@ fn flow_reducer_projection_commit_is_structurally_allowed(
                     || has_typed_authority_token_and_command_source)
                 && context.call_arg_idents.contains("next_state")
         }
-        "meerkat-mob/src/runtime/actor.rs" => {
+        "crates/meerkat-mob/src/runtime/actor.rs" => {
             if context.enclosing_fn.as_deref() != Some("commit_flow_frame_store_plan_in_actor") {
                 return false;
             }
@@ -2747,7 +2747,7 @@ fn flow_reducer_projection_commit_is_structurally_allowed(
                 _ => false,
             }
         }
-        "meerkat-mob/src/runtime/flow_frame_engine.rs" => false,
+        "crates/meerkat-mob/src/runtime/flow_frame_engine.rs" => false,
         _ => false,
     }
 }
@@ -2901,17 +2901,17 @@ pub fn collect_production_machine_owner_relation_mismatches_for_schemas(
 
 fn retired_generated_source_paths() -> &'static [&'static str] {
     &[
-        "meerkat-machine-kernels/src/compat_generated.rs",
-        "meerkat-machine-kernels/src/generated/flow_run.rs",
-        "meerkat-machine-kernels/src/generated/flow_frame.rs",
-        "meerkat-machine-kernels/src/generated/loop_iteration.rs",
-        "meerkat-mob/src/generated/flow_run.rs",
-        "meerkat-mob/src/generated/flow_frame.rs",
-        "meerkat-mob/src/generated/loop_iteration.rs",
-        "meerkat-mob/src/generated/flow_frame_loop_driver.rs",
-        "meerkat-mob/src/runtime/flow_run_kernel.rs",
-        "meerkat-mob/src/runtime/flow_frame_kernel.rs",
-        "meerkat-mob/src/runtime/loop_iteration_authority.rs",
+        "crates/meerkat-machine-kernels/src/compat_generated.rs",
+        "crates/meerkat-machine-kernels/src/generated/flow_run.rs",
+        "crates/meerkat-machine-kernels/src/generated/flow_frame.rs",
+        "crates/meerkat-machine-kernels/src/generated/loop_iteration.rs",
+        "crates/meerkat-mob/src/generated/flow_run.rs",
+        "crates/meerkat-mob/src/generated/flow_frame.rs",
+        "crates/meerkat-mob/src/generated/loop_iteration.rs",
+        "crates/meerkat-mob/src/generated/flow_frame_loop_driver.rs",
+        "crates/meerkat-mob/src/runtime/flow_run_kernel.rs",
+        "crates/meerkat-mob/src/runtime/flow_frame_kernel.rs",
+        "crates/meerkat-mob/src/runtime/loop_iteration_authority.rs",
     ]
 }
 
@@ -3288,7 +3288,7 @@ fn authority_language_paths(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 pub fn owner_module_dir(root: &Path, crate_name: &str, module: &str) -> PathBuf {
-    let mut path = root.join(crate_name).join("src");
+    let mut path = root.join("crates").join(crate_name).join("src");
     let mut segments = module.split("::").peekable();
     while let Some(segment) = segments.next() {
         if segments.peek().is_none() {
@@ -3340,8 +3340,18 @@ fn collect_text_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
 
 fn production_rust_source_paths(root: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
-    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
-        let entry = entry.with_context(|| format!("iterate {}", root.display()))?;
+    // Workspace crates live under crates/; older fixture roots may still
+    // place them directly under the root.
+    let crates_dir = root.join("crates");
+    let scan_root = if crates_dir.is_dir() {
+        crates_dir
+    } else {
+        root.to_path_buf()
+    };
+    for entry in
+        fs::read_dir(&scan_root).with_context(|| format!("read {}", scan_root.display()))?
+    {
+        let entry = entry.with_context(|| format!("iterate {}", scan_root.display()))?;
         let path = entry.path();
         let file_type = entry
             .file_type()
@@ -3414,7 +3424,7 @@ fn relative_slash_path(root: &Path, path: &Path) -> Result<String> {
 }
 
 fn is_catalog_dsl_path(path: &str) -> bool {
-    path.starts_with("meerkat-machine-schema/src/catalog/dsl/")
+    path.starts_with("crates/meerkat-machine-schema/src/catalog/dsl/")
 }
 
 pub struct CanonicalRegistry {
@@ -4622,6 +4632,7 @@ pub fn repo_root() -> Result<PathBuf> {
 
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(Path::parent)
         .map(Path::to_path_buf)
         .ok_or_else(|| anyhow!("failed to resolve repo root from xtask manifest dir"))
 }
@@ -4721,7 +4732,8 @@ pub fn machine_mapping_path(root: &Path, slug: &str) -> PathBuf {
 }
 
 fn generated_kernel_root(root: &Path) -> PathBuf {
-    root.join("meerkat-machine-kernels")
+    root.join("crates")
+        .join("meerkat-machine-kernels")
         .join("src")
         .join("generated")
 }
@@ -4767,7 +4779,7 @@ fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<S
 }
 
 fn mob_generated_machine_module_path(root: &Path, slug: &str) -> PathBuf {
-    root.join(format!("meerkat-mob/src/generated/{slug}.rs"))
+    root.join(format!("crates/meerkat-mob/src/generated/{slug}.rs"))
 }
 
 fn prune_stale_generated_kernel_modules(root: &Path, registry: &CanonicalRegistry) -> Result<()> {

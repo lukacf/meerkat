@@ -59,7 +59,7 @@ optional explicit Bazel target:
 ```bash
 BUILDBUDDY_DRY_RUN=1 make buildbuddy-test
 scripts/buildbuddy-dev --dry-run build
-scripts/buildbuddy-dev build //meerkat-cli:rkat
+scripts/buildbuddy-dev build //crates/meerkat-cli:rkat
 scripts/buildbuddy-dev clippy --keep_going
 ```
 
@@ -408,7 +408,7 @@ profile so `cargo fast`, `cargo rct`, `cargo int`, and
 | Changed support gate, combined exact tests + exact clippy, warm | `3.85-3.856s` script wall |
 | Changed source gate, combined owning build + clippy, first touch | `16.97-17.16s` script wall |
 | Changed source gate, combined owning build + clippy, warm | `3.79-3.927s` script wall |
-| Agent gate, owned source path (`meerkat-runtime/src/input_ledger.rs`) | `23s` wall, selected `24` tests / clippy |
+| Agent gate, owned source path (`crates/meerkat-runtime/src/input_ledger.rs`) | `23s` wall, selected `24` tests / clippy |
 | Agent gate, global BuildBuddy/Makefile edit escalation | `39s` warmed workspace wall after script edits |
 | Two same-worktree changed gates, combined first touch | `24.91s` / `25.10s` wall |
 | Two same-worktree changed gates, combined warm | `4.47s` / `4.63s` wall |

@@ -668,7 +668,7 @@ mod tests {
             declared, covered,
             "meerkat_mob_seam routes an input declaring `runtime_epoch_id` that this gate does \
              not cover; fill it in MeerkatMachine::resolve_routed_entry_runtime_epoch \
-             (meerkat-runtime/src/meerkat_machine/dsl_effects.rs) and add it here"
+             (crates/meerkat-runtime/src/meerkat_machine/dsl_effects.rs) and add it here"
         );
 
         let entry_epoch_id = meerkat_core::RuntimeEpochId::new();

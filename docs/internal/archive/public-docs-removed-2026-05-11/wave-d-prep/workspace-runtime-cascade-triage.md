@@ -12,7 +12,7 @@
 
 ### Test
 
-`meerkat-rest::tests::test_create_session_route_returns_identity_on_post_commit_turn_failure` at `meerkat-rest/src/lib.rs:5608`.
+`meerkat-rest::tests::test_create_session_route_returns_identity_on_post_commit_turn_failure` at `crates/meerkat-rest/src/lib.rs:5608`.
 
 ### Symptom
 
@@ -34,7 +34,7 @@ The same crate's `test_create_session_route_completes_in_runtime_backed_mode` at
 ### Fix shape proposal
 
 - **Immediate bounded fix**: wrap the `oneshot(...)` call at `lib.rs:5620-5635` in `tokio::time::timeout(Duration::from_secs(10), ...)` and fail with a clear message if the timeout fires. This matches the sibling tests' pattern and turns a hang into a visible failure, so the underlying bug surfaces rather than silently holding up `--workspace` runs.
-- **Root-cause fix** (separate commit): the post-commit turn-failure path in the create-session route must close its result channel on error. Likely site: search `meerkat-rest/src/lib.rs` for the create-session route implementation that handles `SESSION_CREATED_WITH_TURN_FAILURE` — wherever the `LlmClient::run` result is awaited in the error branch.
+- **Root-cause fix** (separate commit): the post-commit turn-failure path in the create-session route must close its result channel on error. Likely site: search `crates/meerkat-rest/src/lib.rs` for the create-session route implementation that handles `SESSION_CREATED_WITH_TURN_FAILURE` — wherever the `LlmClient::run` result is awaited in the error branch.
 
 ### Scope estimate
 
@@ -47,7 +47,7 @@ The same crate's `test_create_session_route_completes_in_runtime_backed_mode` at
 fix(meerkat-rest): bound oneshot in post-commit-failure test to unblock workspace nextest (#32 B)
 
 The `test_create_session_route_returns_identity_on_post_commit_turn_failure`
-test at meerkat-rest/src/lib.rs:5608 hangs indefinitely when `ErrorLlmClient`
+test at crates/meerkat-rest/src/lib.rs:5608 hangs indefinitely when `ErrorLlmClient`
 surfaces a turn failure on the post-commit path. The sibling
 `test_create_session_route_completes_in_runtime_backed_mode` at lib.rs:5387
 uses `tokio::time::timeout(...)` and surfaces a clear `Elapsed(())` panic
@@ -113,9 +113,9 @@ Failures cluster into a small number of root-classes, all rooted in Wave-A/B/C s
 - `meerkat::service_factory::tests::test_session_llm_override_is_applied_end_to_end`
 - `meerkat::surface::embedded::tests::build_embedded_service_uses_default_schedule_tools`
 - 14× `meerkat-core` tests with this same panic
-- Most of `meerkat/tests/factory_build_agent.rs::*` live-run tests
-- Most of `meerkat/tests/sdk_structured_output.rs::*` agent-run tests
-- `meerkat/tests/sdk_agentfactory.rs::test_sdk_agentfactory_tool_dispatch`
+- Most of `crates/meerkat/tests/factory_build_agent.rs::*` live-run tests
+- Most of `crates/meerkat/tests/sdk_structured_output.rs::*` agent-run tests
+- `crates/meerkat/tests/sdk_agentfactory.rs::test_sdk_agentfactory_tool_dispatch`
 
 **Root cause**: Wave-A deleted the standalone fallback that populated `turn_state_handle` on agent construction for test harnesses that used `AgentBuilder::new()` directly without runtime-backed wiring. Tests constructing an agent via fixture helpers that predate Wave-A wiring now fail at the first live-run code path (any `agent.run(...)` call that queries the turn-state handle).
 
@@ -207,7 +207,7 @@ explicitly; the default only affects the currently-unclassified cases.
 - `meerkat::service_factory::tests::test_config_api_keys_resolve_different_providers_per_model`
 - `meerkat::agent_factory_connection_ref::build_agent_without_connection_ref_uses_flat_path`
 - `meerkat::factory_build_agent::build_agent_uses_provider_config_api_key`
-- (~7 more in `meerkat/tests/factory_build_agent.rs`)
+- (~7 more in `crates/meerkat/tests/factory_build_agent.rs`)
 
 **Root cause**: Wave-C auth-seam cleanup deleted env-default realm synthesis and first-matching-provider promotion. Tests that relied on `AgentFactory` reading `config.provider.api_key` without an explicit `ConnectionRef` now panic.
 
@@ -258,7 +258,7 @@ per the Wave-C contract — so future auth-seam changes surface cleanly.
 
 **Fix-shape proposal**:
 
-- **(W4.α)** Populate `MachineSchema.named_types` at each affected schema's constructor site in `test-fixtures/machine-dsl-tests/src/`. For each failing schema, collect all `TypeRef::Named(...)` references via the existing `collect_named_type_references_machine` walker and emit `NamedTypeBinding` entries with the correct Rust-type pointer (likely `NamedTypeBinding::rust_type(...)` — API to confirm at `meerkat-machine-schema`).
+- **(W4.α)** Populate `MachineSchema.named_types` at each affected schema's constructor site in `tests/fixtures/machine-dsl-tests/src/`. For each failing schema, collect all `TypeRef::Named(...)` references via the existing `collect_named_type_references_machine` walker and emit `NamedTypeBinding` entries with the correct Rust-type pointer (likely `NamedTypeBinding::rust_type(...)` — API to confirm at `meerkat-machine-schema`).
 
 **Scope estimate**: 5 schemas × 1-5 bindings each = ~15 binding additions. Fully mechanical once the binding-API is inspected. **Small, 1 commit**.
 
@@ -272,7 +272,7 @@ Commit `c0cb12071` (wave-b B-4) added validation that every
 matching entry in `MachineSchema.named_types`. The commit message
 explicitly flagged that existing constructors don't yet populate the
 new field, and they still don't — 5 schema fixtures in
-`test-fixtures/machine-dsl-tests/src/` fail with
+`tests/fixtures/machine-dsl-tests/src/` fail with
 `MissingNamedTypeBinding { name: "<type>" }`:
 
 - mob_machine::tests::schema_validates    → AgentRuntimeId
@@ -294,13 +294,13 @@ walker produces the input set; binding emission is a loop over it.
 
 - **W5.1 mob-mcp actor-task-dropped** (8 tests): `tool call: ExecutionFailed { message: "tool '<tool_name>' failed: internal error: actor task dropped" }` — **collapses into #31 Class A1**. These are mob-mcp surfaces dispatching into the mob actor, which dies on routed-effect dispatch failure per the A1 root cause. Not a new class.
 - **W5.2 mcp-server misc** (4 tests): heterogeneous — persisted-session listing, session-not-found after mcp-add, serde-variant rename (`peer_message` → `input`), Live-MCP unavailable.
-- **W5.3 runtime `ed25519:<alias>`** (11 tests in `meerkat-runtime/src/comms_drain.rs`): `valid supervisor spec: "invalid peer_id: invalid peer id \"ed25519:supervisor\": ..."` — **same class as #31 Class D**, 11 sites in `meerkat-runtime` (not `meerkat-mob`). These sites are in production code (`comms_drain.rs::2315-3334` supervisor-reconcile construction paths), not tests; earlier D sweep only touched `meerkat-mob`.
+- **W5.3 runtime `ed25519:<alias>`** (11 tests in `crates/meerkat-runtime/src/comms_drain.rs`): `valid supervisor spec: "invalid peer_id: invalid peer id \"ed25519:supervisor\": ..."` — **same class as #31 Class D**, 11 sites in `meerkat-runtime` (not `meerkat-mob`). These sites are in production code (`comms_drain.rs::2315-3334` supervisor-reconcile construction paths), not tests; earlier D sweep only touched `meerkat-mob`.
 
 **Fix-shape proposal**:
 
 - **W5.1**: blocked on #31 A1 (not new work; already tracked).
 - **W5.2**: heterogeneous; each requires per-test investigation — 1-4 hours total, likely 1-3 commits.
-- **W5.3**: same `PeerId::new()` / `test_only_unsigned_typed` migration as #31 Class D, applied to 11 production call sites in `meerkat-runtime/src/comms_drain.rs`. **The production code uses `key.to_peer_id().as_str()` elsewhere in the file** — the 11 broken sites are outliers that hardcode `"ed25519:<alias>"` strings. 1 commit.
+- **W5.3**: same `PeerId::new()` / `test_only_unsigned_typed` migration as #31 Class D, applied to 11 production call sites in `crates/meerkat-runtime/src/comms_drain.rs`. **The production code uses `key.to_peer_id().as_str()` elsewhere in the file** — the 11 broken sites are outliers that hardcode `"ed25519:<alias>"` strings. 1 commit.
 
 **Scope estimate**: W5.1 blocked, W5.2 medium, W5.3 small.
 
@@ -309,7 +309,7 @@ walker produces the input set; binding emission is a loop over it.
 ```
 fix(runtime/comms-drain): migrate 11 supervisor-reconcile fixture sites from ed25519:<alias> to typed PeerId (#32 Class W5.3)
 
-11 call sites in `meerkat-runtime/src/comms_drain.rs` (test harnesses
+11 call sites in `crates/meerkat-runtime/src/comms_drain.rs` (test harnesses
 within the `comms_drain` module's test submodule) construct
 `TrustedPeerDescriptor` via `test_only_unsigned(..., "ed25519:<alias>", ...)`.
 Post-#24, `PeerId::parse` only accepts UUIDs, so the string-form
@@ -365,7 +365,7 @@ outliers from a pre-#24 fixture pattern. Migrate them to the typed
 | W4 | 5 | Wave-B B-4 schema validation deferred constructor updates; `named_types` unpopulated on 5 fixtures | Small, mechanical | Yes (D-GATE) |
 | W5.1 | ~8 | mob-mcp surface dispatches into A1-dead actor | Blocked on #31 A1 | N/A (A1 blocker) |
 | W5.2 | 4 | Heterogeneous mcp-server test drift | Medium | Likely |
-| W5.3 | 11 | Same as #31 Class D but in `meerkat-runtime/src/comms_drain.rs` | Small, 1 commit | Yes (runtime unshippable) |
+| W5.3 | 11 | Same as #31 Class D but in `crates/meerkat-runtime/src/comms_drain.rs` | Small, 1 commit | Yes (runtime unshippable) |
 | W6 | ~30 (non-W5.3) | Mixed meerkat-runtime regressions, needs own triage | Large | Yes (needs own triage) |
 | W7 | 6 | Serde shape drift on memory snapshot | Small | Yes if memory feature ships |
 | B (hung) | 1 | Deadlock in post-commit-failure route | Small (bound with timeout) + medium (fix root) | **Yes — unblocks workspace nextest** |
@@ -437,4 +437,4 @@ These are **Class W6-adjacent** — mob-side runtime-behavior regressions that p
 - Panic-message bucketing used `awk '/panicked at/{getline line; print line}'` piped through `sort | uniq -c`.
 - `meerkat-rest` hang confirmed by running the single suspect test alone with 240s `alarm` and observing it hit SIGALRM with nextest printing "SLOW" at 60s/120s/180s intervals.
 - F2 re-verification used `--nocapture -E 'test(<name>) or test(<name>) ...'` nextest filter to extract actual panic bodies (which show the left/right sides of the assertion mismatch that the summary line hides).
-- Not all crates were run (gave up after confirming W1-W7 coverage): `meerkat-llm-core`, `meerkat-auth-core`, `meerkat-contracts`, `meerkat-machine-derive`, `meerkat-machine-dsl-core`, `meerkat-machine-dsl`, `meerkat-machine-kernels`, `meerkat-gemini`, `meerkat-anthropic`, `meerkat-openai`, `meerkat-web-runtime`, `test-fixtures/surface-build-fixtures`, `test-fixtures/mcp-test-server`, `tests/integration`, `xtask`. Team-lead's 57-min hang run covered these; only the one hang surfaced, so they're probably clean or only fail under the workspace's shared-cache race condition.
+- Not all crates were run (gave up after confirming W1-W7 coverage): `meerkat-llm-core`, `meerkat-auth-core`, `meerkat-contracts`, `meerkat-machine-derive`, `meerkat-machine-dsl-core`, `meerkat-machine-dsl`, `meerkat-machine-kernels`, `meerkat-gemini`, `meerkat-anthropic`, `meerkat-openai`, `meerkat-web-runtime`, `tests/fixtures/surface-build-fixtures`, `tests/fixtures/mcp-test-server`, `tests/integration`, `xtask`. Team-lead's 57-min hang run covered these; only the one hang surfaced, so they're probably clean or only fail under the workspace's shared-cache race condition.

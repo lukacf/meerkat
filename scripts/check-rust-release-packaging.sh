@@ -32,7 +32,7 @@ run_package() {
 
     mkdir -p "$target_dir/package"
     rm -f "$target_dir/package/meerkat-core"
-    ln -s "$ROOT/meerkat-core" "$target_dir/package/meerkat-core"
+    ln -s "$ROOT/crates/meerkat-core" "$target_dir/package/meerkat-core"
 
     printf '  %-34sPACKAGING\n' "$crate"
     if "$ROOT/scripts/generate-patch-config.sh" "$ROOT" "$crate" > "$cfg" &&

@@ -6,7 +6,7 @@ use meerkat_machine_dsl::machine;
 //
 // Each binding_key (format: "<realm_id>:<binding_id>") has its own
 // AuthMachine instance, tracked by the runtime-level registry in
-// `meerkat-runtime/src/handles/auth_lease.rs`. The machine owns the
+// `crates/meerkat-runtime/src/handles/auth_lease.rs`. The machine owns the
 // semantics of:
 //
 //   * whether a lease is currently fresh / expiring / refreshing /

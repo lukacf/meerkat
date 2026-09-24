@@ -3,9 +3,9 @@
 
 ``docs/reference/usage-accounting.mdx`` documents one worked example over four
 Anthropic-shaped provider calls in two runs of one session.
-``meerkat-core/src/agent/usage_accounting_tests.rs`` drives the real agent loop
+``crates/meerkat-core/src/agent/usage_accounting_tests.rs`` drives the real agent loop
 and asserts what the event stream publishes for that script;
-``meerkat-core/src/types/tests.rs`` (module ``usage_aggregation_semantics``)
+``crates/meerkat-core/src/types/tests.rs`` (module ``usage_aggregation_semantics``)
 asserts the same arithmetic against ``CumulativeUsage``.
 
 Editing either side alone would let the documented example drift away from
@@ -23,8 +23,8 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCS_PAGE = ROOT / "docs" / "reference" / "usage-accounting.mdx"
-LOOP_TEST = ROOT / "meerkat-core" / "src" / "agent" / "usage_accounting_tests.rs"
-TYPES_TEST = ROOT / "meerkat-core" / "src" / "types" / "tests.rs"
+LOOP_TEST = ROOT / "crates" / "meerkat-core" / "src" / "agent" / "usage_accounting_tests.rs"
+TYPES_TEST = ROOT / "crates" / "meerkat-core" / "src" / "types" / "tests.rs"
 TYPES_TEST_MODULE = "usage_aggregation_semantics"
 
 # The worked-example table, exactly as the page must render it:
@@ -152,7 +152,7 @@ class UsageAccountingDocsPin(unittest.TestCase):
             EXPECTED_TABLE_ROWS,
             f"{DOCS_PAGE}: worked-example table no longer matches the pinned "
             "provider script asserted in "
-            "meerkat-core/src/agent/usage_accounting_tests.rs",
+            "crates/meerkat-core/src/agent/usage_accounting_tests.rs",
         )
 
     def test_table_cells_are_asserted_on_the_rust_side(self) -> None:

@@ -1598,7 +1598,7 @@ mod tests {
     #[test]
     fn schema_validates() {
         // Mirror the meerkat-machine catalog binding set from
-        // `meerkat-machine-schema/src/catalog/dsl/mod.rs::dsl_meerkat_machine`.
+        // `crates/meerkat-machine-schema/src/catalog/dsl/mod.rs::dsl_meerkat_machine`.
         // B-4 (`c0cb12071`) made `MachineSchema.named_types` validation-
         // gated; catalogs populate via `with_named_types`, DSL macro
         // emits `vec![]`, so the test fixture must populate inline.

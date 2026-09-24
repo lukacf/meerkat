@@ -2485,10 +2485,10 @@ fn write_artifact_manifest(
 
 fn bazel_rust_bin_relative(bin: &str) -> Option<&'static str> {
     match bin {
-        "rkat" => Some("meerkat-cli/rkat"),
-        "rkat-mcp" => Some("meerkat-mcp-server/rkat_mcp_bin"),
-        "rkat-rest" => Some("meerkat-rest/rkat_rest_bin"),
-        "rkat-rpc" => Some("meerkat-rpc/rkat_rpc_bin"),
+        "rkat" => Some("crates/meerkat-cli/rkat"),
+        "rkat-mcp" => Some("crates/meerkat-mcp-server/rkat_mcp_bin"),
+        "rkat-rest" => Some("crates/meerkat-rest/rkat_rest_bin"),
+        "rkat-rpc" => Some("crates/meerkat-rpc/rkat_rpc_bin"),
         _ => None,
     }
 }
@@ -2523,24 +2523,30 @@ fn bazel_rust_test_relative(key: &str) -> Result<&'static str, String> {
         "meerkat-integration-tests:gpt_live_public_e2e" => {
             Ok("tests/integration/gpt_live_public_e2e_test")
         }
-        "meerkat-comms:e2e" => Ok("meerkat-comms/e2e_test"),
-        "meerkat-mob:smoke_mob_flow_runtime" => Ok("meerkat-mob/smoke_mob_flow_runtime_test"),
-        "meerkat-mob:smoke_mob_generated_image_comms" => {
-            Ok("meerkat-mob/smoke_mob_generated_image_comms_test")
+        "meerkat-comms:e2e" => Ok("crates/meerkat-comms/e2e_test"),
+        "meerkat-mob:smoke_mob_flow_runtime" => {
+            Ok("crates/meerkat-mob/smoke_mob_flow_runtime_test")
         }
-        "meerkat-mob:smoke_mob_idle_burn" => Ok("meerkat-mob/smoke_mob_idle_burn_test"),
-        "meerkat-mob:smoke_mob_turn_latency" => Ok("meerkat-mob/smoke_mob_turn_latency_test"),
-        "meerkat-mob:smoke_mob_pictionary" => Ok("meerkat-mob/smoke_mob_pictionary_test"),
-        "meerkat-mob:smoke_mob_resume" => Ok("meerkat-mob/smoke_mob_resume_test"),
-        "meerkat:live_meerkat_regression" => Ok("meerkat/live_meerkat_regression_test"),
-        "meerkat:smoke_meerkat_sdk" => Ok("meerkat/smoke_meerkat_sdk_test"),
-        "meerkat-mcp-server:live_mcp_matrix" => Ok("meerkat-mcp-server/live_mcp_matrix_test"),
-        "meerkat-rest:live_rest_matrix" => Ok("meerkat-rest/live_rest_matrix_test"),
-        "meerkat-rpc:live_smoke_rpc" => Ok("meerkat-rpc/live_smoke_rpc_test"),
-        "rkat:cli_mobpack_live_smoke" => Ok("meerkat-cli/cli_mobpack_live_smoke_test"),
-        "rkat:live_smoke_cli" => Ok("meerkat-cli/live_smoke_cli_test"),
-        "rkat:storage_migrate" => Ok("meerkat-cli/storage_migrate_test"),
-        "rkat:system_mob_host_daemon" => Ok("meerkat-cli/system_mob_host_daemon_test"),
+        "meerkat-mob:smoke_mob_generated_image_comms" => {
+            Ok("crates/meerkat-mob/smoke_mob_generated_image_comms_test")
+        }
+        "meerkat-mob:smoke_mob_idle_burn" => Ok("crates/meerkat-mob/smoke_mob_idle_burn_test"),
+        "meerkat-mob:smoke_mob_turn_latency" => {
+            Ok("crates/meerkat-mob/smoke_mob_turn_latency_test")
+        }
+        "meerkat-mob:smoke_mob_pictionary" => Ok("crates/meerkat-mob/smoke_mob_pictionary_test"),
+        "meerkat-mob:smoke_mob_resume" => Ok("crates/meerkat-mob/smoke_mob_resume_test"),
+        "meerkat:live_meerkat_regression" => Ok("crates/meerkat/live_meerkat_regression_test"),
+        "meerkat:smoke_meerkat_sdk" => Ok("crates/meerkat/smoke_meerkat_sdk_test"),
+        "meerkat-mcp-server:live_mcp_matrix" => {
+            Ok("crates/meerkat-mcp-server/live_mcp_matrix_test")
+        }
+        "meerkat-rest:live_rest_matrix" => Ok("crates/meerkat-rest/live_rest_matrix_test"),
+        "meerkat-rpc:live_smoke_rpc" => Ok("crates/meerkat-rpc/live_smoke_rpc_test"),
+        "rkat:cli_mobpack_live_smoke" => Ok("crates/meerkat-cli/cli_mobpack_live_smoke_test"),
+        "rkat:live_smoke_cli" => Ok("crates/meerkat-cli/live_smoke_cli_test"),
+        "rkat:storage_migrate" => Ok("crates/meerkat-cli/storage_migrate_test"),
+        "rkat:system_mob_host_daemon" => Ok("crates/meerkat-cli/system_mob_host_daemon_test"),
         other => Err(format!(
             "no Bazel e2e artifact mapping for Rust test {other}"
         )),
@@ -6172,8 +6178,8 @@ mod tests {
                 )
                 .expect("encode workspace"),
             ),
-            r#"{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"meerkat-mob/smoke_mob_turn_latency_test","uri":"file:///x","pathPrefix":["bazel-out","darwin_arm64-fastbuild","bin"]}]}}"#.to_string(),
-            r#"{"id":{"namedSet":{"id":"1"}},"namedSetOfFiles":{"files":[{"name":"meerkat-cli/rkat","pathPrefix":["bazel-out","darwin_arm64-fastbuild","bin"]}],"fileSets":[{"id":"0"}]}}"#.to_string(),
+            r#"{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"crates/meerkat-mob/smoke_mob_turn_latency_test","uri":"file:///x","pathPrefix":["bazel-out","darwin_arm64-fastbuild","bin"]}]}}"#.to_string(),
+            r#"{"id":{"namedSet":{"id":"1"}},"namedSetOfFiles":{"files":[{"name":"crates/meerkat-cli/rkat","pathPrefix":["bazel-out","darwin_arm64-fastbuild","bin"]}],"fileSets":[{"id":"0"}]}}"#.to_string(),
             r#"{"id":{"buildFinished":{}},"finished":{"overallSuccess":true}}"#.to_string(),
         ]
         .join("\n");
@@ -6186,12 +6192,16 @@ mod tests {
             "bazel-out/darwin_arm64-fastbuild/bin"
         );
         assert!(
-            require_built_by_recorded_invocation(Some(&provenance), "meerkat-cli/rkat", "rkat")
-                .is_ok()
+            require_built_by_recorded_invocation(
+                Some(&provenance),
+                "crates/meerkat-cli/rkat",
+                "rkat"
+            )
+            .is_ok()
         );
         let refusal = require_built_by_recorded_invocation(
             Some(&provenance),
-            "meerkat-mob/smoke_mob_idle_burn_test",
+            "crates/meerkat-mob/smoke_mob_idle_burn_test",
             "meerkat-mob:smoke_mob_idle_burn",
         )
         .expect_err("artifact absent from the invocation must refuse");
@@ -6216,7 +6226,7 @@ mod tests {
             serde_json::to_string(workspace.to_str().expect("utf8 fixture workspace"))
                 .expect("encode workspace")
         );
-        let output = r#"{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"meerkat-cli/rkat","pathPrefix":["bazel-out","other-config","bin"]}]}}"#;
+        let output = r#"{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"crates/meerkat-cli/rkat","pathPrefix":["bazel-out","other-config","bin"]}]}}"#;
 
         std::fs::write(&bep, format!("{started}\n{output}\n")).expect("write partial BEP");
         let error = bazel_build_event_provenance(&bep, &workspace, &bazel_bin)
@@ -6245,9 +6255,12 @@ mod tests {
         .expect("write wrong-config BEP");
         let provenance =
             bazel_build_event_provenance(&bep, &workspace, &bazel_bin).expect("complete BEP");
-        let error =
-            require_built_by_recorded_invocation(Some(&provenance), "meerkat-cli/rkat", "rkat")
-                .expect_err("an output from another configuration must refuse");
+        let error = require_built_by_recorded_invocation(
+            Some(&provenance),
+            "crates/meerkat-cli/rkat",
+            "rkat",
+        )
+        .expect_err("an output from another configuration must refuse");
         assert!(error.contains("another configuration"), "{error}");
 
         let foreign_workspace = temp.path().join("foreign-workspace");

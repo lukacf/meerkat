@@ -319,10 +319,10 @@ def bazel_release_binary_version_env_errors(root: pathlib.Path, version: str) ->
     """Check the generated Bazel release binary targets embed the crate version."""
 
     targets = {
-        pathlib.Path("meerkat-cli/BUILD.bazel"): ["rkat"],
-        pathlib.Path("meerkat-rpc/BUILD.bazel"): ["rkat_rpc_bin"],
-        pathlib.Path("meerkat-rest/BUILD.bazel"): ["rkat_rest_bin"],
-        pathlib.Path("meerkat-mcp-server/BUILD.bazel"): ["rkat_mcp_bin"],
+        pathlib.Path("crates/meerkat-cli/BUILD.bazel"): ["rkat"],
+        pathlib.Path("crates/meerkat-rpc/BUILD.bazel"): ["rkat_rpc_bin"],
+        pathlib.Path("crates/meerkat-rest/BUILD.bazel"): ["rkat_rest_bin"],
+        pathlib.Path("crates/meerkat-mcp-server/BUILD.bazel"): ["rkat_mcp_bin"],
     }
     expected = f'"CARGO_PKG_VERSION": "{version}"'
     errors = []

@@ -122,7 +122,7 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
-        "//meerkat:__pkg__",
+        "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.41",
@@ -181,6 +181,15 @@ rust_test(
     size = "large",
     data = [
         "//:repo_governance_files",
+        "//crates/meerkat-anthropic:package_runfiles",
+        "//crates/meerkat-client:package_runfiles",
+        "//crates/meerkat-contracts:package_runfiles",
+        "//crates/meerkat-llm-core:package_runfiles",
+        "//crates/meerkat-machine-schema:package_runfiles",
+        "//crates/meerkat-mob:package_runfiles",
+        "//crates/meerkat-runtime:package_runfiles",
+        "//crates/meerkat-session:package_runfiles",
+        "//crates/meerkat:package_runfiles",
         ":package_runfiles",
     ],
     env = {
@@ -518,7 +527,9 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        ":package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
@@ -991,7 +1002,9 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//crates/meerkat:package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",

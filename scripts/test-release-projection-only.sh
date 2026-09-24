@@ -12,7 +12,7 @@ git -C "$TEST_ROOT" config user.email meerkat@example.invalid
 mkdir -p \
   "$TEST_ROOT/crate" \
   "$TEST_ROOT/docs/api" \
-  "$TEST_ROOT/meerkat-contracts/src" \
+  "$TEST_ROOT/crates/meerkat-contracts/src" \
   "$TEST_ROOT/sdks/web/src"
 
 cat > "$TEST_ROOT/Cargo.toml" <<'EOF'
@@ -36,7 +36,7 @@ printf 'fixture = "1.2.3"\n' > "$TEST_ROOT/README.md"
 printf 'version = "1.2.3"\n' > "$TEST_ROOT/crate/BUILD.bazel"
 printf '{"contract_version":{"major":1,"minor":2,"patch":3}}\n' \
   > "$TEST_ROOT/docs/api/contract.mdx"
-cat > "$TEST_ROOT/meerkat-contracts/src/version.rs" <<'EOF'
+cat > "$TEST_ROOT/crates/meerkat-contracts/src/version.rs" <<'EOF'
 impl ContractVersion {
     pub const CURRENT: Self = Self {
         major: 1,
@@ -62,8 +62,8 @@ sed -i.bak \
   's/"major":1,"minor":2,"patch":3/"major":1,"minor":2,"patch":4/' \
   "$TEST_ROOT/docs/api/contract.mdx"
 rm -f "$TEST_ROOT/docs/api/contract.mdx.bak"
-sed -i.bak 's/patch: 3/patch: 4/' "$TEST_ROOT/meerkat-contracts/src/version.rs"
-rm -f "$TEST_ROOT/meerkat-contracts/src/version.rs.bak"
+sed -i.bak 's/patch: 3/patch: 4/' "$TEST_ROOT/crates/meerkat-contracts/src/version.rs"
+rm -f "$TEST_ROOT/crates/meerkat-contracts/src/version.rs.bak"
 printf 'root digest after\n' > "$TEST_ROOT/MODULE.bazel.lock"
 cat > "$TEST_ROOT/CHANGELOG.md" <<'EOF'
 ## [1.2.4] - 2026-08-28

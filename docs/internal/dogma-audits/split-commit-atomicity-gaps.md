@@ -53,7 +53,7 @@ hand-check surfaced **2–3 genuine but bounded Low residuals.** **SYSTEMIC: fal
 - **Atomic transactions.** The schedule store runs claim/transition inside one `begin_immediate_transaction` (SQLite)
   or one `state.write().await` (in-memory) — a true CAS on `attempt_count`+`claim_token` with no await between
   read-check-write; stale completions fail closed. Refuted the `read_modify_write_race` cluster.
-- **Fail-closed compensation rollback.** Auth token refresh (`meerkat-auth-core/src/resolver.rs:843`) does AuthMachine
+- **Fail-closed compensation rollback.** Auth token refresh (`crates/meerkat-auth-core/src/resolver.rs:843`) does AuthMachine
   accept → `store.save`, and on save failure **releases the lease, restores the token-lifecycle snapshot, restores
   the token store**, returning a typed Err. **Verified — the highest-stakes concern (token-write-split / credential
   bleed) is properly handled.**
@@ -70,7 +70,7 @@ hand-check surfaced **2–3 genuine but bounded Low residuals.** **SYSTEMIC: fal
 ### R1 — Multi-peer mob WIRE rollback is best-effort, weaker than the rotation reference
 **`no_rollback_on_midfail` / `effect_before_commit` · Low · meerkat-mob · members 0,1**
 
-`apply_wire_members_idempotent` / `wire_members_peer_only` (`meerkat-mob/src/runtime/actor.rs:9748-9830`, batch
+`apply_wire_members_idempotent` / `wire_members_peer_only` (`crates/meerkat-mob/src/runtime/actor.rs:9748-9830`, batch
 `:10272-10385`) mutate the in-memory `dsl_authority` and in-memory comms trust per peer. On a later peer's
 trust/wire failure, the rollback unwires the DSL edge and prior trust — but **the rollback's own error is discarded**
 (`let _ = self.apply_trusted_peer_remove(...)`, ~`:9830`, **verified**), and the DSL unwire can itself be rejected
@@ -83,7 +83,7 @@ fail-closed pattern. **Repair:** fold per-edge wire+trust into the existing `Wir
 ### R2 — Background hook patch publish dropped on cancellation (Rule 8 leaked task)
 **`effect_before_commit` / `cancel_window` · Low · meerkat-hooks · member 50**
 
-`meerkat-hooks/src/lib.rs:814-854` fires background hooks via detached `tokio::spawn`; on session
+`crates/meerkat-hooks/src/lib.rs:814-854` fires background hooks via detached `tokio::spawn`; on session
 cancellation/shutdown the task can be killed after `execute_one()` but before `publish_patches()`, silently dropping
 patches (`tracing::warn` only). Best-effort by design and the caller never relies on it — but it's an unmodeled
 leaked-task fault. **Repair:** track in-flight background-hook tasks against the session lifecycle (a `JoinSet` /

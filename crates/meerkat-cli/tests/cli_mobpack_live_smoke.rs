@@ -32,7 +32,7 @@ fn rkat_binary_path() -> Option<PathBuf> {
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent()?;
+    let workspace_root = manifest_dir.parent()?.parent()?;
     let codex_debug = workspace_root.join("target-codex/debug/rkat");
     if codex_debug.exists() {
         return Some(codex_debug);
@@ -1017,7 +1017,9 @@ async fn e2e_scenario_28_cli_mobpack_deploy_signed_strict_live()
 /// tests need the real artifact from the meerkat-web-runtime pipeline; when
 /// it has not been built locally, skip (mirrors the no-API-key skip).
 fn prebuilt_web_runtime_wasm() -> Option<std::path::PathBuf> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent()?;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .parent()?;
     let path = root.join("sdks/web/wasm/meerkat_web_runtime_bg.wasm");
     path.exists().then_some(path)
 }

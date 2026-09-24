@@ -1164,10 +1164,10 @@ fn canonical_kernel_modules_are_rendered_from_catalog_schema_not_production_sour
             "mod source {",
             "include_str!",
             "read_to_string",
-            "meerkat-mob/src/machines/mob_machine.rs",
-            "meerkat-runtime/src/auth_machine/dsl.rs",
-            "meerkat-schedule/src/machines/schedule_lifecycle.rs",
-            "meerkat-schedule/src/machines/occurrence_lifecycle.rs",
+            "crates/meerkat-mob/src/machines/mob_machine.rs",
+            "crates/meerkat-runtime/src/auth_machine/dsl.rs",
+            "crates/meerkat-schedule/src/machines/schedule_lifecycle.rs",
+            "crates/meerkat-schedule/src/machines/occurrence_lifecycle.rs",
             "meerkat_machine_schema::mob_catalog_machine_dsl!",
             "meerkat_machine_schema::auth_catalog_machine_dsl!",
         ] {
@@ -1184,11 +1184,12 @@ fn canonical_kernel_modules_are_rendered_from_catalog_schema_not_production_sour
 fn production_machine_bridges_do_not_own_option_value_helper_semantics() {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(std::path::Path::parent)
         .expect("repo root");
 
     for rel in [
-        "meerkat-mob/src/machines/mob_machine.rs",
-        "meerkat-runtime/src/meerkat_machine/dsl.rs",
+        "crates/meerkat-mob/src/machines/mob_machine.rs",
+        "crates/meerkat-runtime/src/meerkat_machine/dsl.rs",
     ] {
         let source = std::fs::read_to_string(repo_root.join(rel)).expect("read production bridge");
         assert!(
@@ -1265,7 +1266,7 @@ fn sample_driver() -> CompositionDriver {
     CompositionDriver {
         name: CompositionDriverId::parse("noop_driver").expect("driver slug"),
         rust: CompositionDriverRustBinding {
-            module_path: "meerkat-runtime/src/generated/meerkat_mob_seam.rs".into(),
+            module_path: "crates/meerkat-runtime/src/generated/meerkat_mob_seam.rs".into(),
             driver_type: "NoopDriver".into(),
             store_plan_type: "NoopStorePlan".into(),
             work_type: "NoopWork".into(),

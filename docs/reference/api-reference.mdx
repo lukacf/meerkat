@@ -30,7 +30,7 @@ These files are generated outputs. Change the owning Rust catalogs and run
 
 For complete error projections, use `ErrorCode::jsonrpc_code()`,
 `ErrorCode::http_status()`, and `ErrorCode::cli_exit_code()` in
-`meerkat-contracts/src/error/mod.rs`, or the [error-code table](#error-code-reference)
+`crates/meerkat-contracts/src/error/mod.rs`, or the [error-code table](#error-code-reference)
 below. `errors.json` does not contain full HTTP or CLI projection tables.
 
 The JSON-RPC `initialize` method on `rkat-rpc` returns the subset enabled by
@@ -387,7 +387,7 @@ See the [skills guide](/guides/skills) for usage details.
 | `WireSessionSummary` | Lightweight session summary |
 | `WireEvent` | Event wire format |
 | `WireUsage` | Token usage with optional cache creation/read token counters; no monetary cost fields |
-| `ContractVersion` | Semver version, lock-stepped with `workspace.package.version` (see `meerkat-contracts/src/version.rs`) |
+| `ContractVersion` | Semver version, lock-stepped with `workspace.package.version` (see `crates/meerkat-contracts/src/version.rs`) |
 | `CoreCreateParams` | Session creation parameters |
 | `OutputSchema` + `structured_output_retries` | Structured-output schema and retry settings carried directly on session/turn request surfaces |
 | `CommsParams` | Keep-alive + comms identity parameters |

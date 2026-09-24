@@ -1419,7 +1419,7 @@ mod tests {
         assert!(
             corpus.is_dir(),
             "RELEASE BLOCKER: published pre-ledger realm corpus is missing at {}; re-mint it \
-             with meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/mint_pre_ledger_fixture.py",
+             with crates/meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/mint_pre_ledger_fixture.py",
             corpus.display()
         );
         let paths = realm_paths_in(state_root, realm_id);

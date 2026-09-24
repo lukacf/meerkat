@@ -343,7 +343,7 @@ authority, and these rows are not interchangeable `--live-ws` targets.
 and private experimental admission. Both Live rows currently use
 provider-managed turns, with no vision or explicit-commit capability.
 
-These fields are set in `meerkat-models/src/capabilities/**` (the types live in `meerkat-core/src/model_profile/**`) and exposed via `ModelProfile`. They control:
+These fields are set in `crates/meerkat-models/src/capabilities/**` (the types live in `crates/meerkat-core/src/model_profile/**`) and exposed via `ModelProfile`. They control:
 
 - **`view_image` tool visibility** -- hidden via the capability-base `ToolFilter` (`capability_base_filter_for_image_tool_results`) when `image_tool_results` is `false`.
 - **`ContentBlock::Image` in tool results** -- providers that do not support `image_tool_results` will receive image content blocks converted to text descriptions.

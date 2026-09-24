@@ -212,41 +212,43 @@ pub fn live_emit_paths() -> BTreeSet<PathBuf> {
 
     // Standalone terminal surface mapping emitted by protocol codegen.
     set.insert(PathBuf::from(
-        "meerkat-core/src/generated/terminal_surface_mapping.rs",
+        "crates/meerkat-core/src/generated/terminal_surface_mapping.rs",
     ));
     set.insert(PathBuf::from(
-        "meerkat-core/src/generated/comms_trust_authority_sources.rs",
+        "crates/meerkat-core/src/generated/comms_trust_authority_sources.rs",
     ));
     set.insert(PathBuf::from(
-        "meerkat-core/src/generated/auth_lease_transition_authority_sources.rs",
+        "crates/meerkat-core/src/generated/auth_lease_transition_authority_sources.rs",
     ));
     set.insert(PathBuf::from(
-        "meerkat-core/src/generated/protocol_tool_visibility_owner.rs",
+        "crates/meerkat-core/src/generated/protocol_tool_visibility_owner.rs",
     ));
     set.insert(PathBuf::from(
-        "meerkat-core/src/generated/auth_lease_durable_lifecycle_marker.rs",
+        "crates/meerkat-core/src/generated/auth_lease_durable_lifecycle_marker.rs",
     ));
     set.insert(PathBuf::from(
-        "meerkat-core/src/generated/session_persistence_version_authority.rs",
+        "crates/meerkat-core/src/generated/session_persistence_version_authority.rs",
     ));
     set.insert(PathBuf::from(
-        "meerkat-session/src/generated/session_turn_admission.rs",
+        "crates/meerkat-session/src/generated/session_turn_admission.rs",
     ));
     set.insert(PathBuf::from(
-        "meerkat-core/src/generated/approval_lifecycle.rs",
+        "crates/meerkat-core/src/generated/approval_lifecycle.rs",
     ));
     set.insert(PathBuf::from(
-        "meerkat-core/src/generated/session_document.rs",
+        "crates/meerkat-core/src/generated/session_document.rs",
     ));
     // Keystone-A: schema-derived per-machine CatalogInput mirror (protocol-codegen).
-    set.insert(PathBuf::from("meerkat-mob/src/generated/catalog_input.rs"));
+    set.insert(PathBuf::from(
+        "crates/meerkat-mob/src/generated/catalog_input.rs",
+    ));
 
     set.insert(PathBuf::from(
-        "meerkat-machine-kernels/src/generated/mod.rs",
+        "crates/meerkat-machine-kernels/src/generated/mod.rs",
     ));
     for machine in canonical_machine_schemas() {
         set.insert(PathBuf::from(format!(
-            "meerkat-machine-kernels/src/generated/{}.rs",
+            "crates/meerkat-machine-kernels/src/generated/{}.rs",
             machine_slug(machine.machine.as_str())
         )));
     }
@@ -259,13 +261,13 @@ fn default_scan_roots() -> Vec<&'static str> {
     // keeps the audit fast and excludes target/, vendored deps, node_modules,
     // etc. Add more as new emit roots appear.
     vec![
-        "meerkat-core/src/generated",
-        "meerkat-machine-kernels/src/generated",
-        "meerkat-mob/src/generated",
-        "meerkat-mcp/src/generated",
-        "meerkat-runtime/src/generated",
-        "meerkat-session/src/generated",
-        "meerkat-tools/src/generated",
+        "crates/meerkat-core/src/generated",
+        "crates/meerkat-machine-kernels/src/generated",
+        "crates/meerkat-mob/src/generated",
+        "crates/meerkat-mcp/src/generated",
+        "crates/meerkat-runtime/src/generated",
+        "crates/meerkat-session/src/generated",
+        "crates/meerkat-tools/src/generated",
     ]
 }
 
@@ -367,10 +369,10 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         let mut emit = BTreeSet::new();
-        emit.insert(PathBuf::from("meerkat-core/src/generated/good.rs"));
+        emit.insert(PathBuf::from("crates/meerkat-core/src/generated/good.rs"));
         write(
             root,
-            "meerkat-core/src/generated/good.rs",
+            "crates/meerkat-core/src/generated/good.rs",
             "// @generated — test fixture\n",
         );
         let findings = audit_with_emit_set(root, &emit).expect("audit");
@@ -385,10 +387,10 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         let mut emit = BTreeSet::new();
-        emit.insert(PathBuf::from("meerkat-core/src/generated/oops.rs"));
+        emit.insert(PathBuf::from("crates/meerkat-core/src/generated/oops.rs"));
         write(
             root,
-            "meerkat-core/src/generated/oops.rs",
+            "crates/meerkat-core/src/generated/oops.rs",
             "// no marker here\n",
         );
         let findings = audit_with_emit_set(root, &emit).expect("audit");
@@ -396,7 +398,7 @@ mod tests {
         assert!(
             matches!(
                 &findings[0],
-                AuditFinding::MissingHeader { path } if path == Path::new("meerkat-core/src/generated/oops.rs")
+                AuditFinding::MissingHeader { path } if path == Path::new("crates/meerkat-core/src/generated/oops.rs")
             ),
             "expected MissingHeader, got {:?}",
             findings[0]
@@ -410,7 +412,7 @@ mod tests {
         let emit = BTreeSet::new();
         write(
             root,
-            "meerkat-core/src/generated/sneaky.rs",
+            "crates/meerkat-core/src/generated/sneaky.rs",
             "// @generated — lying about this\npub fn x() {}\n",
         );
         let findings = audit_with_emit_set(root, &emit).expect("audit");
@@ -418,7 +420,7 @@ mod tests {
         assert!(
             matches!(
                 &findings[0],
-                AuditFinding::ForbiddenHeader { path } if path == Path::new("meerkat-core/src/generated/sneaky.rs")
+                AuditFinding::ForbiddenHeader { path } if path == Path::new("crates/meerkat-core/src/generated/sneaky.rs")
             ),
             "expected ForbiddenHeader, got {:?}",
             findings[0]
@@ -436,7 +438,11 @@ mod tests {
             contents.push_str("//\n");
         }
         contents.push_str("// @generated buried past the window\n");
-        write(root, "meerkat-core/src/generated/buried.rs", &contents);
+        write(
+            root,
+            "crates/meerkat-core/src/generated/buried.rs",
+            &contents,
+        );
         let findings = audit_with_emit_set(root, &emit).expect("audit");
         assert!(
             findings.is_empty(),
@@ -449,15 +455,17 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         let mut emit = BTreeSet::new();
-        emit.insert(PathBuf::from("meerkat-core/src/generated/missing.rs"));
+        emit.insert(PathBuf::from(
+            "crates/meerkat-core/src/generated/missing.rs",
+        ));
         write(
             root,
-            "meerkat-core/src/generated/missing.rs",
+            "crates/meerkat-core/src/generated/missing.rs",
             "// no marker\n",
         );
         write(
             root,
-            "meerkat-core/src/generated/forbidden.rs",
+            "crates/meerkat-core/src/generated/forbidden.rs",
             "// @generated — hand-authored liar\n",
         );
         let findings = audit_with_emit_set(root, &emit).expect("audit");

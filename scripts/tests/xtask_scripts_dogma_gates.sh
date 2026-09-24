@@ -36,7 +36,7 @@ fi
 # ── #227: Bazel CARGO_PKG_VERSION is gated and regenerated ───────────────────
 echo "#227 Bazel CARGO_PKG_VERSION is gated + regenerated:"
 if grep -Fq 'CARGO_PKG_VERSION' scripts/verify-version-parity.sh \
-  && grep -Fq 'meerkat-machine-codegen/BUILD.bazel' scripts/verify-version-parity.sh; then
+  && grep -Fq 'crates/meerkat-machine-codegen/BUILD.bazel' scripts/verify-version-parity.sh; then
   ok "verify-version-parity.sh asserts BUILD.bazel CARGO_PKG_VERSION"
 else
   bad "verify-version-parity.sh does not assert BUILD.bazel CARGO_PKG_VERSION"
@@ -48,7 +48,7 @@ else
 fi
 # Behavioral: a workspace-version bump without regen makes the parity check fail.
 WS_VER=$(grep -m1 -E '^version = "' Cargo.toml | sed -n 's/.*"\([^"]*\)".*/\1/p')
-BAZEL_VERS=$(grep -E '"CARGO_PKG_VERSION":' meerkat-machine-codegen/BUILD.bazel \
+BAZEL_VERS=$(grep -E '"CARGO_PKG_VERSION":' crates/meerkat-machine-codegen/BUILD.bazel \
   | sed -n 's/.*"CARGO_PKG_VERSION": *"\([^"]*\)".*/\1/p' | sort -u)
 mismatch=0
 while IFS= read -r bv; do
@@ -65,12 +65,12 @@ fi
 
 # ── #203: governance source routes the machine-authority + edge lanes ────────
 echo "#203 governance source escalates change-detection lanes:"
-if scripts/machine-authority-changed -- xtask/src/rmat_policy.rs >/dev/null; then
-  ok "machine-authority-changed exits 0 (changed) for xtask/src/rmat_policy.rs"
+if scripts/machine-authority-changed -- crates/xtask/src/rmat_policy.rs >/dev/null; then
+  ok "machine-authority-changed exits 0 (changed) for crates/xtask/src/rmat_policy.rs"
 else
-  bad "machine-authority-changed did not flag xtask/src/rmat_policy.rs"
+  bad "machine-authority-changed did not flag crates/xtask/src/rmat_policy.rs"
 fi
-if scripts/machine-authority-changed -- meerkat-mob/src/runtime/actor.rs >/dev/null; then
+if scripts/machine-authority-changed -- crates/meerkat-mob/src/runtime/actor.rs >/dev/null; then
   ok "machine-authority-changed exits 0 (changed) for mob runtime authority"
 else
   bad "machine-authority-changed did not flag mob runtime authority"
@@ -80,14 +80,14 @@ if scripts/machine-authority-changed -- docs/reference/machine-authority.mdx >/d
 else
   bad "machine-authority-changed did not flag machine-authority docs"
 fi
-for gate_owner in .github/workflows/ci.yml .github/workflows/cargo.yml Makefile scripts/machine-authority-changed scripts/tests/xtask_scripts_dogma_gates.sh xtask/tests/ci_gate_requires_rmat.rs; do
+for gate_owner in .github/workflows/ci.yml .github/workflows/cargo.yml Makefile scripts/machine-authority-changed scripts/tests/xtask_scripts_dogma_gates.sh crates/xtask/tests/ci_gate_requires_rmat.rs; do
   if scripts/machine-authority-changed -- "$gate_owner" >/dev/null; then
     ok "machine-authority-changed protects its gate owner $gate_owner"
   else
     bad "machine-authority-changed ignored its gate owner $gate_owner"
   fi
 done
-edge_out=$(printf 'xtask/src/rmat_policy.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)
+edge_out=$(printf 'crates/xtask/src/rmat_policy.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)
 if printf '%s' "$edge_out" | grep -Fq 'changed=true'; then
   ok "buildbuddy-edge-changes marks rmat_policy.rs as changed"
 else
@@ -99,13 +99,13 @@ if printf '%s' "$edge_dogma" | grep -Fq 'wasm_changed=true'; then
 else
   bad "buildbuddy-edge-changes did not mark_all on a dogma doc"
 fi
-edge_internal_dogma=$(printf 'docs-internal/dogma-audits/PR759-final-ledger.md\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)
+edge_internal_dogma=$(printf 'docs/internal/dogma-audits/PR759-final-ledger.md\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)
 if printf '%s' "$edge_internal_dogma" | grep -Fq 'wasm_changed=true'; then
   ok "buildbuddy-edge-changes mark_all triggers on internal dogma audit docs"
 else
   bad "buildbuddy-edge-changes did not mark_all on internal dogma audit docs"
 fi
-finite_ledger='docs-internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md'
+finite_ledger='docs/internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md'
 if scripts/machine-authority-changed -- "$finite_ledger" >/dev/null; then
   ok "machine-authority-changed exits 0 (changed) for finite ownership ledger"
 else
@@ -119,7 +119,7 @@ else
 fi
 # Governance baselines are governance truth: a baseline-TOML-only diff must
 # escalate both the machine-authority lane and the edge lanes.
-for baseline in xtask/rmat-baseline.toml xtask/ownership-baseline.toml; do
+for baseline in crates/xtask/rmat-baseline.toml crates/xtask/ownership-baseline.toml; do
   if scripts/machine-authority-changed -- "$baseline" >/dev/null; then
     ok "machine-authority-changed exits 0 (changed) for $baseline"
   else
@@ -163,28 +163,28 @@ if printf '%s' "$docs_gate_out" | grep -Fq 'machine-check-drift machine-authorit
 else
   bad "buildbuddy-agent-gate dry-run did not route machine-authority docs"
 fi
-generated_machine_gate_out=$(scripts/cargo-agent-gate --dry-run -- meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs 2>&1 || true)
+generated_machine_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs 2>&1 || true)
 if printf '%s' "$generated_machine_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit' \
   && ! printf '%s' "$generated_machine_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
   ok "cargo-agent-gate dry-run routes generated machine catalog changes to governance gate"
 else
   bad "cargo-agent-gate dry-run did not route generated machine catalog changes"
 fi
-mob_identity_gate_out=$(scripts/cargo-agent-gate --dry-run -- meerkat-mob/src/ids.rs 2>&1 || true)
+mob_identity_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-mob/src/ids.rs 2>&1 || true)
 if printf '%s' "$mob_identity_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
   && ! printf '%s' "$mob_identity_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
   ok "cargo-agent-gate dry-run routes mob identity authority changes to governance gate"
 else
   bad "cargo-agent-gate dry-run did not route mob identity authority changes"
 fi
-generated_buildbuddy_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- meerkat-core/src/generated/protocol_runtime.rs 2>&1 || true)
+generated_buildbuddy_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- crates/meerkat-core/src/generated/protocol_runtime.rs 2>&1 || true)
 if printf '%s' "$generated_buildbuddy_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit' \
   && ! printf '%s' "$generated_buildbuddy_gate_out" | grep -Fq 'no build-relevant changes detected.'; then
   ok "buildbuddy-agent-gate dry-run routes generated protocol changes to governance gate"
 else
   bad "buildbuddy-agent-gate dry-run did not route generated protocol changes"
 fi
-if grep -Fq '//meerkat-machine-schema:docs_machine_authority_alignment_test' scripts/buildbuddy-bazel-poc \
+if grep -Fq '//crates/meerkat-machine-schema:docs_machine_authority_alignment_test' scripts/buildbuddy-bazel-poc \
   && grep -Fq 'docs_machine_authority_alignment' scripts/buildbuddy-ci-full; then
   ok "BuildBuddy machine-authority lanes include machine-authority docs alignment"
 else
@@ -204,7 +204,7 @@ if printf '%s' "$sdk_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-co
 else
   bad "buildbuddy-agent-gate dry-run did not route SDK generated artifacts"
 fi
-surface_gate_out=$(scripts/cargo-agent-gate --dry-run -- meerkat-mcp/src/router.rs meerkat-mob-mcp/src/agent_tools.rs docs/api/mcp.mdx sdks/typescript/README.md 2>&1 || true)
+surface_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-mcp/src/router.rs crates/meerkat-mob-mcp/src/agent_tools.rs docs/api/mcp.mdx sdks/typescript/README.md 2>&1 || true)
 if printf '%s' "$surface_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
   && ! printf '%s' "$surface_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
   ok "cargo-agent-gate dry-run routes public surface docs/router/mob-mcp changes to generated contract ratchets"
@@ -218,14 +218,14 @@ if printf '%s' "$web_gate_out" | grep -Fq 'test-sdk-web' \
 else
   bad "cargo-agent-gate dry-run did not route Web SDK changes"
 fi
-wasm_gate_out=$(scripts/cargo-agent-gate --dry-run -- meerkat-web-runtime/src/lib.rs 2>&1 || true)
+wasm_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-web-runtime/src/lib.rs 2>&1 || true)
 if printf '%s' "$wasm_gate_out" | grep -Fq 'wasm-check' \
   && ! printf '%s' "$wasm_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
   ok "cargo-agent-gate dry-run routes web runtime changes to wasm-check"
 else
   bad "cargo-agent-gate dry-run did not route web runtime changes"
 fi
-rest_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- meerkat-rest/src/lib.rs meerkat-rpc/src/session_runtime.rs 2>&1 || true)
+rest_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- crates/meerkat-rest/src/lib.rs crates/meerkat-rpc/src/session_runtime.rs 2>&1 || true)
 if printf '%s' "$rest_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
   && ! printf '%s' "$rest_gate_out" | grep -Fq 'no build-relevant changes detected.'; then
   ok "buildbuddy-agent-gate dry-run routes RPC/REST surface changes to generated contract ratchets"
@@ -250,11 +250,11 @@ fi
 # ── #221: TLC lane fails closed when tlc is absent ───────────────────────────
 echo "#221 machine-verify TLC lane fails closed without tlc:"
 if grep -Fq 'tlc not on PATH but this lane advertises TLC-backed verification' \
-    xtask/tests/machine_verify_all_tlc_test.sh \
-  && grep -Fq 'MACHINE_VERIFY_TLC_DRIFT_ONLY' xtask/tests/machine_verify_all_tlc_test.sh \
-  && grep -Fq 'JAVA_TOOL_OPTIONS' xtask/tests/machine_verify_all_tlc_test.sh \
-  && grep -Fq -- '-Xss256m' xtask/tests/machine_verify_all_tlc_test.sh \
-  && grep -Fq -- '-XX:+UseParallelGC' xtask/tests/machine_verify_all_tlc_test.sh; then
+    crates/xtask/tests/machine_verify_all_tlc_test.sh \
+  && grep -Fq 'MACHINE_VERIFY_TLC_DRIFT_ONLY' crates/xtask/tests/machine_verify_all_tlc_test.sh \
+  && grep -Fq 'JAVA_TOOL_OPTIONS' crates/xtask/tests/machine_verify_all_tlc_test.sh \
+  && grep -Fq -- '-Xss256m' crates/xtask/tests/machine_verify_all_tlc_test.sh \
+  && grep -Fq -- '-XX:+UseParallelGC' crates/xtask/tests/machine_verify_all_tlc_test.sh; then
   ok "TLC test fails closed unless explicitly downgraded and gives direct witnesses the canonical JVM policy"
 else
   bad "TLC test silently downgrades without tlc or omits the canonical JVM policy for direct witnesses"
@@ -269,7 +269,7 @@ fi
 # never reached because the tlc guard fires first.
 if ! command -v tlc >/dev/null 2>&1; then
   set +e
-  PATH="/usr/bin:/bin" bash xtask/tests/machine_verify_all_tlc_test.sh /bin/true >/dev/null 2>&1
+  PATH="/usr/bin:/bin" bash crates/xtask/tests/machine_verify_all_tlc_test.sh /bin/true >/dev/null 2>&1
   rc=$?
   set -e
   if [ "$rc" -ne 0 ]; then
@@ -302,7 +302,7 @@ if PATH="$tlc_env_tmp:$PATH" \
     TLC_JAVA_OPTIONS_CAPTURE="$capture" \
     TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
     JAVA_TOOL_OPTIONS='-Dmeerkat.sentinel=true' \
-    bash xtask/tests/machine_verify_all_tlc_test.sh "$true_bin" >/dev/null 2>&1 \
+    bash crates/xtask/tests/machine_verify_all_tlc_test.sh "$true_bin" >/dev/null 2>&1 \
   && grep -Fqw -- '-Dmeerkat.sentinel=true' "$capture" \
   && [ "$(tr ' ' '\n' < "$capture" | grep -Fxc -- '-Xss256m')" -eq 1 ] \
   && [ "$(tr ' ' '\n' < "$capture" | grep -Fxc -- '-XX:+UseParallelGC')" -eq 1 ]; then
@@ -324,7 +324,7 @@ if PATH="$tlc_env_tmp:$PATH" \
     TLC_JAVA_OPTIONS_CAPTURE="$capture" \
     TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
     JAVA_TOOL_OPTIONS='-Dmeerkat.sentinel=true -Xss8m -XX:+UseParallelGC' \
-    bash xtask/tests/machine_verify_all_tlc_test.sh "$true_bin" >/dev/null 2>&1 \
+    bash crates/xtask/tests/machine_verify_all_tlc_test.sh "$true_bin" >/dev/null 2>&1 \
   && [ "$(tr ' ' '\n' < "$capture" | grep -Fxc -- '-Xss8m')" -eq 1 ] \
   && ! grep -Fqw -- '-Xss256m' "$capture" \
   && [ "$(tr ' ' '\n' < "$capture" | grep -Fxc -- '-XX:+UseParallelGC')" -eq 1 ] \

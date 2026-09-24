@@ -177,7 +177,7 @@ fn authority_language_check_reports_live_docs_outside_retired_architecture_scope
 #[test]
 fn peer_response_terminal_projection_ratchet_rejects_runtime_boundary_projection() {
     let dir = tempdir().expect("tempdir");
-    let runtime = dir.path().join("meerkat-runtime/src");
+    let runtime = dir.path().join("crates/meerkat-runtime/src");
     fs::create_dir_all(&runtime).expect("create runtime dir");
     fs::write(
         runtime.join("input.rs"),
@@ -207,7 +207,7 @@ mod tests {
     );
     assert!(
         mismatches.iter().all(|mismatch| {
-            mismatch.contains("meerkat-runtime/src/input.rs")
+            mismatch.contains("crates/meerkat-runtime/src/input.rs")
                 && !mismatch.contains("allowed_test_fixture")
         }),
         "expected mismatches to point at production boundary lines, got {mismatches:#?}"
@@ -217,7 +217,7 @@ mod tests {
 #[test]
 fn peer_response_terminal_projection_ratchet_rejects_core_string_identity_bus() {
     let dir = tempdir().expect("tempdir");
-    let core = dir.path().join("meerkat-core/src");
+    let core = dir.path().join("crates/meerkat-core/src");
     fs::create_dir_all(&core).expect("create core dir");
     fs::write(
         core.join("handles.rs"),
@@ -282,8 +282,8 @@ pub fn peer_response_terminal_context_key(route_identity: &String, correlation_i
 #[test]
 fn peer_response_terminal_projection_ratchet_rejects_shell_peer_name_identity_bus() {
     let dir = tempdir().expect("tempdir");
-    let contracts = dir.path().join("meerkat-contracts/src/wire");
-    let rpc = dir.path().join("meerkat-rpc/src");
+    let contracts = dir.path().join("crates/meerkat-contracts/src/wire");
+    let rpc = dir.path().join("crates/meerkat-rpc/src");
     fs::create_dir_all(&contracts).expect("create contracts dir");
     fs::create_dir_all(rpc.join("handlers")).expect("create rpc handlers dir");
     fs::write(
@@ -345,7 +345,7 @@ fn canonical_machine_inventory_matches_docs_and_artifact_bundle() {
 fn row22_kernel_public_api_contract_rejects_legacy_exports() {
     require_live_workspace_runfiles();
     let root = repo_root().expect("repo root");
-    let kernel_lib = root.join("meerkat-machine-kernels/src/lib.rs");
+    let kernel_lib = root.join("crates/meerkat-machine-kernels/src/lib.rs");
     let contents = fs::read_to_string(&kernel_lib).expect("read kernel lib");
 
     assert!(
@@ -359,7 +359,7 @@ fn row22_kernel_public_api_contract_rejects_legacy_exports() {
 fn kernel_generated_inventory_is_canonical_seven_only() {
     require_live_workspace_runfiles();
     let root = repo_root().expect("repo root");
-    let generated_mod = root.join("meerkat-machine-kernels/src/generated/mod.rs");
+    let generated_mod = root.join("crates/meerkat-machine-kernels/src/generated/mod.rs");
     let contents = fs::read_to_string(&generated_mod).expect("read generated mod");
 
     for required in [
@@ -391,10 +391,10 @@ fn kernel_generated_inventory_is_canonical_seven_only() {
 fn generated_kernel_boundary_rejects_retired_generated_source_and_bridge_paths() {
     let dir = tempdir().expect("tempdir");
     for retired in [
-        "meerkat-machine-kernels/src/compat_generated.rs",
-        "meerkat-machine-kernels/src/generated/flow_run.rs",
-        "meerkat-mob/src/generated/flow_frame_loop_driver.rs",
-        "meerkat-mob/src/runtime/loop_iteration_authority.rs",
+        "crates/meerkat-machine-kernels/src/compat_generated.rs",
+        "crates/meerkat-machine-kernels/src/generated/flow_run.rs",
+        "crates/meerkat-mob/src/generated/flow_frame_loop_driver.rs",
+        "crates/meerkat-mob/src/runtime/loop_iteration_authority.rs",
     ] {
         let path = dir.path().join(retired);
         fs::create_dir_all(path.parent().expect("retired parent")).expect("create parent");
@@ -404,10 +404,10 @@ fn generated_kernel_boundary_rejects_retired_generated_source_and_bridge_paths()
     let mismatches =
         collect_generated_kernel_boundary_mismatches(dir.path()).expect("boundary mismatches");
     for retired in [
-        "meerkat-machine-kernels/src/compat_generated.rs",
-        "meerkat-machine-kernels/src/generated/flow_run.rs",
-        "meerkat-mob/src/generated/flow_frame_loop_driver.rs",
-        "meerkat-mob/src/runtime/loop_iteration_authority.rs",
+        "crates/meerkat-machine-kernels/src/compat_generated.rs",
+        "crates/meerkat-machine-kernels/src/generated/flow_run.rs",
+        "crates/meerkat-mob/src/generated/flow_frame_loop_driver.rs",
+        "crates/meerkat-mob/src/runtime/loop_iteration_authority.rs",
     ] {
         assert!(
             mismatches.iter().any(|mismatch| mismatch.contains(retired)),
@@ -421,13 +421,13 @@ fn generated_kernel_boundary_accepts_canonical_generated_module_without_owner_bo
     let dir = tempdir().expect("tempdir");
     let generated = dir
         .path()
-        .join("meerkat-machine-kernels/src/generated/meerkat.rs");
+        .join("crates/meerkat-machine-kernels/src/generated/meerkat.rs");
     fs::create_dir_all(generated.parent().expect("generated parent")).expect("create generated");
     fs::write(&generated, "// generated MeerkatMachine kernel").expect("write generated kernel");
 
     let owner = dir
         .path()
-        .join("meerkat-runtime/src/meerkat_machine/dsl.rs");
+        .join("crates/meerkat-runtime/src/meerkat_machine/dsl.rs");
     fs::create_dir_all(owner.parent().expect("owner parent")).expect("create owner");
     fs::write(
         &owner,
@@ -453,13 +453,13 @@ fn production_owner_relation_rejects_source_only_token_without_schema_relation()
 
     let generated = dir
         .path()
-        .join("meerkat-machine-kernels/src/generated/meerkat.rs");
+        .join("crates/meerkat-machine-kernels/src/generated/meerkat.rs");
     fs::create_dir_all(generated.parent().expect("generated parent")).expect("create generated");
     fs::write(&generated, "// generated MeerkatMachine kernel").expect("write generated kernel");
 
     let source_only = dir
         .path()
-        .join("meerkat-runtime/src/meerkat_machine/dsl.rs");
+        .join("crates/meerkat-runtime/src/meerkat_machine/dsl.rs");
     fs::create_dir_all(source_only.parent().expect("source parent")).expect("create parent");
     fs::write(&source_only, "machine! { machine MeerkatMachine {} }").expect("write source");
 
@@ -488,13 +488,13 @@ fn production_owner_relation_accepts_generated_relation_without_machine_token_sh
 
     let generated = dir
         .path()
-        .join("meerkat-machine-kernels/src/generated/meerkat.rs");
+        .join("crates/meerkat-machine-kernels/src/generated/meerkat.rs");
     fs::create_dir_all(generated.parent().expect("generated parent")).expect("create generated");
     fs::write(&generated, "// generated MeerkatMachine kernel").expect("write generated kernel");
 
     let owner = dir
         .path()
-        .join("meerkat-runtime/src/meerkat_machine/dsl.rs");
+        .join("crates/meerkat-runtime/src/meerkat_machine/dsl.rs");
     fs::create_dir_all(owner.parent().expect("owner parent")).expect("create owner");
     fs::write(&owner, "pub fn schema_adapter() {}").expect("write owner");
 
@@ -516,7 +516,7 @@ fn phase1_source_string_scanner_is_removed_from_xtask_surface() {
     let source = fs::read_to_string(
         repo_root()
             .expect("repo root")
-            .join("xtask/src/machines.rs"),
+            .join("crates/xtask/src/machines.rs"),
     )
     .expect("read machines xtask source");
 
@@ -532,17 +532,17 @@ fn compat_kernel_modules_and_flow_runtime_mini_machines_are_deleted() {
     require_live_workspace_runfiles();
     let root = repo_root().expect("repo root");
     for forbidden in [
-        "meerkat-machine-kernels/src/compat_generated.rs",
-        "meerkat-machine-kernels/src/generated/flow_run.rs",
-        "meerkat-machine-kernels/src/generated/flow_frame.rs",
-        "meerkat-machine-kernels/src/generated/loop_iteration.rs",
-        "meerkat-mob/src/generated/flow_run.rs",
-        "meerkat-mob/src/generated/flow_frame.rs",
-        "meerkat-mob/src/generated/loop_iteration.rs",
-        "meerkat-mob/src/runtime/flow_run_kernel.rs",
-        "meerkat-mob/src/runtime/flow_frame_kernel.rs",
-        "meerkat-mob/src/runtime/loop_iteration_authority.rs",
-        "meerkat-mob/src/generated/flow_frame_loop_driver.rs",
+        "crates/meerkat-machine-kernels/src/compat_generated.rs",
+        "crates/meerkat-machine-kernels/src/generated/flow_run.rs",
+        "crates/meerkat-machine-kernels/src/generated/flow_frame.rs",
+        "crates/meerkat-machine-kernels/src/generated/loop_iteration.rs",
+        "crates/meerkat-mob/src/generated/flow_run.rs",
+        "crates/meerkat-mob/src/generated/flow_frame.rs",
+        "crates/meerkat-mob/src/generated/loop_iteration.rs",
+        "crates/meerkat-mob/src/runtime/flow_run_kernel.rs",
+        "crates/meerkat-mob/src/runtime/flow_frame_kernel.rs",
+        "crates/meerkat-mob/src/runtime/loop_iteration_authority.rs",
+        "crates/meerkat-mob/src/generated/flow_frame_loop_driver.rs",
     ] {
         let path = root.join(forbidden);
         assert!(
@@ -556,7 +556,7 @@ fn compat_kernel_modules_and_flow_runtime_mini_machines_are_deleted() {
 fn flow_runtime_until_feedback_does_not_use_loop_iteration_authority_bridge() {
     require_live_workspace_runfiles();
     let root = repo_root().expect("repo root");
-    let flow_engine = root.join("meerkat-mob/src/runtime/flow_frame_engine.rs");
+    let flow_engine = root.join("crates/meerkat-mob/src/runtime/flow_frame_engine.rs");
     let contents = std::fs::read_to_string(&flow_engine)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", flow_engine.display()));
 
@@ -573,7 +573,7 @@ fn flow_runtime_until_feedback_does_not_use_loop_iteration_authority_bridge() {
         );
     }
 
-    let schema_src = root.join("meerkat-machine-schema/src");
+    let schema_src = root.join("crates/meerkat-machine-schema/src");
     let mut stack = vec![schema_src];
     while let Some(path) = stack.pop() {
         let metadata = fs::metadata(&path)
@@ -639,7 +639,7 @@ fn live_mob_runtime_catalog_commands_fail_close_on_matching_machine_inputs() {
 #[test]
 fn live_flow_runtime_reducer_transition_ratchet_rejects_direct_runtime_calls() {
     let dir = tempdir().expect("tempdir");
-    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    let runtime = dir.path().join("crates/meerkat-mob/src/runtime");
     fs::create_dir_all(&runtime).expect("create runtime dir");
     let file = runtime.join("bad.rs");
     fs::write(
@@ -653,7 +653,7 @@ fn live_flow_runtime_reducer_transition_ratchet_rejects_direct_runtime_calls() {
     assert!(
         mismatches
             .iter()
-            .any(|mismatch| mismatch.contains("meerkat-mob/src/runtime/bad.rs:1")),
+            .any(|mismatch| mismatch.contains("crates/meerkat-mob/src/runtime/bad.rs:1")),
         "expected direct runtime reducer call to be rejected, got {mismatches:#?}"
     );
 }
@@ -661,7 +661,7 @@ fn live_flow_runtime_reducer_transition_ratchet_rejects_direct_runtime_calls() {
 #[test]
 fn live_flow_runtime_reducer_transition_ratchet_rejects_direct_reducer_input_construction() {
     let dir = tempdir().expect("tempdir");
-    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    let runtime = dir.path().join("crates/meerkat-mob/src/runtime");
     fs::create_dir_all(&runtime).expect("create runtime dir");
     let file = runtime.join("bad_input.rs");
     fs::write(
@@ -675,7 +675,7 @@ fn live_flow_runtime_reducer_transition_ratchet_rejects_direct_reducer_input_con
     assert!(
         mismatches
             .iter()
-            .any(|mismatch| mismatch.contains("meerkat-mob/src/runtime/bad_input.rs:1")),
+            .any(|mismatch| mismatch.contains("crates/meerkat-mob/src/runtime/bad_input.rs:1")),
         "expected direct runtime reducer input to be rejected, got {mismatches:#?}"
     );
 }
@@ -683,7 +683,7 @@ fn live_flow_runtime_reducer_transition_ratchet_rejects_direct_reducer_input_con
 #[test]
 fn live_flow_runtime_reducer_transition_ratchet_rejects_aliases_and_projection_writes() {
     let dir = tempdir().expect("tempdir");
-    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    let runtime = dir.path().join("crates/meerkat-mob/src/runtime");
     fs::create_dir_all(&runtime).expect("create runtime dir");
     fs::write(
         runtime.join("aliased.rs"),
@@ -786,7 +786,7 @@ fn live_flow_runtime_reducer_transition_ratchet_rejects_aliases_and_projection_w
     }
     assert!(
         mismatches.iter().any(|mismatch| {
-            mismatch.contains("meerkat-mob/src/runtime/projection_helper_wrapper.rs")
+            mismatch.contains("crates/meerkat-mob/src/runtime/projection_helper_wrapper.rs")
                 && mismatch.contains(".cas_grant_body_frame_start(")
         }),
         "expected helper wrapper around compound projection CAS to be rejected, got {mismatches:#?}"
@@ -799,7 +799,7 @@ fn live_flow_runtime_reducer_transition_ratchet_rejects_aliases_and_projection_w
 #[test]
 fn live_flow_cas_write_ratchet_is_ast_shaped_not_token_shaped() {
     let dir = tempdir().expect("tempdir");
-    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    let runtime = dir.path().join("crates/meerkat-mob/src/runtime");
     fs::create_dir_all(&runtime).expect("create runtime dir");
     fs::write(
         runtime.join("cas_shapes.rs"),
@@ -850,7 +850,7 @@ fn live_flow_cas_write_ratchet_is_ast_shaped_not_token_shaped() {
 #[test]
 fn mob_runtime_catalog_command_gate_ratchet_rejects_missing_and_warning_only_gates() {
     let dir = tempdir().expect("tempdir");
-    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    let runtime = dir.path().join("crates/meerkat-mob/src/runtime");
     fs::create_dir_all(&runtime).expect("create runtime dir");
     fs::write(
         runtime.join("actor.rs"),
@@ -897,7 +897,7 @@ async fn dispatch(&mut self, command: MobCommand) {
 #[test]
 fn mob_runtime_catalog_command_gate_ratchet_accepts_fail_closed_gates() {
     let dir = tempdir().expect("tempdir");
-    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    let runtime = dir.path().join("crates/meerkat-mob/src/runtime");
     fs::create_dir_all(&runtime).expect("create runtime dir");
     fs::write(
         runtime.join("actor.rs"),
@@ -946,7 +946,7 @@ async fn dispatch(&mut self, command: MobCommand) -> Result<(), MobError> {
 #[test]
 fn live_flow_runtime_reducer_transition_ratchet_accepts_typed_authority_wrappers() {
     let dir = tempdir().expect("tempdir");
-    let run = dir.path().join("meerkat-mob/src/run.rs");
+    let run = dir.path().join("crates/meerkat-mob/src/run.rs");
     fs::create_dir_all(run.parent().expect("run parent")).expect("create run dir");
     fs::write(
         &run,
@@ -982,7 +982,7 @@ impl MobMachineFlowRunCommand {
 #[test]
 fn live_flow_runtime_projection_ratchet_accepts_typed_outcome_commits() {
     let dir = tempdir().expect("tempdir");
-    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    let runtime = dir.path().join("crates/meerkat-mob/src/runtime");
     fs::create_dir_all(&runtime).expect("create runtime dir");
     fs::write(
         runtime.join("flow.rs"),
@@ -1009,7 +1009,7 @@ async fn good(run_store: Store, run_id: &RunId, run: MobRun, command: MobMachine
 #[test]
 fn live_flow_runtime_projection_ratchet_accepts_actor_store_plan_commit() {
     let dir = tempdir().expect("tempdir");
-    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    let runtime = dir.path().join("crates/meerkat-mob/src/runtime");
     fs::create_dir_all(&runtime).expect("create runtime dir");
     fs::write(
         runtime.join("actor.rs"),
@@ -1075,7 +1075,7 @@ async fn commit_flow_frame_store_plan_in_actor(
 #[test]
 fn flow_reducer_run_rs_direct_use_allow_list_is_ast_shaped() {
     let dir = tempdir().expect("tempdir");
-    let mob_src = dir.path().join("meerkat-mob/src");
+    let mob_src = dir.path().join("crates/meerkat-mob/src");
     fs::create_dir_all(&mob_src).expect("create mob src dir");
     fs::write(
         mob_src.join("run.rs"),
@@ -1113,7 +1113,7 @@ fn flow_reducer_run_rs_direct_use_allow_list_is_ast_shaped() {
 #[test]
 fn flow_reducer_run_rs_allow_list_rejects_comment_and_string_authority() {
     let dir = tempdir().expect("tempdir");
-    let mob_src = dir.path().join("meerkat-mob/src");
+    let mob_src = dir.path().join("crates/meerkat-mob/src");
     fs::create_dir_all(&mob_src).expect("create mob src dir");
     fs::write(
         mob_src.join("run.rs"),
@@ -1135,20 +1135,20 @@ fn flow_reducer_run_rs_allow_list_rejects_comment_and_string_authority() {
     assert!(
         mismatches.iter().any(
             |mismatch| mismatch.contains("direct live-flow reducer transition")
-                && mismatch.contains("meerkat-mob/src/run.rs")
+                && mismatch.contains("crates/meerkat-mob/src/run.rs")
         ),
         "comment/string authority.require must not satisfy the allow-list, got {mismatches:#?}"
     );
 }
 
 /// The allow-list keys on structural facts, not file-local text: the same
-/// wrapper shape outside `meerkat-mob/src/run.rs`, a wrapper requiring the
+/// wrapper shape outside `crates/meerkat-mob/src/run.rs`, a wrapper requiring the
 /// *wrong* authority family, and an `into_input` adapter on the wrong impl
 /// type must all stay rejected.
 #[test]
 fn flow_reducer_direct_use_allow_list_rejects_wrong_structural_facts() {
     let dir = tempdir().expect("tempdir");
-    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    let runtime = dir.path().join("crates/meerkat-mob/src/runtime");
     fs::create_dir_all(&runtime).expect("create runtime dir");
     // Right shape, wrong file.
     fs::write(
@@ -1164,7 +1164,7 @@ fn flow_reducer_direct_use_allow_list_rejects_wrong_structural_facts() {
         ),
     )
     .expect("write wrong-file wrapper");
-    let mob_src = dir.path().join("meerkat-mob/src");
+    let mob_src = dir.path().join("crates/meerkat-mob/src");
     // Wrong authority family + wrong adapter impl type, right file.
     fs::write(
         mob_src.join("run.rs"),
@@ -1190,20 +1190,20 @@ fn flow_reducer_direct_use_allow_list_rejects_wrong_structural_facts() {
     assert!(
         mismatches
             .iter()
-            .any(|mismatch| mismatch.contains("meerkat-mob/src/runtime/wrong_file.rs")),
+            .any(|mismatch| mismatch.contains("crates/meerkat-mob/src/runtime/wrong_file.rs")),
         "wrapper shape outside run.rs must stay rejected, got {mismatches:#?}"
     );
     assert!(
         mismatches.iter().any(
             |mismatch| mismatch.contains("direct live-flow reducer transition")
-                && mismatch.contains("meerkat-mob/src/run.rs")
+                && mismatch.contains("crates/meerkat-mob/src/run.rs")
         ),
         "wrapper requiring the wrong authority family must stay rejected, got {mismatches:#?}"
     );
     assert!(
         mismatches.iter().any(
             |mismatch| mismatch.contains("direct live-flow reducer input")
-                && mismatch.contains("meerkat-mob/src/run.rs")
+                && mismatch.contains("crates/meerkat-mob/src/run.rs")
         ),
         "adapter on the wrong impl type must stay rejected, got {mismatches:#?}"
     );

@@ -79,7 +79,7 @@ meerkat-core = "=$version"
 EOF
 
 cp \
-  "$ROOT/meerkat/tests/fixtures/agent_builder_policy/downstream_public_facade_agentbuilder.rs" \
+  "$ROOT/crates/meerkat/tests/fixtures/agent_builder_policy/downstream_public_facade_agentbuilder.rs" \
   "$smoke_dir/src/main.rs"
 
 CARGO_TARGET_DIR="$tmp_dir/smoke-target" \

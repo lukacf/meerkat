@@ -52,9 +52,9 @@ whose authoritative terminal truth is carried by the return value / machine stat
 
 The **same condition terminates two ways across provider parsers** — the canonical Rule-8 violation:
 - **id 50:** `ToolCallBuffer::try_complete()` returns `Option`, and `serde_json::from_str(&self.args_json).ok()?`
-  (`meerkat-llm-core/src/types.rs:445`) silently drops malformed tool-args after `finish_reason == tool_calls` → the
+  (`crates/meerkat-llm-core/src/types.rs:445`) silently drops malformed tool-args after `finish_reason == tool_calls` → the
   intended tool call **vanishes** and the turn emits `Done{Success}`. Anthropic, for the identical corruption,
-  returns typed `LlmError::StreamParseError` (`meerkat-anthropic/src/client.rs:1638`).
+  returns typed `LlmError::StreamParseError` (`crates/meerkat-anthropic/src/client.rs:1638`).
 - **id 46:** Anthropic clean-EOF-without `message_stop` synthesizes `Done{Success{EndTurn}}` (`client.rs:1423-1432`),
   pre-empting `ensure_terminal_done`'s `IncompleteResponse` and dropping any in-flight `tool_use`; OpenAI/Gemini don't.
 - **id 43:** `parse_sse_line` `.ok()`-drops a malformed real `data:` event → content truncation laundered to Success.
@@ -93,7 +93,7 @@ corruption). *Medium — local to one file with a prevailing propagation convent
 ## Contested / cleared (validates panel quality)
 
 The map's two most prominent agent-loop flags were **correctly refuted**: **id 1** `save_session_best_effort`
-(`meerkat-core/src/agent/state.rs:255`) swallows the store save — but it's a redundant optimization: the persistent
+(`crates/meerkat-core/src/agent/state.rs:255`) swallows the store save — but it's a redundant optimization: the persistent
 service re-persists with `?`-propagation (`persist_full_session_or_discard_live`) and `RunResult` never claims
 persistence (**verified**). The **entire 35-site `let _ = tap_emit(...)` event-tap cluster** was refuted — best-effort
 observability whose authoritative terminal outcome is the return value / machine state / persisted event, not the

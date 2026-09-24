@@ -160,7 +160,7 @@ fn gemini_model() -> String {
 
 fn get_test_server_path() -> Option<std::path::PathBuf> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
-    let workspace_root = std::path::Path::new(&manifest_dir).parent()?;
+    let workspace_root = std::path::Path::new(&manifest_dir).parent()?.parent()?;
     let server_path = std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .and_then(|target_dir| {

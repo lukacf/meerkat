@@ -238,7 +238,7 @@ package pin goes through `--config`; repeat the flag with
 - **`lto`**: leave it at the default `false`. `"thin"` or `"fat"` LTO pulls the
   whole dependency graph into one optimization pass at link time and multiplies
   link-stage memory.
-- **Features**: `meerkat-cli/Cargo.toml` lists the subsystems behind `rkat`'s
+- **Features**: `crates/meerkat-cli/Cargo.toml` lists the subsystems behind `rkat`'s
   default features (`mob`, `rpc-surface`, `openai-realtime`, `comms`,
   `schedule`, `workgraph`, `mcp`, `skills`, storage backends, providers). A
   narrower `--no-default-features --features ...` production build can remove
@@ -395,7 +395,7 @@ gh attestation verify rkat-0.8.32-x86_64-unknown-linux-gnu.tar.gz --repo lukacf/
 
 The Linux GNU binaries are built inside the `buildpack-deps:bullseye` image
 (Debian 11, glibc 2.31) on both release lanes: the BuildBuddy lane pins that
-image as the execution container in `platforms/BUILD.bazel`, and the
+image as the execution container in `tools/bazel/platforms/BUILD.bazel`, and the
 GitHub-hosted lane runs its Linux jobs under the same `container:`, because
 building directly on the Ubuntu 24.04 runner (glibc 2.39) would silently raise
 the floor. Packaging then runs

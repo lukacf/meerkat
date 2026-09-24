@@ -1420,7 +1420,7 @@ struct SessionFootprint {
     /// `session_strand_messages` rows whose session has no usable
     /// `session_heads` row. `append_messages` lands strand rows and
     /// `save_head` mints the head row in a separate transaction
-    /// (`meerkat-store/src/sqlite_store.rs`), so this is a legitimate
+    /// (`crates/meerkat-store/src/sqlite_store.rs`), so this is a legitimate
     /// durable state, not corruption — but without the head key the rows'
     /// live-or-retained split is unknowable. The strand pool counts the
     /// same rows in its unclassified bucket.
@@ -2532,7 +2532,7 @@ fn report_frozen_archives(
         "{} frozen `sessions.session_json` row(s) hold {} for session(s) that already have a \
          `session_heads` row; every SqliteSessionStore read resolves the head row first and \
          `list` excludes blob rows that have one, so these bytes are never read again \
-         (meerkat-store/src/sqlite_store.rs: \"The blob row is left untouched as a frozen archive \
+         (crates/meerkat-store/src/sqlite_store.rs: \"The blob row is left untouched as a frozen archive \
          and is never read again once the head row exists\")",
         archives.sessions,
         format_bytes(archives.bytes),
@@ -4286,7 +4286,7 @@ mod tests {
         let db_path = realm_dir.join("sessions.sqlite3");
         // `append_messages` lands strand rows in one transaction and
         // `save_head` mints the head row in a later one
-        // (meerkat-store/src/sqlite_store.rs), so a session legitimately
+        // (crates/meerkat-store/src/sqlite_store.rs), so a session legitimately
         // holds strand rows and no head row — and no `sessions.session_json`
         // row at all. Enough mass that the old mass-alone arm would have
         // fired.

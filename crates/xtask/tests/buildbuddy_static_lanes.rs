@@ -145,14 +145,14 @@ fn linux_release_rbe_provides_hermetic_cmake_for_vendored_opus() {
 fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
     let root = repo_root();
     let launcher = read(root.join("scripts/buildbuddy-bazel-poc"));
-    let build = read(root.join("xtask/BUILD.bazel"));
-    let wrapper = read(root.join("xtask/tests/machine_verify_all_tlc_test.sh"));
+    let build = read(root.join("crates/xtask/BUILD.bazel"));
+    let wrapper = read(root.join("crates/xtask/tests/machine_verify_all_tlc_test.sh"));
     let doctor = read(root.join("scripts/buildbuddy-doctor"));
 
     let lane = find_all_between(&launcher, "machine-authority-rbe)", ";;")
         .expect("machine-authority-rbe lane block");
     assert!(
-        lane.contains("default_target=\"//xtask:machine_verify_all_tlc_test "),
+        lane.contains("default_target=\"//crates/xtask:machine_verify_all_tlc_test "),
         "machine-authority-rbe must start with explicit machine-verify TLC target; block:\n{lane}"
     );
     assert!(
@@ -427,7 +427,7 @@ fn public_version_surfaces_are_in_sync() {
     assert_eq!(ts_version, cargo_version, "TypeScript SDK version mismatch");
     assert_eq!(web_version, cargo_version, "Web SDK version mismatch");
 
-    let version_rs = read(root.join("meerkat-contracts/src/version.rs"));
+    let version_rs = read(root.join("crates/meerkat-contracts/src/version.rs"));
     let mut parts = Vec::new();
     let current = find_all_between(&version_rs, "pub const CURRENT: Self = Self {", "};")
         .expect("ContractVersion::CURRENT");
@@ -496,8 +496,8 @@ fn public_version_surfaces_are_in_sync() {
 #[test]
 fn rpc_catalog_router_docs_and_sdk_wrappers_are_aligned() {
     let root = repo_root();
-    let router = read(root.join("meerkat-rpc/src/router.rs"));
-    let catalog = read(root.join("meerkat-contracts/src/rpc_catalog.rs"));
+    let router = read(root.join("crates/meerkat-rpc/src/router.rs"));
+    let catalog = read(root.join("crates/meerkat-contracts/src/rpc_catalog.rs"));
     let docs = read(root.join("docs/api/rpc.mdx"));
 
     let mut router_methods = BTreeSet::new();
@@ -621,30 +621,30 @@ fn retired_public_surface_tokens_stay_out_of_unowned_paths() {
         ".claude/skills/meerkat-platform",
         "sdks",
         "CHANGELOG.md",
-        "meerkat/src",
-        "meerkat-cli",
-        "meerkat-core",
-        "meerkat-comms",
-        "meerkat-rest",
-        "meerkat-rpc",
-        "meerkat-session",
-        "meerkat-tools",
-        "meerkat-contracts/src/version.rs",
+        "crates/meerkat/src",
+        "crates/meerkat-cli",
+        "crates/meerkat-core",
+        "crates/meerkat-comms",
+        "crates/meerkat-rest",
+        "crates/meerkat-rpc",
+        "crates/meerkat-session",
+        "crates/meerkat-tools",
+        "crates/meerkat-contracts/src/version.rs",
     ];
     let allowed_prefixes = [
         "docs/",
         ".claude/skills/meerkat-platform/",
         "sdks/",
         "CHANGELOG.md",
-        "meerkat/",
-        "meerkat-cli/",
-        "meerkat-core/",
-        "meerkat-comms/",
-        "meerkat-rpc/",
-        "meerkat-rest/",
-        "meerkat-session/",
-        "meerkat-tools/",
-        "meerkat-contracts/src/version.rs",
+        "crates/meerkat/",
+        "crates/meerkat-cli/",
+        "crates/meerkat-core/",
+        "crates/meerkat-comms/",
+        "crates/meerkat-rpc/",
+        "crates/meerkat-rest/",
+        "crates/meerkat-session/",
+        "crates/meerkat-tools/",
+        "crates/meerkat-contracts/src/version.rs",
     ];
 
     let mut blocked = Vec::new();
@@ -699,9 +699,9 @@ fn retired_session_control_names_are_absent() {
         "docs",
         "sdks",
         "artifacts",
-        "meerkat-contracts",
-        "meerkat-rest",
-        "meerkat-rpc",
+        "crates/meerkat-contracts",
+        "crates/meerkat-rest",
+        "crates/meerkat-rpc",
         "tools/sdk-codegen",
     ];
     let mut matches = Vec::new();
@@ -710,7 +710,8 @@ fn retired_session_control_names_are_absent() {
         walk_files(&root.join(scan_path), &mut files);
         for file in files {
             let rel = relative(&root, &file);
-            if rel.starts_with("docs/dogma-")
+            if rel.starts_with("docs/internal/")
+                || rel.starts_with("docs/dogma-")
                 || rel.starts_with("docs/wave-")
                 || rel.starts_with("artifacts/")
             {
@@ -782,9 +783,9 @@ fn deprecated_backend_references_stay_rejected_only() {
 fn bridge_code_does_not_reinterpret_response_status() {
     let root = repo_root();
     let bridge_files = [
-        "meerkat-mob/src/runtime/supervisor_bridge.rs",
-        "meerkat-mob/src/runtime/local_bridge.rs",
-        "meerkat-contracts/src/wire/supervisor_bridge.rs",
+        "crates/meerkat-mob/src/runtime/supervisor_bridge.rs",
+        "crates/meerkat-mob/src/runtime/local_bridge.rs",
+        "crates/meerkat-contracts/src/wire/supervisor_bridge.rs",
     ];
     let mut violations = Vec::new();
     for rel in bridge_files {
@@ -816,11 +817,11 @@ fn bridge_code_does_not_reinterpret_response_status() {
 #[test]
 fn supervisor_bridge_protocol_version_checks_stay_in_typed_owner() {
     let root = repo_root();
-    let owner = "meerkat-contracts/src/wire/supervisor_bridge.rs";
+    let owner = "crates/meerkat-contracts/src/wire/supervisor_bridge.rs";
     let source_roots = [
-        root.join("meerkat-contracts/src"),
-        root.join("meerkat-mob/src"),
-        root.join("meerkat-runtime/src"),
+        root.join("crates/meerkat-contracts/src"),
+        root.join("crates/meerkat-mob/src"),
+        root.join("crates/meerkat-runtime/src"),
     ];
     let mut files = Vec::new();
     for source_root in source_roots {

@@ -285,6 +285,7 @@ fn assert_typed_runtime_manifest_matches_generated_inputs<T>(
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(std::path::Path::parent)
         .expect("repo root")
         .to_path_buf()
 }
@@ -645,8 +646,8 @@ fn mob_machine_inputs_equal_runtime_manifest_exactly() {
 #[test]
 fn runtime_classifications_do_not_expose_string_catalog_input_names() {
     for path in [
-        "meerkat-runtime/src/meerkat_machine_types.rs",
-        "meerkat-mob/src/mob_machine.rs",
+        "crates/meerkat-runtime/src/meerkat_machine_types.rs",
+        "crates/meerkat-mob/src/mob_machine.rs",
     ] {
         let source =
             std::fs::read_to_string(repo_root().join(path)).expect("read classification source");
@@ -660,19 +661,19 @@ fn runtime_classifications_do_not_expose_string_catalog_input_names() {
 #[test]
 fn canonical_command_manifests_do_not_project_through_strings() {
     assert_command_manifest_body_uses_typed_variants(
-        "meerkat-runtime/src/meerkat_machine_types.rs",
+        "crates/meerkat-runtime/src/meerkat_machine_types.rs",
         "pub fn canonical_meerkat_machine_command_input_variant_manifest",
     );
     assert_meerkat_runtime_internal_manifest_body_uses_typed_records(
-        "meerkat-runtime/src/meerkat_machine_types.rs",
+        "crates/meerkat-runtime/src/meerkat_machine_types.rs",
         "pub fn canonical_meerkat_machine_runtime_internal_input_variant_manifest",
     );
     assert_meerkat_runtime_internal_classification_body_uses_typed_records(
-        "meerkat-runtime/src/meerkat_machine_types.rs",
+        "crates/meerkat-runtime/src/meerkat_machine_types.rs",
         "pub fn canonical_meerkat_machine_runtime_internal_classifications",
     );
     assert_command_manifest_body_uses_typed_variants(
-        "meerkat-mob/src/mob_machine.rs",
+        "crates/meerkat-mob/src/mob_machine.rs",
         "pub fn canonical_mob_machine_command_input_variant_manifest",
     );
 }
@@ -680,19 +681,19 @@ fn canonical_command_manifests_do_not_project_through_strings() {
 #[test]
 fn flow_authority_manifest_does_not_project_through_strings() {
     assert_flow_authority_manifest_body_uses_typed_variants(
-        "meerkat-mob/src/run.rs",
+        "crates/meerkat-mob/src/run.rs",
         "pub fn canonical_flow_authority_input_variant_manifest",
     );
     assert_flow_authority_record_conversion_uses_typed_manifest(
-        "meerkat-mob/src/run.rs",
+        "crates/meerkat-mob/src/run.rs",
         "pub(crate) fn from_accepted_mob_machine_input",
     );
     assert_flow_authority_record_conversion_uses_typed_manifest(
-        "meerkat-mob/src/run.rs",
+        "crates/meerkat-mob/src/run.rs",
         "pub(crate) fn from_machine_input",
     );
     assert_flow_authority_body_has_no_catch_all(
-        "meerkat-mob/src/run.rs",
+        "crates/meerkat-mob/src/run.rs",
         "pub(crate) fn from_accepted_mob_machine_body_frame_seed",
         "body-frame seed flow authority conversion",
     );
@@ -701,11 +702,11 @@ fn flow_authority_manifest_does_not_project_through_strings() {
 #[test]
 fn user_interrupt_path_uses_typed_runtime_internal_authority() {
     assert_runtime_internal_stager_validates_typed_manifest(
-        "meerkat-runtime/src/meerkat_machine/dsl_effects.rs",
+        "crates/meerkat-runtime/src/meerkat_machine/dsl_effects.rs",
         "pub(super) fn stage_runtime_internal_dsl_transition_on_authority",
     );
     assert_no_local_runtime_internal_stager_alphabet(
-        "meerkat-runtime/src/meerkat_machine/dsl_effects.rs",
+        "crates/meerkat-runtime/src/meerkat_machine/dsl_effects.rs",
     );
 }
 
@@ -738,12 +739,12 @@ fn fieldless_runtime_internal_inputs_are_typed_generated_manifest() {
 #[test]
 fn command_classifiers_do_not_use_string_whitelists_or_wildcards() {
     assert_classifier_body_uses_typed_variants(
-        "meerkat-runtime/src/meerkat_machine_types.rs",
+        "crates/meerkat-runtime/src/meerkat_machine_types.rs",
         "const fn meerkat_machine_command_classification",
         "/// Snapshot of completion waiters",
     );
     assert_classifier_body_uses_typed_variants(
-        "meerkat-mob/src/mob_machine.rs",
+        "crates/meerkat-mob/src/mob_machine.rs",
         "const fn mob_machine_command_classification",
         "",
     );

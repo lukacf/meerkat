@@ -69,15 +69,15 @@ const SURFACE_SERVICE_RECEIVERS: [&str; 4] = ["service", "svc", "session_service
 
 /// Surface files where direct service-interrupt bypasses are banned.
 const SURFACE_INTERRUPT_FILES: [&str; 9] = [
-    "meerkat-rest/src/lib.rs",
-    "meerkat-mcp-server/src/lib.rs",
-    "meerkat-rpc/src/handlers/session.rs",
-    "meerkat-rpc/src/handlers/turn.rs",
-    "meerkat-rpc/src/realtime_ws.rs",
-    "meerkat-cli/src/main.rs",
-    "meerkat-openai/src/realtime_attachment.rs",
-    "meerkat-mob/src/runtime/local_bridge.rs",
-    "meerkat-mob/src/runtime/provisioner.rs",
+    "crates/meerkat-rest/src/lib.rs",
+    "crates/meerkat-mcp-server/src/lib.rs",
+    "crates/meerkat-rpc/src/handlers/session.rs",
+    "crates/meerkat-rpc/src/handlers/turn.rs",
+    "crates/meerkat-rpc/src/realtime_ws.rs",
+    "crates/meerkat-cli/src/main.rs",
+    "crates/meerkat-openai/src/realtime_attachment.rs",
+    "crates/meerkat-mob/src/runtime/local_bridge.rs",
+    "crates/meerkat-mob/src/runtime/provisioner.rs",
 ];
 
 /// Standalone demo server: ForceState intentionally uses
@@ -85,10 +85,10 @@ const SURFACE_INTERRUPT_FILES: [&str; 9] = [
 /// to route through.
 const EXAMPLE_INTERRUPT_ALLOWLIST: [&str; 1] = ["examples/034-codemob-mcp/src/tools/consult.rs"];
 
-const CORE_EXECUTOR_TRAIT_REL: &str = "meerkat-core/src/lifecycle/core_executor.rs";
+const CORE_EXECUTOR_TRAIT_REL: &str = "crates/meerkat-core/src/lifecycle/core_executor.rs";
 const MACHINE_MANAGED_EXECUTOR_REL: &str =
-    "meerkat-runtime/src/meerkat_machine/session_management.rs";
-const AGENT_LLM_CLIENT_TRAIT_REL: &str = "meerkat-core/src/agent.rs";
+    "crates/meerkat-runtime/src/meerkat_machine/session_management.rs";
+const AGENT_LLM_CLIENT_TRAIT_REL: &str = "crates/meerkat-core/src/agent.rs";
 
 /// Reviewed disposition for one intentional `AgentLlmClient` default body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -221,7 +221,7 @@ const CORE_EXECUTOR_CONSUMED_BEFORE_WRAP_METHODS: &[&str] = &[
 /// the banned tokens, so they are excluded from the tombstone text scan
 /// (the bash predecessor excluded itself the same way).
 fn is_effect_gate_own_source(rel: &str) -> bool {
-    rel == "xtask/src/effect_authority.rs" || rel == "xtask/tests/effect_authority.rs"
+    rel == "crates/xtask/src/effect_authority.rs" || rel == "crates/xtask/tests/effect_authority.rs"
 }
 
 fn is_test_rust_path(rel: &str) -> bool {
@@ -356,12 +356,12 @@ fn line_has_word(line: &str, word: &str) -> bool {
 
 fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>) {
     // Workspace-wide structural rules.
-    if !is_test_rust_path(rel) && rel != "meerkat-runtime/src/meerkat_machine_tests.rs" {
+    if !is_test_rust_path(rel) && rel != "crates/meerkat-runtime/src/meerkat_machine_tests.rs" {
         let mut visitor = LegacyInterruptFnDefVisitor { rel, findings };
         visitor.visit_file(&parsed);
     }
 
-    if rel != "meerkat-runtime/src/user_interrupt.rs" {
+    if rel != "crates/meerkat-runtime/src/user_interrupt.rs" {
         let mut visitor = PathPairVisitor {
             rel,
             pairs: &[("UserInterruptAuthority", "new")],
@@ -372,18 +372,18 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
     }
 
     if !is_test_rust_path(rel)
-        && rel != "meerkat-runtime/src/meerkat_machine/session_management.rs"
-        && rel != "meerkat-runtime/src/user_interrupt.rs"
-        && rel != "meerkat-runtime/src/meerkat_machine_tests.rs"
+        && rel != "crates/meerkat-runtime/src/meerkat_machine/session_management.rs"
+        && rel != "crates/meerkat-runtime/src/user_interrupt.rs"
+        && rel != "crates/meerkat-runtime/src/meerkat_machine_tests.rs"
     {
         let mut visitor = InterruptCurrentRunCallVisitor { rel, findings };
         visitor.visit_file(&parsed);
     }
 
     if !is_test_rust_path(rel)
-        && rel != "meerkat-runtime/src/meerkat_machine/session_management.rs"
-        && rel != "meerkat-runtime/src/meerkat_machine/dispatch_session.rs"
-        && rel != "meerkat-runtime/src/meerkat_machine_tests.rs"
+        && rel != "crates/meerkat-runtime/src/meerkat_machine/session_management.rs"
+        && rel != "crates/meerkat-runtime/src/meerkat_machine/dispatch_session.rs"
+        && rel != "crates/meerkat-runtime/src/meerkat_machine_tests.rs"
     {
         let mut visitor = InterruptCommandConstructionVisitor { rel, findings };
         visitor.visit_file(&parsed);
@@ -408,10 +408,10 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
     }
 
     // Per-file structural rules.
-    if rel == "meerkat-runtime/src/meerkat_machine_types.rs" {
+    if rel == "crates/meerkat-runtime/src/meerkat_machine_types.rs" {
         audit_interrupt_command_variant(rel, &parsed, findings);
     }
-    if rel == "meerkat-runtime/src/meerkat_machine/mod.rs" {
+    if rel == "crates/meerkat-runtime/src/meerkat_machine/mod.rs" {
         audit_user_interrupt_module_mount(rel, &parsed, findings);
     }
 
@@ -420,8 +420,8 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
         file_name.starts_with("peer_admission") || rel.contains("/peer_admission/")
     };
     if is_peer_admission
-        || rel == "meerkat-runtime/src/meerkat_machine/dispatch_control.rs"
-        || rel == "meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs"
+        || rel == "crates/meerkat-runtime/src/meerkat_machine/dispatch_control.rs"
+        || rel == "crates/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs"
     {
         let mut visitor = HardInterruptAuthorityVisitor {
             rel,
@@ -434,7 +434,7 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
         visitor.visit_file(&parsed);
     }
 
-    if rel == "meerkat-runtime/src/comms_drain.rs" {
+    if rel == "crates/meerkat-runtime/src/comms_drain.rs" {
         let mut visitor = HardInterruptAuthorityVisitor {
             rel,
             label: "comms-drain code can reach hard interrupt authority",
@@ -448,29 +448,29 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
         visitor.visit_file(&parsed);
     }
 
-    if rel == "meerkat-rpc/src/session_executor.rs" {
+    if rel == "crates/meerkat-rpc/src/session_executor.rs" {
         let mut visitor = RuntimeFieldInterruptVisitor { rel, findings };
         visitor.visit_file(&parsed);
     }
 
-    if rel == "meerkat-runtime/src/user_interrupt.rs" {
+    if rel == "crates/meerkat-runtime/src/user_interrupt.rs" {
         audit_user_interrupt_file(rel, &parsed, findings);
     }
 
-    if rel == "meerkat-runtime/src/control_plane.rs" {
+    if rel == "crates/meerkat-runtime/src/control_plane.rs" {
         let mut visitor = WarnOnlyBoundaryCancelVisitor { rel, findings };
         visitor.visit_file(&parsed);
     }
 
-    if rel == "meerkat-runtime/src/effect.rs" {
+    if rel == "crates/meerkat-runtime/src/effect.rs" {
         audit_effect_module_visibility(rel, &parsed, findings);
     }
 
     if matches!(
         rel,
-        "meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs"
-            | "meerkat-runtime/src/meerkat_machine/dispatch_control.rs"
-            | "meerkat-runtime/src/meerkat_machine/runtime_control.rs"
+        "crates/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs"
+            | "crates/meerkat-runtime/src/meerkat_machine/dispatch_control.rs"
+            | "crates/meerkat-runtime/src/meerkat_machine/runtime_control.rs"
     ) {
         let mut visitor = InterruptEffectDropVisitor { rel, findings };
         visitor.visit_file(&parsed);
@@ -480,7 +480,7 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
     // dropped structurally before the walk.
     strip_cfg_test_items(&mut parsed.items);
 
-    if rel == "meerkat-runtime/src/runtime_loop.rs" {
+    if rel == "crates/meerkat-runtime/src/runtime_loop.rs" {
         let mut visitor = CalleeNameVisitor {
             rel,
             banned: &["stop_runtime_executor"],
@@ -496,12 +496,12 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
     // capability report) — those two files come off this ban. actor.rs stays
     // banned: the actor must route through the provisioner verb, never
     // construct bridge hard-cancel commands directly.
-    if rel == "meerkat-mob/src/runtime/actor.rs" {
+    if rel == "crates/meerkat-mob/src/runtime/actor.rs" {
         let mut visitor = BridgeHardCancelVisitor { rel, findings };
         visitor.visit_file(&parsed);
     }
 
-    if rel == "meerkat-mob/src/runtime/local_bridge.rs" {
+    if rel == "crates/meerkat-mob/src/runtime/local_bridge.rs" {
         let mut visitor = CalleeNameVisitor {
             rel,
             banned: &["hard_cancel_current_run"],
@@ -511,11 +511,11 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
         visitor.visit_file(&parsed);
     }
 
-    if rel.starts_with("meerkat-runtime/src/")
+    if rel.starts_with("crates/meerkat-runtime/src/")
         && !rel.contains("/generated/")
         && !rel.ends_with("/effect.rs")
         && !is_test_rust_path(rel)
-        && rel != "meerkat-runtime/src/meerkat_machine_tests.rs"
+        && rel != "crates/meerkat-runtime/src/meerkat_machine_tests.rs"
     {
         let mut visitor = PathPairVisitor {
             rel,

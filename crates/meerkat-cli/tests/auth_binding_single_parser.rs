@@ -3,13 +3,13 @@
 //! Tripwire for wave-c (Section 1.5 #4). Flipped green by **C-12**
 //! (CLI consolidation to a single `AuthBindingRef`-parsing call site).
 //!
-//! Invariant: exactly one function in `meerkat-cli/src/**/*.rs` is
+//! Invariant: exactly one function in `crates/meerkat-cli/src/**/*.rs` is
 //! responsible for parsing user-supplied freeform text into a
 //! `AuthBindingRef` (realm / binding / profile triple). The canonical
 //! name is `parse_auth_binding_user_input`. Multiple ad-hoc parsers
 //! are the very regression C-12 exists to prevent.
 //!
-//! Scope: we scan only `meerkat-cli/src/**/*.rs` for functions whose
+//! Scope: we scan only `crates/meerkat-cli/src/**/*.rs` for functions whose
 //! name matches the canonical parser. `split_once(':')` elsewhere in
 //! the CLI is not a violation — `main.rs:3798` parses a `TokenKey`
 //! and `mcp.rs:~193` splits an HTTP header; neither is a
@@ -59,10 +59,10 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 #[test]
 fn exactly_one_parse_auth_binding_user_input_in_cli_src() {
     let root = workspace_root();
-    let cli_src = root.join("meerkat-cli/src");
+    let cli_src = root.join("crates/meerkat-cli/src");
     assert!(
         cli_src.is_dir(),
-        "expected meerkat-cli/src to exist at {}",
+        "expected crates/meerkat-cli/src to exist at {}",
         cli_src.display()
     );
 
@@ -89,7 +89,7 @@ fn exactly_one_parse_auth_binding_user_input_in_cli_src() {
         hits.len(),
         1,
         "expected exactly one `fn parse_auth_binding_user_input` in \
-         meerkat-cli/src, found {}. The CLI must have a single \
+         crates/meerkat-cli/src, found {}. The CLI must have a single \
          AuthBindingRef parser at the input boundary (C-12). Hits:\n{}",
         hits.len(),
         hits.iter()

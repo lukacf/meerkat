@@ -76,32 +76,32 @@ pub fn protocol_emission_set() -> Result<Vec<GeneratedProtocolFile>> {
     if let Some(machine) = machine_by_name.get("MeerkatMachine") {
         let code = generate_terminal_surface_mapping(machine)?;
         push(
-            root.join("meerkat-core/src/generated/terminal_surface_mapping.rs"),
+            root.join("crates/meerkat-core/src/generated/terminal_surface_mapping.rs"),
             &code,
         )?;
     }
 
     let code = generate_comms_trust_authority_sources(&compositions)?;
     push(
-        root.join("meerkat-core/src/generated/comms_trust_authority_sources.rs"),
+        root.join("crates/meerkat-core/src/generated/comms_trust_authority_sources.rs"),
         &code,
     )?;
 
     let code = generate_auth_lease_transition_authority_sources(&compositions)?;
     push(
-        root.join("meerkat-core/src/generated/auth_lease_transition_authority_sources.rs"),
+        root.join("crates/meerkat-core/src/generated/auth_lease_transition_authority_sources.rs"),
         &code,
     )?;
 
     let code = generate_tool_visibility_owner_protocol()?;
     push(
-        root.join("meerkat-core/src/generated/protocol_tool_visibility_owner.rs"),
+        root.join("crates/meerkat-core/src/generated/protocol_tool_visibility_owner.rs"),
         &code,
     )?;
 
     let code = generate_auth_lease_durable_lifecycle_marker_contract(&compositions)?;
     push(
-        root.join("meerkat-core/src/generated/auth_lease_durable_lifecycle_marker.rs"),
+        root.join("crates/meerkat-core/src/generated/auth_lease_durable_lifecycle_marker.rs"),
         &code,
     )?;
 
@@ -110,21 +110,21 @@ pub fn protocol_emission_set() -> Result<Vec<GeneratedProtocolFile>> {
     let code =
         generate_session_persistence_version_authority(&session_persistence_version_machine)?;
     push(
-        root.join("meerkat-core/src/generated/session_persistence_version_authority.rs"),
+        root.join("crates/meerkat-core/src/generated/session_persistence_version_authority.rs"),
         &code,
     )?;
 
     let approval_machine = dsl::dsl_approval_lifecycle_machine_production_schema();
     let code = generate_approval_lifecycle_authority(&approval_machine)?;
     push(
-        root.join("meerkat-core/src/generated/approval_lifecycle.rs"),
+        root.join("crates/meerkat-core/src/generated/approval_lifecycle.rs"),
         &code,
     )?;
 
     let session_document_machine = dsl::dsl_session_document_machine_production_schema();
     let code = generate_session_document_authority(&session_document_machine)?;
     push(
-        root.join("meerkat-core/src/generated/session_document.rs"),
+        root.join("crates/meerkat-core/src/generated/session_document.rs"),
         &code,
     )?;
 
@@ -132,7 +132,7 @@ pub fn protocol_emission_set() -> Result<Vec<GeneratedProtocolFile>> {
         dsl::dsl_session_turn_admission_machine_production_schema();
     let code = generate_session_turn_admission_authority(&session_turn_admission_machine)?;
     push(
-        root.join("meerkat-session/src/generated/session_turn_admission.rs"),
+        root.join("crates/meerkat-session/src/generated/session_turn_admission.rs"),
         &code,
     )?;
 
@@ -145,7 +145,7 @@ pub fn protocol_emission_set() -> Result<Vec<GeneratedProtocolFile>> {
     let mob_machine = dsl::dsl_mob_machine_production_schema();
     let code = generate_mob_machine_catalog_input(&mob_machine)?;
     push(
-        root.join("meerkat-mob/src/generated/catalog_input.rs"),
+        root.join("crates/meerkat-mob/src/generated/catalog_input.rs"),
         &code,
     )?;
     // NOTE: MeerkatMachineCatalogInput is NOT generated yet. Meerkat's hand

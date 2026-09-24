@@ -1619,7 +1619,7 @@ where
     /// the standalone authority entirely; the runtime-backed handle is now
     /// the only turn-state source. For live runs the facade wires the
     /// handle via `AgentBuilder::with_turn_state_handle` (see
-    /// `meerkat/src/factory.rs` where it plugs `SessionRuntimeBindings`).
+    /// `crates/meerkat/src/factory.rs` where it plugs `SessionRuntimeBindings`).
     ///
     /// Returns a typed `AgentError::InternalError` when callers on the
     /// live-run path query turn state without an attached handle —
@@ -4540,7 +4540,7 @@ where
             .map_err(|error| AgentError::InternalError(error.to_string()))?;
         // 0. Auth lease refresh loop (Phase 1.5-rev).
         //    The canonical auth-state owner is the MeerkatMachine
-        //    DSL (see meerkat-machine-schema/src/catalog/dsl/
+        //    DSL (see crates/meerkat-machine-schema/src/catalog/dsl/
         //    meerkat_machine.rs). The runner's role here is
         //    *mechanism*: it drives DSL-legal transitions when
         //    the observable state calls for them, and emits a
@@ -5740,7 +5740,7 @@ where
         //
         // By the time this frame runs the provider has already streamed the
         // answer and the caller has already read it (`TextDelta` reaches the
-        // host at `meerkat-llm-core/src/adapter.rs`, long before the assistant
+        // host at `crates/meerkat-llm-core/src/adapter.rs`, long before the assistant
         // message is committed below). Whether a usage event ever arrived says
         // nothing about what the model said, which tools it asked for, or what
         // the transcript may carry. Killing a completed turn over an absent

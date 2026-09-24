@@ -101,7 +101,7 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
-        "//meerkat:__pkg__",
+        "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.41",
@@ -112,10 +112,10 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat:meerkat_capabilities_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_schedule_agent_factory_build",
-        "//meerkat:meerkat_workgraph_agent_factory_build",
+        "//crates/meerkat:meerkat_capabilities_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
         normal = True,
@@ -159,6 +159,8 @@ rust_test(
     data = [
         "//:repo_governance_files",
         "//:test_fixtures",
+        "//crates/meerkat-comms:package_runfiles",
+        "//crates/meerkat-rpc:package_runfiles",
         "//tests/fixtures/machine-dsl-tests:package_runfiles",
         "//tests/fixtures/mcp-test-server:package_runfiles",
         "//tests/fixtures/surface-build-fixtures:package_runfiles",
@@ -261,7 +263,9 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        ":package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",

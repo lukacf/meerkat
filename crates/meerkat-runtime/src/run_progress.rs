@@ -1664,7 +1664,7 @@ mod tests {
         // workspace layout but not in a packaged meerkat-runtime; gate it when
         // it is there rather than failing a crate-local build.
         if let Some(workspace) = manifest.parent() {
-            let kernels = workspace.join("meerkat-machine-kernels/src/generated/meerkat.rs");
+            let kernels = workspace.join("crates/meerkat-machine-kernels/src/generated/meerkat.rs");
             if kernels.exists() {
                 files.push(kernels);
             }

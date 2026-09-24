@@ -18,8 +18,8 @@
 # Transient sequence locks stay ignored: they are runtime artifacts of the
 # capturing process, not realm state, and binding them to a manifest makes the
 # corpus unverifiable the moment it is committed.
-!meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/corpus/**/.rkat/
-meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/corpus/**/*.lock
+!crates/meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/corpus/**/.rkat/
+crates/meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/corpus/**/*.lock
 .raik/
 .mcp-the-force/
 

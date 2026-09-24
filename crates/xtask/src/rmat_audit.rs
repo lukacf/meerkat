@@ -74,7 +74,7 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
         combined_findings.push(Finding {
             key: FindingKey {
                 rule: "OwnershipLedgerDocDrift".into(),
-                path: "docs-internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md".into(),
+                path: "docs/internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md".into(),
                 symbol: "finite-ownership-ledger".into(),
             },
             severity: "error".into(),
@@ -95,12 +95,12 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
 
     if !ownership_doc_in_sync {
         bail!(
-            "ownership ledger doc drift:\n- docs-internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md is stale relative to typed ownership registry"
+            "ownership ledger doc drift:\n- docs/internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md is stale relative to typed ownership registry"
         );
     }
 
-    let baseline_path = root.join("xtask/rmat-baseline.toml");
-    let ownership_baseline_path = root.join("xtask/ownership-baseline.toml");
+    let baseline_path = root.join("crates/xtask/rmat-baseline.toml");
+    let ownership_baseline_path = root.join("crates/xtask/ownership-baseline.toml");
     if args.update_baseline {
         write_baseline(&baseline_path, &findings)?;
         ownership_ledger::write_baseline(&ownership_baseline_path, &ownership_findings)?;
@@ -236,7 +236,7 @@ pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding
 }
 
 fn collect_schema_emitted_request_consumption_findings(root: &Path) -> Result<Vec<Finding>> {
-    let emit_path = root.join("meerkat-contracts/src/emit.rs");
+    let emit_path = root.join("crates/meerkat-contracts/src/emit.rs");
     if !emit_path.exists() {
         return Ok(Vec::new());
     }
@@ -282,7 +282,7 @@ fn collect_schema_emitted_request_consumption_findings(root: &Path) -> Result<Ve
         {
             findings.push(error_finding(
                 "SchemaEmittedRequestHasProducer",
-                "meerkat-contracts/src/emit.rs",
+                "crates/meerkat-contracts/src/emit.rs",
                 &request_name,
                 format!(
                     "`{request_name}` is emitted as a public request schema but has no non-test production AST consumption path outside contract emission; wire the operation or stop emitting the schema"
@@ -309,8 +309,8 @@ fn schema_emitted_request_names_from_source(source: &str) -> BTreeSet<String> {
 }
 
 fn is_schema_request_consumption_excluded_path(relative: &str) -> bool {
-    relative == "meerkat-contracts/src/emit.rs"
-        || relative.starts_with("xtask/")
+    relative == "crates/meerkat-contracts/src/emit.rs"
+        || relative.starts_with("crates/xtask/")
         || relative.starts_with("tests/")
         || relative.contains("/tests/")
         || relative.ends_with("/tests.rs")
@@ -799,8 +799,8 @@ fn collect_route_realization_findings(root: &Path, policy: &AuditPolicy) -> Vec<
     }
 
     // ---------------------------------------------------------------------
-    // B-10 semantic upgrade: byte-level scan under `meerkat-runtime/src/`
-    // and `meerkat-mob/src/` (excluding the composition module itself and
+    // B-10 semantic upgrade: byte-level scan under `crates/meerkat-runtime/src/`
+    // and `crates/meerkat-mob/src/` (excluding the composition module itself and
     // tests) for re-introductions of the deleted wave-a helper names. This
     // complements the crate-local grep canary shipped in B-5 by running as
     // part of every CI `rmat-audit` invocation and covering the mob side
@@ -821,7 +821,7 @@ fn collect_route_realization_findings(root: &Path, policy: &AuditPolicy) -> Vec<
     // disposition. `composition_dispatch` + `recompute_mob_peer_overlay`
     // remain banned because their dispositions *are* routed.
     const BANNED_LEGACY_HELPERS: &[&str] = &["composition_dispatch", "recompute_mob_peer_overlay"];
-    let scan_roots: [&str; 2] = ["meerkat-runtime/src", "meerkat-mob/src"];
+    let scan_roots: [&str; 2] = ["crates/meerkat-runtime/src", "crates/meerkat-mob/src"];
     for root_rel in scan_roots {
         let root_path = root.join(root_rel);
         if !root_path.exists() {
@@ -1599,7 +1599,7 @@ fn collect_protocol_feedback_constraint_findings(
             continue;
         }
         // xtask files are allowed — they generate/audit.
-        if relative.starts_with("xtask/") {
+        if relative.starts_with("crates/xtask/") {
             continue;
         }
         // These files are the typed authority/owner adapter implementations
@@ -1765,10 +1765,10 @@ impl<'a> Visit<'a> for FeedbackVariantConstructionVisitor<'_> {
 fn is_feedback_authority_implementation_path(relative: &str) -> bool {
     matches!(
         relative,
-        "meerkat-core/src/agent/state.rs"
-            | "meerkat-runtime/src/handles/turn_state.rs"
-            | "meerkat-mcp/src/router.rs"
-            | "meerkat-mcp/src/external_tool_surface_authority.rs"
+        "crates/meerkat-core/src/agent/state.rs"
+            | "crates/meerkat-runtime/src/handles/turn_state.rs"
+            | "crates/meerkat-mcp/src/router.rs"
+            | "crates/meerkat-mcp/src/external_tool_surface_authority.rs"
     ) || relative.contains("/authority")
         || relative.contains("/handles/")
 }
@@ -1834,8 +1834,8 @@ fn collect_terminal_mapping_constraint_findings(root: &Path, policy: &AuditPolic
 /// runtime input families without re-deriving class from raw peer names, and
 /// must preserve rendered peer body plus multimodal blocks.
 fn collect_runtime_comms_bridge_projection_findings(root: &Path) -> Vec<Finding> {
-    let bridge_path = "meerkat-runtime/src/comms_bridge.rs";
-    let drain_path = "meerkat-runtime/src/comms_drain.rs";
+    let bridge_path = "crates/meerkat-runtime/src/comms_bridge.rs";
+    let drain_path = "crates/meerkat-runtime/src/comms_drain.rs";
 
     let bridge_source = match fs::read_to_string(root.join(bridge_path)) {
         Ok(source) => source,
@@ -1858,9 +1858,9 @@ fn collect_runtime_comms_bridge_projection_findings(root: &Path) -> Vec<Finding>
 /// preserve canonical text-vs-JSON mode, plain-event multimodal blocks, and
 /// runtime block rendering for ExternalEvent inputs.
 fn collect_runtime_external_event_projection_findings(root: &Path) -> Vec<Finding> {
-    let stdin_path = "meerkat-cli/src/stdin_events.rs";
-    let bridge_path = "meerkat-runtime/src/comms_bridge.rs";
-    let input_path = "meerkat-runtime/src/input.rs";
+    let stdin_path = "crates/meerkat-cli/src/stdin_events.rs";
+    let bridge_path = "crates/meerkat-runtime/src/comms_bridge.rs";
+    let input_path = "crates/meerkat-runtime/src/input.rs";
 
     let stdin_source = match fs::read_to_string(root.join(stdin_path)) {
         Ok(source) => source,
@@ -2671,19 +2671,19 @@ mod tests {
     #[test]
     fn schema_request_consumption_path_filter_excludes_tests() {
         assert!(is_schema_request_consumption_excluded_path(
-            "meerkat-workgraph/tests/attention_contracts.rs"
+            "crates/meerkat-workgraph/tests/attention_contracts.rs"
         ));
         assert!(is_schema_request_consumption_excluded_path(
-            "meerkat-workgraph/src/tests.rs"
+            "crates/meerkat-workgraph/src/tests.rs"
         ));
         assert!(is_schema_request_consumption_excluded_path(
-            "meerkat-workgraph/src/store/tests/helpers.rs"
+            "crates/meerkat-workgraph/src/store/tests/helpers.rs"
         ));
         assert!(is_schema_request_consumption_excluded_path(
-            "meerkat-workgraph/src/attention_test.rs"
+            "crates/meerkat-workgraph/src/attention_test.rs"
         ));
         assert!(!is_schema_request_consumption_excluded_path(
-            "meerkat-workgraph/src/service.rs"
+            "crates/meerkat-workgraph/src/service.rs"
         ));
     }
 
@@ -2819,9 +2819,9 @@ mod tests {
         ";
 
         let findings = runtime_comms_bridge_projection_findings_for_sources(
-            "meerkat-runtime/src/comms_bridge.rs",
+            "crates/meerkat-runtime/src/comms_bridge.rs",
             bridge,
-            "meerkat-runtime/src/comms_drain.rs",
+            "crates/meerkat-runtime/src/comms_drain.rs",
             drain,
         );
         assert!(findings.is_empty(), "unexpected findings: {findings:#?}");
@@ -2844,9 +2844,9 @@ mod tests {
         ";
 
         let findings = runtime_comms_bridge_projection_findings_for_sources(
-            "meerkat-runtime/src/comms_bridge.rs",
+            "crates/meerkat-runtime/src/comms_bridge.rs",
             bridge,
-            "meerkat-runtime/src/comms_drain.rs",
+            "crates/meerkat-runtime/src/comms_drain.rs",
             drain,
         );
         let rules = findings
@@ -2927,11 +2927,11 @@ mod tests {
         ";
 
         let findings = runtime_external_event_projection_findings_for_sources(
-            "meerkat-cli/src/stdin_events.rs",
+            "crates/meerkat-cli/src/stdin_events.rs",
             stdin,
-            "meerkat-runtime/src/comms_bridge.rs",
+            "crates/meerkat-runtime/src/comms_bridge.rs",
             bridge,
-            "meerkat-runtime/src/runtime_loop.rs",
+            "crates/meerkat-runtime/src/runtime_loop.rs",
             loop_source,
         );
         assert!(findings.is_empty(), "unexpected findings: {findings:#?}");
@@ -2971,11 +2971,11 @@ mod tests {
         ";
 
         let findings = runtime_external_event_projection_findings_for_sources(
-            "meerkat-cli/src/stdin_events.rs",
+            "crates/meerkat-cli/src/stdin_events.rs",
             stdin,
-            "meerkat-runtime/src/comms_bridge.rs",
+            "crates/meerkat-runtime/src/comms_bridge.rs",
             bridge,
-            "meerkat-runtime/src/runtime_loop.rs",
+            "crates/meerkat-runtime/src/runtime_loop.rs",
             loop_source,
         );
         assert!(
@@ -2992,7 +2992,8 @@ mod tests {
 
     fn guarded_apply_findings(source: &str) -> Vec<Finding> {
         let parsed = syn::parse_file(source).expect("parse guarded-apply fixture");
-        let mut visitor = GuardedApplyVisitor::new("meerkat-mob/src/runtime/actor.rs", source);
+        let mut visitor =
+            GuardedApplyVisitor::new("crates/meerkat-mob/src/runtime/actor.rs", source);
         visitor.visit_file(&parsed);
         visitor.findings
     }
@@ -3070,7 +3071,7 @@ mod tests {
     #[test]
     fn banned_helper_flags_call_not_string_or_comment() {
         let flagged = banned_helper_findings(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             r"
             fn run(&self) {
                 self.composition_dispatch(effect);
@@ -3096,7 +3097,7 @@ mod tests {
         // so the prior `/composition/`-skip byte scan false positive is gone
         // even in a file under the composition module.
         let clean = banned_helper_findings(
-            "meerkat-runtime/src/composition/dispatcher.rs",
+            "crates/meerkat-runtime/src/composition/dispatcher.rs",
             r#"
             fn run(&self) {
                 // composition_dispatch was the legacy fork; gone now.
@@ -3119,8 +3120,8 @@ mod tests {
             fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
             fs::write(&path, "fn f() {}\n").expect("write source");
         };
-        write("meerkat-core/src/agent.rs");
-        write(".codex/worktrees/stale/meerkat-core/src/agent.rs");
+        write("crates/meerkat-core/src/agent.rs");
+        write(".codex/worktrees/stale/crates/meerkat-core/src/agent.rs");
         write(".claude/worktrees/agent/src/lib.rs");
         write("wt/parked/src/lib.rs");
         fs::create_dir_all(root.path().join("wt/parked/.git")).expect("create nested .git");
@@ -3137,7 +3138,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             rels,
-            vec!["meerkat-core/src/agent.rs".to_string()],
+            vec!["crates/meerkat-core/src/agent.rs".to_string()],
             "hidden dirs and nested git checkouts must be excluded"
         );
     }

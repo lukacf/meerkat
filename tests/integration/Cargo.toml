@@ -34,7 +34,7 @@ meerkat-rpc = { workspace = true, features = [
     "schedule",
     "workgraph",
 ] }
-# test-support: the shared multi-host fixture (meerkat-mob/tests/support,
+# test-support: the shared multi-host fixture (crates/meerkat-mob/tests/support,
 # consumed via #[path] from tests/e2e_fast/multi_host_bind.rs) composes external
 # comms targets with MeerkatMachine::test_install_session_peer_comms_handle_on_runtime.
 meerkat-runtime = { workspace = true, features = ["test-support"] }
@@ -122,6 +122,6 @@ chrono.workspace = true
 axum.workspace = true
 meerkat-auth-core = { workspace = true, features = ["gcp-auth"] }
 meerkat-copilot.workspace = true
-# The e2e-fast multi-host beat #[path]-includes meerkat-mob/tests/support,
+# The e2e-fast multi-host beat #[path]-includes crates/meerkat-mob/tests/support,
 # whose fixture installs an env-gated tracing subscriber.
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

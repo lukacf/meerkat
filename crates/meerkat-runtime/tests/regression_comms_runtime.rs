@@ -2,7 +2,7 @@
 //! Regression tests for comms → RuntimeDriver path.
 //!
 //! These tests mirror the 12 behavioral contracts from
-//! meerkat-core/tests/regression_comms_host.rs but exercise them
+//! crates/meerkat-core/tests/regression_comms_host.rs but exercise them
 //! through the v9 RuntimeDriver input acceptance path.
 //!
 //! Each test verifies:

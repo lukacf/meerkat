@@ -38,7 +38,7 @@ use super::fixture_mob as meerkat_mob;
 
 // Trait imports for method-call resolution on `Arc<meerkat_comms::CommsRuntime>`
 // (`send`, `handoff_volatile_peer_input_candidates`) and on `Arc<MeerkatMachine>`
-// (`list_active_inputs`) — the meerkat-mob/src/runtime/tests.rs and
+// (`list_active_inputs`) — the crates/meerkat-mob/src/runtime/tests.rs and
 // smoke_mob_flow_runtime.rs import discipline.
 use meerkat_core::agent::CommsRuntime as _;
 use meerkat_core::comms::TrustedPeerDescriptor;
@@ -104,7 +104,7 @@ pub fn mob_authority_type_ids() -> [std::any::TypeId; 6] {
 
 /// Serialize tests that bind real loopback listeners or install inproc comms
 /// registrations — the `tests/*.rs` analogue of the in-crate
-/// `REAL_COMMS_TEST_LOCK` discipline (meerkat-mob/src/runtime/tests.rs).
+/// `REAL_COMMS_TEST_LOCK` discipline (crates/meerkat-mob/src/runtime/tests.rs).
 pub static REAL_COMMS_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -182,7 +182,7 @@ pub fn reserve_loopback_port() -> u16 {
 
 // ===========================================================================
 // PeerCommsEndpoint + raw bridge probe — split into probe.rs (dependency-light
-// half consumed by meerkat-cli/tests/system_mob_host_daemon.rs via #[path])
+// half consumed by crates/meerkat-cli/tests/system_mob_host_daemon.rs via #[path])
 // ===========================================================================
 
 #[path = "probe_shared.rs"]
@@ -3618,7 +3618,7 @@ fn persistent_service_with_client_in_realm(
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::default());
     // Durable event projection (the production Jsonl composition shape,
-    // meerkat/src/persistence.rs): phase-6 member observation serves
+    // crates/meerkat/src/persistence.rs): phase-6 member observation serves
     // PollMemberEvents and terminal_seq binding from this log.
     Arc::new(
         meerkat_session::PersistentSessionService::new(

@@ -43,7 +43,7 @@ struct MachineAlphabetEntry {
 struct MachineAlphabetDocument {
     /// Entries in `canonical_machine_schemas()` catalog order. Consumers that
     /// need the `dsl_<fn>` binding zip this array against the call order in
-    /// `meerkat-machine-schema/src/catalog/mod.rs::canonical_machine_schemas`
+    /// `crates/meerkat-machine-schema/src/catalog/mod.rs::canonical_machine_schemas`
     /// (the same source this array is built from) and must verify the paired
     /// `machine` identity independently.
     machines: Vec<MachineAlphabetEntry>,

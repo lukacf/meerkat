@@ -35,14 +35,14 @@ Every pre-wave-a `.rs` file that contained `#[test]` and no longer exists at HEA
 
 | File | Pre-tests | Deleted in |
 |---|---:|---|
-| `meerkat-mob/src/runtime/mob_member_lifecycle_authority.rs` | 4 | `949162121` |
-| `meerkat-mob/src/runtime/mob_wiring_authority.rs` | 3 | `0ad584cde` |
-| `meerkat-mob/tests/track_b_cutover_source_scan.rs` | 6 | `7f88cb477` |
-| `meerkat-runtime/src/composition_dispatch.rs` | 9 | `ce2dbe35e` |
-| `meerkat-runtime/src/recompute_mob_peer_overlay.rs` | 9 | `ce2dbe35e` |
-| `meerkat-runtime/src/comms_trust_reconcile.rs` | 7 | `ce2dbe35e` |
-| `meerkat-runtime/tests/recompute_mob_peer_overlay_e2e.rs` | 1 | `ce2dbe35e` |
-| `meerkat-rpc/tests/router_realtime_target.rs` | 1 | `488944b7d` |
+| `crates/meerkat-mob/src/runtime/mob_member_lifecycle_authority.rs` | 4 | `949162121` |
+| `crates/meerkat-mob/src/runtime/mob_wiring_authority.rs` | 3 | `0ad584cde` |
+| `crates/meerkat-mob/tests/track_b_cutover_source_scan.rs` | 6 | `7f88cb477` |
+| `crates/meerkat-runtime/src/composition_dispatch.rs` | 9 | `ce2dbe35e` |
+| `crates/meerkat-runtime/src/recompute_mob_peer_overlay.rs` | 9 | `ce2dbe35e` |
+| `crates/meerkat-runtime/src/comms_trust_reconcile.rs` | 7 | `ce2dbe35e` |
+| `crates/meerkat-runtime/tests/recompute_mob_peer_overlay_e2e.rs` | 1 | `ce2dbe35e` |
+| `crates/meerkat-rpc/tests/router_realtime_target.rs` | 1 | `488944b7d` |
 | **Total** | **40** | |
 
 ### Behaviors covered pre-wave-a (source of deleted files)
@@ -60,21 +60,21 @@ Every pre-wave-a `.rs` file that contained `#[test]` and no longer exists at HEA
 
 | File | Pre | Post | Δ | Notes |
 |---|---:|---:|---:|---|
-| `meerkat-skills/src/resolve.rs` | 11 | 0 | -11 | Skill resolver precedence, defaults, stdio wiring |
-| `meerkat-skills/src/source/filesystem.rs` | 11 | 0 | -11 | Filesystem scan/quarantine/collection tests |
-| `meerkat-skills/src/source/protocol.rs` | 10 | 0 | -10 | Stdio protocol handshake, capability mismatch, timeout |
-| `meerkat-skills/src/source/composite.rs` | 8 | 0 | -8 | Composite source ordering/precedence |
-| `meerkat-skills/src/source/git.rs` | 8 | 0 | -8 | Git source fetch/quarantine |
-| `meerkat-skills/src/source/http.rs` | 6 | 0 | -6 | HTTP source fetch/health |
-| `meerkat-core/src/skills/mod.rs` | 21 | 8 | -13 | Skill introspection serde, collection derivation, ref boundary |
-| `meerkat-mob/src/roster.rs` | 39 | 29 | -10 | Roster-level assertions on removed Track-B variants |
-| `meerkat-core/src/agent/state.rs` | 38 | 33 | -5 | `run_completed` lifecycle, turn-boundary denial, hook rewrite |
-| `meerkat-core/src/comms.rs` | 14 | 9 | -5 | Peer-request params/body promotion, input-stream mode |
-| `meerkat-tools/src/builtin/skills/browse.rs` | 5 | 0 | -5 | `test_browse_*` end-to-end tool tests |
-| `meerkat-tools/src/builtin/skills/load.rs` | 2 | 0 | -2 | Skill load tool tests |
-| `meerkat-mob-pack/src/pack.rs` | 12 | 8 | -4 | Pack-format serde cases |
-| `meerkat/src/surface/schedule_host.rs` | 3 | 0 | -3 | Schedule dispatch/admission/completion typing |
-| `meerkat-rest/src/lib.rs` | 55 | 52 | -3 | Endpoints for deleted mob-realtime attach/detach |
+| `crates/meerkat-skills/src/resolve.rs` | 11 | 0 | -11 | Skill resolver precedence, defaults, stdio wiring |
+| `crates/meerkat-skills/src/source/filesystem.rs` | 11 | 0 | -11 | Filesystem scan/quarantine/collection tests |
+| `crates/meerkat-skills/src/source/protocol.rs` | 10 | 0 | -10 | Stdio protocol handshake, capability mismatch, timeout |
+| `crates/meerkat-skills/src/source/composite.rs` | 8 | 0 | -8 | Composite source ordering/precedence |
+| `crates/meerkat-skills/src/source/git.rs` | 8 | 0 | -8 | Git source fetch/quarantine |
+| `crates/meerkat-skills/src/source/http.rs` | 6 | 0 | -6 | HTTP source fetch/health |
+| `crates/meerkat-core/src/skills/mod.rs` | 21 | 8 | -13 | Skill introspection serde, collection derivation, ref boundary |
+| `crates/meerkat-mob/src/roster.rs` | 39 | 29 | -10 | Roster-level assertions on removed Track-B variants |
+| `crates/meerkat-core/src/agent/state.rs` | 38 | 33 | -5 | `run_completed` lifecycle, turn-boundary denial, hook rewrite |
+| `crates/meerkat-core/src/comms.rs` | 14 | 9 | -5 | Peer-request params/body promotion, input-stream mode |
+| `crates/meerkat-tools/src/builtin/skills/browse.rs` | 5 | 0 | -5 | `test_browse_*` end-to-end tool tests |
+| `crates/meerkat-tools/src/builtin/skills/load.rs` | 2 | 0 | -2 | Skill load tool tests |
+| `crates/meerkat-mob-pack/src/pack.rs` | 12 | 8 | -4 | Pack-format serde cases |
+| `crates/meerkat/src/surface/schedule_host.rs` | 3 | 0 | -3 | Schedule dispatch/admission/completion typing |
+| `crates/meerkat-rest/src/lib.rs` | 55 | 52 | -3 | Endpoints for deleted mob-realtime attach/detach |
 
 ## 3. Orphan / stale references
 
@@ -82,9 +82,9 @@ Scan for symbols from deleted modules in files that still compile:
 
 | Location | Dead reference | Severity |
 |---|---|---|
-| `meerkat-machine-codegen/tests/render_contracts.rs:305,367` | String-literal `"use meerkat_runtime::composition_dispatch::*;"` — test asserts on generated output that imports a deleted module | medium (codegen contract test is vacuous — any downstream crate instantiating it will fail to compile) |
-| `meerkat-machine-codegen/src/artifacts.rs` | Doc-comment + generator emits `meerkat_runtime::composition_dispatch::CompositionDriverTrait` | medium (codegen emits references to deleted module) |
-| `meerkat-machine-schema/src/composition.rs` + `tests/schema_contracts.rs` | Comments cite `meerkat-runtime::composition_dispatch` | low (doc-only) |
+| `crates/meerkat-machine-codegen/tests/render_contracts.rs:305,367` | String-literal `"use meerkat_runtime::composition_dispatch::*;"` — test asserts on generated output that imports a deleted module | medium (codegen contract test is vacuous — any downstream crate instantiating it will fail to compile) |
+| `crates/meerkat-machine-codegen/src/artifacts.rs` | Doc-comment + generator emits `meerkat_runtime::composition_dispatch::CompositionDriverTrait` | medium (codegen emits references to deleted module) |
+| `crates/meerkat-machine-schema/src/composition.rs` + `tests/schema_contracts.rs` | Comments cite `meerkat-runtime::composition_dispatch` | low (doc-only) |
 
 No actual broken `use` statements in test files. The codegen references are the real orphan risk: they will silently emit code that cannot compile once the driver is wired. This is consistent with the known broken tree state.
 
@@ -92,7 +92,7 @@ No actual broken `use` statements in test files. The codegen references are the 
 
 | Pre-wave-a behavior | Replacement | Tested now? |
 |---|---|---|
-| Mob Wire/Unwire reducer | `MobMachineInput::WireMembers`/`::UnwireMembers` DSL | **Yes** — `meerkat-mob/tests/member_session_bindings.rs` |
+| Mob Wire/Unwire reducer | `MobMachineInput::WireMembers`/`::UnwireMembers` DSL | **Yes** — `crates/meerkat-mob/tests/member_session_bindings.rs` |
 | Mob member terminal classification | DSL guards in `MobMachine` | **Partial** — restore-failure-breaks-present-member not replicated |
 | Composition dispatcher contract (9) | Drivers now catalog-declared | **No direct replacement** — schema round-trip only |
 | Recompute mob peer overlay (9+1) | `MeerkatMachine::peer_projection` DSL | **Partial** — 13 tests cover basic mutations; respawn rotation, shadow-mode parity, release-binding sweep not covered |

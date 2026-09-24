@@ -11,12 +11,14 @@ use tempfile::tempdir;
 fn workflow_yml_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.pop();
+    path.pop();
     path.push(".github/workflows/release.yml");
     path
 }
 
 fn manifest_script_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.pop();
     path.pop();
     path.push("scripts/release-build-asset-manifest");
     path

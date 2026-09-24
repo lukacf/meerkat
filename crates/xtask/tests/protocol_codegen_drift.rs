@@ -139,7 +139,8 @@ fn terminal_surface_mapping_matches_codegen_output() {
         .expect("render terminal_surface_mapping");
     let rendered = rustfmt(&rendered);
 
-    let committed_path = repo_root().join("meerkat-core/src/generated/terminal_surface_mapping.rs");
+    let committed_path =
+        repo_root().join("crates/meerkat-core/src/generated/terminal_surface_mapping.rs");
     let committed = std::fs::read_to_string(&committed_path)
         .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
 
@@ -160,7 +161,7 @@ fn comms_trust_authority_sources_matches_codegen_output() {
     let rendered = rustfmt(&rendered);
 
     let committed_path =
-        repo_root().join("meerkat-core/src/generated/comms_trust_authority_sources.rs");
+        repo_root().join("crates/meerkat-core/src/generated/comms_trust_authority_sources.rs");
     let committed = std::fs::read_to_string(&committed_path)
         .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
 
@@ -181,8 +182,8 @@ fn auth_lease_transition_authority_sources_matches_codegen_output() {
             .expect("render auth_lease_transition_authority_sources");
     let rendered = rustfmt(&rendered);
 
-    let committed_path =
-        repo_root().join("meerkat-core/src/generated/auth_lease_transition_authority_sources.rs");
+    let committed_path = repo_root()
+        .join("crates/meerkat-core/src/generated/auth_lease_transition_authority_sources.rs");
     let committed = std::fs::read_to_string(&committed_path)
         .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
 
@@ -203,8 +204,8 @@ fn auth_lease_durable_lifecycle_marker_matches_codegen_output() {
             .expect("render auth_lease_durable_lifecycle_marker");
     let rendered = rustfmt(&rendered);
 
-    let committed_path =
-        repo_root().join("meerkat-core/src/generated/auth_lease_durable_lifecycle_marker.rs");
+    let committed_path = repo_root()
+        .join("crates/meerkat-core/src/generated/auth_lease_durable_lifecycle_marker.rs");
     let committed = std::fs::read_to_string(&committed_path)
         .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
 
@@ -224,8 +225,8 @@ fn session_persistence_version_authority_matches_codegen_output() {
         .expect("render session_persistence_version_authority");
     let rendered = rustfmt(&rendered);
 
-    let committed_path =
-        repo_root().join("meerkat-core/src/generated/session_persistence_version_authority.rs");
+    let committed_path = repo_root()
+        .join("crates/meerkat-core/src/generated/session_persistence_version_authority.rs");
     let committed = std::fs::read_to_string(&committed_path)
         .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
 
@@ -254,7 +255,7 @@ fn session_turn_admission_authority_matches_codegen_output() {
     let rendered = rustfmt(&rendered);
 
     let committed_path =
-        repo_root().join("meerkat-session/src/generated/session_turn_admission.rs");
+        repo_root().join("crates/meerkat-session/src/generated/session_turn_admission.rs");
     let committed = std::fs::read_to_string(&committed_path)
         .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
 
@@ -274,7 +275,8 @@ fn approval_lifecycle_matches_codegen_output() {
         .expect("render approval_lifecycle");
     let rendered = rustfmt(&rendered);
 
-    let committed_path = repo_root().join("meerkat-core/src/generated/approval_lifecycle.rs");
+    let committed_path =
+        repo_root().join("crates/meerkat-core/src/generated/approval_lifecycle.rs");
     let committed = std::fs::read_to_string(&committed_path)
         .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
 
@@ -294,7 +296,7 @@ fn session_document_authority_matches_codegen_output() {
         .expect("render session_document");
     let rendered = rustfmt(&rendered);
 
-    let committed_path = repo_root().join("meerkat-core/src/generated/session_document.rs");
+    let committed_path = repo_root().join("crates/meerkat-core/src/generated/session_document.rs");
     let committed = std::fs::read_to_string(&committed_path)
         .unwrap_or_else(|_| panic!("read {}", committed_path.display()));
 
@@ -335,18 +337,22 @@ fn every_protocol_helper_lands_under_an_owning_crate_generated_module() {
                 .collect();
 
             assert!(
-                components.len() >= 4
-                    && components[1] == "src"
-                    && components[2] == "generated"
+                components.len() >= 5
+                    && components[0] == "crates"
+                    && components[2] == "src"
+                    && components[3] == "generated"
                     && components
                         .last()
                         .is_some_and(|file| file.starts_with("protocol_") && file.ends_with(".rs")),
-                "protocol `{}` helper path `{}` must be <owning-crate>/src/generated/protocol_*.rs",
+                "protocol `{}` helper path `{}` must be crates/<owning-crate>/src/generated/protocol_*.rs",
                 protocol.name,
                 protocol.rust.module_path
             );
 
-            let crate_manifest = root.join(&components[0]).join("Cargo.toml");
+            let crate_manifest = root
+                .join(&components[0])
+                .join(&components[1])
+                .join("Cargo.toml");
             assert!(
                 crate_manifest.exists(),
                 "protocol `{}` helper path `{}` must belong to a crate with Cargo.toml",
@@ -431,31 +437,31 @@ fn comms_trust_authority_minting_is_generated_only() {
         if source.contains(concat!(
             "CommsTrustMutationAuthority::",
             "from_generated_parts"
-        )) && relative != "meerkat-core/src/comms.rs"
+        )) && relative != "crates/meerkat-core/src/comms.rs"
         {
             raw_constructor_violations.push(relative.clone());
         }
         if source.contains(concat!(
             "AuthLeaseTransition::",
             "from_generated_auth_lease_publication_parts"
-        )) && relative != "meerkat-core/src/handles.rs"
+        )) && relative != "crates/meerkat-core/src/handles.rs"
         {
             raw_constructor_violations.push(relative.clone());
         }
         let generated_protocol_file = relative.contains("/src/generated/protocol_")
-            || relative == "xtask/src/protocol_codegen.rs";
-        let codegen_file = relative == "xtask/src/protocol_codegen.rs";
-        let drift_test_file = relative == "xtask/tests/protocol_codegen_drift.rs";
-        let core_bridge_file =
-            relative == "meerkat-core/src/comms.rs" || relative == "meerkat-core/src/handles.rs";
+            || relative == "crates/xtask/src/protocol_codegen.rs";
+        let codegen_file = relative == "crates/xtask/src/protocol_codegen.rs";
+        let drift_test_file = relative == "crates/xtask/tests/protocol_codegen_drift.rs";
+        let core_bridge_file = relative == "crates/meerkat-core/src/comms.rs"
+            || relative == "crates/meerkat-core/src/handles.rs";
         let generated_bridge_validator_file = core_bridge_file
-            || relative == "meerkat-core/src/service/mod.rs"
-            || relative == "meerkat-core/src/agent.rs"
-            || relative == "meerkat-live/src/host.rs"
-            || relative == "meerkat-runtime/src/meerkat_machine/mod.rs"
-            || relative == "meerkat-runtime/src/mob_operator_authority.rs"
-            || relative == "meerkat-runtime/src/live_execution.rs"
-            || relative == "meerkat-session/src/live_transcript_authority.rs";
+            || relative == "crates/meerkat-core/src/service/mod.rs"
+            || relative == "crates/meerkat-core/src/agent.rs"
+            || relative == "crates/meerkat-live/src/host.rs"
+            || relative == "crates/meerkat-runtime/src/meerkat_machine/mod.rs"
+            || relative == "crates/meerkat-runtime/src/mob_operator_authority.rs"
+            || relative == "crates/meerkat-runtime/src/live_execution.rs"
+            || relative == "crates/meerkat-session/src/live_transcript_authority.rs";
         if (source.contains(concat!(
             "impl meerkat_core::comms::",
             "GeneratedCommsTrustAuthorityParts"

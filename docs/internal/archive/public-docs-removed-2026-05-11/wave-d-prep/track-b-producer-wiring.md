@@ -7,7 +7,7 @@ gap, and the catching assertion that proves the eventual follow-up task closed.
 
 ## Background
 
-Wave-c C-T (commit `b0e881535`) ported `meerkat-runtime/src/comms_trust_reconcile.rs`
+Wave-c C-T (commit `b0e881535`) ported `crates/meerkat-runtime/src/comms_trust_reconcile.rs`
 from PR #340 — the `CommsTrustReconciler` struct with
 `reconcile(epoch, BTreeSet<PeerEndpoint>) -> Result<ReconcileReport, _>`, a
 `tokio::sync::Mutex<AppliedView>` concurrency guard, and 3 blocker-list tests
@@ -25,22 +25,22 @@ records the findings verbatim as the spec for the follow-up task.
 ### Finding 1 — the effect has no emitter on any production path
 
 `CommsTrustReconcileRequested` is emitted by exactly 3 DSL transitions
-(`meerkat-runtime/src/meerkat_machine/dsl.rs` lines 6488, 6501, 6515):
+(`crates/meerkat-runtime/src/meerkat_machine/dsl.rs` lines 6488, 6501, 6515):
 
 - `AddDirectPeerEndpoint`
 - `RemoveDirectPeerEndpoint`
 - `ApplyMobPeerOverlay`
 
-`grep -rn "AddDirectPeerEndpoint\|RemoveDirectPeerEndpoint\|ApplyMobPeerOverlay" meerkat-runtime/src/ --include="*.rs"`
+`grep -rn "AddDirectPeerEndpoint\|RemoveDirectPeerEndpoint\|ApplyMobPeerOverlay" crates/meerkat-runtime/src/ --include="*.rs"`
 returns ZERO production hits — the only callers are inside
-`meerkat-runtime/tests/peer_projection_dsl.rs`. The effect payload is only
+`crates/meerkat-runtime/tests/peer_projection_dsl.rs`. The effect payload is only
 `peer_projection_epoch: u64`; the reconciler's `BTreeSet<PeerEndpoint>` must
 be derived by reading `direct_peer_endpoints ∪ mob_overlay_peer_endpoints`
 from DSL state at observation time.
 
 ### Finding 2 — the effect has no consumer / observer terminator
 
-`grep -rn "CommsTrustReconcileRequested" meerkat-runtime/src/` returns only
+`grep -rn "CommsTrustReconcileRequested" crates/meerkat-runtime/src/` returns only
 the DSL emit sites, the module doc in `comms_trust_reconcile.rs`, and one
 comment in `dsl.rs` — no shell-side consumer, no handle observer, no drain
 site. The effect terminates nowhere today. There is NO effect delivery seam
@@ -48,7 +48,7 @@ in `comms_drain.rs` to place the reconciler wire.
 
 ### Finding 3 — the scattered `add_trusted_peer` / `remove_trusted_peer` calls in `comms_drain.rs` are NOT DSL-emitted-trust-reconcile paths
 
-The 6 production sites in `meerkat-runtime/src/comms_drain.rs` all correspond
+The 6 production sites in `crates/meerkat-runtime/src/comms_drain.rs` all correspond
 to bridge-protocol handlers, not the peer-projection state machine:
 
 - Line 1032 (`BridgeCommand::BindMember`) — stages `BindSupervisor` DSL input,
@@ -66,7 +66,7 @@ to bridge-protocol handlers, not the peer-projection state machine:
   today. Goes straight to `comms_runtime.remove_trusted_peer` with no DSL
   mutation.
 
-Verified at `meerkat-runtime/src/meerkat_machine/dsl.rs:6384-6444` — the
+Verified at `crates/meerkat-runtime/src/meerkat_machine/dsl.rs:6384-6444` — the
 `BindSupervisor` / `AuthorizeSupervisor` / `RevokeSupervisor` transitions
 have NO `emit` clauses at all; they do not emit
 `CommsTrustReconcileRequested` (or any effect). The supervisor-binding state
@@ -85,7 +85,7 @@ built in the same task — any one alone is incomplete:
 
 Add three stager helpers on `MeerkatMachine` (co-located with the existing
 `stage_supervisor_bind` / `stage_supervisor_authorize` / `stage_supervisor_revoke`
-at `meerkat-runtime/src/meerkat_machine/comms_drain.rs`):
+at `crates/meerkat-runtime/src/meerkat_machine/comms_drain.rs`):
 
 - `stage_add_direct_peer_endpoint(session_id, endpoint) -> Result<Vec<Effect>, _>`
 - `stage_remove_direct_peer_endpoint(session_id, endpoint) -> Result<Vec<Effect>, _>`
@@ -124,7 +124,7 @@ future mob-overlay driver) routes through the same terminator.
 ### Seam 3 — Reconciler lifetime
 
 `CommsTrustReconciler::new(comms: Arc<dyn CommsRuntime>)` has zero
-production callers today. `grep "CommsTrustReconciler::new" meerkat-runtime/src/`
+production callers today. `grep "CommsTrustReconciler::new" crates/meerkat-runtime/src/`
 returns only the test modules.
 
 The reconciler must be constructed at session registration time (one per
@@ -157,10 +157,10 @@ on the blocker list) against the ported API. The producer-side integration
 When the wave-d follow-up task runs and closes the gap, these assertions
 must both hold:
 
-- `grep "CommsTrustReconciler::new" meerkat-runtime/src/` returns >0
+- `grep "CommsTrustReconciler::new" crates/meerkat-runtime/src/` returns >0
   production hits (not just tests) — proving the reconciler has at least
   one production constructor site.
-- `grep "add_trusted_peer\|remove_trusted_peer" meerkat-runtime/src/comms_drain.rs`
+- `grep "add_trusted_peer\|remove_trusted_peer" crates/meerkat-runtime/src/comms_drain.rs`
   returns zero results, OR only results that are the reconciler-invocation
   call site(s). Scattered direct calls on the direct-peer / overlay paths
   (WireMember / UnwireMember bridge handlers) must be gone; supervisor-bind
@@ -169,7 +169,7 @@ must both hold:
   that closes the task.
 
 Additionally, the existing C-T tests
-(`meerkat-runtime/tests/trust_reconcile_concurrency.rs` and
-`meerkat-runtime/tests/trust_reconcile_add_failure.rs`) must continue to
+(`crates/meerkat-runtime/tests/trust_reconcile_concurrency.rs` and
+`crates/meerkat-runtime/tests/trust_reconcile_add_failure.rs`) must continue to
 pass unchanged — they test the reconciler module against a mock
 `CommsRuntime` and are independent of the production wiring path.

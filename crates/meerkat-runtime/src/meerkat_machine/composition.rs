@@ -14,7 +14,7 @@
 //! [`ConsumerSurface::apply_routed_input`] with the typed
 //! [`InputVariantId`] + projected field bindings declared by the
 //! `meerkat_mob_seam` composition schema
-//! (`meerkat-machine-schema/src/catalog/compositions.rs::meerkat_mob_seam_composition`).
+//! (`crates/meerkat-machine-schema/src/catalog/compositions.rs::meerkat_mob_seam_composition`).
 //! This surface translates each of the four routed variants —
 //! `PrepareBindings`, `Ingest`, `Retire`, `Destroy` — into the
 //! corresponding `MeerkatMachineInput` and applies it against the
@@ -254,7 +254,7 @@ impl MeerkatConsumerSurface {
         // Typed session_id is the canonical source (Shape 4 — producer DSL
         // emits `session_id: SessionId` alongside `agent_runtime_id`; see
         // `MobMachineEffect::RequestRuntimeBinding` in
-        // `meerkat-machine-schema/src/catalog/dsl/mob_machine.rs:168`).
+        // `crates/meerkat-machine-schema/src/catalog/dsl/mob_machine.rs:168`).
         let projected_session_id = projected
             .iter()
             .find(|(id, _)| id == &seam_facts::fields::session_id())

@@ -97,7 +97,7 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
-        "//meerkat:__pkg__",
+        "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.41",
@@ -108,10 +108,10 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat:meerkat_capabilities_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_machine_schema_agent_factory_build",
-        "//meerkat:meerkat_skills_agent_factory_build",
+        "//crates/meerkat:meerkat_capabilities_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_skills_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
         normal = True,
@@ -305,18 +305,18 @@ rust_library(
         "skills/schedule-workflow/SKILL.md",
     ],
     srcs = glob(["src/**/*.rs"]),
-    visibility = ["//meerkat-machine-codegen:__pkg__"],
+    visibility = ["//crates/meerkat-machine-codegen:__pkg__"],
     proc_macro_deps = [
-        "//meerkat-machine-dsl:meerkat_machine_dsl",
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-capabilities:meerkat_capabilities",
         "//crates/meerkat-core:meerkat_core",
-        "//meerkat-machine-schema:meerkat_machine_schema",
-        "//meerkat-skills:meerkat_skills",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+        "//crates/meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
         normal = True,
@@ -340,18 +340,18 @@ rust_library(
         "skills/schedule-workflow/SKILL.md",
     ],
     srcs = glob(["src/**/*.rs"]),
-    visibility = ["//meerkat-machine-codegen:__pkg__"],
+    visibility = ["//crates/meerkat-machine-codegen:__pkg__"],
     proc_macro_deps = [
-        "//meerkat-machine-dsl:meerkat_machine_dsl",
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
         proc_macro = True,
     ),
     deps = [
-        "//meerkat:meerkat_capabilities_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_machine_schema_agent_factory_build",
-        "//meerkat:meerkat_skills_agent_factory_build",
+        "//crates/meerkat:meerkat_capabilities_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_skills_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
         normal = True,

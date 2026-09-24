@@ -158,7 +158,7 @@ Since 0.7.12 (PR #821, the MobKit upstream asks):
   BEGIN IMMEDIATE migration + idempotent NULL-row heal before every scoped
   op) and allocates point ids from a durable counter table (never reused
   after drop).
-- **Compaction curator** — `CompactionCurator` (meerkat-core/src/compact.rs)
+- **Compaction curator** — `CompactionCurator` (crates/meerkat-core/src/compact.rs)
   substitutes summary CONTENT production for the compaction LLM call
   (`Option<Arc<dyn CompactionCurator>>` on Agent/AgentBuilder;
   `AgentBuildConfig.compaction_curator_override`). Curator failure is the
@@ -170,7 +170,7 @@ Since 0.7.12 (PR #821, the MobKit upstream asks):
   transcript-edit family); restore parses `RevisionSelector` (restoring
   `current` surfaces the typed NoOpRewrite instead of a stringly lookup).
 - **Comms content taint** — `SenderContentTaint { Clean, Tainted }` is
-  core-owned vocabulary (meerkat-core/src/comms.rs) carried as an optional
+  core-owned vocabulary (crates/meerkat-core/src/comms.rs) carried as an optional
   field INSIDE the signed `MessageKind` region (absent = byte-identical to
   pre-field envelopes; present fails verification closed on old receivers).
   Sender side: `CommsRuntime::set_outbound_content_taint` + tri-state
@@ -188,7 +188,7 @@ Since 0.7.12 (PR #821, the MobKit upstream asks):
   ENFORCED (previously admission-gated then dropped at the actor spawn
   sites): `ToolExecutionPolicy` (sealed resolved form) +
   `ExecutionPolicyGatedDispatcher`
-  (meerkat-core/src/tool_execution_policy.rs) gate execution while leaving
+  (crates/meerkat-core/src/tool_execution_policy.rs) gate execution while leaving
   `tools()`/`tool_catalog()` byte-identical (prompt-cache preserved). Deny
   surfaces as an ordinary `access_denied` tool error (run continues); hook
   denials remain the run-fatal channel. The gate wraps OUTERMOST in the
@@ -198,7 +198,7 @@ Since 0.7.12 (PR #821, the MobKit upstream asks):
 - **Host-runnable schedule targets** — `TargetBinding::HostRunnable`
   (`HostRunnableName` + wire-opaque params) + feature-owned
   `ScheduleRunnableHost` / `HostRunnableRegistry`
-  (meerkat-schedule/src/runnable.rs);
+  (crates/meerkat-schedule/src/runnable.rs);
   `SharedScheduleTargetAdapter::with_runnable_host` routes probe/deliver
   through the normal occurrence lifecycle. Machines untouched (targets stay
   opaque `TargetBindingId` keys); failures map onto existing typed reasons
@@ -228,7 +228,7 @@ Since the Ask 9/10 follow-ups (post-0.7.12):
 
 Since 0.8.4 (PR #912, the storage unification arc):
 
-- **`StorageLayout` path authority** (meerkat-core/src/storage_layout.rs) —
+- **`StorageLayout` path authority** (crates/meerkat-core/src/storage_layout.rs) —
   resolved once at bootstrap, carried through composition; the
   `storage-ambient-gate` CI gate bans ambient root resolution (`dirs::*`,
   `HOME`/`XDG`) outside the bootstrap/layout modules. Realm state roots
@@ -246,7 +246,7 @@ Since 0.8.4 (PR #912, the storage unification arc):
   crate table). Opens are DDL-free; every database gains a `meerkat_schema`
   ledger and a sibling `<file>.mfence` fence-lock; a future-schema file
   refuses typed (`SchemaFromTheFuture`) preflight, before WAL.
-- **`RealmStorageProvider` seam** (meerkat/src/storage_provider.rs) — one
+- **`RealmStorageProvider` seam** (crates/meerkat/src/storage_provider.rs) — one
   provider supplies all durable stores for a realm; store-only by design
   (mob storage stays mob-owned to avoid the facade↔mob cycle). Realm
   manifest v2 adds `provider` / `ephemeral_domains`; future formats and
@@ -256,14 +256,14 @@ Since 0.8.4 (PR #912, the storage unification arc):
   slot is a startup `DurabilityViolation`, never a silent in-memory fallback.
 - **`meerkat-store-conformance`** — published per-trait conformance
   chapters any backend runs by supplying store factories; the in-repo
-  stores run the same suite (meerkat-store/tests/conformance.rs).
+  stores run the same suite (crates/meerkat-store/tests/conformance.rs).
 - **`rkat storage doctor|migrate|prune`** — CLI storage verbs dispatch
   BEFORE runtime-scope resolution (no leases, no realm creation;
   `--isolated`/`--default-model` are usage errors; only `migrate --apply`
   opens a realm's persistence bundle, under the exclusive fence). Doctor
   renders the shape-stable `StorageMigrator::diagnose` seam
-  (meerkat-core/src/storage_diagnostics.rs; disk impl
-  meerkat-store/src/doctor.rs). Migrate is dry-run by default, fenced under
+  (crates/meerkat-core/src/storage_diagnostics.rs; disk impl
+  crates/meerkat-store/src/doctor.rs). Migrate is dry-run by default, fenced under
   `--apply`, refuses split-brain without `--adopt-root`, and runs structural
   store/ledger migrations only. The exact 0.8.10 Session conversion belongs
   to store activation, where the source row identity and authority replacement
@@ -273,8 +273,8 @@ Since 0.8.4 (PR #912, the storage unification arc):
   timestamp.
 - **Machine schemas are constructed once per process** — the `machine!`
   macro emits a `LazyLock`-cached `schema_static()`; `schema()` clones the
-  cache (meerkat-machine-dsl-core/src/gen_schema.rs; pointer-identity
-  pinned by meerkat-machine-schema/tests/schema_construction_cache.rs).
+  cache (crates/meerkat-machine-dsl-core/src/gen_schema.rs; pointer-identity
+  pinned by crates/meerkat-machine-schema/tests/schema_construction_cache.rs).
   Previously every schedule-host tick re-parsed machine DSLs per persisted
   row — an idle busy-loop that escalated to restart availability loss.
 - **Stream-inactivity watchdog** — `RetryPolicy::stream_inactivity_timeout`
@@ -448,7 +448,7 @@ into the `meerkat-dogma-inquisition` skill via
 `docs/architecture/meerkat-dogma-commentary.md`. Public summary:
 `docs/reference/machine-authority.mdx`. Historical archive (legacy rules
 #1–#20; the canonical doc carries the legacy-number mapping):
-`docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`.
+`docs/internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`.
 
 The nine canonical rules:
 
@@ -489,7 +489,7 @@ Public vocabulary:
   transport. The `live/*` methods are absent only when neither transport is
   configured.
 
-Wire types live in `meerkat-contracts/src/wire/live.rs`. Adapter
+Wire types live in `crates/meerkat-contracts/src/wire/live.rs`. Adapter
 internals live in `meerkat-core::live_adapter` (`LiveAdapterStatus`,
 `LiveChannelCapabilities`, `LiveContinuityMode`,
 `LiveTransportBootstrap`, `LiveAdapterObservation`, etc.). Provider
@@ -498,15 +498,15 @@ implementations currently sit in `meerkat-openai::live`.
 The DSL realtime-binding plane and `reconfigure_live_topology`
 orchestration were deleted, not renamed; the live-adapter implementation
 lives in `meerkat-live`. For a deeper internal reference,
-`meerkat-live/src/host.rs`, `meerkat-rpc/src/handlers/live.rs`, and
-`meerkat-contracts/src/wire/live.rs` are the authoritative surface;
+`crates/meerkat-live/src/host.rs`, `crates/meerkat-rpc/src/handlers/live.rs`, and
+`crates/meerkat-contracts/src/wire/live.rs` are the authoritative surface;
 `docs/guides/realtime.mdx` is the user-facing Live Channels companion.
 
 ## The canonical machine catalog
 
 The machine roster is owned by `canonical_machine_schemas()` and
-`canonical_composition_schemas()` in `meerkat-machine-schema/src/catalog/mod.rs`,
-with one DSL source per machine in `meerkat-machine-schema/src/catalog/dsl/`.
+`canonical_composition_schemas()` in `crates/meerkat-machine-schema/src/catalog/mod.rs`,
+with one DSL source per machine in `crates/meerkat-machine-schema/src/catalog/dsl/`.
 Do not maintain a copy of the machine list here — read the registry (and
 `canonical_machine_production_owner_relations()` for per-machine production
 owners; the public mirror is `docs/reference/machine-authority.mdx`).
@@ -525,7 +525,7 @@ Phase 1 of the machine-authority convergence is closed:
 - Catalog DSL is the source for production machine bodies and generated kernels.
 - `runtime_schema_parity` checks the explicitly enumerated Phase 1
   production-schema pairs in `phase1_schema_parity_cases()`
-  (`meerkat-machine-codegen/tests/runtime_schema_parity.rs`). Equality remains
+  (`crates/meerkat-machine-codegen/tests/runtime_schema_parity.rs`). Equality remains
   required for all canonical machines; this suite's case table is not an
   exhaustive catalog-coverage claim.
 - `runtime_alphabet_parity` uses typed command classification manifests; string whitelists are forbidden.
@@ -555,7 +555,7 @@ Member lifecycle facts (kickoff phases, restore failures, revival obligations,
 
 A realm is a config + state namespace. Config inherits along a parent chain;
 state never does. The chain authority is `RealmChain` in
-`meerkat-core/src/connection.rs`.
+`crates/meerkat-core/src/connection.rs`.
 
 - **`global` is the reserved optional chain root.** Reserved slug
   `GLOBAL_REALM_SLUG = "global"` (`RealmId::global()` / `RealmId::is_global()`,
@@ -580,7 +580,7 @@ state never does. The chain authority is `RealmChain` in
   `AuthBindingRef.realm` is the realm that DEFINES it, not the requesting realm,
   because materialize is fed the owner's own set (`realm.realm_id == owner` by
   construction). This keeps the strict equality at
-  `meerkat-llm-core/.../registry.rs` (`auth_binding.realm != realm.realm_id`) a
+  `crates/meerkat-llm-core/.../registry.rs` (`auth_binding.realm != realm.realm_id`) a
   real invariant with no relaxation, and `RealmConnectionSet`/`AuthBindingRef`
   gain no field — zero wire/schema churn. Env/InlineSecret/Command material is
   realm-agnostic (provenance only bites for the realm-namespaced TokenKey/LeaseKey).
@@ -604,7 +604,7 @@ state never does. The chain authority is `RealmChain` in
   presence-based (`is_some`), not a `!= default` heuristic.
 - **All surfaces compose.** CLI, REST, RPC, and MCP-server compose the effective
   config over the head realm via `effective_config_over_head` on the build path
-  (`meerkat/src/service_factory.rs` plus each surface), so inheritance is not
+  (`crates/meerkat/src/service_factory.rs` plus each surface), so inheritance is not
   CLI-only. WASM (`meerkat-web-runtime`) synthesizes its api-key binding section
   under `global`, giving a degenerate single-realm chain identical to today.
 - **Migration.** Legacy `dev`-realm logins migrate to `global` on the run path
@@ -613,11 +613,11 @@ state never does. The chain authority is `RealmChain` in
 
 Machine authority is untouched: chain invariants are enforced by plain Rust
 (typed `RealmChain` newtype, private field, fallible ctor, typed error), not a new
-DSL/machine domain. Key files: `meerkat-core/src/connection.rs` (`RealmChain`,
+DSL/machine domain. Key files: `crates/meerkat-core/src/connection.rs` (`RealmChain`,
 `RealmChainError`, resolvers, `resolve_write_owner`),
-`meerkat-core/src/config.rs` (`compose_effective_config`, `global_config_path`),
-`meerkat-core/src/config_store.rs` (`RealmConfigSource`, `EffectiveConfigReader`),
-`meerkat-store/src/realm.rs` (filesystem source + `realm_paths_in`).
+`crates/meerkat-core/src/config.rs` (`compose_effective_config`, `global_config_path`),
+`crates/meerkat-core/src/config_store.rs` (`RealmConfigSource`, `EffectiveConfigReader`),
+`crates/meerkat-store/src/realm.rs` (filesystem source + `realm_paths_in`).
 
 ## Crate Ownership
 
@@ -680,40 +680,40 @@ Load these as needed. SKILL.md alone is intentionally minimal — everything els
 
 For comprehensive file lists, see the matching reference. This is a minimal pointer index for the most common landmarks.
 
-- `meerkat-machine-schema/src/catalog/dsl/` — DSL sources (one per canonical machine; the roster and count are owned by `canonical_machine_schemas()`)
-- `meerkat-machine-schema/src/catalog/mod.rs` — `canonical_machine_schemas()` registry
-- `meerkat-machine-kernels/src/generated/` — ordinary typed generated kernel surface; production authority changes originate in catalog DSL and its bridge modules
-- `meerkat-machine-kernels/src/runtime.rs` — optional generic interpreter, exported as `test_oracle::GeneratedMachineKernel` only with `test-oracle`
-- `meerkat-runtime/src/meerkat_machine/` — `MeerkatMachine`, session management, dispatch paths, DSL adapter
-- `meerkat-runtime/src/handles/` — runtime impls of DSL handle traits
-- `meerkat-core/src/handles.rs` — DSL handle trait definitions
-- `meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings`, `RuntimeBuildMode`
-- `meerkat-core/src/storage_layout.rs` — `StorageLayout` path authority (dual-root resolution lives in `runtime_bootstrap.rs`)
-- `meerkat-core/src/storage_durability.rs`, `meerkat-core/src/storage_diagnostics.rs` — `DurabilityClass`/`DurabilityDeclaration`, `StorageDiagnosis`/`StorageMigrator`
-- `meerkat-sqlite/src/{profile,ledger,fence,json_column,error}.rs` — shared SQLite mechanics
-- `meerkat/src/storage_provider.rs` — `RealmStorageProvider`, `DiskStorageProvider`, `enforce_fail_closed_durability`
-- `meerkat-store/src/{doctor,migrate,realm}.rs` — disk diagnosis, offline migration mechanics, realm manifest v2 pinning
-- `meerkat-cli/src/storage_migrate.rs` — `rkat storage migrate`/`prune` orchestration
-- `meerkat-live/src/host.rs`, `meerkat-live/src/transport.rs` — live channel host and WebSocket transport
-- `meerkat-rpc/src/handlers/live.rs` — `live/*` JSON-RPC handlers
-- `meerkat-core/src/agent.rs`, `meerkat-core/src/agent/*.rs` — agent loop
-- `meerkat-core/src/tool_execution_policy.rs` — `ToolExecutionPolicy`, `ExecutionPolicyGatedDispatcher` (list-preserving call-level tool gate)
-- `meerkat-core/src/compact.rs` — `Compactor`, `CompactionCurator` (host-supplied summary producer)
-- `meerkat-schedule/src/runnable.rs` — `ScheduleRunnableHost`, `HostRunnableRegistry` (host-runnable schedule targets)
-- `meerkat/src/factory.rs` — `AgentFactory::build_agent()` (pipeline)
-- `meerkat-session/src/{ephemeral,persistent}.rs` — session services
-- `meerkat-workgraph/src/{types,store,service,tools}.rs` — WorkGraph domain model, durable stores, service policy, and agent tools
-- `meerkat-mob/src/runtime/actor.rs` — `MobActor`
-- `meerkat-mob/src/backend.rs`, `meerkat-mob/src/ids.rs` — identity-first binding model
-- `meerkat-mob/src/runtime/supervisor_bridge.rs` — supervisor bridge transport
-- `meerkat-mob/src/runtime/local_bridge.rs` — in-process MeerkatMachine bridge
-- `meerkat-mob-mcp/src/agent_tools.rs` — agent-facing delegation/orchestration tools
-- `meerkat-contracts/src/wire/supervisor_bridge.rs` — bridge protocol types
-- `xtask/src/{effect_authority,bridge_classifier,ownership_ledger,rmat_audit,seam_inventory}.rs` — typed governance gates
+- `crates/meerkat-machine-schema/src/catalog/dsl/` — DSL sources (one per canonical machine; the roster and count are owned by `canonical_machine_schemas()`)
+- `crates/meerkat-machine-schema/src/catalog/mod.rs` — `canonical_machine_schemas()` registry
+- `crates/meerkat-machine-kernels/src/generated/` — ordinary typed generated kernel surface; production authority changes originate in catalog DSL and its bridge modules
+- `crates/meerkat-machine-kernels/src/runtime.rs` — optional generic interpreter, exported as `test_oracle::GeneratedMachineKernel` only with `test-oracle`
+- `crates/meerkat-runtime/src/meerkat_machine/` — `MeerkatMachine`, session management, dispatch paths, DSL adapter
+- `crates/meerkat-runtime/src/handles/` — runtime impls of DSL handle traits
+- `crates/meerkat-core/src/handles.rs` — DSL handle trait definitions
+- `crates/meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings`, `RuntimeBuildMode`
+- `crates/meerkat-core/src/storage_layout.rs` — `StorageLayout` path authority (dual-root resolution lives in `runtime_bootstrap.rs`)
+- `crates/meerkat-core/src/storage_durability.rs`, `crates/meerkat-core/src/storage_diagnostics.rs` — `DurabilityClass`/`DurabilityDeclaration`, `StorageDiagnosis`/`StorageMigrator`
+- `crates/meerkat-sqlite/src/{profile,ledger,fence,json_column,error}.rs` — shared SQLite mechanics
+- `crates/meerkat/src/storage_provider.rs` — `RealmStorageProvider`, `DiskStorageProvider`, `enforce_fail_closed_durability`
+- `crates/meerkat-store/src/{doctor,migrate,realm}.rs` — disk diagnosis, offline migration mechanics, realm manifest v2 pinning
+- `crates/meerkat-cli/src/storage_migrate.rs` — `rkat storage migrate`/`prune` orchestration
+- `crates/meerkat-live/src/host.rs`, `crates/meerkat-live/src/transport.rs` — live channel host and WebSocket transport
+- `crates/meerkat-rpc/src/handlers/live.rs` — `live/*` JSON-RPC handlers
+- `crates/meerkat-core/src/agent.rs`, `crates/meerkat-core/src/agent/*.rs` — agent loop
+- `crates/meerkat-core/src/tool_execution_policy.rs` — `ToolExecutionPolicy`, `ExecutionPolicyGatedDispatcher` (list-preserving call-level tool gate)
+- `crates/meerkat-core/src/compact.rs` — `Compactor`, `CompactionCurator` (host-supplied summary producer)
+- `crates/meerkat-schedule/src/runnable.rs` — `ScheduleRunnableHost`, `HostRunnableRegistry` (host-runnable schedule targets)
+- `crates/meerkat/src/factory.rs` — `AgentFactory::build_agent()` (pipeline)
+- `crates/meerkat-session/src/{ephemeral,persistent}.rs` — session services
+- `crates/meerkat-workgraph/src/{types,store,service,tools}.rs` — WorkGraph domain model, durable stores, service policy, and agent tools
+- `crates/meerkat-mob/src/runtime/actor.rs` — `MobActor`
+- `crates/meerkat-mob/src/backend.rs`, `crates/meerkat-mob/src/ids.rs` — identity-first binding model
+- `crates/meerkat-mob/src/runtime/supervisor_bridge.rs` — supervisor bridge transport
+- `crates/meerkat-mob/src/runtime/local_bridge.rs` — in-process MeerkatMachine bridge
+- `crates/meerkat-mob-mcp/src/agent_tools.rs` — agent-facing delegation/orchestration tools
+- `crates/meerkat-contracts/src/wire/supervisor_bridge.rs` — bridge protocol types
+- `crates/xtask/src/{effect_authority,bridge_classifier,ownership_ledger,rmat_audit,seam_inventory}.rs` — typed governance gates
 - `docs/architecture/meerkat-dogma.md`, `docs/architecture/meerkat-dogma-commentary.md` — canonical dogma doctrine
 - `docs/reference/machine-authority.mdx` — public machine-authority summary
 - `docs/reference/build-and-ci.mdx` — public BuildBuddy/Cargo/CI guide
-- `docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md` — historical internal doctrine archive
-- `docs-internal/archive/public-docs-removed-2026-05-11/architecture/identity-first-live-voice-proposal.md` — historical live + identity design notes
+- `docs/internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md` — historical internal doctrine archive
+- `docs/internal/archive/public-docs-removed-2026-05-11/architecture/identity-first-live-voice-proposal.md` — historical live + identity design notes
 - `tests/integration/src/e2e_lanes.rs` — authoritative e2e lane catalog
 - `scripts/build-backend-env`, `scripts/run-build-backend-lane`, `scripts/buildbuddy-dev` — local build backend switch and BuildBuddy facade

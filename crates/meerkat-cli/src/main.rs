@@ -18212,7 +18212,7 @@ where
     // RPC-host: deploy_mob inline-hosts an RpcServer for the deployed mob session.
     // `TransportWriter` is the trait bound carrying the RPC-wire write half
     // (writes framed `RpcResponse`/`RpcNotification` JSON-RPC envelopes — see
-    // `meerkat-rpc/src/transport.rs`). Lifting this would require duplicating
+    // `crates/meerkat-rpc/src/transport.rs`). Lifting this would require duplicating
     // the RPC wire framer; this site legitimately owns the RPC-host role.
     W: meerkat_rpc::transport::TransportWriter,
 {
@@ -18271,7 +18271,7 @@ where
     // `SessionRuntime::new_with_config_store` is the RPC-host constructor —
     // it owns the JSON-RPC dispatch loop, callback channel, and notification
     // fan-out. `NotificationSink` (next line) wraps `mpsc::Sender<RpcNotification>`
-    // (RPC wire type — see `meerkat-rpc/src/router.rs`). Both are RPC-host
+    // (RPC wire type — see `crates/meerkat-rpc/src/router.rs`). Both are RPC-host
     // contracts and not lift candidates.
     let runtime = meerkat_rpc::session_runtime::SessionRuntime::new_with_config_store(
         factory,
@@ -18418,7 +18418,7 @@ where
     // the function inline-hosts a full `RpcServer` over the supplied
     // reader/writer for the lifetime of the deployed mob session.
     // `RpcServer::new_with_skill_runtime_and_mob_state` owns the JSON-RPC
-    // method router (`meerkat-rpc/src/server.rs`), wires `RpcRequest` →
+    // method router (`crates/meerkat-rpc/src/server.rs`), wires `RpcRequest` →
     // method dispatch and emits `RpcNotification`s back to the connected
     // client. By definition this cannot be lifted — `deploy_mob`'s job
     // *is* to be an RPC host.
@@ -18545,7 +18545,7 @@ mod tests {
 
     fn hooks_override_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/hooks/run_override.json")
+            .join("../../../tests/fixtures/hooks/run_override.json")
     }
 
     fn fixture_skill_key(name: &str) -> meerkat_core::skills::SkillKey {
@@ -28709,6 +28709,7 @@ mod docs_cli_examples {
     fn fenced_rkat_doc_examples_parse_against_clap() {
         let docs_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
+            .and_then(std::path::Path::parent)
             .expect("workspace root")
             .join("docs");
         let mut checked = 0usize;

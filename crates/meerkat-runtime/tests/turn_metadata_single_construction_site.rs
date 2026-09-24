@@ -1,7 +1,7 @@
 #![allow(clippy::panic)]
 
 //! B-6: enforce that every `RuntimeTurnMetadata` construction inside
-//! `meerkat-runtime/src/` routes through the canonical
+//! `crates/meerkat-runtime/src/` routes through the canonical
 //! `runtime_loop::for_input` constructor.
 //!
 //! Grep-based so it stays cheap and runs on every test lane.

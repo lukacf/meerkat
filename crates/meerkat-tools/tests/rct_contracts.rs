@@ -174,6 +174,7 @@ fn test_rct_contracts_no_manual_tool_schema_literals() -> Result<(), Box<dyn std
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = crate_root
         .parent()
+        .and_then(std::path::Path::parent)
         .ok_or("missing workspace root")?
         .to_path_buf();
 

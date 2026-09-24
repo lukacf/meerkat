@@ -493,7 +493,7 @@ pub mod tests {
     use axum::{Json, Router};
     use rmcp::model::Content;
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::TcpListener;
@@ -660,7 +660,11 @@ pub mod tests {
 
         // Build path relative to workspace root
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-        let workspace_root = PathBuf::from(manifest_dir).parent().unwrap().to_path_buf();
+        let workspace_root = PathBuf::from(manifest_dir)
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .to_path_buf();
         workspace_root
             .join("target")
             .join("debug")

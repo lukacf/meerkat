@@ -47,7 +47,7 @@ fn assert_released_ordinals(path: &str, name: &str, released: &[&str]) -> Result
 #[test]
 fn agent_event_preserves_v0_8_36_ordinals() -> Result<()> {
     assert_released_ordinals(
-        "meerkat-core/src/event.rs",
+        "crates/meerkat-core/src/event.rs",
         "AgentEvent",
         &[
             "RunStarted",
@@ -98,7 +98,7 @@ fn agent_event_preserves_v0_8_36_ordinals() -> Result<()> {
 #[test]
 fn agent_error_reason_preserves_v0_8_36_ordinals() -> Result<()> {
     assert_released_ordinals(
-        "meerkat-core/src/event.rs",
+        "crates/meerkat-core/src/event.rs",
         "AgentErrorReason",
         &[
             "LlmRateLimited",
@@ -124,7 +124,7 @@ fn agent_error_reason_preserves_v0_8_36_ordinals() -> Result<()> {
 #[test]
 fn diagnostic_code_preserves_v0_8_36_ordinals() -> Result<()> {
     assert_released_ordinals(
-        "meerkat-mob/src/validate.rs",
+        "crates/meerkat-mob/src/validate.rs",
         "DiagnosticCode",
         &[
             "MissingSkillRef",

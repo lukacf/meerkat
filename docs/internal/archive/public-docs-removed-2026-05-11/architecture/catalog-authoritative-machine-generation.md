@@ -9,13 +9,13 @@ The machine system is meant to make machine-owned semantics the runtime
 authority. The current tree still has a foundational gap: the verified catalog
 machine and the production runtime machine can diverge.
 
-The catalog DSL under `meerkat-machine-schema/src/catalog/dsl/` expands into
+The catalog DSL under `crates/meerkat-machine-schema/src/catalog/dsl/` expands into
 `MachineSchema`, generated specs, and TLA+/TLC verification. Production runtime
 crates also carry local `machine! { ... }` definitions for the same conceptual
 machines, especially:
 
-- `meerkat-runtime/src/meerkat_machine/dsl.rs`
-- `meerkat-mob/src/machines/mob_machine.rs`
+- `crates/meerkat-runtime/src/meerkat_machine/dsl.rs`
+- `crates/meerkat-mob/src/machines/mob_machine.rs`
 
 Those production definitions use the same DSL macro, but they are separate
 source bodies. TLC therefore verifies the catalog-expanded machine, while the
@@ -83,7 +83,7 @@ These constraints are permanent. Phase acceptance criteria prove individual
 migrations; these rules define the architecture after the migration.
 
 - Do not hand-author a canonical `machine! { ... }` body outside
-  `meerkat-machine-schema/src/catalog/dsl/`. Generated production output may
+  `crates/meerkat-machine-schema/src/catalog/dsl/`. Generated production output may
   contain `machine!` invocations if Phase 1 chooses generated DSL invocations
   rather than expanded Rust.
 - Do not introduce production-only DSL state, inputs, signals, effects,
@@ -137,10 +137,10 @@ production machine body  -> runtime authority execution
 
 Production-specific bridge code moves out of the machine body. For example:
 
-- `meerkat-runtime/src/meerkat_machine/dsl_types.rs`
-- `meerkat-runtime/src/meerkat_machine/dsl_conversions.rs`
-- `meerkat-mob/src/machines/mob_machine_types.rs`
-- `meerkat-mob/src/machines/mob_machine_conversions.rs`
+- `crates/meerkat-runtime/src/meerkat_machine/dsl_types.rs`
+- `crates/meerkat-runtime/src/meerkat_machine/dsl_conversions.rs`
+- `crates/meerkat-mob/src/machines/mob_machine_types.rs`
+- `crates/meerkat-mob/src/machines/mob_machine_conversions.rs`
 
 The exact filenames are not normative. The rule is normative: bridge code may be
 crate-local; canonical machine state, inputs, effects, transitions, helpers, and
@@ -250,8 +250,8 @@ in `MeerkatMachine`: request class, phase, cancellation, publish/complete order,
 terminal class, and method/tool commit classification.
 
 The following semantic facts currently spread across
-`meerkat/src/surface/request_execution.rs`, `meerkat-rpc/src/server.rs`,
-`meerkat-mcp-server/src/main.rs`, and `meerkat-rest/src/lib.rs` must become
+`crates/meerkat/src/surface/request_execution.rs`, `crates/meerkat-rpc/src/server.rs`,
+`crates/meerkat-mcp-server/src/main.rs`, and `crates/meerkat-rest/src/lib.rs` must become
 `MeerkatMachine` state or machine effects before Phase 5 is complete:
 
 - request key / request id uniqueness, including duplicate in-flight rejection
@@ -355,13 +355,13 @@ Acceptance criteria:
 
 Suggested files:
 
-- `meerkat-machine-codegen/tests/runtime_alphabet_parity.rs`
-- new `meerkat-machine-codegen/tests/runtime_schema_parity.rs`
-- `meerkat-runtime/src/meerkat_machine/dsl.rs`
-- `meerkat-runtime/src/auth_machine/dsl.rs`
-- `meerkat-mob/src/machines/mob_machine.rs`
-- `meerkat-schedule/src/machines/schedule_lifecycle.rs`
-- `meerkat-schedule/src/machines/occurrence_lifecycle.rs`
+- `crates/meerkat-machine-codegen/tests/runtime_alphabet_parity.rs`
+- new `crates/meerkat-machine-codegen/tests/runtime_schema_parity.rs`
+- `crates/meerkat-runtime/src/meerkat_machine/dsl.rs`
+- `crates/meerkat-runtime/src/auth_machine/dsl.rs`
+- `crates/meerkat-mob/src/machines/mob_machine.rs`
+- `crates/meerkat-schedule/src/machines/schedule_lifecycle.rs`
+- `crates/meerkat-schedule/src/machines/occurrence_lifecycle.rs`
 - `docs/architecture/catalog-production-schema-parity-ledger.md`
 - `docs/architecture/mob-runtime-schema-parity-ledger.md`
 
@@ -425,7 +425,7 @@ Suggested gates:
 - add the schema equality gate as a separate parity test from command
   classification
 - add an AST audit that rejects non-generated canonical `machine! { ... }`
-  bodies outside `meerkat-machine-schema/src/catalog/dsl/`
+  bodies outside `crates/meerkat-machine-schema/src/catalog/dsl/`
 
 ### Phase 2: Typed Command Classification
 
@@ -472,10 +472,10 @@ Acceptance criteria:
 
 Suggested files:
 
-- `meerkat-machine-derive/src/lib.rs`
-- `meerkat-runtime/src/meerkat_machine_types.rs`
-- `meerkat-mob/src/mob_machine.rs`
-- `meerkat-machine-codegen/tests/runtime_alphabet_parity.rs`
+- `crates/meerkat-machine-derive/src/lib.rs`
+- `crates/meerkat-runtime/src/meerkat_machine_types.rs`
+- `crates/meerkat-mob/src/mob_machine.rs`
+- `crates/meerkat-machine-codegen/tests/runtime_alphabet_parity.rs`
 
 ### Phase 3: Recovery Replays Machine Truth
 
@@ -517,10 +517,10 @@ Acceptance criteria:
 
 Suggested files:
 
-- `meerkat-runtime/src/meerkat_machine/driver.rs`
-- `meerkat-runtime/src/driver/ephemeral.rs`
-- `meerkat-runtime/tests/recovery_contract_test.rs`
-- `meerkat-runtime/tests/recovery_replay_test.rs`
+- `crates/meerkat-runtime/src/meerkat_machine/driver.rs`
+- `crates/meerkat-runtime/src/driver/ephemeral.rs`
+- `crates/meerkat-runtime/tests/recovery_contract_test.rs`
+- `crates/meerkat-runtime/tests/recovery_replay_test.rs`
 - session store implementations under `meerkat-store/` and `meerkat-session/`
 
 ### Phase 4: Mob Member Lifecycle Authority
@@ -576,11 +576,11 @@ Acceptance criteria:
 
 Suggested files:
 
-- `meerkat-mob/src/runtime/mob_member_lifecycle_projection.rs`
-- `meerkat-mob/src/runtime/handle.rs`
-- `meerkat-mob/src/runtime/actor.rs`
-- `meerkat-machine-schema/src/catalog/dsl/mob_machine.rs`
-- `meerkat-mob/src/runtime/tests.rs`
+- `crates/meerkat-mob/src/runtime/mob_member_lifecycle_projection.rs`
+- `crates/meerkat-mob/src/runtime/handle.rs`
+- `crates/meerkat-mob/src/runtime/actor.rs`
+- `crates/meerkat-machine-schema/src/catalog/dsl/mob_machine.rs`
+- `crates/meerkat-mob/src/runtime/tests.rs`
 
 ### Phase 5: Surface Request Lifecycle Authority
 
@@ -616,8 +616,8 @@ Deliverables:
   `CompleteOutcome`, and `RequestTerminal` semantics into machine-owned
   transition/effect types
 - replace direct `SurfaceRequestExecutor` lifecycle mutation in
-  `meerkat-rpc/src/server.rs`, `meerkat-mcp-server/src/main.rs`, and
-  `meerkat-rest/src/lib.rs` with `MeerkatMachine` request lifecycle inputs
+  `crates/meerkat-rpc/src/server.rs`, `crates/meerkat-mcp-server/src/main.rs`, and
+  `crates/meerkat-rest/src/lib.rs` with `MeerkatMachine` request lifecycle inputs
 - keep `SurfaceRequestExecutor` only as transport mechanics: storing closures,
   task handles, cleanup actions, and stream shutdown behavior
 
@@ -637,11 +637,11 @@ Acceptance criteria:
 
 Suggested files:
 
-- `meerkat/src/surface/request_execution.rs`
-- `meerkat-rpc/src/server.rs`
-- `meerkat-mcp-server/src/main.rs`
-- `meerkat-rest/src/lib.rs`
-- `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`
+- `crates/meerkat/src/surface/request_execution.rs`
+- `crates/meerkat-rpc/src/server.rs`
+- `crates/meerkat-mcp-server/src/main.rs`
+- `crates/meerkat-rest/src/lib.rs`
+- `crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`
 
 ### Phase 6: Enforcement Audits
 
@@ -652,7 +652,7 @@ Required audits:
 
 | Retired pattern | Audit shape | Default lane |
 | --- | --- | --- |
-| Production canonical machine body is handwritten | Rust AST scan rejects non-generated `machine! { ... }` invocations for canonical machines outside `meerkat-machine-schema/src/catalog/dsl/`. Generated output and DSL test fixtures are allowed only with explicit generated/test classification. | `ci-smoke` |
+| Production canonical machine body is handwritten | Rust AST scan rejects non-generated `machine! { ... }` invocations for canonical machines outside `crates/meerkat-machine-schema/src/catalog/dsl/`. Generated output and DSL test fixtures are allowed only with explicit generated/test classification. | `ci-smoke` |
 | Command parity uses string exemptions | Rust AST scan rejects exemption arrays, `variant_name()` string maps, and `shift_remove`-style command manifest subtraction in runtime command parity modules. | `ci-smoke` |
 | Driver projection seeds canonical recovery state | AST or targeted source audit rejects writes to `*.dsl_authority.state.*` and direct construction of canonical lifecycle fields from recovery/projection modules except inside generated snapshot-load code. | `ci-smoke` for source audit; machine lane for replay tests |
 | Mob wait/collect consumes lifecycle projection | AST audit rejects calls from wait/collect barrier functions to `MobMemberLifecycleProjection`, `member_status().is_final`, or projection terminal classifiers. | `ci-smoke` |
@@ -753,8 +753,8 @@ Phase 4 and is not considered complete until member lifecycle is machine-owned.
 
 ## Coordination
 
-Any branch that changes `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`
-or `meerkat-machine-schema/src/catalog/dsl/mob_machine.rs` must coordinate with
+Any branch that changes `crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`
+or `crates/meerkat-machine-schema/src/catalog/dsl/mob_machine.rs` must coordinate with
 Phase 1. The conflict policy is:
 
 1. land catalog semantic changes in the catalog DSL first
@@ -810,6 +810,6 @@ Before later phases land:
 - `docs/architecture/RMAT.md`
 - `docs/architecture/formal-seam-closure.md`
 - `docs/architecture/finite-ownership-ledger.md`
-- `meerkat-machine-schema/src/catalog/dsl/`
-- `meerkat-machine-codegen/tests/runtime_alphabet_parity.rs`
-- `xtask/src/machines.rs`
+- `crates/meerkat-machine-schema/src/catalog/dsl/`
+- `crates/meerkat-machine-codegen/tests/runtime_alphabet_parity.rs`
+- `crates/xtask/src/machines.rs`

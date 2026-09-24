@@ -22,7 +22,7 @@
 //! peer_projection input". Post-C-7 collapse, `MemberSessionBindingChanged`
 //! has `disposition external` in the catalog — it does NOT route
 //! through the seam dispatcher; it crosses the boundary via the DSL
-//! `peer_projection` input path described in `meerkat-runtime/src/
+//! `peer_projection` input path described in `crates/meerkat-runtime/src/
 //! meerkat_machine/dsl.rs:2115+` (direct_peer_endpoints ∪
 //! mob_overlay_peer_endpoints with peer_projection_epoch). The
 //! dispatcher seam carries the 4 Request* effects (binding / ingress

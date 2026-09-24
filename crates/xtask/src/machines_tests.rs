@@ -589,7 +589,8 @@ fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
 #[cfg(feature = "machine-authority")]
 fn peer_terminal_projection_mismatches(source: &str) -> Vec<String> {
     let parsed = syn::parse_file(source).expect("parse projection fixture");
-    let mut visitor = PeerResponseTerminalProjectionVisitor::new("meerkat-runtime/src/accept.rs");
+    let mut visitor =
+        PeerResponseTerminalProjectionVisitor::new("crates/meerkat-runtime/src/accept.rs");
     visitor.visit_file(&parsed);
     visitor.mismatches
 }
@@ -636,7 +637,8 @@ fn peer_terminal_projection_ignores_names_in_comments_and_unrelated_calls() {
 #[cfg(feature = "machine-authority")]
 fn peer_terminal_shell_mismatches(source: &str) -> Vec<String> {
     let parsed = syn::parse_file(source).expect("parse shell fixture");
-    let mut visitor = PeerResponseTerminalShellVisitor::new("meerkat-rpc/src/session_runtime.rs");
+    let mut visitor =
+        PeerResponseTerminalShellVisitor::new("crates/meerkat-rpc/src/session_runtime.rs");
     visitor.visit_file(&parsed);
     visitor.mismatches
 }

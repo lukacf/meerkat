@@ -95,7 +95,7 @@ For an `Auto` image target, the planner first uses the build's configured
 typed `SessionModelRoutingStatus.session_provider`. It never infers provider
 identity from a model string. References to the current turn's generated
 images travel as the typed `CurrentTurnImageRef` newtype
-(`meerkat-core/src/agent.rs`), not raw indices.
+(`crates/meerkat-core/src/agent.rs`), not raw indices.
 
 Generated images must be surfaced through transcript history plus blob retrieval. SDKs should parse `AssistantBlock::Image` into typed image fields and fetch bytes through `blob/get`; do not inline generated image bytes into history.
 
@@ -113,11 +113,11 @@ Tool visibility state lives in MeerkatMachine DSL (`active_filter`, `staged_filt
 
 ## Key files
 
-- `meerkat/src/factory.rs` — `AgentFactory`, `DynAgent`, `AgentBuildConfig`
-- `meerkat/src/service_factory.rs` — `FactoryAgentBuilder`, `FactoryAgent`, `build_ephemeral_service`
-- `meerkat-core/src/agent.rs` — `Agent`, `AgentExecutionSnapshot` (reads turn state from DSL via `TurnStateHandle`)
-- `meerkat-core/src/agent/runner.rs` — `run_inner`, run-loop reset
-- `meerkat-core/src/agent/builder.rs` — `AgentBuilder`
-- `meerkat-core/src/agent/state.rs` — `run_loop`, `WaitingForOps` dispatch
-- `meerkat-core/src/tool_scope.rs` — runtime tool visibility
-- `meerkat-core/src/types.rs` - `ContentBlock`, `ContentInput`
+- `crates/meerkat/src/factory.rs` — `AgentFactory`, `DynAgent`, `AgentBuildConfig`
+- `crates/meerkat/src/service_factory.rs` — `FactoryAgentBuilder`, `FactoryAgent`, `build_ephemeral_service`
+- `crates/meerkat-core/src/agent.rs` — `Agent`, `AgentExecutionSnapshot` (reads turn state from DSL via `TurnStateHandle`)
+- `crates/meerkat-core/src/agent/runner.rs` — `run_inner`, run-loop reset
+- `crates/meerkat-core/src/agent/builder.rs` — `AgentBuilder`
+- `crates/meerkat-core/src/agent/state.rs` — `run_loop`, `WaitingForOps` dispatch
+- `crates/meerkat-core/src/tool_scope.rs` — runtime tool visibility
+- `crates/meerkat-core/src/types.rs` - `ContentBlock`, `ContentInput`

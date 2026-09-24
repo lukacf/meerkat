@@ -37,15 +37,15 @@
 ^\./sdks/.+
 
 # Crate code still migration-boundary internal/public surfaces (M1+)
-^\./meerkat/.+
-^\./meerkat-cli/.+
-^\./meerkat-core/.+
-^\./meerkat-comms/.+
-^\./meerkat-rpc/.+
-^\./meerkat-rest/.+
-^\./meerkat-session/.+
-^\./meerkat-tools/.+
-^\./meerkat-contracts/src/version\.rs
+^\./crates/meerkat/.+
+^\./crates/meerkat-cli/.+
+^\./crates/meerkat-core/.+
+^\./crates/meerkat-comms/.+
+^\./crates/meerkat-rpc/.+
+^\./crates/meerkat-rest/.+
+^\./crates/meerkat-session/.+
+^\./crates/meerkat-tools/.+
+^\./crates/meerkat-contracts/src/version\.rs
 
 # Historical log / release notes placeholders
 ^\./CHANGELOG\.md

@@ -3,7 +3,7 @@
 //! Typed parameter and result shapes for the `live/open`, `live/status`,
 //! `live/close`, `live/send_input`, `live/commit_input`, `live/interrupt`,
 //! and `live/truncate` JSON-RPC methods. Promoted from
-//! `meerkat-rpc/src/handlers/live.rs` (I52) so SDKs and the protocol catalog
+//! `crates/meerkat-rpc/src/handlers/live.rs` (I52) so SDKs and the protocol catalog
 //! can reference them as typed contracts rather than free-form `basic`
 //! entries.
 //!
@@ -80,7 +80,7 @@ impl From<Provider> for WireProvider {
                 debug_assert!(
                     false,
                     "WireProvider::from saw an unmapped Provider variant: {other:?}; \
-                     add an explicit arm in meerkat-contracts/src/wire/live.rs."
+                     add an explicit arm in crates/meerkat-contracts/src/wire/live.rs."
                 );
                 Self::Unknown
             }
@@ -306,7 +306,7 @@ impl From<LiveTransportBootstrap> for WireLiveTransportBootstrap {
                     false,
                     "WireLiveTransportBootstrap::from saw an unmapped \
                      LiveTransportBootstrap variant; add an explicit arm in \
-                     meerkat-contracts/src/wire/live.rs."
+                     crates/meerkat-contracts/src/wire/live.rs."
                 );
                 Self::Unknown {
                     debug: format!("{other:?}"),
@@ -530,7 +530,7 @@ impl From<LiveContinuityMode> for WireLiveContinuityMode {
                     false,
                     "WireLiveContinuityMode::from saw an unmapped \
                      LiveContinuityMode variant; add an explicit arm in \
-                     meerkat-contracts/src/wire/live.rs."
+                     crates/meerkat-contracts/src/wire/live.rs."
                 );
                 Self::Unknown {
                     debug: format!("{other:?}"),
@@ -649,7 +649,7 @@ impl From<LiveResponseModality> for WireLiveResponseModality {
                     false,
                     "WireLiveResponseModality::from saw an unmapped \
                      LiveResponseModality variant; add an explicit arm in \
-                     meerkat-contracts/src/wire/live.rs."
+                     crates/meerkat-contracts/src/wire/live.rs."
                 );
                 Self::Unknown {
                     debug: format!("{other:?}"),
@@ -1092,7 +1092,7 @@ impl From<LiveDegradationReason> for WireLiveDegradationReason {
                     false,
                     "WireLiveDegradationReason::from saw an unmapped \
                      LiveDegradationReason variant: {other:?}; add an explicit arm in \
-                     meerkat-contracts/src/wire/live.rs."
+                     crates/meerkat-contracts/src/wire/live.rs."
                 );
                 Self::Unknown {
                     debug: format!("{other:?}"),
@@ -1178,7 +1178,7 @@ impl From<LiveAdapterStatus> for WireLiveAdapterStatus {
                     false,
                     "WireLiveAdapterStatus::from saw an unmapped \
                      LiveAdapterStatus variant; add an explicit arm in \
-                     meerkat-contracts/src/wire/live.rs."
+                     crates/meerkat-contracts/src/wire/live.rs."
                 );
                 Self::Unknown {
                     debug: format!("{other:?}"),
@@ -1490,7 +1490,7 @@ impl From<LiveConfigRejectionReason> for WireLiveConfigRejectionReason {
                     false,
                     "WireLiveConfigRejectionReason::from saw an unmapped \
                      LiveConfigRejectionReason variant; add an explicit arm \
-                     in meerkat-contracts/src/wire/live.rs."
+                     in crates/meerkat-contracts/src/wire/live.rs."
                 );
                 Self::Unknown {
                     debug: format!("{other:?}"),
@@ -1646,7 +1646,7 @@ impl From<LiveAdapterErrorCode> for WireLiveAdapterErrorCode {
                     false,
                     "WireLiveAdapterErrorCode::from saw an unmapped \
                      LiveAdapterErrorCode variant; add an explicit arm in \
-                     meerkat-contracts/src/wire/live.rs."
+                     crates/meerkat-contracts/src/wire/live.rs."
                 );
                 Self::Unknown {
                     debug: format!("{other:?}"),
@@ -2246,7 +2246,7 @@ impl From<LiveAdapterObservation> for WireLiveAdapterObservation {
                     false,
                     "WireLiveAdapterObservation::from saw an unmapped \
                      LiveAdapterObservation variant; add an explicit arm in \
-                     meerkat-contracts/src/wire/live.rs."
+                     crates/meerkat-contracts/src/wire/live.rs."
                 );
                 Self::Unknown {
                     debug: format!("{other:?}"),

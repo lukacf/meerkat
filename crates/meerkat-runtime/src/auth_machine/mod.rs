@@ -3,10 +3,10 @@
 //! Per-binding auth-lease lifecycle machine. Each typed `LeaseKey`
 //! (`realm`, `binding`, optional `profile`) has its own `AuthMachine`
 //! instance, managed by the lease-key registry in
-//! `meerkat-runtime/src/handles/auth_lease.rs`.
+//! `crates/meerkat-runtime/src/handles/auth_lease.rs`.
 //!
 //! See `dsl.rs` for the machine definition. See
-//! `meerkat-machine-schema/src/catalog/dsl/auth_machine.rs` for the
+//! `crates/meerkat-machine-schema/src/catalog/dsl/auth_machine.rs` for the
 //! schema-catalog mirror (the two must stay structurally identical;
 //! the xtask drift-check enforces this).
 

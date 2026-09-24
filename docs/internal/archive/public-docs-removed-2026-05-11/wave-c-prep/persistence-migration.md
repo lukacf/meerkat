@@ -10,8 +10,8 @@ Three physically distinct stores carry serialized shapes that wave-b
 touches, plus the wire-only envelope that rides on top of RPC.
 
 ### 1.1 `sessions` table (SQLite) — `SessionStore` blob row
-File: `meerkat-store/src/sqlite_store.rs:15-24` (DDL) and
-`meerkat-store/src/sqlite_store.rs:71-108` (writer).
+File: `crates/meerkat-store/src/sqlite_store.rs:15-24` (DDL) and
+`crates/meerkat-store/src/sqlite_store.rs:71-108` (writer).
 
 ```
 sessions(session_id, created_at_ms, updated_at_ms, message_count,
@@ -19,8 +19,8 @@ sessions(session_id, created_at_ms, updated_at_ms, message_count,
 ```
 
 `session_json` is `serde_json::to_vec(&Session)` of
-`meerkat-core/src/session.rs:32-47`. `Session` already carries
-`version: u32` (`SESSION_VERSION = 1` — `meerkat-core/src/session.rs:26`),
+`crates/meerkat-core/src/session.rs:32-47`. `Session` already carries
+`version: u32` (`SESSION_VERSION = 1` — `crates/meerkat-core/src/session.rs:26`),
 with a `#[serde(default = "default_version")]` so pre-versioned rows
 deserialize as v1. `Session.metadata: serde_json::Map<String,Value>` holds
 `SESSION_METADATA_KEY → SessionMetadata` (`session.rs:696-711`,
@@ -28,7 +28,7 @@ deserialize as v1. `Session.metadata: serde_json::Map<String,Value>` holds
 
 Fields changed by wave-b inside `SessionMetadata`:
 - `provider_params: Option<serde_json::Value>` → `Option<ProviderParamsOverride>` (`session.rs:861`; commit `197a70b4a`)
-- `connection_ref: Option<ConnectionRef>` — *structural change*, same field name; v0 inner shape is `{realm_id: String, binding_id: String, profile: Option<String>}`, v1 is `{realm: RealmId, binding: BindingId, profile: Option<ProfileId>}` (`session.rs:891`; commit `cf90208b7`, `meerkat-core/src/connection.rs:86-106`)
+- `connection_ref: Option<ConnectionRef>` — *structural change*, same field name; v0 inner shape is `{realm_id: String, binding_id: String, profile: Option<String>}`, v1 is `{realm: RealmId, binding: BindingId, profile: Option<ProfileId>}` (`session.rs:891`; commit `cf90208b7`, `crates/meerkat-core/src/connection.rs:86-106`)
 - `realm_id: Option<String>` (session.rs:871) and the string `realm_id`/`binding_id` pair inside v0 `ConnectionRef` — both collapse under v1 `RealmId`/`BindingId` newtypes
 - `SessionLlmIdentity.provider_params: Option<Value>` (`session.rs:907`) and `SessionLlmIdentity.connection_ref` (`session.rs:921`) — same pair of changes, projected through hot-swap
 
@@ -37,7 +37,7 @@ The secondary `metadata_json` column is a denormalized copy of
 fields here are the same `Map<String,Value>`, not the typed struct.
 
 ### 1.2 `runtime_*` tables — `RuntimeStore`
-File: `meerkat-runtime/src/store/sqlite.rs:18-43` (DDL).
+File: `crates/meerkat-runtime/src/store/sqlite.rs:18-43` (DDL).
 
 ```
 runtime_input_states(runtime_id, input_id, state_json BLOB)
@@ -48,11 +48,11 @@ runtime_ops_lifecycle(runtime_id, state_json)
 ```
 
 - `runtime_input_states.state_json` = `StoredInputState` via the custom
-  `InputStateSerde` helper (`meerkat-runtime/src/input_state.rs:257-336`).
+  `InputStateSerde` helper (`crates/meerkat-runtime/src/input_state.rs:257-336`).
   `persisted_input: Option<Input>` (`input_state.rs:278`) recursively
   carries `PromptInput`/`PeerInput`/`FlowStepInput`/... each of which
   owns `turn_metadata: Option<RuntimeTurnMetadata>`
-  (`meerkat-runtime/src/input.rs:265,291,409`). Every field retyped in
+  (`crates/meerkat-runtime/src/input.rs:265,291,409`). Every field retyped in
   B-6 lives under here when the input was persisted:
   - `RuntimeTurnMetadata.provider_params` — `Option<Value>` → `Option<ProviderParamsOverride>` (`run_primitive.rs:292`)
   - `RuntimeTurnMetadata.model: Option<String>` → `Option<ModelId>` (`run_primitive.rs:286`)
@@ -61,10 +61,10 @@ runtime_ops_lifecycle(runtime_id, state_json)
   - NEW fields: `connection_ref: Option<ConnectionRef>` (`run_primitive.rs:295`), `keep_alive: Option<KeepAlivePolicy>` (`run_primitive.rs:298`)
 - `runtime_session_snapshots.session_snapshot` is a second serialization
   of `Session` (written in `SessionDelta`,
-  `meerkat-runtime/src/store/mod.rs:38-41`,
+  `crates/meerkat-runtime/src/store/mod.rs:38-41`,
   `sqlite.rs:87-101,224-263`). Same migration surface as §1.1.
 - `runtime_states.runtime_state_json` = `RuntimeState`
-  (`meerkat-runtime/src/runtime_state.rs:27`). Enum of lifecycle phases,
+  (`crates/meerkat-runtime/src/runtime_state.rs:27`). Enum of lifecycle phases,
   no wave-b-typed fields.
 - `runtime_boundary_receipts.receipt_json` = `RunBoundaryReceipt`
   (conversation_digest + counts). No wave-b-typed fields.
@@ -72,8 +72,8 @@ runtime_ops_lifecycle(runtime_id, state_json)
   (optional; `store/mod.rs:177`). No wave-b-typed fields.
 
 ### 1.3 `.rkat/sessions/{id}/events.jsonl` — projector output
-File: `meerkat-session/src/projector.rs:67-121`. Each line is
-`StoredEvent` (`meerkat-session/src/event_store.rs:12-25`) which already
+File: `crates/meerkat-session/src/projector.rs:67-121`. Each line is
+`StoredEvent` (`crates/meerkat-session/src/event_store.rs:12-25`) which already
 has `schema_version: u32` (`EVENT_SCHEMA_VERSION = 1`). Payload is
 `AgentEvent`. AgentEvent variants do not embed `RuntimeTurnMetadata` or
 `WireInputState`, but some (`RunStarted`, hot-swap notifications)
@@ -82,7 +82,7 @@ snapshot echoed back in events. `.rkat/` is derived and disposable
 (`CLAUDE.md` rule); replaying the event store regenerates it.
 
 ### 1.4 Wire-only shapes (cross-process, not persisted)
-`WireInputState` (`meerkat-contracts/src/wire/runtime.rs:235-260`) and
+`WireInputState` (`crates/meerkat-contracts/src/wire/runtime.rs:235-260`) and
 `WireRuntimeTurnMetadata` (same file, commit `18e12d3a4`) are wire
 projections only — commit `5fb027af1` explicitly defers the
 runtime-side typed projection to wave-c. Not on the persistence
@@ -212,10 +212,10 @@ snapshot.
 
 ## 5. Fixture matrix
 
-Location: `meerkat-session/tests/fixtures/pre_wave_b/`. Each fixture
+Location: `crates/meerkat-session/tests/fixtures/pre_wave_b/`. Each fixture
 is a literal JSON byte file (not a helper) so helper drift does not
 mask regressions. Loaded by a new
-`meerkat-session/tests/persistence_compat.rs`.
+`crates/meerkat-session/tests/persistence_compat.rs`.
 
 Session-blob fixtures:
 1. `session_empty_metadata.json` — no `session_metadata` key. Typed

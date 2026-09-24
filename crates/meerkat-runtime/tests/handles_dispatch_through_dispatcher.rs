@@ -5,7 +5,7 @@
 //! layer).
 //!
 //! Invariant: every routed-effect-consuming `apply_input(` call site
-//! in `meerkat-runtime/src/handles/**/*.rs` must traverse the
+//! in `crates/meerkat-runtime/src/handles/**/*.rs` must traverse the
 //! `CompositionDispatcher` — i.e. it is lexically inside a function
 //! whose body references a `dispatcher` binding or
 //! `CompositionDispatcher`. B-5 landed the behavioural canary; this
@@ -125,10 +125,10 @@ fn find_fn_end(lines: &[&str], fn_start: usize) -> usize {
 #[test]
 fn every_apply_input_in_handles_traverses_dispatcher() {
     let root = workspace_root();
-    let handles_dir = root.join("meerkat-runtime/src/handles");
+    let handles_dir = root.join("crates/meerkat-runtime/src/handles");
     assert!(
         handles_dir.is_dir(),
-        "expected meerkat-runtime/src/handles to exist at {}",
+        "expected crates/meerkat-runtime/src/handles to exist at {}",
         handles_dir.display()
     );
 
@@ -180,7 +180,7 @@ fn every_apply_input_in_handles_traverses_dispatcher() {
     assert!(
         violations.is_empty(),
         "expected zero direct `apply_input(` call sites in \
-         meerkat-runtime/src/handles/ to bypass the \
+         crates/meerkat-runtime/src/handles/ to bypass the \
          CompositionDispatcher; found {}. Flipped green by C-6c.\n{}",
         violations.len(),
         violations.join("\n")

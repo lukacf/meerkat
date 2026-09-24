@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hold the pre-ledger corpus generator to the exclusions the repo enforces.
 
-`meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/mint_pre_ledger_fixture.py`
+`crates/meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/mint_pre_ledger_fixture.py`
 walks the realm a published binary left and turns that walk into two things:
 the bytes copied into the committed corpus, and the payload list bound in
 `fixture-manifest.json`. A transient sequence lock is an artifact of the
@@ -31,7 +31,7 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-FIXTURE_DIR = ROOT / "meerkat-runtime" / "tests" / "fixtures" / "v0_7_x_pre_ledger_realm"
+FIXTURE_DIR = ROOT / "crates" / "meerkat-runtime" / "tests" / "fixtures" / "v0_7_x_pre_ledger_realm"
 GENERATOR = FIXTURE_DIR / "mint_pre_ledger_fixture.py"
 CORPUS = FIXTURE_DIR / "corpus"
 

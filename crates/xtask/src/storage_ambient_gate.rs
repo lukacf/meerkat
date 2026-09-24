@@ -82,12 +82,12 @@ const AMBIENT_ALLOWLIST: [AllowEntry; 10] = [
     // The path authority and the bootstrap resolver: where ambient inputs
     // are turned into the immutable layout. The only whole-file entries.
     (
-        "meerkat-core/src/storage_layout.rs",
+        "crates/meerkat-core/src/storage_layout.rs",
         AllowScope::WholeFile,
         "the path authority",
     ),
     (
-        "meerkat-core/src/runtime_bootstrap.rs",
+        "crates/meerkat-core/src/runtime_bootstrap.rs",
         AllowScope::WholeFile,
         "default_state_root / dual-root candidates",
     ),
@@ -95,7 +95,7 @@ const AMBIENT_ALLOWLIST: [AllowEntry; 10] = [
     // (no in-repo production callers; removal follows the deprecation
     // cadence).
     (
-        "meerkat-skills/src/resolve.rs",
+        "crates/meerkat-skills/src/resolve.rs",
         AllowScope::Functions(&["resolve_repositories"]),
         "deprecated ambient wrapper (resolve_repositories)",
     ),
@@ -103,7 +103,7 @@ const AMBIENT_ALLOWLIST: [AllowEntry; 10] = [
     // consumed via the layout's user_home_root at surface level; the
     // ambient forms remain for SDK compatibility.
     (
-        "meerkat-core/src/config.rs",
+        "crates/meerkat-core/src/config.rs",
         AllowScope::Functions(&[
             "Config::load",
             "Config::load_layered_hooks",
@@ -112,7 +112,7 @@ const AMBIENT_ALLOWLIST: [AllowEntry; 10] = [
         "global config doc convention (~/.rkat/config.toml)",
     ),
     (
-        "meerkat-core/src/mcp_config.rs",
+        "crates/meerkat-core/src/mcp_config.rs",
         AllowScope::Functions(&["user_mcp_path", "user_mcp_dir"]),
         "user mcp.toml convention (~/.rkat/mcp.toml)",
     ),
@@ -120,14 +120,14 @@ const AMBIENT_ALLOWLIST: [AllowEntry; 10] = [
     // resolution (porting it to `dirs` would silently relocate — and thereby
     // rotate — comms identity keys).
     (
-        "meerkat/src/sdk.rs",
+        "crates/meerkat/src/sdk.rs",
         AllowScope::Functions(&["canonical_session_comms_identity_root"]),
         "session-comms identity root (resolution preserved exactly)",
     ),
     // Credentials convention: config_dir/meerkat/credentials, contractually
     // unchanged by the storage unification.
     (
-        "meerkat-auth-core/src/auth_store/mod.rs",
+        "crates/meerkat-auth-core/src/auth_store/mod.rs",
         AllowScope::Functions(&[
             "TokenStoreBackend::default_keyring_auto",
             "TokenStoreBackend::default_file",
@@ -137,7 +137,7 @@ const AMBIENT_ALLOWLIST: [AllowEntry; 10] = [
     ),
     // Foreign credential convention (Google ADC reads gcloud's own path).
     (
-        "meerkat-auth-core/src/authorizers/google.rs",
+        "crates/meerkat-auth-core/src/authorizers/google.rs",
         AllowScope::Functions(&["GoogleAuthAuthorizer::with_env_lookup"]),
         "third-party ADC convention",
     ),
@@ -145,7 +145,7 @@ const AMBIENT_ALLOWLIST: [AllowEntry; 10] = [
     // --user-config-root, ~ expansion of user-typed paths) are gathered
     // in these functions and threaded explicitly from then on.
     (
-        "meerkat-cli/src/main.rs",
+        "crates/meerkat-cli/src/main.rs",
         AllowScope::Functions(&[
             "resolve_user_prompt_file_token",
             "expand_path",
@@ -158,7 +158,7 @@ const AMBIENT_ALLOWLIST: [AllowEntry; 10] = [
         "CLI bootstrap inputs",
     ),
     (
-        "meerkat-rpc/src/main.rs",
+        "crates/meerkat-rpc/src/main.rs",
         AllowScope::Functions(&["async_main"]),
         "RPC bootstrap inputs",
     ),
@@ -186,26 +186,26 @@ const GATE_LABEL: &str = "storage-ambient gate: ambient root resolution (dirs::*
 /// the walker skips tests/, examples/, benches/, generated code). Each
 /// crate's `build.rs` is scanned alongside its `src/` tree.
 const SCAN_ROOTS: [&str; 20] = [
-    "meerkat-core/src",
-    "meerkat-store/src",
-    "meerkat-sqlite/src",
-    "meerkat-session/src",
-    "meerkat-memory/src",
-    "meerkat-tools/src",
-    "meerkat-schedule/src",
-    "meerkat-workgraph/src",
-    "meerkat-mob/src",
-    "meerkat-mob-mcp/src",
-    "meerkat-mob-pack/src",
-    "meerkat-runtime/src",
-    "meerkat-skills/src",
-    "meerkat-hooks/src",
-    "meerkat-comms/src",
-    "meerkat/src",
-    "meerkat-cli/src",
-    "meerkat-rpc/src",
-    "meerkat-rest/src",
-    "meerkat-mcp-server/src",
+    "crates/meerkat-core/src",
+    "crates/meerkat-store/src",
+    "crates/meerkat-sqlite/src",
+    "crates/meerkat-session/src",
+    "crates/meerkat-memory/src",
+    "crates/meerkat-tools/src",
+    "crates/meerkat-schedule/src",
+    "crates/meerkat-workgraph/src",
+    "crates/meerkat-mob/src",
+    "crates/meerkat-mob-mcp/src",
+    "crates/meerkat-mob-pack/src",
+    "crates/meerkat-runtime/src",
+    "crates/meerkat-skills/src",
+    "crates/meerkat-hooks/src",
+    "crates/meerkat-comms/src",
+    "crates/meerkat/src",
+    "crates/meerkat-cli/src",
+    "crates/meerkat-rpc/src",
+    "crates/meerkat-rest/src",
+    "crates/meerkat-mcp-server/src",
 ];
 
 pub fn run_storage_ambient_gate() -> Result<()> {
@@ -852,8 +852,8 @@ mod tests {
     #[test]
     fn whole_file_exemptions_are_reserved_for_the_layout_authority() {
         const LAYOUT_AUTHORITY: [&str; 2] = [
-            "meerkat-core/src/storage_layout.rs",
-            "meerkat-core/src/runtime_bootstrap.rs",
+            "crates/meerkat-core/src/storage_layout.rs",
+            "crates/meerkat-core/src/runtime_bootstrap.rs",
         ];
         for (file, scope, _) in &AMBIENT_ALLOWLIST {
             if matches!(scope, AllowScope::WholeFile) {

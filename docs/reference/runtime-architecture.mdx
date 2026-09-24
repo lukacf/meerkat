@@ -168,7 +168,7 @@ monotonic sequence, exact replay, and ordered application cursor.
 
 The canonical `job_runtime_delivery` composition transfers a job terminal or
 notification outbox entry into the runtime inbox, then acknowledges successful
-transfer back to the job store. The projector in `meerkat/src/job_delivery.rs`
+transfer back to the job store. The projector in `crates/meerkat/src/job_delivery.rs`
 is mechanical. Schedule and WorkGraph may reference or await a job, but their
 own machines remain the authority for occurrence and work-item truth.
 
@@ -189,19 +189,19 @@ the same canonical conversation, tool, and turn-boundary semantics.
 
 | Area | Source |
 | --- | --- |
-| Runtime kernel | `meerkat-runtime/src/meerkat_machine/` |
-| Runtime store and delivery inbox | `meerkat-runtime/src/store/`, `meerkat-runtime/src/delivery_inbox.rs` |
-| Runtime bindings | `meerkat-core/src/runtime_epoch.rs` |
-| Session services | `meerkat-session/src/` |
-| Persistent event path | `meerkat-session/src/persistent.rs`, `meerkat-session/src/ephemeral.rs` |
-| Durable jobs | `meerkat-jobs/src/` |
-| Job delivery projector | `meerkat/src/job_delivery.rs` |
-| Realm storage contracts | `meerkat/src/storage_provider.rs`, `meerkat-core/src/storage_layout.rs` |
-| Shared SQLite mechanics | `meerkat-sqlite/src/` |
-| Agent construction | `meerkat/src/factory.rs` |
-| RPC live handlers | `meerkat-rpc/src/handlers/live.rs` |
-| Live host | `meerkat-live/src/host.rs` |
-| Wire contracts | `meerkat-contracts/src/wire/` |
+| Runtime kernel | `crates/meerkat-runtime/src/meerkat_machine/` |
+| Runtime store and delivery inbox | `crates/meerkat-runtime/src/store/`, `crates/meerkat-runtime/src/delivery_inbox.rs` |
+| Runtime bindings | `crates/meerkat-core/src/runtime_epoch.rs` |
+| Session services | `crates/meerkat-session/src/` |
+| Persistent event path | `crates/meerkat-session/src/persistent.rs`, `crates/meerkat-session/src/ephemeral.rs` |
+| Durable jobs | `crates/meerkat-jobs/src/` |
+| Job delivery projector | `crates/meerkat/src/job_delivery.rs` |
+| Realm storage contracts | `crates/meerkat/src/storage_provider.rs`, `crates/meerkat-core/src/storage_layout.rs` |
+| Shared SQLite mechanics | `crates/meerkat-sqlite/src/` |
+| Agent construction | `crates/meerkat/src/factory.rs` |
+| RPC live handlers | `crates/meerkat-rpc/src/handlers/live.rs` |
+| Live host | `crates/meerkat-live/src/host.rs` |
+| Wire contracts | `crates/meerkat-contracts/src/wire/` |
 
 ## See Also
 

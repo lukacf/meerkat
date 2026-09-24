@@ -54,7 +54,7 @@ For each task marked `[x]` in the phase:
 ### 5. Deferral Detection
 Search for language that suggests requirements are being pushed to later:
 ```bash
-grep -ri "v0.2\|future work\|deferred\|out of scope\|TODO.*later" meerkat-core/src/
+grep -ri "v0.2\|future work\|deferred\|out of scope\|TODO.*later" crates/meerkat-core/src/
 ```
 Cross-reference against spec. If a spec-required feature appears in deferral language, that's a blocker.
 

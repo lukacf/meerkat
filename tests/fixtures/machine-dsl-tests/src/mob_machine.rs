@@ -1238,7 +1238,7 @@ mod tests {
         // macro emits `named_types: vec![]`; production catalogs populate
         // them via `catalog::dsl::mod::with_named_types`. This test-fixture
         // mirrors the mob-machine catalog binding set from
-        // `meerkat-machine-schema/src/catalog/dsl/mod.rs::dsl_mob_machine`.
+        // `crates/meerkat-machine-schema/src/catalog/dsl/mod.rs::dsl_mob_machine`.
         use meerkat_machine_schema::identity::NamedTypeBinding;
         let mut schema = MobMachineState::schema();
         schema.named_types = vec![

@@ -150,7 +150,7 @@ forked or duplicated.
 
 ### Step 5: `handoff_protocol` on `EffectDispositionRule`
 
-**File**: `meerkat-machine-schema/src/machine.rs`
+**File**: `crates/meerkat-machine-schema/src/machine.rs`
 
 **Current shape**:
 
@@ -189,7 +189,7 @@ file is updated to pass `None`. No behavioral change.
 
 ### Step 6: `ActorSchema` and `ActorKind` on `CompositionSchema`
 
-**File**: `meerkat-machine-schema/src/composition.rs`
+**File**: `crates/meerkat-machine-schema/src/composition.rs`
 
 **New types**:
 
@@ -250,7 +250,7 @@ are not counted as canonical unless the registry exposes them.
 
 ### Step 7: `EffectHandoffProtocol` on `CompositionSchema`
 
-**File**: `meerkat-machine-schema/src/composition.rs`
+**File**: `crates/meerkat-machine-schema/src/composition.rs`
 
 **New types**:
 
@@ -345,7 +345,7 @@ gets `handoff_protocols: vec![]` initially (no protocols until step 12).
 
 ### Step 8: Closed-World Obligation Validation
 
-**File**: `meerkat-machine-schema/src/composition.rs`
+**File**: `crates/meerkat-machine-schema/src/composition.rs`
 
 **New invariant kind**:
 
@@ -444,7 +444,7 @@ handoff_protocols: vec![
 
 ### Re-exports
 
-**File**: `meerkat-machine-schema/src/lib.rs`
+**File**: `crates/meerkat-machine-schema/src/lib.rs`
 
 New types to re-export after steps 5-7:
 
@@ -542,7 +542,7 @@ references that carry a wait policy, adds a barrier-satisfaction input, and gate
 
 #### Step 17: Replace raw op IDs with `AsyncOpRef`
 
-**File**: `meerkat-machine-schema/src/catalog/turn_execution.rs`
+**File**: `crates/meerkat-machine-schema/src/catalog/turn_execution.rs`
 
 **Current state field** (line ~48):
 
@@ -706,7 +706,7 @@ Shell code must not:
 
 The boundary rule is enforced by:
 - RMAT audit structural seam rules (hard errors in CI)
-- Protected field rules in `xtask/src/rmat_policy.rs`
+- Protected field rules in `crates/xtask/src/rmat_policy.rs`
 - Generated protocol helpers that are the only legal path for feedback submission
 
 ## Verification Strategy

@@ -1,7 +1,7 @@
 //! Auth lease, credential-material kinds, authorizer trait, and refresh semantics.
 //!
 //! `meerkat-core` owns the trait shape; concrete lease implementations
-//! (`StaticLease`, `DynamicLease`) live in `meerkat-client/src/runtime/binding.rs`.
+//! (`StaticLease`, `DynamicLease`) live in `crates/meerkat-client/src/runtime/binding.rs`.
 //! `meerkat-core` declares none of the Phase 2 shim surface — the
 //! `ResolvedConnection.shim_credential` seam is entirely on the client side.
 

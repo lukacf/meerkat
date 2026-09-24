@@ -1,6 +1,6 @@
 //! Tripwire for wave-c (Section 1.5 #6). Flipped green by the c.1
 //! exit gate (negative-case for the B-10 `CompositionDispatchIsThePath`
-//! rule at `xtask/src/rmat_audit.rs:488+`).
+//! rule at `crates/xtask/src/rmat_audit.rs:488+`).
 //!
 //! Invariant: the B-10 rule is not silently vacuous. If we delete a
 //! `dispatcher.dispatch(...)` call from a fixture, the rule must

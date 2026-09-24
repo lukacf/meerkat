@@ -270,7 +270,7 @@ pub fn should_apply_global_model_hot_swap(
 /// If the propagate body grows to consult additional fields (e.g.
 /// `agent.provider`, realtime audio defaults, tool catalog scopes),
 /// extend this helper AND the regression tests in
-/// `meerkat/tests/session_runtime_live_orchestration.rs`. Keeping the
+/// `crates/meerkat/tests/session_runtime_live_orchestration.rs`. Keeping the
 /// predicate field set in lock-step with the propagate body is the
 /// whole point of the helper: an under-fired propagate (P2) leaves
 /// live channels stale; an over-fired propagate (P1) retargets or

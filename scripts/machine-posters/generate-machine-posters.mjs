@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..", "..");
 const outputDir = path.join(
   repoRoot,
-  "docs-internal",
+  "docs/internal",
   "machine-posters",
 );
 
@@ -39,7 +39,7 @@ const MACHINE_SPECS = [
     title: "MeerkatMachine",
     // Canonical machine this poster represents. Cross-checked by `--check`
     // against the `dsl::dsl_<fn>()` call list in
-    // meerkat-machine-schema/src/catalog/mod.rs::canonical_machine_schemas so
+    // crates/meerkat-machine-schema/src/catalog/mod.rs::canonical_machine_schemas so
     // that adding a canonical machine without a poster fails the drift gate.
     canonicalFn: "dsl_meerkat_machine",
     subtitle: "Lifecycle / Transition / Visibility / Effect Architecture",
@@ -641,7 +641,7 @@ const MACHINE_SPECS = [
 ];
 
 // Parse the `dsl::dsl_<fn>()` calls inside `canonical_machine_schemas()` in
-// meerkat-machine-schema/src/catalog/mod.rs. This is the canonical machine
+// crates/meerkat-machine-schema/src/catalog/mod.rs. This is the canonical machine
 // authority; the posters are a hand-authored, NON-AUTHORITATIVE internal
 // rendering and must stay coverage-aligned with it.
 function canonicalMachineFns() {

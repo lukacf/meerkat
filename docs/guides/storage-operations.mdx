@@ -342,7 +342,7 @@ so references written before the rule keep hydrating.
 
 | | Meerkat `content_blob_id` | MobKit `compute_blob_id` |
 | --- | --- | --- |
-| Where | `meerkat-core/src/blob.rs`, `content_blob_id(media_type, data)` | `meerkat-mobkit/src/blob_store.rs`, `compute_blob_id(media_type, bytes)` |
+| Where | `crates/meerkat-core/src/blob.rs`, `content_blob_id(media_type, data)` | `meerkat-mobkit/src/blob_store.rs`, `compute_blob_id(media_type, bytes)` |
 | Media type | canonicalized (`MediaType::canonical_str`: lowercase, parameters dropped) | as passed, byte for byte |
 | Payload hashed | the exact base64 string handed to `BlobStore::put_image` | the decoded raw bytes handed to `BinaryBlobStore::put_bytes` |
 | Recipe | `sha256(canonical_media_type \|\| 0x00 \|\| base64_text)` | `sha256(media_type \|\| 0x00 \|\| raw_bytes)` |

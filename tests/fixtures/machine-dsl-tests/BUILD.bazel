@@ -107,6 +107,8 @@ rust_test(
     size = "medium",
     data = [
         "//:test_fixtures",
+        "//crates/meerkat-machine-schema:package_runfiles",
+        "//crates/meerkat-runtime:package_runfiles",
         "//tests/fixtures/mcp-test-server:package_runfiles",
         "//tests/fixtures/surface-build-fixtures:package_runfiles",
         ":package_runfiles",

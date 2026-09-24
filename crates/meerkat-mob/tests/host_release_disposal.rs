@@ -5,7 +5,7 @@
 //! `dispose_archive_session` feeding `ObserveMemberRetirementArchived
 //! {RuntimeReleasedOnlyHostOwned}`) is an IN-CRATE row: the observation
 //! producer and the adopted-session construction are `pub(crate)`
-//! (meerkat-mob/src/runtime/tests.rs holds the existing twin at the
+//! (crates/meerkat-mob/src/runtime/tests.rs holds the existing twin at the
 //! working-tree fix site) — owned by the A2 lane, referenced here.
 
 #![cfg(not(target_arch = "wasm32"))]

@@ -28,8 +28,8 @@ const dirs = [
   ["meerkat", { name: "meerkat" }],
 ];
 
-assert.equal(packageForFile("meerkat-core/src/lib.rs", dirs)?.name, "meerkat-core");
-assert.equal(packageForFile("meerkat/Cargo.toml", dirs)?.name, "meerkat");
+assert.equal(packageForFile("crates/meerkat-core/src/lib.rs", dirs)?.name, "meerkat-core");
+assert.equal(packageForFile("crates/meerkat/Cargo.toml", dirs)?.name, "meerkat");
 
 // The facade embeds the platform and CLI reference skills through tracked
 // symlinks under meerkat/embedded_skills; edits to the symlink targets are

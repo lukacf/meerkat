@@ -1,14 +1,14 @@
 //! Wave-c C-T §6 #1 + #2 — `CommsTrustReconciler` concurrency invariants.
 //!
 //! Ports the blocker stub that was originally scaffolded in
-//! `meerkat-comms/tests/trust_reconcile_concurrency.rs` at c.0. The
+//! `crates/meerkat-comms/tests/trust_reconcile_concurrency.rs` at c.0. The
 //! stub expected a free `meerkat_comms::trust_reconcile::reconcile`
 //! entry point that was never built — the post-PR #340 architecture
 //! routes trust reconciliation through the DSL-owned
 //! `CommsTrustReconcileRequested` effect consumed by
 //! `meerkat_runtime::comms_trust_reconcile::CommsTrustReconciler`.
 //! The tests live next to the reconciler they exercise (in
-//! `meerkat-runtime/tests/`) rather than in `meerkat-comms/tests/`
+//! `crates/meerkat-runtime/tests/`) rather than in `crates/meerkat-comms/tests/`
 //! because `meerkat-comms` cannot dev-dep on `meerkat-runtime`
 //! without introducing a circular crate dependency.
 //!

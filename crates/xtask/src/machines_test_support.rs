@@ -297,6 +297,7 @@ fn workspace_root() -> Result<PathBuf> {
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(Path::parent)
         .map(Path::to_path_buf)
         .ok_or_else(|| anyhow!("failed to resolve repo root from xtask manifest dir"))
 }

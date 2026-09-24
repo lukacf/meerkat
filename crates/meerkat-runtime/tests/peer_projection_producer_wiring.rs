@@ -22,7 +22,7 @@
 //!
 //! Wire shape (WireMember / UnwireMember bridge handlers) is covered by
 //! the existing bridge handler tests in
-//! `meerkat-runtime/src/comms_drain.rs`; this file pins the stager →
+//! `crates/meerkat-runtime/src/comms_drain.rs`; this file pins the stager →
 //! reconciler → trust-store chain at the integration layer.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

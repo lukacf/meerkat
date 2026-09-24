@@ -956,7 +956,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
         driver: Some(CompositionDriver {
             name: driver_id("meerkat_mob_seam_driver"),
             rust: CompositionDriverRustBinding {
-                module_path: "meerkat-runtime/src/generated/meerkat_mob_seam.rs".into(),
+                module_path: "crates/meerkat-runtime/src/generated/meerkat_mob_seam.rs".into(),
                 driver_type: "MeerkatMobSeamDriver".into(),
                 store_plan_type: "MeerkatMobSeamStorePlan".into(),
                 work_type: "MeerkatMobSeamWork".into(),
@@ -1241,7 +1241,7 @@ pub fn workgraph_flow_bundle_composition() -> CompositionSchema {
         teardown: None,
         rust: ProtocolRustBinding {
             module_path: format!(
-                "meerkat-workgraph/src/generated/protocol_{name}.rs"
+                "crates/meerkat-workgraph/src/generated/protocol_{name}.rs"
             )
             .into(),
             generation_mode: ProtocolGenerationMode::EffectExtractor,
@@ -1693,7 +1693,7 @@ pub fn adaptive_mob_bundle_composition() -> CompositionSchema {
             let mut protocol = template.clone();
             protocol.producer_instance = mi_id(producer);
             protocol.rust.module_path = format!(
-                "meerkat-mob/src/generated/protocol_adaptive_{producer}_{}.rs",
+                "crates/meerkat-mob/src/generated/protocol_adaptive_{producer}_{}.rs",
                 template.name.as_str()
             )
             .into();
@@ -1754,7 +1754,7 @@ pub fn adaptive_mob_bundle_composition() -> CompositionSchema {
         driver: Some(CompositionDriver {
             name: driver_id("adaptive_mob_bundle_driver"),
             rust: CompositionDriverRustBinding {
-                module_path: "meerkat-mob/src/generated/adaptive_mob_bundle.rs".into(),
+                module_path: "crates/meerkat-mob/src/generated/adaptive_mob_bundle.rs".into(),
                 driver_type: "AdaptiveMobBundleDriver".into(),
                 store_plan_type: "AdaptiveMobBundleStorePlan".into(),
                 work_type: "AdaptiveMobBundleWork".into(),
@@ -2691,7 +2691,7 @@ fn mob_bundle_composition() -> CompositionSchema {
             durable_marker: None,
             teardown: None,
             rust: ProtocolRustBinding {
-                module_path: "meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs"
+                module_path: "crates/meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs"
                     .into(),
                 // Primary mode: HandleBridge. The obligation is built
                 // from the shell-owned `WaitAllSatisfied` struct via the
@@ -2848,7 +2848,7 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                 durable_marker: None,
                 teardown: None,
                 rust: ProtocolRustBinding {
-                    module_path: "meerkat-mcp/src/generated/protocol_surface_completion.rs".into(),
+                    module_path: "crates/meerkat-mcp/src/generated/protocol_surface_completion.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
                         "use meerkat_core::handles::{DslTransitionError, ExternalToolSurfaceEffect, ExternalToolSurfaceHandle};".into(),
@@ -2923,7 +2923,7 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                 teardown: None,
                 rust: ProtocolRustBinding {
                     module_path:
-                        "meerkat-mcp/src/generated/protocol_surface_snapshot_alignment.rs".into(),
+                        "crates/meerkat-mcp/src/generated/protocol_surface_snapshot_alignment.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
                         "use meerkat_core::handles::{DslTransitionError, ExternalToolSurfaceEffect, ExternalToolSurfaceHandle};".into(),
@@ -3067,7 +3067,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                     "direct_peer_endpoints",
                     "mob_overlay_peer_endpoints",
                 ],
-                module_path: "meerkat-runtime/src/generated/protocol_comms_trust_reconcile.rs",
+                module_path: "crates/meerkat-runtime/src/generated/protocol_comms_trust_reconcile.rs",
                 required_imports: &[
                     "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};",
                 ],
@@ -3090,7 +3090,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                     "b_endpoint",
                     "epoch",
                 ],
-                module_path: "meerkat-mob/src/generated/protocol_mob_member_trust_wiring.rs",
+                module_path: "crates/meerkat-mob/src/generated/protocol_mob_member_trust_wiring.rs",
                 required_imports: &member_wiring_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
                 transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
@@ -3104,7 +3104,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 row_owner_kind: Some(CommsTrustAuthoritySourceKind::MobMachineMemberTrustWiring),
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicRemove],
                 obligation_fields: &["edge", "a_peer_id", "b_peer_id", "epoch"],
-                module_path: "meerkat-mob/src/generated/protocol_mob_member_trust_unwiring.rs",
+                module_path: "crates/meerkat-mob/src/generated/protocol_mob_member_trust_unwiring.rs",
                 required_imports: &member_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
                 transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
@@ -3135,7 +3135,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 durable_marker: None,
                 teardown: None,
                 rust: effect_extractor_rust_binding(
-                    "meerkat-mob/src/generated/protocol_mob_member_peer_overlay.rs",
+                    "crates/meerkat-mob/src/generated/protocol_mob_member_peer_overlay.rs",
                     &member_overlay_imports,
                     "crate::machines::mob_machine::MobMachineEffect",
                     "crate::machines::mob_machine::MobMachineTransition",
@@ -3150,7 +3150,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 row_owner_kind: None,
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
                 obligation_fields: &["edge", "local_peer_id", "peer_id", "epoch"],
-                module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_wiring.rs",
+                module_path: "crates/meerkat-mob/src/generated/protocol_mob_external_peer_trust_wiring.rs",
                 required_imports: &external_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
                 transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
@@ -3166,7 +3166,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 ),
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicRemove],
                 obligation_fields: &["edge", "local_peer_id", "peer_id", "epoch"],
-                module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_unwiring.rs",
+                module_path: "crates/meerkat-mob/src/generated/protocol_mob_external_peer_trust_unwiring.rs",
                 required_imports: &external_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
                 transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
@@ -3182,7 +3182,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 ),
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
                 obligation_fields: &["edge", "local_peer_id", "peer_id", "epoch"],
-                module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_trust_repair.rs",
+                module_path: "crates/meerkat-mob/src/generated/protocol_mob_external_peer_trust_repair.rs",
                 required_imports: &external_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
                 transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
@@ -3198,7 +3198,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
                 ),
                 allowed_operations: &[CommsTrustAuthorityOperation::PublicAdd],
                 obligation_fields: &["key", "edge", "peer_id", "peer_endpoint", "epoch"],
-                module_path: "meerkat-mob/src/generated/protocol_mob_external_peer_reciprocal_trust.rs",
+                module_path: "crates/meerkat-mob/src/generated/protocol_mob_external_peer_reciprocal_trust.rs",
                 required_imports: &reciprocal_imports,
                 effect_enum_path: "crate::machines::mob_machine::MobMachineEffect",
                 transition_type_path: "crate::machines::mob_machine::MobMachineTransition",
@@ -3241,7 +3241,7 @@ fn comms_trust_bundle_composition() -> CompositionSchema {
 /// supervisor-binding fact (`supervisor_binding_kind` +
 /// `supervisor_bound_*`), but the companion trust edge in
 /// `meerkat-comms::Router` was mutated by the shell as a separate step
-/// today (see `meerkat-runtime/src/meerkat_machine/dsl.rs` DSL comment
+/// today (see `crates/meerkat-runtime/src/meerkat_machine/dsl.rs` DSL comment
 /// `:114-134` and `state-scope-audit.md` §3 row F2).
 ///
 /// C-F2 formalises the step-lock as a generated obligation publication
@@ -3324,7 +3324,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                 teardown: None,
                 rust: ProtocolRustBinding {
                     module_path:
-                        "meerkat-runtime/src/generated/protocol_supervisor_trust_publish.rs".into(),
+                        "crates/meerkat-runtime/src/generated/protocol_supervisor_trust_publish.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
                         "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};".into(),
@@ -3384,7 +3384,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                 teardown: None,
                 rust: ProtocolRustBinding {
                     module_path:
-                        "meerkat-runtime/src/generated/protocol_supervisor_trust_revoke.rs".into(),
+                        "crates/meerkat-runtime/src/generated/protocol_supervisor_trust_revoke.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
                         "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, MeerkatMachineTransition, PeerEndpoint};".into(),
@@ -3466,7 +3466,7 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
 ///
 /// State-scope-audit row F3 flagged that `MeerkatMachine` carries a
 /// `peer_ingress_mob_id: Option<MobId>` with no structural
-/// "mob-exists" invariant (`meerkat-machine-schema/src/catalog/dsl/
+/// "mob-exists" invariant (`crates/meerkat-machine-schema/src/catalog/dsl/
 /// meerkat_machine.rs:112`). When a mob is destroyed, every session
 /// whose peer-ingress ownership was `MobOwned` by that mob must
 /// receive `DetachIngress` first — otherwise the session is left
@@ -3582,7 +3582,7 @@ fn mob_destroy_session_ingress_bundle_composition() -> CompositionSchema {
             teardown: Some(TeardownObligationClass::DetachBeforeDestroy),
             rust: ProtocolRustBinding {
                 module_path:
-                    "meerkat-mob/src/generated/protocol_mob_destroying_session_ingress.rs"
+                    "crates/meerkat-mob/src/generated/protocol_mob_destroying_session_ingress.rs"
                         .into(),
                 generation_mode: ProtocolGenerationMode::EffectExtractor,
                 required_imports: vec![
@@ -3739,7 +3739,7 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
             teardown: None,
             rust: ProtocolRustBinding {
                 module_path:
-                    "meerkat-runtime/src/generated/protocol_auth_release_oauth_flow_drain.rs"
+                    "crates/meerkat-runtime/src/generated/protocol_auth_release_oauth_flow_drain.rs"
                         .into(),
                 generation_mode: ProtocolGenerationMode::EffectExtractor,
                 required_imports: vec![
@@ -3817,7 +3817,7 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
             teardown: None,
             rust: ProtocolRustBinding {
                 module_path:
-                    "meerkat-runtime/src/generated/protocol_auth_lease_lifecycle_publication.rs"
+                    "crates/meerkat-runtime/src/generated/protocol_auth_lease_lifecycle_publication.rs"
                         .into(),
                 generation_mode: ProtocolGenerationMode::EffectExtractor,
                 required_imports: vec![

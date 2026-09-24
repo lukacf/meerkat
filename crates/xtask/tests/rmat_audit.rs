@@ -20,7 +20,7 @@ fn catches_parallel_transition_table() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-core/src/state.rs",
+        "crates/meerkat-core/src/state.rs",
         r"
 pub enum LoopState { Completed }
 impl LoopState {
@@ -36,7 +36,7 @@ impl LoopState {
     .expect("findings");
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "NoParallelTransitionTable"
-            && finding.key.path == "meerkat-core/src/state.rs"
+            && finding.key.path == "crates/meerkat-core/src/state.rs"
     }));
 }
 
@@ -45,7 +45,7 @@ fn catches_guarded_apply() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-runtime/src/driver/ephemeral.rs",
+        "crates/meerkat-runtime/src/driver/ephemeral.rs",
         r"
 struct Driver;
 impl Driver {
@@ -77,7 +77,7 @@ fn catches_dead_authority_dead_code() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-mob/src/runtime/actor.rs",
+        "crates/meerkat-mob/src/runtime/actor.rs",
         r"
 #[allow(dead_code)]
 enum FutureInput {
@@ -96,12 +96,12 @@ fn future_shell_hook() {}
     .expect("findings");
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "NoDeadAuthorityWiring"
-            && finding.key.path == "meerkat-mob/src/runtime/actor.rs"
+            && finding.key.path == "crates/meerkat-mob/src/runtime/actor.rs"
             && finding.key.symbol == "FutureInput"
     }));
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "NoDeadAuthorityWiring"
-            && finding.key.path == "meerkat-mob/src/runtime/actor.rs"
+            && finding.key.path == "crates/meerkat-mob/src/runtime/actor.rs"
             && finding.key.symbol == "future_shell_hook"
     }));
 }
@@ -111,7 +111,7 @@ fn catches_protected_flag_write() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-runtime/src/driver/ephemeral.rs",
+        "crates/meerkat-runtime/src/driver/ephemeral.rs",
         r"
 struct Driver { wake_requested: bool }
 fn wrong(driver: &mut Driver) {
@@ -127,7 +127,7 @@ fn wrong(driver: &mut Driver) {
     .expect("findings");
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "NoShellSemanticFlagWrites"
-            && finding.key.path == "meerkat-runtime/src/driver/ephemeral.rs"
+            && finding.key.path == "crates/meerkat-runtime/src/driver/ephemeral.rs"
     }));
 }
 
@@ -136,7 +136,7 @@ fn warns_on_lifecycle_suspicion() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-comms/src/runtime/comms_runtime.rs",
+        "crates/meerkat-comms/src/runtime/comms_runtime.rs",
         r"
 enum ReservationState { Reserved, Attached, Completed }
 ",
@@ -159,7 +159,7 @@ fn lifecycle_suspicion_can_be_suppressed() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-comms/src/runtime/comms_runtime.rs",
+        "crates/meerkat-comms/src/runtime/comms_runtime.rs",
         r"
 // RMAT-ALLOW(LifecycleSuspicionReport): internal reservation lifecycle
 enum ReservationState { Reserved, Attached, Completed }
@@ -183,7 +183,7 @@ fn forbidden_shell_reads_catches_phase_call_in_mob_actor() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-mob/src/runtime/actor.rs",
+        "crates/meerkat-mob/src/runtime/actor.rs",
         r"
 struct Orchestrator;
 impl Orchestrator { fn phase(&self) -> u8 { 0 } fn apply(&mut self) {} }
@@ -204,7 +204,7 @@ impl Actor {
     .expect("findings");
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "ForbiddenShellAuthorityReads"
-            && finding.key.path == "meerkat-mob/src/runtime/actor.rs"
+            && finding.key.path == "crates/meerkat-mob/src/runtime/actor.rs"
             && finding.key.symbol.contains(".phase()")
             && !finding.suppressed
     }));
@@ -215,7 +215,7 @@ fn forbidden_shell_reads_allows_lifecycle_authority_phase_in_mob_actor() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-mob/src/runtime/actor.rs",
+        "crates/meerkat-mob/src/runtime/actor.rs",
         r"
 struct Authority;
 impl Authority { fn phase(&self) -> u8 { 0 } }
@@ -246,7 +246,7 @@ fn forbidden_shell_reads_catches_policy_field_in_ephemeral_driver() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-runtime/src/driver/ephemeral.rs",
+        "crates/meerkat-runtime/src/driver/ephemeral.rs",
         r"
 struct Policy { apply_mode: u8, queue_mode: u8, consume_point: u8 }
 fn route(policy: &Policy) -> u8 {
@@ -282,7 +282,7 @@ fn forbidden_shell_reads_catches_shadow_field_in_mcp_router() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-mcp/src/router.rs",
+        "crates/meerkat-mcp/src/router.rs",
         r"
 use std::collections::HashMap;
 struct Router { removal_timeouts: HashMap<String, u64> }
@@ -296,7 +296,7 @@ struct Router { removal_timeouts: HashMap<String, u64> }
     .expect("findings");
     assert!(findings.iter().any(|finding| {
         finding.key.rule == "ForbiddenShellAuthorityReads"
-            && finding.key.path == "meerkat-mcp/src/router.rs"
+            && finding.key.path == "crates/meerkat-mcp/src/router.rs"
             && finding.key.symbol == "Router::removal_timeouts"
             && !finding.suppressed
     }));
@@ -307,7 +307,7 @@ fn forbidden_shell_reads_catches_shadow_counters_in_mob_actor_struct() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-mob/src/runtime/actor.rs",
+        "crates/meerkat-mob/src/runtime/actor.rs",
         r"
 struct MobActor {
     tracked_flows: std::collections::BTreeMap<String, String>,
@@ -339,7 +339,7 @@ fn forbidden_shell_reads_ignores_struct_literal_projection_of_allowed_snapshot()
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-mob/src/runtime/actor.rs",
+        "crates/meerkat-mob/src/runtime/actor.rs",
         r"
 struct Snapshot;
 fn projection() -> Snapshot {
@@ -366,7 +366,7 @@ fn forbidden_shell_reads_production_rmat_allow_does_not_suppress() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-mcp/src/router.rs",
+        "crates/meerkat-mcp/src/router.rs",
         r"
 use std::collections::HashMap;
 struct Router {
@@ -399,7 +399,7 @@ fn forbidden_shell_reads_fixture_rmat_allow_is_test_only() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "rmat-test-fixtures/meerkat-mcp/src/router.rs",
+        "rmat-test-fixtures/crates/meerkat-mcp/src/router.rs",
         r"
 use std::collections::HashMap;
 struct Router {
@@ -434,7 +434,8 @@ fn legacy_rmat_read_seam_script_is_removed() {
     // authority for shell/authority read-seam enforcement.
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("xtask parent is repo root");
+        .and_then(std::path::Path::parent)
+        .expect("crates/xtask grandparent is repo root");
     let script = repo_root.join("scripts").join("rmat-read-seam-lint.sh");
     assert!(
         !script.exists(),
@@ -463,12 +464,12 @@ fn rmat_policy_knows_workgraph_attention_route() {
     assert_eq!(rule.consumer_input, "Stop");
     assert!(
         rule.allowed_paths
-            .contains(&"meerkat-workgraph/src/service.rs"),
+            .contains(&"crates/meerkat-workgraph/src/service.rs"),
         "{rule:#?}"
     );
     assert!(
         rule.allowed_paths
-            .contains(&"meerkat-workgraph/src/store.rs"),
+            .contains(&"crates/meerkat-workgraph/src/store.rs"),
         "{rule:#?}"
     );
 }
@@ -478,7 +479,7 @@ fn suppression_must_be_local_not_file_wide() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-comms/src/runtime/comms_runtime.rs",
+        "crates/meerkat-comms/src/runtime/comms_runtime.rs",
         r"
 // RMAT-ALLOW(LifecycleSuspicionReport): only for ReservationState
 enum ReservationState { Reserved, Attached, Completed }

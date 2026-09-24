@@ -6,7 +6,7 @@
 //! canonical `SessionTurnAdmissionMachine`. Its generated, schema-free
 //! authority is emitted into `crate::generated::session_turn_admission` by
 //! `xtask protocol-codegen` (DSL in
-//! `meerkat-machine-schema/src/catalog/dsl/session_turn_admission.rs`, TLA
+//! `crates/meerkat-machine-schema/src/catalog/dsl/session_turn_admission.rs`, TLA
 //! model in `specs/machines/session_turn_admission/`). This shell drives the
 //! generated authority and MIRRORS the emitted decisions; it owns no semantics.
 

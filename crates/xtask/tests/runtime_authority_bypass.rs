@@ -29,7 +29,7 @@ fn findings_for_files(files: &[(&str, &str)]) -> Vec<String> {
 }
 
 fn expect_failure(name: &str, contents: &str) {
-    let findings = findings_for("meerkat-runtime/src/driver/ephemeral.rs", contents);
+    let findings = findings_for("crates/meerkat-runtime/src/driver/ephemeral.rs", contents);
     assert!(
         !findings.is_empty(),
         "{name}: fixture must fail the audit but passed"
@@ -37,7 +37,7 @@ fn expect_failure(name: &str, contents: &str) {
 }
 
 fn expect_clean(name: &str, contents: &str) {
-    let findings = findings_for("meerkat-runtime/src/driver/ephemeral.rs", contents);
+    let findings = findings_for("crates/meerkat-runtime/src/driver/ephemeral.rs", contents);
     assert!(
         findings.is_empty(),
         "{name}: fixture must pass the audit, got {findings:#?}"
@@ -112,7 +112,7 @@ impl Driver {
 
 #[test]
 fn planted_public_queue_module_violation_fails() {
-    let findings = findings_for_files(&[("meerkat-runtime/src/lib.rs", "pub mod queue;")]);
+    let findings = findings_for_files(&[("crates/meerkat-runtime/src/lib.rs", "pub mod queue;")]);
     assert!(
         findings
             .iter()
@@ -124,7 +124,7 @@ fn planted_public_queue_module_violation_fails() {
 #[test]
 fn planted_public_input_queue_reexport_violation_fails() {
     let findings = findings_for_files(&[(
-        "meerkat-runtime/src/lib.rs",
+        "crates/meerkat-runtime/src/lib.rs",
         "pub(crate) mod queue;\npub use queue::InputQueue;",
     )]);
     assert!(
@@ -138,7 +138,7 @@ fn planted_public_input_queue_reexport_violation_fails() {
 #[test]
 fn planted_generated_capability_mint_outside_runtime_bridge_fails() {
     let findings = findings_for_files(&[(
-        "meerkat-runtime/src/completion.rs",
+        "crates/meerkat-runtime/src/completion.rs",
         r"
 fn bad() {
     let _ = generated_command_capabilities::AuthorizedRuntimeLoopBatch::mint_from_generated_command_plan();

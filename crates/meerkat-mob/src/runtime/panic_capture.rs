@@ -40,7 +40,7 @@ use std::future::Future;
 
 /// Best-effort human-readable panic payload; thin delegation to the shared
 /// [`meerkat_core::panic_payload`] helper (also used by the meerkat-runtime
-/// attachment boundaries in `meerkat-runtime/src/panic_boundary.rs`).
+/// attachment boundaries in `crates/meerkat-runtime/src/panic_boundary.rs`).
 pub(super) fn panic_payload_detail(payload: &(dyn std::any::Any + Send)) -> String {
     meerkat_core::panic_payload::panic_payload_detail(payload)
 }

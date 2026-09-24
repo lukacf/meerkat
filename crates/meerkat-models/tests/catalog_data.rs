@@ -47,7 +47,7 @@ fn canonical_instance_wires_the_same_data_as_the_free_functions() {
 }
 
 // ---------------------------------------------------------------------------
-// Catalog tests (moved from meerkat-core/src/model_profile/catalog.rs)
+// Catalog tests (moved from crates/meerkat-core/src/model_profile/catalog.rs)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -594,7 +594,7 @@ fn infer_provider_is_exact_catalog_match_only() {
 }
 
 // ---------------------------------------------------------------------------
-// Capability tests (moved from meerkat-core/src/model_profile/capabilities.rs)
+// Capability tests (moved from crates/meerkat-core/src/model_profile/capabilities.rs)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -776,7 +776,7 @@ fn display_provider_string_cannot_be_promoted_to_capability_owner() {
 }
 
 // ---------------------------------------------------------------------------
-// Profile tests (moved from meerkat-core/src/model_profile/mod.rs)
+// Profile tests (moved from crates/meerkat-core/src/model_profile/mod.rs)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1016,7 +1016,7 @@ fn web_search_supported_across_default_models() {
 
 // ---------------------------------------------------------------------------
 // Schema tests over real rows (moved from
-// meerkat-core/src/model_profile/schema_builder.rs)
+// crates/meerkat-core/src/model_profile/schema_builder.rs)
 // ---------------------------------------------------------------------------
 
 mod schema {

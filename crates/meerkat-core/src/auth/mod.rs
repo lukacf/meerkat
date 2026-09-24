@@ -2,7 +2,7 @@
 //!
 //! This module owns the trait contracts (`AuthLease`, `HttpAuthorizer`),
 //! error shapes, metadata shapes, and status projection. Concrete provider
-//! runtimes live in `meerkat-client/src/providers/*`. `meerkat-core` stays
+//! runtimes live in `crates/meerkat-client/src/providers/*`. `meerkat-core` stays
 //! generic — no provider-specific fields or logic land here.
 
 pub mod binding_use;

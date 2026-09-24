@@ -24,19 +24,25 @@ const HOOK_FN: &str = "fn pre_dequeue_handle(";
 /// The RPC crate contributes two: the ordinary session executor and the
 /// mob-over-RPC executor. Both are runtime-backed, so both are listed.
 const RUNTIME_BACKED_EXECUTOR_SOURCES: &[(&str, &str)] = &[
-    ("meerkat/src/surface/runtime_backed.rs", "facade"),
-    ("meerkat-cli/src/main.rs", "cli"),
-    ("meerkat-rest/src/lib.rs", "rest"),
-    ("meerkat-rpc/src/session_executor.rs", "rpc"),
-    ("meerkat-mcp-server/src/runtime_ingress.rs", "mcp-server"),
-    ("meerkat-mob/src/runtime/provisioner.rs", "mob"),
+    ("crates/meerkat/src/surface/runtime_backed.rs", "facade"),
+    ("crates/meerkat-cli/src/main.rs", "cli"),
+    ("crates/meerkat-rest/src/lib.rs", "rest"),
+    ("crates/meerkat-rpc/src/session_executor.rs", "rpc"),
+    (
+        "crates/meerkat-mcp-server/src/runtime_ingress.rs",
+        "mcp-server",
+    ),
+    ("crates/meerkat-mob/src/runtime/provisioner.rs", "mob"),
 ];
 
 /// Surfaces that deliberately do NOT realize handoffs, and must not pretend to.
 const NON_RUNTIME_BACKED_SOURCES: &[(&str, &str)] = &[
-    ("meerkat-web-runtime/src/lib.rs", "wasm browser runtime"),
     (
-        "meerkat/src/agent_builder.rs",
+        "crates/meerkat-web-runtime/src/lib.rs",
+        "wasm browser runtime",
+    ),
+    (
+        "crates/meerkat/src/agent_builder.rs",
         "standalone embedded builder",
     ),
 ];
@@ -88,7 +94,7 @@ fn every_runtime_backed_surface_uses_the_shared_runtime_helper() {
 /// cross-run transaction has acquired a second owner.
 #[test]
 fn the_pre_dequeue_handle_has_exactly_one_production_implementation() {
-    let runtime = read("meerkat-runtime/src/service_ext.rs");
+    let runtime = read("crates/meerkat-runtime/src/service_ext.rs");
     let implementations = runtime
         .matches("impl meerkat_core::lifecycle::CoreExecutorPreDequeueHandle")
         .count()
@@ -120,17 +126,17 @@ fn the_pre_dequeue_handle_has_exactly_one_production_implementation() {
 /// existing one quietly moved back onto the hostless builder, fails here.
 const RUNTIME_BACKED_CONSTRUCTION_SITES: &[(&str, &str, &str)] = &[
     (
-        "meerkat-cli/src/main.rs",
+        "crates/meerkat-cli/src/main.rs",
         "cli",
         "build_runtime_backed_service_with_default_reconfigure_host",
     ),
     (
-        "meerkat-rest/src/lib.rs",
+        "crates/meerkat-rest/src/lib.rs",
         "rest",
         "build_runtime_backed_service_with_default_reconfigure_host",
     ),
     (
-        "meerkat-mcp-server/src/lib.rs",
+        "crates/meerkat-mcp-server/src/lib.rs",
         "mcp-server",
         "build_runtime_backed_service_with_default_reconfigure_host",
     ),
@@ -138,7 +144,7 @@ const RUNTIME_BACKED_CONSTRUCTION_SITES: &[(&str, &str, &str)] = &[
     // host with late-bound client/config/staged-registry wiring. Routing it
     // through the hosted wrapper would install a SECOND, shadowing host.
     (
-        "meerkat-rpc/src/session_runtime.rs",
+        "crates/meerkat-rpc/src/session_runtime.rs",
         "rpc",
         "build_runtime_backed_service_with_capacities",
     ),
@@ -157,7 +163,7 @@ fn every_production_service_construction_installs_or_owns_a_reconfigure_host() {
     // The CLI is the surface with the most construction paths, and its resume
     // path historically used a different one. Pin that no CLI path falls back
     // to the hostless facade constructor.
-    let cli = read("meerkat-cli/src/main.rs");
+    let cli = read("crates/meerkat-cli/src/main.rs");
     assert!(
         !cli.contains("build_persistent_service_with_runtime_adapter"),
         "the CLI must not construct a session service through the hostless facade builder; \
@@ -166,7 +172,7 @@ fn every_production_service_construction_installs_or_owns_a_reconfigure_host() {
 
     // RPC owns its host explicitly. If that install ever disappears, RPC is on
     // the hostless builder with nothing installing a host at all.
-    let rpc = read("meerkat-rpc/src/session_runtime.rs");
+    let rpc = read("crates/meerkat-rpc/src/session_runtime.rs");
     assert!(
         rpc.contains("set_session_llm_reconfigure_host"),
         "rpc uses the low-level builder, so it must install its own reconfigure host"
@@ -179,7 +185,7 @@ fn every_production_service_construction_installs_or_owns_a_reconfigure_host() {
 /// whether a reconfigure host was installed. The factory has to ask.
 #[test]
 fn the_registration_gate_consults_actual_host_availability() {
-    let factory = read("meerkat/src/factory.rs");
+    let factory = read("crates/meerkat/src/factory.rs");
     assert!(
         factory.contains("committed_handoff_realization_ready()"),
         "the brain_swap registration gate must ask the runtime whether it can realize a \

@@ -11,8 +11,8 @@ use syn::{ImplItem, Item, ItemFn, ItemImpl, Type};
 use crate::public_contracts::repo_root;
 
 const DOC_PATH: &str =
-    "docs-internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md";
-const BASELINE_PATH: &str = "xtask/ownership-baseline.toml";
+    "docs/internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md";
+const BASELINE_PATH: &str = "crates/xtask/ownership-baseline.toml";
 
 #[derive(Debug, Clone, Args, Default)]
 pub struct OwnershipLedgerArgs {
@@ -33,9 +33,9 @@ pub enum Subsystem {
     Mcp,
     Mob,
     /// Per-binding auth-lease lifecycle (dogma #44 resolved). The AuthMachine
-    /// kernel in `meerkat-runtime/src/auth_machine/` owns the semantics of
+    /// kernel in `crates/meerkat-runtime/src/auth_machine/` owns the semantics of
     /// auth-lease phase transitions; the `AuthLeaseHandle` impl in
-    /// `meerkat-runtime/src/handles/auth_lease.rs` is the only boundary into
+    /// `crates/meerkat-runtime/src/handles/auth_lease.rs` is the only boundary into
     /// it. Tracking as its own subsystem keeps the state cells, semantic
     /// operations, and coupling invariants orthogonal to the runtime core.
     Auth,
@@ -645,7 +645,13 @@ pub fn collect_ownership_findings(
                 Some((type_name, field_name)) => (type_name.to_string(), field_name),
                 None => (entry.owner_shell.clone(), writeset_item.as_str()),
             };
-            let crate_dir = entry.path.split('/').next().unwrap_or_default().to_string();
+            // Ledger paths are repo-relative (`crates/<crate>/src/...`); the
+            // owning crate directory is everything before the `src/` tree.
+            let crate_dir = entry
+                .path
+                .split_once("/src/")
+                .map(|(dir, _)| dir.to_string())
+                .unwrap_or_else(|| entry.path.split('/').next().unwrap_or_default().to_string());
             let index = match struct_field_index_by_crate.entry(crate_dir.clone()) {
                 Entry::Vacant(slot) => slot.insert(crate_struct_field_index(root, &crate_dir)?),
                 Entry::Occupied(slot) => slot.into_mut(),
@@ -1443,13 +1449,13 @@ fn title_case_subsystem(subsystem: Subsystem) -> &'static str {
 }
 
 fn subsystem_of_path(path: &str) -> Subsystem {
-    if path.starts_with("meerkat-runtime/src/handles/auth_lease.rs")
-        || path.starts_with("meerkat-runtime/src/auth_machine/")
+    if path.starts_with("crates/meerkat-runtime/src/handles/auth_lease.rs")
+        || path.starts_with("crates/meerkat-runtime/src/auth_machine/")
     {
         Subsystem::Auth
-    } else if path.starts_with("meerkat-runtime/") {
+    } else if path.starts_with("crates/meerkat-runtime/") {
         Subsystem::Runtime
-    } else if path.starts_with("meerkat-mcp/") {
+    } else if path.starts_with("crates/meerkat-mcp/") {
         Subsystem::Mcp
     } else {
         Subsystem::Mob
@@ -1796,7 +1802,32 @@ fn workspace_member_dirs(root: &Path) -> Result<Vec<String>> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    Ok(members)
+    let mut dirs = Vec::new();
+    for member in members {
+        // Cargo allows `<dir>/*` member globs (the workspace uses `crates/*`);
+        // expand them to the concrete crate directories so the source walk
+        // below sees every member crate.
+        if let Some(parent) = member.strip_suffix("/*") {
+            let parent_dir = root.join(parent);
+            if !parent_dir.is_dir() {
+                continue;
+            }
+            let mut expanded = Vec::new();
+            for entry in fs::read_dir(&parent_dir)
+                .with_context(|| format!("read {}", parent_dir.display()))?
+            {
+                let entry = entry.with_context(|| format!("iterate {}", parent_dir.display()))?;
+                if entry.path().join("Cargo.toml").is_file() {
+                    expanded.push(format!("{parent}/{}", entry.file_name().to_string_lossy()));
+                }
+            }
+            expanded.sort();
+            dirs.extend(expanded);
+        } else {
+            dirs.push(member);
+        }
+    }
+    Ok(dirs)
 }
 
 /// Names of every type-like declaration (struct / enum / trait / trait
@@ -2074,7 +2105,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
         trait_impls: vec![
             TraitImplBoundary {
                 family_name: "runtime-control-plane".into(),
-                path_suffix: "meerkat-runtime/src/meerkat_machine/traits.rs".into(),
+                path_suffix: "crates/meerkat-runtime/src/meerkat_machine/traits.rs".into(),
                 type_name: "MeerkatMachine".into(),
                 trait_name: "RuntimeControlPlane".into(),
                 method_names: vec![
@@ -2098,7 +2129,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
             // phase writes are a shell-authority bypass.
             TraitImplBoundary {
                 family_name: "auth-lease-registry".into(),
-                path_suffix: "meerkat-runtime/src/handles/auth_lease.rs".into(),
+                path_suffix: "crates/meerkat-runtime/src/handles/auth_lease.rs".into(),
                 type_name: "RuntimeAuthLeaseHandle".into(),
                 trait_name: "AuthLeaseHandle".into(),
                 method_names: vec![
@@ -2119,7 +2150,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
         public_inherent: vec![
             PublicInherentBoundary {
                 family_name: "runtime-session-adapter".into(),
-                path_suffix: "meerkat-runtime/src/meerkat_machine/mod.rs".into(),
+                path_suffix: "crates/meerkat-runtime/src/meerkat_machine/mod.rs".into(),
                 type_name: "MeerkatMachine".into(),
                 method_names: vec!["register_session"]
                     .into_iter()
@@ -2128,7 +2159,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
             },
             PublicInherentBoundary {
                 family_name: "runtime-session-adapter".into(),
-                path_suffix: "meerkat-runtime/src/meerkat_machine/session_management.rs".into(),
+                path_suffix: "crates/meerkat-runtime/src/meerkat_machine/session_management.rs".into(),
                 type_name: "MeerkatMachine".into(),
                 method_names: vec![
                     "set_session_silent_intents",
@@ -2142,7 +2173,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
             },
             PublicInherentBoundary {
                 family_name: "runtime-session-adapter".into(),
-                path_suffix: "meerkat-runtime/src/user_interrupt.rs".into(),
+                path_suffix: "crates/meerkat-runtime/src/user_interrupt.rs".into(),
                 type_name: "MeerkatMachine".into(),
                 method_names: vec!["hard_cancel_current_run"]
                     .into_iter()
@@ -2151,7 +2182,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
             },
             PublicInherentBoundary {
                 family_name: "runtime-session-adapter".into(),
-                path_suffix: "meerkat-runtime/src/meerkat_machine/runtime_control.rs".into(),
+                path_suffix: "crates/meerkat-runtime/src/meerkat_machine/runtime_control.rs".into(),
                 type_name: "MeerkatMachine".into(),
                 method_names: vec!["stop_runtime_executor", "accept_input_with_completion"]
                 .into_iter()
@@ -2160,7 +2191,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
             },
             PublicInherentBoundary {
                 family_name: "runtime-session-adapter".into(),
-                path_suffix: "meerkat-runtime/src/meerkat_machine/comms_drain.rs".into(),
+                path_suffix: "crates/meerkat-runtime/src/meerkat_machine/comms_drain.rs".into(),
                 type_name: "MeerkatMachine".into(),
                 method_names: vec![
                     "update_peer_ingress_context",
@@ -2174,7 +2205,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
             },
             PublicInherentBoundary {
                 family_name: "mcp-router".into(),
-                path_suffix: "meerkat-mcp/src/router.rs".into(),
+                path_suffix: "crates/meerkat-mcp/src/router.rs".into(),
                 type_name: "McpRouter".into(),
                 method_names: vec![
                     "set_removal_timeout",
@@ -2195,7 +2226,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
             },
             PublicInherentBoundary {
                 family_name: "mcp-router-adapter".into(),
-                path_suffix: "meerkat-mcp/src/adapter.rs".into(),
+                path_suffix: "crates/meerkat-mcp/src/adapter.rs".into(),
                 type_name: "McpRouterAdapter".into(),
                 method_names: vec![
                     "refresh_tools",
@@ -2214,7 +2245,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
             },
             PublicInherentBoundary {
                 family_name: "mob-handle".into(),
-                path_suffix: "meerkat-mob/src/runtime/handle.rs".into(),
+                path_suffix: "crates/meerkat-mob/src/runtime/handle.rs".into(),
                 type_name: "MobHandle".into(),
                 method_names: vec![
                     "spawn_spec",
@@ -2246,7 +2277,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
             },
             PublicInherentBoundary {
                 family_name: "mob-member-handle".into(),
-                path_suffix: "meerkat-mob/src/runtime/handle.rs".into(),
+                path_suffix: "crates/meerkat-mob/src/runtime/handle.rs".into(),
                 type_name: "MemberHandle".into(),
                 method_names: vec!["internal_turn"]
                     .into_iter()
@@ -2256,7 +2287,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
         ],
         enum_dispatch: vec![EnumDispatchBoundary {
             family_name: "mob-command-dispatch".into(),
-            path_suffix: "meerkat-mob/src/runtime/actor.rs".into(),
+            path_suffix: "crates/meerkat-mob/src/runtime/actor.rs".into(),
             owner_type_name: "MobActor".into(),
             enum_name: "MobCommand".into(),
             handler_methods: vec![
@@ -2278,14 +2309,14 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
             .collect(),
         }, EnumDispatchBoundary {
             family_name: "mob-command-dispatch".into(),
-            path_suffix: "meerkat-mob/src/runtime/actor/retirement_io.rs".into(),
+            path_suffix: "crates/meerkat-mob/src/runtime/actor/retirement_io.rs".into(),
             owner_type_name: "MobActor".into(),
             enum_name: "MobCommand".into(),
             handler_methods: vec!["start_retirement".into(), "begin_retirement_batch".into()],
         }],
         callbacks: vec![
             CallbackBoundary {
-                path_suffix: "meerkat-runtime/src/meerkat_machine/comms_drain.rs".into(),
+                path_suffix: "crates/meerkat-runtime/src/meerkat_machine/comms_drain.rs".into(),
                 owner_type_name: Some("MeerkatMachine".into()),
                 method_name: "notify_comms_drain_exited".into(),
                 compensating_family: "runtime-session-adapter".into(),
@@ -2295,7 +2326,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                         .into(),
             },
             CallbackBoundary {
-                path_suffix: "meerkat-mcp/src/router.rs".into(),
+                path_suffix: "crates/meerkat-mcp/src/router.rs".into(),
                 owner_type_name: Some("McpRouter".into()),
                 method_name: "process_pending_result".into(),
                 compensating_family: "mcp-router".into(),
@@ -2307,7 +2338,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                         .into(),
             },
             CallbackBoundary {
-                path_suffix: "meerkat-mob/src/runtime/actor.rs".into(),
+                path_suffix: "crates/meerkat-mob/src/runtime/actor.rs".into(),
                 owner_type_name: Some("MobActor".into()),
                 method_name: "handle_spawn_provisioned_batch".into(),
                 compensating_family: "mob-command-dispatch".into(),
@@ -2322,28 +2353,28 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
         export_contracts: vec![
             ExportContractBoundary {
                 family_name: "shell-background-job-view".into(),
-                path_suffix: "meerkat-tools/src/builtin/shell/types.rs".into(),
+                path_suffix: "crates/meerkat-tools/src/builtin/shell/types.rs".into(),
                 symbol: "BackgroundJob".into(),
                 scope: ExportContractScope::AppFacing,
                 exports_raw_operation_id: false,
             },
             ExportContractBoundary {
                 family_name: "shell-job-summary-view".into(),
-                path_suffix: "meerkat-tools/src/builtin/shell/types.rs".into(),
+                path_suffix: "crates/meerkat-tools/src/builtin/shell/types.rs".into(),
                 symbol: "JobSummary".into(),
                 scope: ExportContractScope::AppFacing,
                 exports_raw_operation_id: false,
             },
             ExportContractBoundary {
                 family_name: "mob-member-ref".into(),
-                path_suffix: "meerkat-mob/src/event.rs".into(),
+                path_suffix: "crates/meerkat-mob/src/event.rs".into(),
                 symbol: "MemberRef".into(),
                 scope: ExportContractScope::AppFacing,
                 exports_raw_operation_id: false,
             },
             ExportContractBoundary {
                 family_name: "mob-infra-member-spawn-receipt".into(),
-                path_suffix: "meerkat-mob/src/runtime/handle.rs".into(),
+                path_suffix: "crates/meerkat-mob/src/runtime/handle.rs".into(),
                 symbol: "MemberSpawnReceipt".into(),
                 scope: ExportContractScope::InfraCanonicalOp,
                 exports_raw_operation_id: true,
@@ -2447,7 +2478,7 @@ macro_rules! semantic_operation_entry {
 fn state_cells() -> Vec<StateCellEntry> {
     vec![
         state_entry!(
-            "meerkat-runtime/src/meerkat_machine/mod.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/mod.rs",
             "MeerkatMachineShared.sessions",
             Subsystem::Runtime,
             StateClass::CapabilityIndex,
@@ -2461,7 +2492,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "session map is identity-to-runtime-capability reachability only; registration, stale attachment normalization, and teardown are enforced by adapter publication rules rather than ad hoc shell pre-checks",
         ),
         state_entry!(
-            "meerkat-runtime/src/meerkat_machine/mod.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/mod.rs",
             "RuntimeSessionEntry.drain_slot",
             Subsystem::Runtime,
             StateClass::CapabilityIndex,
@@ -2475,7 +2506,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "wave-c C-H2 collapse: drain slots now live on RuntimeSessionEntry so slot presence is structurally identical to session registration — the subset invariant with MeerkatMachineShared.sessions is vacuous by construction; unregister aborts the slot before removing the entry",
         ),
         state_entry!(
-            "meerkat-runtime/src/meerkat_machine/mod.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/mod.rs",
             "RuntimeSessionEntry.driver",
             Subsystem::Runtime,
             StateClass::CapabilityHandle,
@@ -2485,7 +2516,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "driver is an opaque capability handle; semantic state transitions are mediated through driver authorities and adapter publication rules rather than raw handle identity",
         ),
         state_entry!(
-            "meerkat-runtime/src/meerkat_machine/mod.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/mod.rs",
             "RuntimeSessionEntry.attachment_slot",
             Subsystem::Runtime,
             StateClass::CapabilityHandle,
@@ -2495,7 +2526,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "attachment publication is liveness-gated by loop channels; stop paths do not pre-clear attachment ahead of canonical driver control transitions, and stale attached-driver states are repaired before re-publication",
         ),
         state_entry!(
-            "meerkat-runtime/src/meerkat_machine/mod.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/mod.rs",
             "RuntimeSessionEntry.completions",
             Subsystem::Runtime,
             StateClass::CapabilityHandle,
@@ -2505,7 +2536,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "completion registry is crate-private waiter plumbing; runtime surfaces expose only completion handles/outcomes and do not branch on waiter presence/count",
         ),
         state_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "McpRouter.servers",
             Subsystem::Mcp,
             StateClass::CapabilityIndex,
@@ -2519,7 +2550,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "used strictly for identity-to-handle reachability after projection-based routing selection",
         ),
         state_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "McpRouter.projection",
             Subsystem::Mcp,
             StateClass::DerivedProjection,
@@ -2533,7 +2564,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "atomically publish projection snapshot after every authority-driven visibility mutation",
         ),
         state_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "RouterProjectionSnapshot.tool_to_server",
             Subsystem::Mcp,
             StateClass::DerivedProjection,
@@ -2547,7 +2578,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "routing map is rebuilt from the same snapshot publication path used by tool visibility",
         ),
         state_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "RouterProjectionSnapshot.visible_tools",
             Subsystem::Mcp,
             StateClass::DerivedProjection,
@@ -2561,7 +2592,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "tool listing uses only atomically published snapshot-visible tool set",
         ),
         state_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "RouterProjectionSnapshot.epoch",
             Subsystem::Mcp,
             StateClass::DerivedProjection,
@@ -2575,7 +2606,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "projection epoch lineage is machine-derived directly from authority snapshot_epoch",
         ),
         state_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "McpRouter.pending_obligations",
             Subsystem::Mcp,
             StateClass::CapabilityIndex,
@@ -2589,7 +2620,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "obligation tokens are capability handles consumed only through generated protocol feedback paths",
         ),
         state_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "McpRouter.pending_snapshot_alignment",
             Subsystem::Mcp,
             StateClass::CapabilityIndex,
@@ -2603,7 +2634,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "snapshot-alignment token is an opaque capability consumed only through generated bridge helpers",
         ),
         state_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "McpRouter.pending_tx",
             Subsystem::Mcp,
             StateClass::CapabilityHandle,
@@ -2613,7 +2644,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "background pending-result sender is an opaque transport capability with no independent semantic truth",
         ),
         state_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "McpRouter.pending_rx",
             Subsystem::Mcp,
             StateClass::TransportBuffer,
@@ -2623,7 +2654,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "pending-result receiver queue is transport-only buffering for obligation completion delivery",
         ),
         state_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "McpRouter.completed_updates",
             Subsystem::Mcp,
             StateClass::TransportBuffer,
@@ -2633,7 +2664,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "queued lifecycle actions are transport-only buffers sourced from authority transitions",
         ),
         state_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "McpRouter.staged_payloads",
             Subsystem::Mcp,
             StateClass::TransportBuffer,
@@ -2643,7 +2674,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "treat staged config payloads as transport-only buffers keyed by machine-owned staged intent, not as authoritative staged-order truth",
         ),
         state_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "MobActor.roster",
             Subsystem::Mob,
             StateClass::DerivedProjection,
@@ -2657,7 +2688,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "sealed RosterAuthority is the sole roster projection mutator; runtime reads are mechanical materialization only, and public retire cancel-vs-preserve behavior comes from MobMachine's incarnation-scoped verdict rather than roster presence",
         ),
         state_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "MobActor.pending_spawns",
             Subsystem::Mob,
             StateClass::DerivedProjection,
@@ -2671,7 +2702,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "PendingSpawnLineage now owns metadata/task coupling and all pending-spawn semantics go through its sealed helpers plus orchestrator-count alignment",
         ),
         state_entry!(
-            "meerkat-mob/src/runtime/pending_spawn_lineage.rs",
+            "crates/meerkat-mob/src/runtime/pending_spawn_lineage.rs",
             "PendingSpawnLineage.tasks",
             Subsystem::Mob,
             StateClass::CapabilityIndex,
@@ -2685,7 +2716,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "ticket-to-task-handle reachability only; insertion/removal is coupled to pending spawn lineage helpers and never carries spawn semantics independently",
         ),
         state_entry!(
-            "meerkat-mob/src/runtime/provisioner.rs",
+            "crates/meerkat-mob/src/runtime/provisioner.rs",
             "SessionBackend.runtime_sessions",
             Subsystem::Mob,
             StateClass::CapabilityIndex,
@@ -2699,7 +2730,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "reduced to identity-to-bridge-sidecar reachability; runtime adapter remains canonical for registration lifecycle",
         ),
         state_entry!(
-            "meerkat-mob/src/runtime/provisioner.rs",
+            "crates/meerkat-mob/src/runtime/provisioner.rs",
             "RuntimeSessionState.queued_turn_owner",
             Subsystem::Mob,
             StateClass::TransportBuffer,
@@ -2713,7 +2744,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "transport-only turn context buffering; no lifecycle truth or independent sequencing semantics",
         ),
         state_entry!(
-            "meerkat-mob/src/runtime/ops_adapter.rs",
+            "crates/meerkat-mob/src/runtime/ops_adapter.rs",
             "MobOpsAdapter.member_bindings",
             Subsystem::Mob,
             StateClass::CapabilityHandle,
@@ -2728,7 +2759,7 @@ fn state_cells() -> Vec<StateCellEntry> {
         // release-dedup, and turn-outcome-journal regions fold into this
         // single MachineOwned entry.
         state_entry!(
-            "meerkat-mob/src/runtime/host_actor.rs",
+            "crates/meerkat-mob/src/runtime/host_actor.rs",
             "MobHostActor.binding_authority",
             Subsystem::Mob,
             StateClass::MachineOwned,
@@ -2745,7 +2776,7 @@ fn state_cells() -> Vec<StateCellEntry> {
         // admission runs FIRST on every delivery; this durable protocol owns
         // effect/reply idempotency, never authorization.
         state_entry!(
-            "meerkat-mob/src/store/mod.rs",
+            "crates/meerkat-mob/src/store/mod.rs",
             "MobMemberOperatorRequestRecord.state",
             Subsystem::Mob,
             StateClass::MachineOwned,
@@ -2763,7 +2794,7 @@ fn state_cells() -> Vec<StateCellEntry> {
         // inside the AuthMachineState wrapper and all writes flow through
         // `auth_machine::dsl::AuthMachineState::transition`.
         state_entry!(
-            "meerkat-runtime/src/handles/auth_lease.rs",
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
             "RuntimeAuthLeaseHandle.machines",
             Subsystem::Auth,
             StateClass::CapabilityIndex,
@@ -2782,7 +2813,7 @@ fn state_cells() -> Vec<StateCellEntry> {
 fn semantic_operations() -> Vec<SemanticOperationEntry> {
     vec![
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/mod.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/mod.rs",
             "register_session",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2802,7 +2833,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/session_management.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/session_management.rs",
             "set_session_silent_intents",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2815,7 +2846,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/session_management.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/session_management.rs",
             "register_session_with_executor",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2832,7 +2863,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/session_management.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/session_management.rs",
             "ensure_session_with_executor",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2849,7 +2880,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/session_management.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/session_management.rs",
             "unregister_session",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2863,7 +2894,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/user_interrupt.rs",
+            "crates/meerkat-runtime/src/user_interrupt.rs",
             "hard_cancel_current_run",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2881,7 +2912,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/runtime_control.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/runtime_control.rs",
             "stop_runtime_executor",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2896,7 +2927,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/runtime_control.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/runtime_control.rs",
             "accept_input_with_completion",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2915,7 +2946,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/comms_drain.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/comms_drain.rs",
             "update_peer_ingress_context",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2926,7 +2957,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/comms_drain.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/comms_drain.rs",
             "notify_comms_drain_exited",
             BoundaryKind::ManualCallback,
             "MeerkatMachine",
@@ -2937,7 +2968,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/comms_drain.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/comms_drain.rs",
             "abort_comms_drains",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2948,7 +2979,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/comms_drain.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/comms_drain.rs",
             "abort_comms_drain",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2959,7 +2990,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/comms_drain.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/comms_drain.rs",
             "wait_comms_drain",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2970,7 +3001,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/traits.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/traits.rs",
             "publish_event",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -2983,7 +3014,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/traits.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/traits.rs",
             "retire",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -2998,7 +3029,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/traits.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/traits.rs",
             "recycle",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -3013,7 +3044,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/traits.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/traits.rs",
             "reset",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -3027,7 +3058,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/traits.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/traits.rs",
             "recover",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -3041,7 +3072,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/traits.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/traits.rs",
             "destroy",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -3058,7 +3089,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/traits.rs",
+            "crates/meerkat-runtime/src/meerkat_machine/traits.rs",
             "ingest",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -3069,7 +3100,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "set_removal_timeout",
             BoundaryKind::PublicInherent,
             "McpRouter",
@@ -3084,7 +3115,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "add_server",
             BoundaryKind::PublicInherent,
             "McpRouter",
@@ -3095,7 +3126,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "stage_add",
             BoundaryKind::PublicInherent,
             "McpRouter",
@@ -3108,7 +3139,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "stage_remove",
             BoundaryKind::PublicInherent,
             "McpRouter",
@@ -3119,7 +3150,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "stage_reload",
             BoundaryKind::PublicInherent,
             "McpRouter",
@@ -3132,7 +3163,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "apply_staged",
             BoundaryKind::PublicInherent,
             "McpRouter",
@@ -3150,7 +3181,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "process_pending_result",
             BoundaryKind::ManualCallback,
             "McpRouter",
@@ -3166,7 +3197,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "take_lifecycle_actions",
             BoundaryKind::PublicInherent,
             "McpRouter",
@@ -3177,7 +3208,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "take_external_updates",
             BoundaryKind::PublicInherent,
             "McpRouter",
@@ -3190,7 +3221,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "progress_removals",
             BoundaryKind::PublicInherent,
             "McpRouter",
@@ -3203,7 +3234,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "call_tool",
             BoundaryKind::PublicInherent,
             "McpRouter",
@@ -3214,7 +3245,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/router.rs",
+            "crates/meerkat-mcp/src/router.rs",
             "shutdown",
             BoundaryKind::PublicInherent,
             "McpRouter",
@@ -3230,7 +3261,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/adapter.rs",
+            "crates/meerkat-mcp/src/adapter.rs",
             "refresh_tools",
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
@@ -3243,7 +3274,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/adapter.rs",
+            "crates/meerkat-mcp/src/adapter.rs",
             "stage_add",
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
@@ -3256,7 +3287,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/adapter.rs",
+            "crates/meerkat-mcp/src/adapter.rs",
             "stage_remove",
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
@@ -3269,7 +3300,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/adapter.rs",
+            "crates/meerkat-mcp/src/adapter.rs",
             "stage_reload",
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
@@ -3282,7 +3313,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/adapter.rs",
+            "crates/meerkat-mcp/src/adapter.rs",
             "apply_staged",
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
@@ -3293,7 +3324,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/adapter.rs",
+            "crates/meerkat-mcp/src/adapter.rs",
             "poll_lifecycle_actions",
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
@@ -3304,7 +3335,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/adapter.rs",
+            "crates/meerkat-mcp/src/adapter.rs",
             "progress_removals",
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
@@ -3317,7 +3348,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/adapter.rs",
+            "crates/meerkat-mcp/src/adapter.rs",
             "wait_until_ready",
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
@@ -3330,7 +3361,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mcp/src/adapter.rs",
+            "crates/meerkat-mcp/src/adapter.rs",
             "shutdown",
             BoundaryKind::PublicInherent,
             "McpRouterAdapter",
@@ -3341,7 +3372,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "spawn_spec",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3354,7 +3385,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "spawn_many",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3367,7 +3398,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "retire",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3389,7 +3420,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "respawn",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3404,7 +3435,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "retire_all",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3415,7 +3446,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "wire",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3426,7 +3457,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "unwire",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3437,7 +3468,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "internal_turn",
             BoundaryKind::PublicInherent,
             "MemberHandle",
@@ -3450,7 +3481,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "run_flow",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3463,7 +3494,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "run_flow_with_stream",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3476,7 +3507,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "cancel_flow",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3491,7 +3522,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "stop",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3508,7 +3539,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "resume",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3519,7 +3550,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "complete",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3538,7 +3569,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "reset",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3554,7 +3585,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "destroy",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3572,7 +3603,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "set_spawn_policy",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3583,7 +3614,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "shutdown",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3603,7 +3634,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "force_cancel_member",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3614,7 +3645,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "spawn_helper",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3625,7 +3656,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "fork_helper",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3636,7 +3667,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "wait_one",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3647,7 +3678,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
+            "crates/meerkat-mob/src/runtime/handle.rs",
             "wait_all",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3658,7 +3689,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "handle_spawn_provisioned_batch",
             BoundaryKind::ManualCallback,
             "MobActor",
@@ -3673,7 +3704,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "enqueue_spawn",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3688,7 +3719,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "handle_force_cancel",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3701,7 +3732,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor/retirement_io.rs",
+            "crates/meerkat-mob/src/runtime/actor/retirement_io.rs",
             "start_retirement",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3714,7 +3745,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor/retirement_io.rs",
+            "crates/meerkat-mob/src/runtime/actor/retirement_io.rs",
             "begin_retirement_batch",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3725,7 +3756,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "handle_respawn",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3740,7 +3771,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "handle_submit_work",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3755,7 +3786,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "handle_cancel_all_work",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3770,7 +3801,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "handle_rotate_supervisor",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3785,7 +3816,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "handle_run_flow",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3803,7 +3834,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "handle_cancel_flow",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3816,7 +3847,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "handle_flow_cleanup",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3829,7 +3860,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "handle_complete",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3844,7 +3875,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "handle_destroy",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3862,7 +3893,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
+            "crates/meerkat-mob/src/runtime/actor.rs",
             "handle_reset",
             BoundaryKind::EnumDispatch,
             "MobActor",
@@ -3884,7 +3915,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
         // `auth_machine::dsl::AuthMachineState::transition`; the registry
         // owns only the binding-keyed slot map.
         semantic_operation_entry!(
-            "meerkat-runtime/src/handles/auth_lease.rs",
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
             "acquire_lease",
             BoundaryKind::TraitImpl,
             "RuntimeAuthLeaseHandle",
@@ -3897,7 +3928,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/handles/auth_lease.rs",
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
             "mark_expiring",
             BoundaryKind::TraitImpl,
             "RuntimeAuthLeaseHandle",
@@ -3908,7 +3939,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/handles/auth_lease.rs",
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
             "begin_refresh",
             BoundaryKind::TraitImpl,
             "RuntimeAuthLeaseHandle",
@@ -3921,7 +3952,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/handles/auth_lease.rs",
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
             "complete_refresh",
             BoundaryKind::TraitImpl,
             "RuntimeAuthLeaseHandle",
@@ -3932,7 +3963,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/handles/auth_lease.rs",
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
             "refresh_failed",
             BoundaryKind::TraitImpl,
             "RuntimeAuthLeaseHandle",
@@ -3945,7 +3976,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/handles/auth_lease.rs",
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
             "mark_reauth_required",
             BoundaryKind::TraitImpl,
             "RuntimeAuthLeaseHandle",
@@ -3956,7 +3987,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/handles/auth_lease.rs",
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
             "release_lease",
             BoundaryKind::TraitImpl,
             "RuntimeAuthLeaseHandle",
@@ -3967,7 +3998,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/handles/auth_lease.rs",
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
             "snapshot",
             BoundaryKind::TraitImpl,
             "RuntimeAuthLeaseHandle",

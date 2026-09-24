@@ -4,7 +4,7 @@
 //! The positive half — a committed `brain_swap` request actually moving the
 //! next provider call from model A to model B, under both WholeBlob and
 //! HeadCanonical — lives in
-//! `meerkat/src/factory/brain_swap_runtime_loop_ab_tests.rs`. It has to live
+//! `crates/meerkat/src/factory/brain_swap_runtime_loop_ab_tests.rs`. It has to live
 //! in-crate because proving the ORDINARY registration path means substituting
 //! a credential-free provider runtime in the factory's own private registry
 //! slot, which no external test can reach and which no production caller needs

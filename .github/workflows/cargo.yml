@@ -115,14 +115,14 @@ jobs:
             # Docs-only changes skip the build/test jobs. Governance still
             # runs on every invocation below. Anything else — or an unknown
             # base — runs the full lane (fail open into MORE CI, never less).
-            if ! grep -qvE '^(docs/|docs-internal/|\.claude/|CHANGELOG\.md|README\.md|.*\.md$)' <<<"${changed}"; then
+            if ! grep -qvE '^(docs/|docs/internal/|\.claude/|CHANGELOG\.md|README\.md|.*\.md$)' <<<"${changed}"; then
               code_changed=false
             fi
             # The full Web SDK suite (wasm-pack + wasm-opt + node tests) is
             # inherently slow; run it per push only when SDK-relevant
             # surfaces changed. wasm-check still runs on every code change,
             # and nightly runs the full suite unconditionally.
-            if ! grep -qE '^(sdks/|meerkat-web-runtime/|meerkat-contracts/|meerkat-core/|artifacts/schemas/|Cargo\.(toml|lock)|Makefile|\.github/)' <<<"${changed}"; then
+            if ! grep -qE '^(sdks/|crates/meerkat-web-runtime/|crates/meerkat-contracts/|crates/meerkat-core/|artifacts/schemas/|Cargo\.(toml|lock)|Makefile|\.github/)' <<<"${changed}"; then
               sdk_changed=false
             fi
             # The browser contract test (wasm-pack + headless Chrome) is the
@@ -130,7 +130,7 @@ jobs:
             # runs only when the wasm contract surfaces changed. wasm-check
             # still type-checks it on every code change, and nightly executes
             # it unconditionally.
-            if ! grep -qE '^(meerkat-web-runtime/|meerkat-contracts/|sdks/web/|\.github/workflows/cargo\.yml)' <<<"${changed}"; then
+            if ! grep -qE '^(crates/meerkat-web-runtime/|crates/meerkat-contracts/|sdks/web/|\.github/workflows/cargo\.yml)' <<<"${changed}"; then
               wasm_changed=false
             fi
             mapfile -t changed_paths <<<"${changed}"
@@ -670,7 +670,7 @@ jobs:
           path: |
             specs/machines
             specs/compositions
-            meerkat-machine-kernels/src/generated
+            crates/meerkat-machine-kernels/src/generated
           if-no-files-found: error
           retention-days: 1
 
@@ -698,15 +698,15 @@ jobs:
         with:
           name: fresh-protocol-artifacts
           # The six crates protocol-codegen emits into. Kept in sync with the
-          # emission set in xtask/src/protocol_codegen.rs; a missing directory
+          # emission set in crates/xtask/src/protocol_codegen.rs; a missing directory
           # fails the upload rather than silently shipping partial evidence.
           path: |
-            meerkat-core/src/generated
-            meerkat-session/src/generated
-            meerkat-mob/src/generated
-            meerkat-mcp/src/generated
-            meerkat-runtime/src/generated
-            meerkat-workgraph/src/generated
+            crates/meerkat-core/src/generated
+            crates/meerkat-session/src/generated
+            crates/meerkat-mob/src/generated
+            crates/meerkat-mcp/src/generated
+            crates/meerkat-runtime/src/generated
+            crates/meerkat-workgraph/src/generated
           if-no-files-found: error
           retention-days: 1
       # check-rust-release-packaging dry-run-packages every release crate

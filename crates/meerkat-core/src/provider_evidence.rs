@@ -956,7 +956,7 @@ mod degradation_marker_tests {
         // Synthetic model ids on purpose. meerkat-core carries ZERO
         // provider-specific model data, tests included (xtask's
         // no_provider_data_in_core gate bans `"gpt-N`/`"claude-N`/`"gemini-N`
-        // literals anywhere under meerkat-core/src), and naming the two sides
+        // literals anywhere under crates/meerkat-core/src), and naming the two sides
         // for what they are reads better here than a real catalog id would.
         let dispute = DisputedTurnUsageAccountingIdentity {
             active_provider: Provider::OpenAI,

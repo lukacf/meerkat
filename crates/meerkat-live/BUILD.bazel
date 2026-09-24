@@ -103,7 +103,7 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
-        "//meerkat:__pkg__",
+        "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.41",
@@ -115,8 +115,8 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
         "@meerkat_live_crates//:bytes-1.11.1",
         "@meerkat_live_crates//:opus-0.3.1",
         "@meerkat_live_crates//:rubato-2.0.0",
@@ -165,6 +165,10 @@ rust_test(
     size = "large",
     exec_properties = {"test.network": "external"},
     data = [
+        "//crates/meerkat-contracts:cargo_manifest",
+        "//crates/meerkat-contracts:package_runfiles",
+        "//crates/meerkat-rpc:cargo_manifest",
+        "//crates/meerkat-rpc:package_runfiles",
         ":package_runfiles",
     ],
     env = {

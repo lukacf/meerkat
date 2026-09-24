@@ -1481,7 +1481,7 @@ fn every_query_runtime_command_has_expected_surface_coverage() {
 
 fn sample_driver_rust_binding() -> CompositionDriverRustBinding {
     CompositionDriverRustBinding {
-        module_path: "meerkat-runtime/src/generated/noop_driver.rs".into(),
+        module_path: "crates/meerkat-runtime/src/generated/noop_driver.rs".into(),
         driver_type: "NoopDriver".into(),
         store_plan_type: "NoopStorePlan".into(),
         work_type: "NoopWork".into(),
@@ -2378,7 +2378,7 @@ mod handoff_binding {
                 durable_marker: None,
                 teardown: None,
                 rust: ProtocolRustBinding {
-                    module_path: "meerkat-mcp/src/generated/test_protocol.rs".into(),
+                    module_path: "crates/meerkat-mcp/src/generated/test_protocol.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![],
                     authority_type_path: None,
@@ -2453,7 +2453,7 @@ mod canonical_handoff_parity {
     fn meerkat_wait_all_satisfied_mirrors_runtime_struct() {
         // The canonical `WaitAllSatisfied` effect must name the three
         // fields the runtime's hand-written `WaitAllSatisfied` struct
-        // in `meerkat-core/src/ops_lifecycle.rs` exposes:
+        // in `crates/meerkat-core/src/ops_lifecycle.rs` exposes:
         //   pub wait_request_id: WaitRequestId,
         //   pub run_id: RunId,
         //   pub operation_ids: Vec<OperationId>,
@@ -2536,7 +2536,7 @@ mod canonical_handoff_parity {
             .expect("MeerkatMachine must declare ScheduleSurfaceCompletion effect");
         let field_names: std::collections::BTreeSet<&str> =
             effect.fields.iter().map(|f| f.name.as_str()).collect();
-        // The runtime struct in `meerkat-mcp/src/external_tool_surface_authority.rs`
+        // The runtime struct in `crates/meerkat-mcp/src/external_tool_surface_authority.rs`
         // exposes these five fields. Any deletion/addition on either
         // side must sync here or fail the parity gate.
         for required in [

@@ -34,7 +34,7 @@
 //! `MobHostAuthorityRecord` (written/deleted only under transition
 //! witnesses). MobHandle exposes no public machine-state read; the
 //! machine-map↔record/report equalities are pinned in-crate by the W3 rows
-//! in `meerkat-mob/src/runtime/tests.rs`.
+//! in `crates/meerkat-mob/src/runtime/tests.rs`.
 
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

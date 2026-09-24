@@ -1065,7 +1065,7 @@ mod order_lifecycle {
     #[test]
     fn schema_is_valid() {
         // Order-lifecycle is an in-module test fixture (not catalogued in
-        // `meerkat-machine-schema/src/catalog/dsl/mod.rs`). Its only
+        // `crates/meerkat-machine-schema/src/catalog/dsl/mod.rs`). Its only
         // named-type reference is the `OrderPhase` enum it declares
         // locally. B-4 (`c0cb12071`) made `named_types` validation-gated;
         // populate inline.
@@ -1155,7 +1155,7 @@ mod order_lifecycle {
 // ("Delete old hand-written machine catalog: DSL is now sole source
 // of truth"). Both `canonical_machine_schemas()` and
 // `dsl_machine_schemas()` now read DSL sources — the first from
-// `meerkat-machine-schema/src/catalog/dsl/` (production) and the
+// `crates/meerkat-machine-schema/src/catalog/dsl/` (production) and the
 // second from `tests/fixtures/machine-dsl-tests/src/` (simplified
 // integration fixture). They are intentionally divergent: the fixture
 // DSL is a minimal surrogate for exercising the `machine!` macro

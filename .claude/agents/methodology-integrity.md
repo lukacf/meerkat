@@ -36,8 +36,8 @@ After verifying the supplied inputs, perform ALL these checks:
 
 ### 1. Stub Detection
 ```bash
-grep -r "todo!" meerkat-comms*/src/ meerkat-core/src/comms.rs
-grep -r "unimplemented!" meerkat-comms*/src/ meerkat-core/src/comms.rs
+grep -r "todo!" meerkat-comms*/src/ crates/meerkat-core/src/comms.rs
+grep -r "unimplemented!" meerkat-comms*/src/ crates/meerkat-core/src/comms.rs
 ```
 For these scans, grep exit 0 means matches, 1 means no matches, and greater than 1 means a scan error. Report scan errors; they are not evidence of clean code.
 
@@ -45,7 +45,7 @@ Any stubs in code marked complete = BLOCK.
 
 ### 2. XFAIL/Skip Detection
 ```bash
-grep -r "#\[ignore\]" meerkat-comms*/src/ meerkat-comms*/tests/ meerkat-core/src/ meerkat-core/tests/
+grep -r "#\[ignore\]" meerkat-comms*/src/ meerkat-comms*/tests/ crates/meerkat-core/src/ crates/meerkat-core/tests/
 ```
 `#[ignore]` on feature tests without external bug reference = BLOCK.
 Note: `#[should_panic]` is valid for edge case tests and should NOT be flagged.

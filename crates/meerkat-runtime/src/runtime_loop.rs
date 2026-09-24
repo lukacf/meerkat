@@ -32,7 +32,7 @@ pub(crate) fn input_to_prompt(input: &Input) -> String {
 /// Canonical runtime-side constructor for [`RuntimeTurnMetadata`].
 ///
 /// This is the ONLY construction site for `RuntimeTurnMetadata` inside
-/// `meerkat-runtime/src/`. Any other literal/default construction is an
+/// `crates/meerkat-runtime/src/`. Any other literal/default construction is an
 /// RMAT-governed seam leak; the `turn_metadata_single_construction_site`
 /// integration test greps for that invariant at build time.
 pub(crate) fn for_input(

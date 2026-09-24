@@ -101,6 +101,7 @@ fn integration_tests_restore_rpc_default_feature_surface() -> Result<(), String>
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
         .parent()
+        .and_then(std::path::Path::parent)
         .ok_or_else(|| "rkat manifest dir should have workspace parent".to_string())?;
     let integration_manifest = read_manifest(workspace_root.join("tests/integration/Cargo.toml"))?;
 
@@ -135,10 +136,16 @@ fn slim_cli_mob_feature_does_not_inherit_rpc_realtime_defaults() -> Result<(), S
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
         .parent()
+        .and_then(std::path::Path::parent)
         .ok_or_else(|| "rkat manifest dir should have workspace parent".to_string())?;
     let workspace_manifest = read_manifest(workspace_root.join("Cargo.toml"))?;
     let cli_manifest = read_manifest(manifest_dir.join("Cargo.toml"))?;
-    let rpc_manifest = read_manifest(workspace_root.join("meerkat-rpc").join("Cargo.toml"))?;
+    let rpc_manifest = read_manifest(
+        workspace_root
+            .join("crates")
+            .join("meerkat-rpc")
+            .join("Cargo.toml"),
+    )?;
 
     let rpc_dependency = workspace_dependency_table(&workspace_manifest, "meerkat-rpc")?;
     assert_eq!(
@@ -208,8 +215,14 @@ fn facade_does_not_pull_websocket_transport_without_live_features() -> Result<()
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
         .parent()
+        .and_then(std::path::Path::parent)
         .ok_or_else(|| "rkat manifest dir should have workspace parent".to_string())?;
-    let facade_manifest = read_manifest(workspace_root.join("meerkat").join("Cargo.toml"))?;
+    let facade_manifest = read_manifest(
+        workspace_root
+            .join("crates")
+            .join("meerkat")
+            .join("Cargo.toml"),
+    )?;
 
     let native_dependencies = facade_manifest
         .get("target")

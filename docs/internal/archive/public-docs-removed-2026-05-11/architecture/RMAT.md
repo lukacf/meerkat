@@ -347,7 +347,7 @@ classification outside generated classifiers all fail the build unless baselined
 
 Read-seam violations — shell code that reads canonical authority state or
 declares shadow-state counters — are caught by the `ForbiddenShellAuthorityReads`
-AST rule inside `rmat-audit`. Policy entries in `xtask/src/rmat_policy.rs` bind
+AST rule inside `rmat-audit`. Policy entries in `crates/xtask/src/rmat_policy.rs` bind
 each rule to a file path and an AST pattern (method call, field declaration, or
 field access). Production findings are not suppressible; inline annotations are
 honored only in explicit test-fixture paths so canaries can exercise suppression

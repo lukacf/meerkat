@@ -157,7 +157,7 @@ is_governance_path() {
     return 0
   fi
   case "${path}" in
-    .claude/skills/meerkat-dogma-inquisition/*|docs/architecture/meerkat-dogma.md|docs/architecture/meerkat-dogma-commentary.md|docs-internal/dogma-audits/*)
+    .claude/skills/meerkat-dogma-inquisition/*|docs/architecture/meerkat-dogma.md|docs/architecture/meerkat-dogma-commentary.md|docs/internal/dogma-audits/*)
       return 0
       ;;
   esac

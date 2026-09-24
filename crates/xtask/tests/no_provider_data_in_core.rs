@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 fn repo_root() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.pop();
+    path.pop();
     path
 }
 
@@ -40,12 +41,12 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// back into the core contract surface.
 #[test]
 fn core_does_not_depend_on_meerkat_models() {
-    let manifest_path = repo_root().join("meerkat-core/Cargo.toml");
+    let manifest_path = repo_root().join("crates/meerkat-core/Cargo.toml");
     let manifest = std::fs::read_to_string(&manifest_path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", manifest_path.display()));
     assert!(
         !manifest.contains("meerkat-models"),
-        "meerkat-core/Cargo.toml references meerkat-models.\n\
+        "crates/meerkat-core/Cargo.toml references meerkat-models.\n\
          \n\
          PRINCIPLE: meerkat-core owns the model-catalog vocabulary and the\n\
          ModelCatalog mechanics, never the provider data. The data lives in\n\
@@ -56,7 +57,7 @@ fn core_does_not_depend_on_meerkat_models() {
     );
 }
 
-/// (b) No file under meerkat-core/src may contain a provider model-name
+/// (b) No file under crates/meerkat-core/src may contain a provider model-name
 /// literal (`"gpt-…"`, `"claude-…"`, `"gemini-…"`). This is a
 /// tombstone-class textual ban: the presence of such a literal anywhere in
 /// core IS the violation, regardless of context — real model names are
@@ -82,10 +83,13 @@ fn core_sources_contain_no_provider_model_literals() {
         None
     }
 
-    let src_root = repo_root().join("meerkat-core/src");
+    let src_root = repo_root().join("crates/meerkat-core/src");
     let mut files = Vec::new();
     collect_files(&src_root, &mut files);
-    assert!(!files.is_empty(), "meerkat-core/src must not be empty");
+    assert!(
+        !files.is_empty(),
+        "crates/meerkat-core/src must not be empty"
+    );
 
     let mut violations = Vec::new();
     for path in files {
@@ -99,7 +103,7 @@ fn core_sources_contain_no_provider_model_literals() {
 
     assert!(
         violations.is_empty(),
-        "provider model-name literals found under meerkat-core/src:\n  {}\n\
+        "provider model-name literals found under crates/meerkat-core/src:\n  {}\n\
          \n\
          PRINCIPLE: meerkat-core must contain ZERO provider-specific model\n\
          data — including model-name string literals in tests, fixtures, and\n\

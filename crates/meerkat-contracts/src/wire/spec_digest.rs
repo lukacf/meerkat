@@ -28,7 +28,7 @@ pub enum SpecDigestError {
 /// normalized on the `Value` tree first — the exact comparator used for
 /// comms envelope signing.
 ///
-/// TWIN ALGORITHM: `meerkat-comms/src/types.rs` `Envelope::signable_bytes`
+/// TWIN ALGORITHM: `crates/meerkat-comms/src/types.rs` `Envelope::signable_bytes`
 /// carries a byte-identical copy of this canonicalizer (the crates cannot
 /// share code without a dependency cycle). Any RFC 8949 edge-case fix must
 /// land in BOTH; the known-answer vector test below pins this copy's
@@ -180,7 +180,7 @@ mod tests {
 
     /// Known-answer vector for the RFC 8949 canonicalization semantics this
     /// canonicalizer must share byte-for-byte with the comms envelope twin
-    /// (meerkat-comms/src/types.rs signable_bytes): text map keys sort
+    /// (crates/meerkat-comms/src/types.rs signable_bytes): text map keys sort
     /// length-first then lexicographically, nested maps and maps inside
     /// arrays/tags are sorted too. If this pin moves, the envelope twin must
     /// move in the same change-set.

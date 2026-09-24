@@ -64,7 +64,7 @@ auth_profile = "{auth_profile_id}"
     realm_ids.insert(meerkat_core::derive_workspace_realm_id(&cwd));
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     realm_ids.insert(meerkat_core::derive_workspace_realm_id(&manifest_dir));
-    if let Some(workspace_root) = manifest_dir.parent() {
+    if let Some(workspace_root) = manifest_dir.parent().and_then(std::path::Path::parent) {
         realm_ids.insert(meerkat_core::derive_workspace_realm_id(workspace_root));
     }
 
@@ -129,7 +129,7 @@ fn rkat_binary() -> Option<PathBuf> {
         }
     }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent()?;
+    let workspace_root = manifest_dir.parent()?.parent()?;
     let codex_debug = workspace_root.join("target-codex/debug/rkat");
     if codex_debug.exists() {
         return Some(codex_debug);

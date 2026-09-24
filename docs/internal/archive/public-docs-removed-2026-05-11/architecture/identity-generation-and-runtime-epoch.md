@@ -128,7 +128,7 @@ Either choice is acceptable only if:
 ## Follow-on Material
 
 - Canonical machine and composition definitions live under
-  `meerkat-machine-schema/src/catalog/dsl/`.
+  `crates/meerkat-machine-schema/src/catalog/dsl/`.
 - Canonical generated specs live under `specs/machines/` and
   `specs/compositions/`.
 - The public architecture hub is [Architecture](/reference/architecture).

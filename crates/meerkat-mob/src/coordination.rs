@@ -4,7 +4,7 @@
 //! resource-claim records, their optimistic-concurrency revisions, affected
 //! resource sets, raw expiry timestamps, and the monotonic coordination event
 //! cursor — is owned by `MobMachine` (see
-//! `meerkat-machine-schema/src/catalog/dsl/mob_machine.rs`, the folded
+//! `crates/meerkat-machine-schema/src/catalog/dsl/mob_machine.rs`, the folded
 //! coordination transitions). The types in this module are *projections* over
 //! the typed effects MobMachine emits (`WorkIntentRecorded`,
 //! `ResourceClaimRecorded`, `WorkIntentStatusChanged`,

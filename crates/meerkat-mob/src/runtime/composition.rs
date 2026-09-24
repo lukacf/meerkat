@@ -298,7 +298,7 @@ pub fn wired_binding_from_runtime_adapter(
     // The schema is hand-authored and compile-time-fixed; a failure to
     // build the route table is a schema bug, not a runtime condition.
     // `expect` mirrors the pattern used by the dispatcher's own test
-    // helpers in `meerkat-runtime/src/composition/route_table.rs`.
+    // helpers in `crates/meerkat-runtime/src/composition/route_table.rs`.
     let table = RouteTable::from_schema(&schema)
         .expect("meerkat_mob_seam schema is well-formed by construction");
     let consumer = Arc::new(

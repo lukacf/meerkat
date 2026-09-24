@@ -37,17 +37,17 @@ impl AuditPolicy {
                 ),
             ],
             authority_modules: vec![
-                AuthorityModuleRule::new("meerkat-runtime/src/meerkat_machine.rs"),
-                AuthorityModuleRule::new("meerkat-mob/src/runtime/actor.rs"),
-                AuthorityModuleRule::new("meerkat-schedule/src/lifecycle.rs"),
+                AuthorityModuleRule::new("crates/meerkat-runtime/src/meerkat_machine.rs"),
+                AuthorityModuleRule::new("crates/meerkat-mob/src/runtime/actor.rs"),
+                AuthorityModuleRule::new("crates/meerkat-schedule/src/lifecycle.rs"),
                 // AuthMachine (dogma #43 resolved): the per-binding auth-lease
                 // lifecycle authority lives in meerkat-runtime. Every
                 // AuthMachine transition must route through the DSL kernel
                 // (`auth_machine::dsl::AuthMachineState::transition`), not
                 // handwritten reducers. Dead-code in this module signals that
                 // the handle trait is wired but the DSL kernel is not.
-                AuthorityModuleRule::new("meerkat-runtime/src/handles/auth_lease.rs"),
-                AuthorityModuleRule::new("meerkat-runtime/src/auth_machine/mod.rs"),
+                AuthorityModuleRule::new("crates/meerkat-runtime/src/handles/auth_lease.rs"),
+                AuthorityModuleRule::new("crates/meerkat-runtime/src/auth_machine/mod.rs"),
             ],
             protected_fields: vec![
                 ProtectedFieldRule::new(
@@ -225,7 +225,7 @@ fn resolve_consumer_input(producer: &str, effect_variant: &str, consumer: &str) 
     }
 
     Err(anyhow!(
-        "routed effect `{producer}::{effect_variant}` has no typed Route to consumer `{consumer}` in any canonical composition; the CompositionDispatcher cannot realize this producer→consumer pair — declare the Route in meerkat-machine-schema/src/catalog/compositions.rs"
+        "routed effect `{producer}::{effect_variant}` has no typed Route to consumer `{consumer}` in any canonical composition; the CompositionDispatcher cannot realize this producer→consumer pair — declare the Route in crates/meerkat-machine-schema/src/catalog/compositions.rs"
     ))
 }
 
@@ -325,7 +325,7 @@ fn default_protocol_realization_sites() -> Vec<ProtocolRealizationSiteRule> {
                 let protocol_name = protocol.name.as_str().to_string();
                 let mut candidate_paths = vec![protocol.rust.module_path.to_string()];
                 candidate_paths.extend(candidate_crates.into_iter().map(|crate_name| {
-                    format!("{crate_name}/src/generated/protocol_{protocol_name}.rs")
+                    format!("crates/{crate_name}/src/generated/protocol_{protocol_name}.rs")
                 }));
                 candidate_paths.sort();
                 candidate_paths.dedup();
@@ -390,7 +390,7 @@ fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> 
                     rules.push(TerminalMappingConstraintRule {
                         protocol_name: protocol.name.as_str().to_string(),
                         producer_machine: machine_name.to_string(),
-                        helper_path: "meerkat-core/src/generated/terminal_surface_mapping.rs",
+                        helper_path: "crates/meerkat-core/src/generated/terminal_surface_mapping.rs",
                     });
                 }
             }
@@ -445,7 +445,7 @@ fn default_forbidden_shell_reads() -> Vec<ForbiddenShellReadRule> {
         // `lifecycle_authority` means the shell is inspecting canonical
         // orchestrator state to decide whether to call apply().
         ForbiddenShellReadRule {
-            path_suffix: "meerkat-mob/src/runtime/actor.rs",
+            path_suffix: "crates/meerkat-mob/src/runtime/actor.rs",
             kind: ForbiddenShellReadKind::MethodCall {
                 method: "phase",
                 allowed_receivers: &["lifecycle_authority"],
@@ -454,7 +454,7 @@ fn default_forbidden_shell_reads() -> Vec<ForbiddenShellReadRule> {
         },
         // Ephemeral driver shell: no `ingress.phase()` gate before apply().
         ForbiddenShellReadRule {
-            path_suffix: "meerkat-runtime/src/driver/ephemeral.rs",
+            path_suffix: "crates/meerkat-runtime/src/driver/ephemeral.rs",
             kind: ForbiddenShellReadKind::MethodCall {
                 method: "phase",
                 allowed_receivers: &[],
@@ -464,7 +464,7 @@ fn default_forbidden_shell_reads() -> Vec<ForbiddenShellReadRule> {
         // Ephemeral driver shell: policy branching fields must flow through
         // authority.admit(); the shell must not classify inputs itself.
         ForbiddenShellReadRule {
-            path_suffix: "meerkat-runtime/src/driver/ephemeral.rs",
+            path_suffix: "crates/meerkat-runtime/src/driver/ephemeral.rs",
             kind: ForbiddenShellReadKind::FieldAccess {
                 base_ident: "policy",
                 field_name: "apply_mode",
@@ -472,7 +472,7 @@ fn default_forbidden_shell_reads() -> Vec<ForbiddenShellReadRule> {
             hint: "use authority.admit(); policy fields are authority-owned classification input",
         },
         ForbiddenShellReadRule {
-            path_suffix: "meerkat-runtime/src/driver/ephemeral.rs",
+            path_suffix: "crates/meerkat-runtime/src/driver/ephemeral.rs",
             kind: ForbiddenShellReadKind::FieldAccess {
                 base_ident: "policy",
                 field_name: "queue_mode",
@@ -480,7 +480,7 @@ fn default_forbidden_shell_reads() -> Vec<ForbiddenShellReadRule> {
             hint: "use authority.admit(); policy fields are authority-owned classification input",
         },
         ForbiddenShellReadRule {
-            path_suffix: "meerkat-runtime/src/driver/ephemeral.rs",
+            path_suffix: "crates/meerkat-runtime/src/driver/ephemeral.rs",
             kind: ForbiddenShellReadKind::FieldAccess {
                 base_ident: "policy",
                 field_name: "consume_point",
@@ -490,7 +490,7 @@ fn default_forbidden_shell_reads() -> Vec<ForbiddenShellReadRule> {
         // MCP router: removal timing lives in ExternalToolSurfaceAuthority, not
         // a shell-owned HashMap.
         ForbiddenShellReadRule {
-            path_suffix: "meerkat-mcp/src/router.rs",
+            path_suffix: "crates/meerkat-mcp/src/router.rs",
             kind: ForbiddenShellReadKind::FieldDeclared {
                 field_name: "removal_timeouts",
             },
@@ -500,14 +500,14 @@ fn default_forbidden_shell_reads() -> Vec<ForbiddenShellReadRule> {
         // The snapshot type `MobFlowTrackerSnapshot` (in runtime/mod.rs) can
         // still populate these via struct-literal projection.
         ForbiddenShellReadRule {
-            path_suffix: "meerkat-mob/src/runtime/actor.rs",
+            path_suffix: "crates/meerkat-mob/src/runtime/actor.rs",
             kind: ForbiddenShellReadKind::FieldDeclared {
                 field_name: "tracked_flows",
             },
             hint: "read counts from authority snapshots (orchestrator.snapshot().active_flow_count)",
         },
         ForbiddenShellReadRule {
-            path_suffix: "meerkat-mob/src/runtime/actor.rs",
+            path_suffix: "crates/meerkat-mob/src/runtime/actor.rs",
             kind: ForbiddenShellReadKind::FieldDeclared {
                 field_name: "pending_spawn_ids",
             },
@@ -523,24 +523,24 @@ fn default_allowed_paths(producer: &str, consumer: &str) -> Vec<&'static str> {
             // `meerkat_machine/` module directory; point at `mod.rs` so
             // the realization-path existence check resolves.
             vec![
-                "meerkat-runtime/src/meerkat_machine/mod.rs",
-                "meerkat-mob/src/runtime/actor.rs",
-                "meerkat-mob/src/runtime/handle.rs",
+                "crates/meerkat-runtime/src/meerkat_machine/mod.rs",
+                "crates/meerkat-mob/src/runtime/actor.rs",
+                "crates/meerkat-mob/src/runtime/handle.rs",
             ]
         }
         ("ScheduleLifecycleMachine", "OccurrenceLifecycleMachine")
         | ("OccurrenceLifecycleMachine", "ScheduleLifecycleMachine") => {
             // Both directions of the schedule_bundle seam are realised
             // via the same service driver path.
-            vec!["meerkat-schedule/src/service.rs"]
+            vec!["crates/meerkat-schedule/src/service.rs"]
         }
         ("WorkGraphLifecycleMachine", "WorkAttentionLifecycleMachine") => {
             // Work item closure fans out to co-resident attention bindings via
             // the WorkGraph service and commits the item/attention transition
             // atomically through the store CAS helper.
             vec![
-                "meerkat-workgraph/src/service.rs",
-                "meerkat-workgraph/src/store.rs",
+                "crates/meerkat-workgraph/src/service.rs",
+                "crates/meerkat-workgraph/src/store.rs",
             ]
         }
         ("DetachedJobMachine", "RuntimeDeliveryMachine")
@@ -549,7 +549,7 @@ fn default_allowed_paths(producer: &str, consumer: &str) -> Vec<&'static str> {
             // protocol: submit terminal outbox payload into runtime delivery
             // authority, then acknowledge the job only after durable commit
             // or exact generated reuse.
-            vec!["meerkat/src/job_delivery.rs"]
+            vec!["crates/meerkat/src/job_delivery.rs"]
         }
         _ => vec![],
     }

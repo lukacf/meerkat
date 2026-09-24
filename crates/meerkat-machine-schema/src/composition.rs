@@ -3810,8 +3810,8 @@ mod rust_metadata_validation_tests {
     #[test]
     fn metadata_from_impls_accept_valid_values_at_ingress() {
         assert_eq!(
-            RustModulePath::from("meerkat-runtime/src/generated/x.rs").as_str(),
-            "meerkat-runtime/src/generated/x.rs"
+            RustModulePath::from("crates/meerkat-runtime/src/generated/x.rs").as_str(),
+            "crates/meerkat-runtime/src/generated/x.rs"
         );
         assert_eq!(RustItemIdent::from("ValidIdent").as_str(), "ValidIdent");
         assert_eq!(

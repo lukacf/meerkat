@@ -48,19 +48,19 @@ pub fn collect_runtime_authority_bypass_findings(root: &Path) -> Result<Vec<Stri
 }
 
 fn audit_public_runtime_queue_surface(root: &Path, findings: &mut Vec<String>) -> Result<()> {
-    let lib = root.join("meerkat-runtime/src/lib.rs");
+    let lib = root.join("crates/meerkat-runtime/src/lib.rs");
     if !lib.exists() {
         return Ok(());
     }
     let source = fs::read_to_string(&lib).with_context(|| format!("read {}", lib.display()))?;
-    let parsed = syn::parse_file(&source).context("parse meerkat-runtime/src/lib.rs")?;
+    let parsed = syn::parse_file(&source).context("parse crates/meerkat-runtime/src/lib.rs")?;
     for item in parsed.items {
         match item {
             syn::Item::Mod(module)
                 if module.ident == "queue" && matches!(module.vis, syn::Visibility::Public(_)) =>
             {
                 findings.push(
-                    "meerkat-runtime/src/lib.rs: public raw InputQueue module `queue` bypasses generated authority"
+                    "crates/meerkat-runtime/src/lib.rs: public raw InputQueue module `queue` bypasses generated authority"
                         .to_owned(),
                 );
             }
@@ -69,7 +69,7 @@ fn audit_public_runtime_queue_surface(root: &Path, findings: &mut Vec<String>) -
                     && use_tree_contains_ident(&item_use.tree, "InputQueue") =>
             {
                 findings.push(
-                    "meerkat-runtime/src/lib.rs: public raw InputQueue re-export bypasses generated authority"
+                    "crates/meerkat-runtime/src/lib.rs: public raw InputQueue re-export bypasses generated authority"
                         .to_owned(),
                 );
             }
@@ -85,12 +85,12 @@ struct SourceFile {
 }
 
 fn runtime_source_files(root: &Path) -> Result<Vec<SourceFile>> {
-    let runtime_src = root.join("meerkat-runtime/src");
+    let runtime_src = root.join("crates/meerkat-runtime/src");
     if !runtime_src.exists() {
         return Ok(Vec::new());
     }
     let mut files = Vec::new();
-    let mob_runtime_src = root.join("meerkat-mob/src/runtime");
+    let mob_runtime_src = root.join("crates/meerkat-mob/src/runtime");
     let mut stack = vec![runtime_src];
     if mob_runtime_src.exists() {
         stack.push(mob_runtime_src);

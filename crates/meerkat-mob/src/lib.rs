@@ -200,7 +200,7 @@ pub mod machine_schema_exports {
 
     /// Production-schema parity export for the non-canonical scoped authority
     /// (plan §21.5). `attach_to` keeps the expansion's own rust binding, which
-    /// is what `meerkat-mob/tests/mob_host_binding_authority.rs` compares
+    /// is what `crates/meerkat-mob/tests/mob_host_binding_authority.rs` compares
     /// against the catalog-side production-schema variant.
     pub fn mob_host_binding_authority_schema() -> meerkat_machine_schema::MachineSchema {
         meerkat_machine_schema::catalog::dsl::mob_host_binding_authority_schema_metadata()

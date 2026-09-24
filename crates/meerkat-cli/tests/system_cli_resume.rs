@@ -29,7 +29,7 @@ fn rkat_binary_path() -> Option<PathBuf> {
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent()?;
+    let workspace_root = manifest_dir.parent()?.parent()?;
     let codex_debug = workspace_root.join("target-codex/debug/rkat");
     if codex_debug.exists() {
         return Some(codex_debug);

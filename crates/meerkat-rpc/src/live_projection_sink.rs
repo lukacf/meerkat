@@ -589,7 +589,7 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         // R5-7: forward the authoritative final transcript text into the
         // realtime-staging pipeline as
         // `RealtimeTranscriptEvent::AssistantTranscriptFinalText`. The
-        // materializer (Phase-1, `meerkat-core/src/session.rs:1062-1107`)
+        // materializer (Phase-1, `crates/meerkat-core/src/session.rs:1062-1107`)
         //   - respects `discarded_assistant_response_ids` (barge-in invariant),
         //   - looks up / creates the staged item via `observe_realtime_item`
         //     keyed on `(response_id, item_id)` so final-only providers get
@@ -2538,7 +2538,7 @@ mod tests {
     // delta paths produced no transcript block.
     //
     // Phase-1 already covers the materializer behavior in
-    // `meerkat-core/src/session.rs` regression tests:
+    // `crates/meerkat-core/src/session.rs` regression tests:
     //   - `realtime_transcript_final_text_overrides_partial_delta_and_promotes_to_spoken_lane`
     //   - `realtime_transcript_final_text_creates_item_when_no_delta_staged`
     //
@@ -2730,7 +2730,7 @@ mod tests {
     // session materializer to flush every assistant transcript as
     // `AssistantBlock::Text`. The fix routes it through the new
     // `AssistantTranscriptDelta` variant so the materializer (verified
-    // separately in `meerkat-core/src/session.rs` regression tests)
+    // separately in `crates/meerkat-core/src/session.rs` regression tests)
     // can flip to `AssistantBlock::Transcript { source: Spoken }`.
     // ------------------------------------------------------------------
 
@@ -2864,21 +2864,21 @@ mod tests {
     // committed exclusively by the realtime-staging materializer
     // (driven by the `AssistantTurnCompleted` event the production
     // `signal_turn_completed` synthesizes; see
-    // `meerkat-core/src/session.rs::Session::materialize_realtime_transcript_ready_items`).
+    // `crates/meerkat-core/src/session.rs::Session::materialize_realtime_transcript_ready_items`).
     // The Round-4 replacement coverage lives in
     // `round4_cc2_signal_turn_completed_synthesizes_assistant_turn_completed_first`,
     // `round4_cc2_realtime_materialized_skips_empty_buffered_drain`,
     // and `round4_cc2_realtime_materialized_with_text_drains_zero_usage`,
     // plus the session-layer end-to-end pin
     // `realtime_transcript_assistant_transcript_delta_materializes_transcript_block`
-    // already in `meerkat-core/src/session.rs`.
+    // already in `crates/meerkat-core/src/session.rs`.
 
     // ------------------------------------------------------------------
     // CC7 (Round-4 adversarial-verifier follow-up): host.apply_observation
     // dispatches a mixed-modality realtime response (display-text deltas +
     // spoken-transcript deltas under one response_id) onto the correct
     // sink lanes, in order. The session-level end-to-end pin lives in
-    // `meerkat-core/src/session.rs::tests::round4_cc7_*` and asserts that
+    // `crates/meerkat-core/src/session.rs::tests::round4_cc7_*` and asserts that
     // the runtime materializer commits one ordered Text+Transcript message
     // into canonical history. This sink-level pin asserts the production
     // host's `apply_observation` routing -> the seam the production sink

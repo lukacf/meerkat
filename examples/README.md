@@ -45,8 +45,8 @@ change the credentials needed, but must apply to the roots used by the script:
 010 redirects its roots into `.work/`, and 004 includes an `--isolated` run.
 An ordinary-realm-only model pin is not sufficient for every run.
 
-Most numbered Rust examples are registered in `meerkat/Cargo.toml`; 017-019
-are registered in `meerkat-mob/Cargo.toml` and use `-p meerkat-mob`. Examples
+Most numbered Rust examples are registered in `crates/meerkat/Cargo.toml`; 017-019
+are registered in `crates/meerkat-mob/Cargo.toml` and use `-p meerkat-mob`. Examples
 034 and 035 are standalone packages: select their `Cargo.toml` with
 `--manifest-path` and the desired binary with `--bin`. See each example's own
 run instructions for target names and required features. For example, run

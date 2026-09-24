@@ -51,8 +51,8 @@ For simultaneous reviewers in the same checkout, set a distinct `RUST_LANE_ID` f
 ### 3. Stub Detection
 Search for incomplete code in the relevant source directories:
 ```bash
-grep -r "todo!" meerkat-core/src/
-grep -r "unimplemented!" meerkat-core/src/
+grep -r "todo!" crates/meerkat-core/src/
+grep -r "unimplemented!" crates/meerkat-core/src/
 ```
 
 ### 4. Verify Round-Trips

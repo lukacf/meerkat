@@ -59,7 +59,7 @@ fn rkat_binary_path() -> Option<PathBuf> {
         }
     }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent()?;
+    let workspace_root = manifest_dir.parent()?.parent()?;
     for target in ["target-codex", "target"] {
         for profile in ["debug", "release"] {
             let candidate = workspace_root.join(target).join(profile).join("rkat");

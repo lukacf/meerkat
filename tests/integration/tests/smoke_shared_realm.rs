@@ -6486,7 +6486,7 @@ async fn e2e_m70_live_send_input_invalid_base64_returns_invalid_params()
 /// B19 capability gate end-to-end.
 ///
 /// The unit-level regressions for the precheck staged-session path live in
-/// `meerkat-rpc/src/session_runtime.rs::tests` as
+/// `crates/meerkat-rpc/src/session_runtime.rs::tests` as
 /// `precheck_live_open_recovers_deferred_realtime_session` (positive) and
 /// `precheck_live_open_rejects_deferred_non_realtime_session` (negative).
 /// Both assert pre-state — staged but not in the live map — so they fail
@@ -6714,7 +6714,7 @@ async fn e2e_m73_live_open_gemini_provider_rejected_by_precheck()
         // The B18 contract ("provider gemini has no live adapter",
         // INTERNAL_ERROR / -32603) is currently UNREACHABLE through the
         // precheck for any Gemini session. `precheck_identity` (in
-        // `meerkat-rpc/src/session_runtime.rs`) checks the realtime
+        // `crates/meerkat-rpc/src/session_runtime.rs`) checks the realtime
         // capability gate (B19) BEFORE the provider gate (B18), and the
         // model catalog has zero non-OpenAI realtime-capable models — so
         // every Gemini session resolves to a non-realtime model and
@@ -6726,7 +6726,7 @@ async fn e2e_m73_live_open_gemini_provider_rejected_by_precheck()
         // A proper B18 sentinel would be a unit test on `precheck_identity`
         // with a synthetic `SessionLlmIdentity { provider: Gemini, model:
         // <hypothetical realtime-capable> }` — that has to be added in
-        // `meerkat-rpc/src/session_runtime.rs::tests` because the
+        // `crates/meerkat-rpc/src/session_runtime.rs::tests` because the
         // catalog-resolution path here can't construct that combination.
         assert_eq!(
             code, -32602,

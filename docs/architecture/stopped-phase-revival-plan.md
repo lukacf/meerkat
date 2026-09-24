@@ -10,9 +10,9 @@ icon: "rotate-right"
 > revival shipped in v0.7.24. The cold-revival runtime rebind follow-up shipped
 > in v0.7.26. This document is the historical root-cause and implementation
 > record; current code lives in
-> `meerkat-runtime/src/meerkat_machine/session_management.rs`, with the stopped
+> `crates/meerkat-runtime/src/meerkat_machine/session_management.rs`, with the stopped
 > lattice pinned by
-> `meerkat-machine-schema/tests/stopped_phase_revival_lattice.rs` and Mob
+> `crates/meerkat-machine-schema/tests/stopped_phase_revival_lattice.rs` and Mob
 > revival tests.
 
 Root cause (verified, wf_63cf2cb3-27c + field forensics): the MeerkatMachine session
@@ -30,8 +30,8 @@ symptoms are this one missing re-admission arc plus ad-hoc per-input tolerance a
 
 ## Fix: machine-owned revival at the two intent-to-use seams
 
-DSL edits in meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs AND its mirror
-meerkat-runtime/src/meerkat_machine/dsl.rs (machine-check-drift enforces parity):
+DSL edits in crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs AND its mirror
+crates/meerkat-runtime/src/meerkat_machine/dsl.rs (machine-check-drift enforces parity):
 
 1. RegisterSession (~5611) / RegisterSessionIdempotent (~5639): remove Stopped from
    per_phase. Add:
@@ -64,7 +64,7 @@ meerkat-runtime/src/meerkat_machine/dsl.rs (machine-check-drift enforces parity)
    caller must either be post-revival or handle typed rejection.
 5. AMENDMENT-1 (load-bearing): add RetireRequestedFromStopped (Stopped→Retired,
    mirroring RetireRequestedFromIdle guard family ~8315) and DELETE the shell phase
-   probes / early-return matches in meerkat-mob/src/runtime/session_service.rs
+   probes / early-return matches in crates/meerkat-mob/src/runtime/session_service.rs
    (:93-104, :116-128). Registered-Stopped retire currently hits
    RuntimeControlPlane::retire at :105 → Retire has no Stopped arm → guard-reject.
    Sequence with provisioner.rs:950: add Stopped to the ask-21d disposal match ONLY
@@ -127,7 +127,7 @@ adjustment (authority-lane precedent). No contracts wire-type changes.
 
 ## Bug B (historical): stale runtime snapshot vs store head — SUPERSEDED
 
-meerkat-session/src/persistent.rs load_authoritative_session_base_with_replay_info
+crates/meerkat-session/src/persistent.rs load_authoritative_session_base_with_replay_info
 preferred the runtime snapshot whenever present, no freshness comparison; quarantine
 only covered snapshot-absent. Field: snapshot froze at 83 msgs, store head 91; resume
 loaded 83, save rejected by the append-only guard — permanent wedge.

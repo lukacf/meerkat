@@ -1,6 +1,6 @@
 //! `catch_unwind` boundary guard for machine attachment/publication sites.
 //!
-//! Twin of `meerkat-mob/src/runtime/panic_capture.rs`, built on the shared
+//! Twin of `crates/meerkat-mob/src/runtime/panic_capture.rs`, built on the shared
 //! `meerkat_core::panic_payload` helpers.
 //!
 //! WHY (field incident, 2026-07-29): a panic during member provisioning was

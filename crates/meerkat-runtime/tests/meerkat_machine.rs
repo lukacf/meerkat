@@ -4223,7 +4223,7 @@ async fn completed_boundary_commit_failure_stops_executor_without_false_durable_
 /// The test above proves disposal works when a caller explicitly asks for it.
 /// Nothing proved that an ordinary session ever gets that ask. A mob member
 /// does, through the retire ladder in
-/// meerkat-mob/src/runtime/provisioner.rs:2207. A CLI or RPC session has no
+/// crates/meerkat-mob/src/runtime/provisioner.rs:2207. A CLI or RPC session has no
 /// such ladder, so the only caller it will ever have is registration itself -
 /// and registration used to answer a durability skew by handing the caller
 /// back a demand for a cold reload that only registration could mint. One

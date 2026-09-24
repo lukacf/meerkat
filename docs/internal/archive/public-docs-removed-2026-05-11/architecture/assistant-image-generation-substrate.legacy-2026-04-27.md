@@ -172,13 +172,13 @@ The ten workstreams produced enough confidence to lock the following decisions:
 
 Code inspection shows the current replay gap is concrete:
 
-- `meerkat-core/src/image_content.rs` externalizes and hydrates images in user
+- `crates/meerkat-core/src/image_content.rs` externalizes and hydrates images in user
   messages and tool results, but not generated assistant image blocks.
-- `meerkat-openai/src/client.rs` lowers user images to Responses `input_image`
+- `crates/meerkat-openai/src/client.rs` lowers user images to Responses `input_image`
   data URLs, but skips ordered assistant image blocks.
-- `meerkat-gemini/src/client.rs` lowers user images to `inlineData`, but skips
+- `crates/meerkat-gemini/src/client.rs` lowers user images to `inlineData`, but skips
   ordered assistant image blocks.
-- `meerkat-anthropic/src/client.rs` lowers user images to Anthropic image
+- `crates/meerkat-anthropic/src/client.rs` lowers user images to Anthropic image
   source blocks, but skips ordered assistant image blocks.
 - SDK history parsers and wire schemas currently expose `role:
   "block_assistant"` plus `block_type: "image"` as their generated-image view.
@@ -372,23 +372,23 @@ The rewrite is a wire and surface change, not a local type cleanup.
 
 High-risk Rust areas:
 
-- `meerkat-core/src/types.rs`: message variants, assistant block variants, user
+- `crates/meerkat-core/src/types.rs`: message variants, assistant block variants, user
   and assistant metadata, cutover validation.
-- `meerkat-core/src/session.rs`: assistant append helpers, text extraction,
+- `crates/meerkat-core/src/session.rs`: assistant append helpers, text extraction,
   tool-call iteration, and external assistant append.
-- `meerkat-core/src/agent/state.rs` and `meerkat-core/src/agent/runner.rs`:
+- `crates/meerkat-core/src/agent/state.rs` and `crates/meerkat-core/src/agent/runner.rs`:
   assistant message construction and session-effect ordering.
-- `meerkat-core/src/image_content.rs`: structural traversal over all
+- `crates/meerkat-core/src/image_content.rs`: structural traversal over all
   `ContentBlock`s.
-- `meerkat-session/src/compactor.rs`: media stripping and image replay policy
+- `crates/meerkat-session/src/compactor.rs`: media stripping and image replay policy
   through compaction.
 - `meerkat-openai`, `meerkat-gemini`, and `meerkat-anthropic`: provider
   request builders and opaque provider replay-envelope codecs.
-- `meerkat-tools/src/builtin/image_generation.rs`: generated assistant content
+- `crates/meerkat-tools/src/builtin/image_generation.rs`: generated assistant content
   append and provenance metadata. During Slices 1-5 the builtin must terminalize
   typed as unavailable instead of using the removed `BlockAssistant` append path
   or synthesizing the new generated-image handle path before the machine owns it.
-- `meerkat-contracts/src/wire/session.rs`: public history schema.
+- `crates/meerkat-contracts/src/wire/session.rs`: public history schema.
 - `meerkat-store`: persisted session JSON cutover errors or explicit offline
   migration tooling.
 
@@ -3583,11 +3583,11 @@ purpose rather than lower it as a source/reference.
 ## References
 
 - `docs/architecture/meerkat-runtime-dogma.md`
-- `meerkat-core/src/types.rs`
-- `meerkat-core/src/image_content.rs`
-- `meerkat-tools/src/builtin/image_generation.rs`
-- `meerkat-openai/src/client.rs`
-- `meerkat-gemini/src/client.rs`
+- `crates/meerkat-core/src/types.rs`
+- `crates/meerkat-core/src/image_content.rs`
+- `crates/meerkat-tools/src/builtin/image_generation.rs`
+- `crates/meerkat-openai/src/client.rs`
+- `crates/meerkat-gemini/src/client.rs`
 - OpenAI image generation guide:
   `https://developers.openai.com/api/docs/guides/image-generation`
 - OpenAI Responses image generation tool:

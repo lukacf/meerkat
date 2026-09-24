@@ -86,7 +86,7 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
-        "//meerkat:__pkg__",
+        "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.41",
@@ -97,7 +97,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-atif",
         normal = True,

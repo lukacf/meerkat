@@ -4,7 +4,7 @@
 //! `meerkat-gemini`) implement `ProviderRuntime`. Shared auth primitives
 //! (TokenStore/OAuth/cloud-IAM authorizers) live in `meerkat-auth-core`.
 //!
-//! Moved from `meerkat-providers/src/runtime/*` in the B2 split
+//! Moved from `crates/meerkat-providers/src/runtime/*` in the B2 split
 //! (2026-04-18) so that the trait surface is reachable without pulling
 //! in provider-specific or heavy-IO dependencies.
 

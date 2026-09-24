@@ -9,9 +9,9 @@
 //! pipeline resolves a WS `&format=` token deterministically.
 //!
 //! The scripted precedents this lifts were test-private
-//! (`meerkat-openai/tests/mock_realtime_ws`, the facade's
+//! (`crates/meerkat-openai/tests/mock_realtime_ws`, the facade's
 //! `RecordingProviderRealtimeFactory`); this module is the ONE shared home
-//! (facade tests, `meerkat-mob/tests` via dev-dependency + feature, and
+//! (facade tests, `crates/meerkat-mob/tests` via dev-dependency + feature, and
 //! the integration crate's thin re-export shim).
 
 use std::sync::atomic::{AtomicBool, Ordering};

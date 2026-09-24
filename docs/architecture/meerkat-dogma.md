@@ -498,7 +498,7 @@ If any answer is "sort of", the design is wrong.
 ## Legacy Rule Numbering
 
 Older audits, ledgers, and reviews cite the archived runtime doctrine
-(`docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`)
+(`docs/internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`)
 by legacy rule number (#1–#20). This table is the authoritative mapping; do
 not re-derive it from memory. Rule 5 (Composability Is Feature-Owned) has no
 legacy counterpart.

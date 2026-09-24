@@ -922,6 +922,7 @@ mod mcp_protocol {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
         let workspace_root = std::path::Path::new(&manifest_dir)
             .parent()
+            .and_then(std::path::Path::parent)
             .unwrap_or(std::path::Path::new("."));
         let server_path = std::env::var_os("CARGO_TARGET_DIR")
             .map(std::path::PathBuf::from)

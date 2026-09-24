@@ -1,6 +1,6 @@
 # LUC-524 — Dogma Invariant 1 enforcement ledger
 
-> **Archived 2026-06-11.** This campaign executed: the REMAINING helper authorities listed below (`session_system_context_authority`, `session_realtime_transcript_authority`, `session_deferred_turn_authority`, `session_durable_config_authority`) no longer exist in the workspace — folded into SessionDocumentMachine/MeerkatMachine (see `docs-internal/dogma-audits/PR759-final-ledger.md`, follow-up item 1, commit `1a88a7d10`). Historical record only.
+> **Archived 2026-06-11.** This campaign executed: the REMAINING helper authorities listed below (`session_system_context_authority`, `session_realtime_transcript_authority`, `session_deferred_turn_authority`, `session_durable_config_authority`) no longer exist in the workspace — folded into SessionDocumentMachine/MeerkatMachine (see `docs/internal/dogma-audits/PR759-final-ledger.md`, follow-up item 1, commit `1a88a7d10`). Historical record only.
 
 **Invariant 1:** every lifecycle/admission/recovery/write semantic decision is
 either inside a canonical TLA-validated machine/composition, or a non-canonical
@@ -22,8 +22,8 @@ status, which re-grows the set and leaves the fact off its owner).
 
 | Authority added by branch | Resolution | Old path deleted | Ratchet |
 |---|---|---|---|
-| `PendingContinuationAdmissionMachine` (canonical) | **Demoted** from canonical (step 1 of fold). Single-phase / `terminal []` / all-self-loop classifier consumed as plain functions. | canonical_machine_schemas + production_owner_relations entries; coverage manifest; `specs/machines/pending_continuation_admission/` TLA dir; `meerkat-machine-kernels/.../pending_continuation_admission.rs` kernel; schema_contracts canonical-name assertion; catalog_typed_round_trip slug; orphaned seam_inventory entries | schema_contracts now asserts PCAM is in the *absorbed-not-canonical* set. TODO: structural classifier-promotion ratchet (W9a) + finish fold so MeerkatMachine revalidates the boundary disposition (it currently feeds the non-canonical SessionTurnAdmissionMachine). |
-| `MobCoordinationLifecycleAuthorityMachine` (declared, non-canonical) | **FOLDED into MobMachine.** MobMachine now owns work_intent/resource_claim maps + monotonic event cursor; computes `already_exists` (map.contains), `revision` (stored-revision CAS), `is_expired` (stored `expires_at_ms` + raw `now_ms` in-DSL), owning-ref (raw `MobId` equality); overlap REVALIDATED via `candidates_are_valid_overlaps` + `no_omitted_overlap` guards over owned maps. | DSL machine file; `meerkat-mob/.../generated/mob_coordination_lifecycle_authority.rs`; ~1485-line bespoke emitter in `xtask/protocol_codegen.rs`; mob_coordination drift test; audit-generated-headers allowlist entry; dsl/mod.rs module+consts+accessors; `MobCoordinationBoard` reducer + revision/sequence arithmetic in `coordination.rs` (zero production callers; serde projection types kept) | seam-inventory completeness (the 5 inputs classified `runtime_internal`); machine-codegen drift gate; MobMachine TLC (heavy seam — pending milestone run). |
+| `PendingContinuationAdmissionMachine` (canonical) | **Demoted** from canonical (step 1 of fold). Single-phase / `terminal []` / all-self-loop classifier consumed as plain functions. | canonical_machine_schemas + production_owner_relations entries; coverage manifest; `specs/machines/pending_continuation_admission/` TLA dir; `crates/meerkat-machine-kernels/.../pending_continuation_admission.rs` kernel; schema_contracts canonical-name assertion; catalog_typed_round_trip slug; orphaned seam_inventory entries | schema_contracts now asserts PCAM is in the *absorbed-not-canonical* set. TODO: structural classifier-promotion ratchet (W9a) + finish fold so MeerkatMachine revalidates the boundary disposition (it currently feeds the non-canonical SessionTurnAdmissionMachine). |
+| `MobCoordinationLifecycleAuthorityMachine` (declared, non-canonical) | **FOLDED into MobMachine.** MobMachine now owns work_intent/resource_claim maps + monotonic event cursor; computes `already_exists` (map.contains), `revision` (stored-revision CAS), `is_expired` (stored `expires_at_ms` + raw `now_ms` in-DSL), owning-ref (raw `MobId` equality); overlap REVALIDATED via `candidates_are_valid_overlaps` + `no_omitted_overlap` guards over owned maps. | DSL machine file; `crates/meerkat-mob/.../generated/mob_coordination_lifecycle_authority.rs`; ~1485-line bespoke emitter in `crates/xtask/protocol_codegen.rs`; mob_coordination drift test; audit-generated-headers allowlist entry; dsl/mod.rs module+consts+accessors; `MobCoordinationBoard` reducer + revision/sequence arithmetic in `coordination.rs` (zero production callers; serde projection types kept) | seam-inventory completeness (the 5 inputs classified `runtime_internal`); machine-codegen drift gate; MobMachine TLC (heavy seam — pending milestone run). |
 
 Gates re-verified independently for both: `machine-check-drift` clean (8 machines /
 6 compositions), `meerkat-machine-schema` 115/115, `meerkat-mob` 1014/1014,
@@ -77,7 +77,7 @@ CRITICAL (turn-admission — both fold together):
 - PendingContinuationAdmissionMachine: unmodeled facts->disposition reducer
   (RunPending/NoPendingBoundary), not canonical, not a pure encoder. Consumed by
   SessionTurnAdmissionMachine + runner.rs.
-- SessionTurnAdmissionMachine (meerkat-session/src/turn_admission.rs): full
+- SessionTurnAdmissionMachine (crates/meerkat-session/src/turn_admission.rs): full
   multi-phase admission lifecycle (Idle/Admitted/Running/Completing/ShuttingDown,
   terminal [ShuttingDown]), the LIVE ephemeral turn gate, but non-canonical + no
   TLA model. Resolution: promote to canonical via the SessionDocument pattern
@@ -470,7 +470,7 @@ is_ready applied a synthetic __ready_probe__ Claim transition + .is_ok() (probe-
 guards reproduce the Claim guards exactly). is_ready mirrors (fail-closed to NOT ready); synthetic probe deleted.
 
 ### FEATURE-GATED-BREAK FIX (verification-gap catch): the round-5 FOLD A deletion of OccurrencePhase::is_terminal
-broke a SECOND consumer the fold agent missed — meerkat-store/src/schedule_sqlite_store.rs:237
+broke a SECOND consumer the fold agent missed — crates/meerkat-store/src/schedule_sqlite_store.rs:237
 occurrence.phase.is_terminal() — which is behind the `sqlite` feature, so default-feature builds/tests/agent
 gates did NOT catch it. Caught by `check --workspace --all-features`. Fixed to occurrence.is_terminal()
 (the machine-backed wrapper). LESSON: deletions need an --all-features sweep (feature-gated consumers).

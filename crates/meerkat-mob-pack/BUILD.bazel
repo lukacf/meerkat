@@ -67,7 +67,7 @@ rust_library(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob",
-        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-mob-pack",
         normal = True,
@@ -101,7 +101,7 @@ rust_library(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
-        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-mob-pack",
         normal = True,
@@ -150,7 +150,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
-        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-mob-pack",
         normal = True,

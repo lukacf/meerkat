@@ -886,7 +886,7 @@ async fn principal_grants_do_not_perturb_upcall_admission() {
     harness.scripted.shutdown();
 }
 
-// T-LS4 lives in-crate (meerkat-mob/src/runtime/tools.rs unit lane): the
+// T-LS4 lives in-crate (crates/meerkat-mob/src/runtime/tools.rs unit lane): the
 // upcall executor's dispatch handle binding (`CommandAuthorityKind::AgentLane`)
 // is not observable from this integration harness — the executor handle never
 // leaves the crate. The behavioral halves (grants don't gate upcalls; agent

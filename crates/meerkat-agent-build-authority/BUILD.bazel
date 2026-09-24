@@ -58,10 +58,10 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = [
         "//:__pkg__",
-        "//meerkat-core:__pkg__",
-        "//meerkat-mob:__pkg__",
-        "//meerkat-session:__pkg__",
-        "//meerkat:__pkg__",
+        "//crates/meerkat-core:__pkg__",
+        "//crates/meerkat-mob:__pkg__",
+        "//crates/meerkat-session:__pkg__",
+        "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.41",
@@ -97,10 +97,10 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = [
         "//:__pkg__",
-        "//meerkat-core:__pkg__",
-        "//meerkat-mob:__pkg__",
-        "//meerkat-session:__pkg__",
-        "//meerkat:__pkg__",
+        "//crates/meerkat-core:__pkg__",
+        "//crates/meerkat-mob:__pkg__",
+        "//crates/meerkat-session:__pkg__",
+        "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.41",

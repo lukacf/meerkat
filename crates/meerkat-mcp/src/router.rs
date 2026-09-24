@@ -2384,6 +2384,7 @@ mod tests {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
         let workspace_root = PathBuf::from(manifest_dir)
             .parent()
+            .and_then(std::path::Path::parent)
             .expect("workspace root")
             .to_path_buf();
         workspace_root

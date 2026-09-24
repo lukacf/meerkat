@@ -32,7 +32,7 @@ fn lease(realm: &str, binding: &str) -> LeaseKey {
 /// driving it into `reauth_required` (via `MarkReauthRequired`) yields a
 /// snapshot where `state == Some("reauth_required")` — this is the
 /// precise precondition the agent runner's CallingLlm arm checks
-/// (meerkat-core/src/agent/state.rs).
+/// (crates/meerkat-core/src/agent/state.rs).
 #[test]
 fn mark_reauth_required_transitions_to_reauth_required_state() {
     let handle = RuntimeAuthLeaseHandle::ephemeral();

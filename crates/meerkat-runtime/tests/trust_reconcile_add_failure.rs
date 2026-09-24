@@ -1,9 +1,9 @@
 //! Wave-c C-T §6 #3 — `CommsTrustReconciler` add-failure contract.
 //!
 //! Ports the blocker stub that was originally scaffolded in
-//! `meerkat-comms/tests/trust_reconcile_add_failure.rs` at c.0. See
+//! `crates/meerkat-comms/tests/trust_reconcile_add_failure.rs` at c.0. See
 //! the sibling `trust_reconcile_concurrency.rs` for the rationale on
-//! why the tests live in `meerkat-runtime/tests/` instead — the
+//! why the tests live in `crates/meerkat-runtime/tests/` instead — the
 //! reconciler lives in `meerkat-runtime`, and `meerkat-comms` cannot
 //! dev-dep on it without introducing a circular crate dependency.
 //!

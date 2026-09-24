@@ -99,7 +99,7 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
-        "//meerkat:__pkg__",
+        "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.41",
@@ -110,10 +110,10 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat:meerkat_capabilities_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_skills_agent_factory_build",
+        "//crates/meerkat:meerkat_capabilities_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_skills_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-comms",
         normal = True,
@@ -154,6 +154,7 @@ rust_test(
     ],
     size = "medium",
     data = [
+        "//crates/meerkat-contracts:package_runfiles",
         ":package_runfiles",
     ],
     env = {

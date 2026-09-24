@@ -22,8 +22,8 @@
 //!    consumers all surface as typed [`DispatchRefusal`] variants — the
 //!    dispatcher never silently drops a routed effect.
 //! 3. **Grep-level invariant.** Scan every file under
-//!    `meerkat-runtime/src/meerkat_machine/` and
-//!    `meerkat-runtime/src/mob_adapter.rs` and fail if any of them
+//!    `crates/meerkat-runtime/src/meerkat_machine/` and
+//!    `crates/meerkat-runtime/src/mob_adapter.rs` and fail if any of them
 //!    re-introduces a legacy routed-effect helper — e.g. the deleted
 //!    `composition_dispatch`, `recompute_mob_peer_overlay`, or
 //!    `comms_trust_reconcile` names. These are RMAT-adjacent canaries
@@ -346,8 +346,8 @@ async fn composition_binding_discriminates_standalone_vs_wired() {
 
 // ---------------------------------------------------------------------
 // 4. Grep-level RMAT canary: the deleted stringly-typed helpers from
-//    wave-a must not reappear in `meerkat-runtime/src/meerkat_machine/`
-//    or `meerkat-runtime/src/mob_adapter.rs`. B-10 will upgrade this to
+//    wave-a must not reappear in `crates/meerkat-runtime/src/meerkat_machine/`
+//    or `crates/meerkat-runtime/src/mob_adapter.rs`. B-10 will upgrade this to
 //    a semantic audit; for now the byte-pattern match is the minimum-
 //    viable invariant that the dispatcher is THE path.
 // ---------------------------------------------------------------------

@@ -22,8 +22,8 @@
 //! shows the persisted reference — not realm-local capability custody — is
 //! what resolves it. The host-owned seating and release halves are covered at
 //! the primitive level by
-//! `meerkat-mob/tests/forked_participant_host_attached_spawn.rs` and
-//! `meerkat-mob/tests/host_forked_participant_live_daemon.rs`, and the
+//! `crates/meerkat-mob/tests/forked_participant_host_attached_spawn.rs` and
+//! `crates/meerkat-mob/tests/host_forked_participant_live_daemon.rs`, and the
 //! coordinator adds no host-specific branch: it never inspects
 //! `ForkedParticipantOwnerRoute` and routes every capability verb through
 //! `MobHandle`, which owns the local/host decision.

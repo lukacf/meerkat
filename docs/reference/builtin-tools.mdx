@@ -108,7 +108,7 @@ may apply explicit presets of their own.
 
 `AgentFactory` is the only place tool categories are composed. The public `meerkat::AgentBuilder` delegates to the factory path with explicit client/tool/store overrides. The lower-level `meerkat_core::AgentBuilder` is not re-exported by the facade and is not a public standalone embedding API. See [AgentBuilder vs AgentFactory](/rust/advanced#agentbuilder-vs-agentfactory).
 
-**Source:** `meerkat/src/factory.rs` -- `AgentFactory` struct and builder methods.
+**Source:** `crates/meerkat/src/factory.rs` -- `AgentFactory` struct and builder methods.
 </Accordion>
 
 <Accordion title="Per-build overrides">
@@ -135,7 +135,7 @@ that dispatcher. The Meerkat-owned web-search fallback is different: it treats
 closed if its runtime dependencies cannot be provisioned. Enabling either
 category does not enable general builtins.
 
-**Source:** `meerkat/src/factory.rs` -- `AgentBuildConfig` struct.
+**Source:** `crates/meerkat/src/factory.rs` -- `AgentBuildConfig` struct.
 </Accordion>
 
 <Accordion title="ToolPolicyLayer">
@@ -164,7 +164,7 @@ undeclared tools, not an assertion that the call is harmless.
 </Accordion>
 
 <Accordion title="Capability registrations">
-Capabilities are registered via the `inventory` crate in `meerkat-tools/src/lib.rs`:
+Capabilities are registered via the `inventory` crate in `crates/meerkat-tools/src/lib.rs`:
 
 - **Builtins** (`CapabilityId::Builtins`): `task_list`, `task_create`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image`, and runtime-backed `blob_save_file`/`blob_load_file`/`blob_inspect` when a blob store is available. Controlled by `config.tools.builtins_enabled`.
 - **Shell** (`CapabilityId::Shell`): `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`, plus opt-in `monitor_start`. Controlled by `config.tools.shell_enabled` and per-tool policy.
@@ -194,7 +194,7 @@ Beyond static factory flags and per-build overrides, tool visibility can be chan
 
 **Persistence:** The active external filter is stored in session metadata under `tool_scope_external_filter` and restored on session resume.
 
-**Source:** `meerkat-core/src/tool_scope.rs`
+**Source:** `crates/meerkat-core/src/tool_scope.rs`
 </Accordion>
 
 <Accordion title="Live MCP server mutation">
@@ -209,7 +209,7 @@ MCP servers can be added or removed from a running session. Operations are stage
 
 Servers being removed transition through `Active → Removing (draining) → Removed` to allow in-flight tool calls to complete before finalization.
 
-**Source:** `meerkat-mcp/src/router.rs`, `meerkat-rpc/src/handlers/mcp.rs`
+**Source:** `crates/meerkat-mcp/src/router.rs`, `crates/meerkat-rpc/src/handlers/mcp.rs`
 </Accordion>
 
 <Accordion title="Per-turn tool overlay">
@@ -234,7 +234,7 @@ Public wire requests use the caller-safe `PublicTurnToolOverlay` shape:
 `allowed_tools` and `blocked_tools` contain string names. They do not accept
 the internal `dispatch_context` field.
 
-**Source:** `meerkat-core/src/service/mod.rs`, `meerkat-mob/src/runtime/flow.rs`
+**Source:** `crates/meerkat-core/src/service/mod.rs`, `crates/meerkat-mob/src/runtime/flow.rs`
 </Accordion>
 
 ## Deferred tool catalog control plane
@@ -264,7 +264,7 @@ The response contains `catalog_exact`, `total_matches`, `results`, optional
 `pending_source` is used only as the empty-result status while a catalog source
 is pending.
 
-**Source:** `meerkat-tools/src/control_plane.rs`
+**Source:** `crates/meerkat-tools/src/control_plane.rs`
 </Accordion>
 
 <Accordion title="tool_catalog_load">
@@ -282,8 +282,8 @@ resolution per requested name. Rejection reasons are `unknown_key`,
 Already staged or visible names are successful no-ops. Accepted loads take
 effect at the next boundary, not during the current tool call.
 
-**Source:** `meerkat-tools/src/control_plane.rs`,
-`meerkat-core/src/tool_catalog.rs`
+**Source:** `crates/meerkat-tools/src/control_plane.rs`,
+`crates/meerkat-core/src/tool_catalog.rs`
 </Accordion>
 
 ## Model-switch tool
@@ -299,9 +299,9 @@ interrupted, or hook-denied runs do not commit the switch, and later
 realization can still be denied or held. A staging result is not proof that
 the model has changed.
 
-**Source:** `meerkat-tools/src/builtin/brain_swap.rs`,
-`meerkat-tools/src/builtin/composite.rs`,
-`meerkat-core/src/agent/state.rs`, `meerkat-runtime/src/service_ext.rs`
+**Source:** `crates/meerkat-tools/src/builtin/brain_swap.rs`,
+`crates/meerkat-tools/src/builtin/composite.rs`,
+`crates/meerkat-core/src/agent/state.rs`, `crates/meerkat-runtime/src/service_ext.rs`
 
 ## Mob tools
 
@@ -319,7 +319,7 @@ Host/operator surfaces for placement, binding, grants, observation, live
 member sessions, and hard cancellation are control-plane APIs, not agent
 builtins, so they are intentionally excluded from this inventory.
 
-**Source:** `meerkat-mob-mcp/src/agent_tools.rs`
+**Source:** `crates/meerkat-mob-mcp/src/agent_tools.rs`
 
 ## Schedule tools
 
@@ -398,7 +398,7 @@ A `Task` object returned by task tools has these fields:
 | `owner` | `String?` | Owner/assignee (agent name or user identifier) |
 | `metadata` | `Object` | Arbitrary key-value metadata |
 
-**Source:** `meerkat-tools/src/builtin/types.rs` -- `Task` struct.
+**Source:** `crates/meerkat-tools/src/builtin/types.rs` -- `Task` struct.
 </Accordion>
 
 <Accordion title="task_create">
@@ -440,7 +440,7 @@ Create a new task in the project task list.
 
 **Returns:** The created `Task` object (see task data model above).
 
-**Source:** `meerkat-tools/src/builtin/tasks/task_create.rs`
+**Source:** `crates/meerkat-tools/src/builtin/tasks/task_create.rs`
 </Accordion>
 
 <Accordion title="task_get">
@@ -456,7 +456,7 @@ Get a task by its ID.
 
 **Error:** `ExecutionFailed` if the task ID is not found.
 
-**Source:** `meerkat-tools/src/builtin/tasks/task_get.rs`
+**Source:** `crates/meerkat-tools/src/builtin/tasks/task_get.rs`
 </Accordion>
 
 <Accordion title="task_list">
@@ -474,7 +474,7 @@ List tasks in the project, optionally filtered by status or labels.
 
 **Returns:** Array of `Task` objects matching the filters.
 
-**Source:** `meerkat-tools/src/builtin/tasks/task_list.rs`
+**Source:** `crates/meerkat-tools/src/builtin/tasks/task_list.rs`
 </Accordion>
 
 <Accordion title="task_update">
@@ -534,7 +534,7 @@ Update an existing task. Only provided fields are modified; omitted fields remai
 
 **Error:** `ExecutionFailed` if the task ID is not found.
 
-**Source:** `meerkat-tools/src/builtin/tasks/task_update.rs`
+**Source:** `crates/meerkat-tools/src/builtin/tasks/task_update.rs`
 </Accordion>
 
 ## Shell tools
@@ -606,7 +606,7 @@ Shell behavior is controlled by `ShellConfig`:
 | `security_mode` | `SecurityMode` | `Unrestricted` | Command security policy |
 | `security_patterns` | `Vec<String>` | `[]` | Glob patterns for allow/deny lists |
 
-**Source:** `meerkat-tools/src/builtin/shell/config.rs`
+**Source:** `crates/meerkat-tools/src/builtin/shell/config.rs`
 </Accordion>
 
 <Accordion title="Shell security modes">
@@ -622,7 +622,7 @@ The engine parses the command into an executable and arguments, canonicalizes
 that complete invocation, and matches the full canonical string against the
 pattern set.
 
-**Source:** `meerkat-tools/src/builtin/shell/security.rs`
+**Source:** `crates/meerkat-tools/src/builtin/shell/security.rs`
 </Accordion>
 
 <Accordion title="shell">
@@ -674,7 +674,7 @@ Execute a shell command. Uses POSIX-style parsing for policy checks; runs via Nu
 Output is truncated to the last 100,000 characters if it exceeds that limit. Fields `stdout_lossy` and `stderr_lossy` indicate whether output was lossy-decoded from non-UTF-8 bytes.
 </Note>
 
-**Source:** `meerkat-tools/src/builtin/shell/tool.rs`
+**Source:** `crates/meerkat-tools/src/builtin/shell/tool.rs`
 </Accordion>
 
 <Accordion title="monitor_start">
@@ -715,7 +715,7 @@ Restart class is a declaration enforced by the detached execution contract,
 not a promise inferred from the command text. Replayable and resumable scripts
 must implement the corresponding idempotency/checkpoint behavior.
 
-**Source:** `meerkat-tools/src/builtin/shell/monitor_tool.rs`
+**Source:** `crates/meerkat-tools/src/builtin/shell/monitor_tool.rs`
 </Accordion>
 
 <Accordion title="shell_jobs">
@@ -740,7 +740,7 @@ The summary `status` field is one of: `"queued"`, `"running"`,
 `"completed"`, `"failed"`, `"cancelled"`, `"worker_lost"`, or
 `"needs_attention"`.
 
-**Source:** `meerkat-tools/src/builtin/shell/jobs_list_tool.rs`
+**Source:** `crates/meerkat-tools/src/builtin/shell/jobs_list_tool.rs`
 </Accordion>
 
 <Accordion title="shell_job_status">
@@ -771,7 +771,7 @@ Check status of a background shell job. Returns full job details including outpu
 
 **Error:** `ExecutionFailed` if the job ID is not found.
 
-**Source:** `meerkat-tools/src/builtin/shell/job_status_tool.rs`
+**Source:** `crates/meerkat-tools/src/builtin/shell/job_status_tool.rs`
 </Accordion>
 
 <Accordion title="shell_job_cancel">
@@ -797,7 +797,7 @@ immediately because there is nothing to contain.
 
 **Error:** `ExecutionFailed` if the job ID is not found.
 
-**Source:** `meerkat-tools/src/builtin/shell/job_cancel_tool.rs`
+**Source:** `crates/meerkat-tools/src/builtin/shell/job_cancel_tool.rs`
 </Accordion>
 
 <Accordion title="Shell types">
@@ -808,7 +808,7 @@ immediately because there is nothing to contain.
 snake_case status tags). A command timeout is represented by the worker's
 terminal failure facts; there is no current `TimedOut` enum variant.
 
-**Source:** `meerkat-tools/src/builtin/shell/types.rs`
+**Source:** `crates/meerkat-tools/src/builtin/shell/types.rs`
 </Accordion>
 
 ## Memory tool
@@ -844,7 +844,7 @@ results do not carry a `session_id`, and there is no cross-session recall.
 
 Returns an empty array if no matches are found.
 
-**Source:** `meerkat-memory/src/tool.rs`
+**Source:** `crates/meerkat-memory/src/tool.rs`
 </Accordion>
 
 ## Utility tools
@@ -872,7 +872,7 @@ Get the current date and time. Returns ISO 8601 formatted datetime and Unix time
 }
 ```
 
-**Source:** `meerkat-tools/src/builtin/utility/datetime.rs`
+**Source:** `crates/meerkat-tools/src/builtin/utility/datetime.rs`
 </Accordion>
 
 <Accordion title="apply_patch">
@@ -894,7 +894,7 @@ after an earlier operation can leave that earlier operation applied.
 The JSON result reports `status: "success"` plus `added_files`,
 `modified_files`, and `deleted_files`.
 
-**Source:** `meerkat-tools/src/builtin/utility/apply_patch.rs`
+**Source:** `crates/meerkat-tools/src/builtin/utility/apply_patch.rs`
 </Accordion>
 
 <Accordion title="view_image">
@@ -914,7 +914,7 @@ Read an image file from the project directory and return its contents as a base6
 
 **Returns:** A content-block result containing a single `ContentBlock::Image` with the base64-encoded image data and detected media type.
 
-**Source:** `meerkat-tools/src/builtin/utility/view_image.rs`
+**Source:** `crates/meerkat-tools/src/builtin/utility/view_image.rs`
 </Accordion>
 
 <Accordion title="blob_save_file">
@@ -936,7 +936,7 @@ Save decoded bytes from the session blob store to a file inside the project root
 
 **Returns:** JSON metadata: `blob_id`, `media_type`, `path`, and `bytes_written`. Raw bytes are never returned in the tool result.
 
-**Source:** `meerkat-tools/src/builtin/utility/blob_file.rs`
+**Source:** `crates/meerkat-tools/src/builtin/utility/blob_file.rs`
 </Accordion>
 
 <Accordion title="blob_load_file">
@@ -956,7 +956,7 @@ Read a file inside the project root and store its bytes in the realm blob store.
 
 **Returns:** JSON metadata: `blob_id`, `media_type`, `path`, and `bytes_read`. Raw bytes are never returned in the tool result.
 
-**Source:** `meerkat-tools/src/builtin/utility/blob_file.rs`
+**Source:** `crates/meerkat-tools/src/builtin/utility/blob_file.rs`
 </Accordion>
 
 <Accordion title="blob_inspect">
@@ -970,7 +970,7 @@ Inspect a blob without returning its raw payload.
 
 **Returns:** JSON metadata: `blob_id`, `media_type`, and decoded `size_bytes`.
 
-**Source:** `meerkat-tools/src/builtin/utility/blob_file.rs`
+**Source:** `crates/meerkat-tools/src/builtin/utility/blob_file.rs`
 </Accordion>
 
 <Accordion title="generate_image">
@@ -1011,7 +1011,7 @@ opening general builtins. See the guide for the current surface matrix.
 
 **Returns:** `ImageGenerationToolResult` JSON containing `operation_id`, `terminal`, `images`, `provider_text`, `revised_prompt`, `native_metadata`, and `warnings`. Each generated image includes `blob_ref.blob_id`, which can be saved from inside the session with `blob_save_file` or fetched externally with `rkat blob get <blob_id> --output image.png`.
 
-**Source:** `meerkat-tools/src/builtin/image_generation.rs`
+**Source:** `crates/meerkat-tools/src/builtin/image_generation.rs`
 
 See [Image generation](/guides/image-generation) for provider behavior, examples, and troubleshooting.
 </Accordion>
@@ -1046,7 +1046,7 @@ from the provider, not Meerkat-owned truth.
 This tool is classified read-only. Visibility is controlled by
 `override_web_search`, independently from general builtins.
 
-**Source:** `meerkat-tools/src/builtin/web_search.rs`
+**Source:** `crates/meerkat-tools/src/builtin/web_search.rs`
 </Accordion>
 
 ## Comms tools
@@ -1090,7 +1090,7 @@ Send a fire-and-forget collaboration message to a trusted peer.
 { "status": "sent", "kind": "peer_message", "receipt": { ... } }
 ```
 
-**Source:** `meerkat-comms/src/mcp/tools.rs`
+**Source:** `crates/meerkat-comms/src/mcp/tools.rs`
 </Accordion>
 
 <Accordion title="reply_to_peer">
@@ -1129,7 +1129,7 @@ Typed failures include `no_reply_capability`, `ambiguous_reply`, and
 `unknown_reply_to`. Trust is revalidated at dispatch time, so revoking a peer
 after turn admission invalidates the previously minted reply capability.
 
-**Source:** `meerkat-comms/src/mcp/tools.rs`
+**Source:** `crates/meerkat-comms/src/mcp/tools.rs`
 </Accordion>
 
 <Accordion title="send_request">
@@ -1169,7 +1169,7 @@ Use `send_message` for normal agent collaboration. Use `send_request` only when 
 { "status": "sent", "kind": "peer_request", "receipt": { ... } }
 ```
 
-**Source:** `meerkat-comms/src/mcp/tools.rs`
+**Source:** `crates/meerkat-comms/src/mcp/tools.rs`
 </Accordion>
 
 <Accordion title="send_response">
@@ -1209,7 +1209,7 @@ Send a response to a previously received request from a trusted peer. Requires a
 { "status": "sent", "kind": "peer_response", "receipt": { ... } }
 ```
 
-**Source:** `meerkat-comms/src/mcp/tools.rs`
+**Source:** `crates/meerkat-comms/src/mcp/tools.rs`
 </Accordion>
 
 <Accordion title="peers">
@@ -1245,7 +1245,7 @@ are display labels and may not be unique; use `peer_id` for sends.
 }
 ```
 
-**Source:** `meerkat-comms/src/mcp/tools.rs` -- `PeersInput`
+**Source:** `crates/meerkat-comms/src/mcp/tools.rs` -- `PeersInput`
 </Accordion>
 
 ## Skill tools
@@ -1268,8 +1268,8 @@ active skills as `{source_uuid, skill_name, name, description}` entries.
 the skill, returning the canonical identity, display `name`, rendered `body`,
 and `byte_size`.
 
-**Source:** `meerkat-tools/src/builtin/skills/browse.rs`,
-`meerkat-tools/src/builtin/skills/load.rs`
+**Source:** `crates/meerkat-tools/src/builtin/skills/browse.rs`,
+`crates/meerkat-tools/src/builtin/skills/load.rs`
 </Accordion>
 
 <Accordion title="Skill resources and functions">
@@ -1282,8 +1282,8 @@ optional JSON-object `arguments`. Its success response echoes the canonical
 identity and function name and carries the skill function's wire-opaque JSON in
 `output`.
 
-**Source:** `meerkat-tools/src/builtin/skills/resources.rs`,
-`meerkat-tools/src/builtin/skills/functions.rs`
+**Source:** `crates/meerkat-tools/src/builtin/skills/resources.rs`,
+`crates/meerkat-tools/src/builtin/skills/functions.rs`
 </Accordion>
 
 ## Cargo feature gates
@@ -1298,4 +1298,4 @@ Tool availability depends on compile-time features in the `meerkat-tools` crate:
 
 The `memory_search` tool is gated by the `memory-store-session` feature on the `meerkat` facade crate (not `meerkat-tools`), since `MemorySearchDispatcher` lives in `meerkat-memory`.
 
-**Source:** `meerkat-tools/Cargo.toml`
+**Source:** `crates/meerkat-tools/Cargo.toml`

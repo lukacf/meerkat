@@ -6,8 +6,8 @@ the "needs-annotation" mirrors are catalog FACTS, not downstream hand tables.
 
 ## Mirror verdicts
 - M1 CatalogInput enum + ALL + input_variant() + as_str(): FULLY derivable from
-  schema.inputs.variants. Hand at meerkat-mob/src/mob_machine.rs:298-869 AND
-  meerkat-runtime/src/meerkat_machine_types.rs:1110-1336 (Mob + Meerkat). Generated
+  schema.inputs.variants. Hand at crates/meerkat-mob/src/mob_machine.rs:298-869 AND
+  crates/meerkat-runtime/src/meerkat_machine_types.rs:1110-1336 (Mob + Meerkat). Generated
   *InputVariant enums already exist (precedent). catalog_input() on CommandVariant
   stays hand (policy). GO NOW.
 - M4 field-evaluator: FULLY derivable from schema.state.fields. tests.rs snapshot
@@ -22,7 +22,7 @@ the "needs-annotation" mirrors are catalog FACTS, not downstream hand tables.
 
 ## Emission seam (M6)
 codegen already emits per-machine *InputVariant enums via render_named_type_definition
-into meerkat-machine-kernels/src/generated/<machine>.rs. Add a render for the richer
+into crates/meerkat-machine-kernels/src/generated/<machine>.rs. Add a render for the richer
 CatalogInput mirror (enum+ALL+input_variant+as_str) into a generated module consumed
 by mob + meerkat; wire into xtask machine-codegen --all loop.
 
@@ -42,13 +42,13 @@ catalog::dsl::<m>::<Prefix>InputVariant, because:
      "machines::mob_machine") emits meerkat-mob's own MobMachineInputVariant) — a DIFFERENT type from the
      catalog-dsl one. A kernel-emitted CatalogInput.input_variant() -> catalog-dsl InputVariant would
      type-mismatch the consumers' production InputVariant.
-CORRECTED TARGET: emit CatalogInput into the CONSUMER crate (meerkat-mob/src/generated/, meerkat-runtime/
+CORRECTED TARGET: emit CatalogInput into the CONSUMER crate (crates/meerkat-mob/src/generated/, meerkat-runtime/
 src/generated/) referencing the PRODUCTION InputVariant in that crate — i.e. via the protocol-codegen
-per-consumer emitter pattern (same machinery that emits meerkat-core/src/generated/* and
-meerkat-session/src/generated/* wrappers), NOT machine-codegen's kernel render. Gate to the machines that
+per-consumer emitter pattern (same machinery that emits crates/meerkat-core/src/generated/* and
+crates/meerkat-session/src/generated/* wrappers), NOT machine-codegen's kernel render. Gate to the machines that
 actually have a CatalogInput consumer (mob + meerkat) — the per-consumer protocol-codegen registration is
 the natural gate (only those crates register a CatalogInput emission), avoiding over-generation for the
 other 8 machines.
-NEXT: build the CatalogInput emitter in xtask/src/protocol_codegen.rs (mirror render_session_document_authority /
-the meerkat-core wrapper emitters), emit into meerkat-mob/src/generated/catalog_input.rs +
-meerkat-runtime/src/generated/catalog_input.rs, delete the hand enums, repoint consumers.
+NEXT: build the CatalogInput emitter in crates/xtask/src/protocol_codegen.rs (mirror render_session_document_authority /
+the meerkat-core wrapper emitters), emit into crates/meerkat-mob/src/generated/catalog_input.rs +
+crates/meerkat-runtime/src/generated/catalog_input.rs, delete the hand enums, repoint consumers.

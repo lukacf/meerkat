@@ -11,18 +11,18 @@ formalizes the session identity contract that MeerkatMachine presupposes.
 
 Sources of truth consulted:
 
-- DSL: `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs` (3059 lines)
-- Generated authority (mirrored): `meerkat-runtime/src/meerkat_machine/dsl.rs`
-- Runtime shell: `meerkat-runtime/src/meerkat_machine/mod.rs`
-- Session core: `meerkat-core/src/session.rs`, `meerkat-core/src/session_store.rs`
-- Event log: `meerkat-session/src/event_store.rs`
-- Comms trust: `meerkat-comms/src/trust.rs`
-- MCP router: `meerkat-mcp/src/router.rs`
-- Ops lifecycle: `meerkat-runtime/src/ops_lifecycle.rs`
+- DSL: `crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs` (3059 lines)
+- Generated authority (mirrored): `crates/meerkat-runtime/src/meerkat_machine/dsl.rs`
+- Runtime shell: `crates/meerkat-runtime/src/meerkat_machine/mod.rs`
+- Session core: `crates/meerkat-core/src/session.rs`, `crates/meerkat-core/src/session_store.rs`
+- Event log: `crates/meerkat-session/src/event_store.rs`
+- Comms trust: `crates/meerkat-comms/src/trust.rs`
+- MCP router: `crates/meerkat-mcp/src/router.rs`
+- Ops lifecycle: `crates/meerkat-runtime/src/ops_lifecycle.rs`
 
 MeerkatMachine is introduced as the "session-scoped execution kernel for
 the Meerkat runtime" — see
-`meerkat-runtime/src/meerkat_machine/mod.rs:401-407`. The top-level shell
+`crates/meerkat-runtime/src/meerkat_machine/mod.rs:401-407`. The top-level shell
 is a `HashMap<SessionId, RuntimeSessionEntry>` (same file, lines 406-427),
 so the shell level is cleanly session-keyed. The DSL state schema is per
 session (each `RuntimeSessionEntry` owns its own
@@ -33,7 +33,7 @@ session-sized lifetime.
 ## Section 1: State Field Enumeration + Scope Classification
 
 All fields are taken from the `state { ... }` block of the DSL at
-`meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs:9-180`.
+`crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs:9-180`.
 
 ### 1.1 Session identity + lifecycle scaffolding
 
@@ -72,7 +72,7 @@ cycles are recorded via authority-epoch monotony, not by crossing
 session boundaries. Clean classification.
 
 A potentially confusing sub-case: the provider's WebSocket connection
-(`meerkat-rpc/src/realtime_ws.rs`) lives in the shell, not in the DSL.
+(`crates/meerkat-rpc/src/realtime_ws.rs`) lives in the shell, not in the DSL.
 The DSL only owns the *authority* of "which binding-epoch is canonical";
 the transport itself is shell-owned mechanics. That's the right split
 and is already correctly projected — see U-C / dogma-round-2 notes in
@@ -98,10 +98,10 @@ is user-scoped / project-scoped: it lives in `.rkat/mcp.toml` per project
 or `~/.rkat/mcp.toml` per user. The *connection instance* the runtime
 owns, however, is per-session. See:
 
-- `meerkat-mcp/src/router.rs:886-912` — each `McpRouter` owns its own
+- `crates/meerkat-mcp/src/router.rs:886-912` — each `McpRouter` owns its own
   `servers: HashMap<String, ServerEntry>` and its own `pending_*`
   infrastructure.
-- `meerkat/src/factory.rs:2092-2120` — every `build_agent()` call
+- `crates/meerkat/src/factory.rs:2092-2120` — every `build_agent()` call
   assembles a fresh dispatcher stack including a router adapter and
   binds an MCP lifecycle handle that mirrors into *this session's*
   `mcp_server_states`.
@@ -168,7 +168,7 @@ discussed in §3.
 The DSL comment (lines 114-134) is explicit: the authoritative
 authorization fact is in MeerkatMachine now, but the *companion trust
 edge* still lives in the router-owned `TrustedPeers`
-(`meerkat-comms/src/trust.rs:232`). Mutations must step-lock: the DSL
+(`crates/meerkat-comms/src/trust.rs:232`). Mutations must step-lock: the DSL
 mutator accepts first, then the shell calls `add_trusted_peer` /
 `remove_trusted_peer` on the router trust store. The DSL owns the
 authorization *discriminant*; the router owns the *trust edge*. Two
@@ -223,7 +223,7 @@ MeerkatMachine is properly per-session.
 
 ### 2.1 Invariants (what "same session" means)
 
-The canonical `Session` type is `meerkat-core/src/session.rs:32-47`:
+The canonical `Session` type is `crates/meerkat-core/src/session.rs:32-47`:
 
 ```rust
 pub struct Session {
@@ -237,7 +237,7 @@ pub struct Session {
 }
 ```
 
-`SessionId` is a UUID newtype (`meerkat-core/src/types.rs:736`). It is
+`SessionId` is a UUID newtype (`crates/meerkat-core/src/types.rs:736`). It is
 the stable identity fact. Within a single "same session" the contract
 is:
 
@@ -255,7 +255,7 @@ stream.
 
 ### 2.2 Append-only verification — EventStore trait
 
-`meerkat-session/src/event_store.rs:30-49`:
+`crates/meerkat-session/src/event_store.rs:30-49`:
 
 ```rust
 pub trait EventStore: Send + Sync {
@@ -277,7 +277,7 @@ could, of course, violate it from inside the implementation body, but
 
 ### 2.3 Append-only gap — SessionStore trait
 
-`meerkat-core/src/session_store.rs:60-77`:
+`crates/meerkat-core/src/session_store.rs:60-77`:
 
 ```rust
 pub trait SessionStore: Send + Sync {
@@ -310,7 +310,7 @@ boundary.
 
 ### 2.4 The `fork_at` operation — a legitimate truncation
 
-`meerkat-core/src/session.rs:798-814` exposes `Session::fork_at(index)`,
+`crates/meerkat-core/src/session.rs:798-814` exposes `Session::fork_at(index)`,
 which returns a *new* Session with a truncated message history:
 
 ```rust
@@ -348,13 +348,13 @@ the event log — but the trait does not encode that.
 
 | # | File:line | Concern | Current scope | Proper scope | Remediation | Urgency |
 |---|---|---|---|---|---|---|
-| F1 | `meerkat-core/src/session_store.rs:62` | `SessionStore::save(&Session)` allows truncate-and-replace; no type-level append-only guarantee | trait-wide destructive replace | append-or-extend only | Option A: split trait into `SessionSnapshotStore::write_snapshot` (derived, caller-asserted idempotent) + explicit `AppendOnlySessionStore` with `append_messages()`. Option B: formalize the doc (snapshot = projection) and route all persistence through the EventStore only, making SessionStore a test-only convenience. | 0.7 |
-| F2 | `meerkat-runtime/src/meerkat_machine/dsl.rs` (supervisor_bound_*) | Supervisor authorization has companion trust edge in router `TrustedPeers` | split ownership with step-lock | single owner | **Closed in C-F2 via option (b)**: step-lock formalised as a generated handoff obligation pair in `supervisor_trust_bundle` composition — `supervisor_trust_publish` (producer effect `PublishSupervisorTrustEdge` → feedback `SupervisorTrustEdgePublished` / `SupervisorTrustEdgePublishFailed`) and `supervisor_trust_revoke` (producer effect `RevokeSupervisorTrustEdge` → feedback `SupervisorTrustEdgeRevoked` / `SupervisorTrustEdgeRevokeFailed`), both with `ClosurePolicy::AckRequired`. Compat bridge: `meerkat-machine-schema/src/compat/supervisor_trust_bridge.rs`; composition: `supervisor_trust_bundle_composition` in `catalog/compositions.rs`; seam-inventory entry: `## Declared Handoff Obligation Pairs`. Option (a) rejected as out-of-scope: `AuthMachine` is per-binding auth-lease lifecycle; supervisor-binding trust is a per-session fact and already lives on `MeerkatMachine`. | closed (C-F2) |
-| F3 | `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs:112` | `peer_ingress_mob_id` references MobId with no structural "mob-exists" invariant in MeerkatMachine | cross-machine id reference | foreign-key w/ cleanup discipline | **Closed in C-F3**: added `mob_destroying_session_ingress` handoff obligation pair on the `mob_destroy_session_ingress_bundle` compat composition — producer effect `RequestSessionIngressDetachForMobDestroy { mob_id, agent_runtime_id }` → realising actor `mob_destroy_session_ingress_owner` → feedback `SessionIngressDetachedForMobDestroy` (success) or `SessionIngressDetachFailedForMobDestroy` (failure). `closure_policy: AckRequired`. Compat bridge: `meerkat-machine-schema/src/compat/mob_destroy_session_ingress_bridge.rs`; composition: `mob_destroy_session_ingress_bundle_composition` in `catalog/compositions.rs`. `xtask seam-inventory` now carries a `## Destroy-obligation Pairing (C-F3)` section that walks every canonical routed `Request*Destroy*` effect and flags any without a paired ingress-detach protocol — zero debt with the pair in place; flags 1+ debt if the pair is removed. | closed (C-F3) |
-| F4 | `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs:177-179` | `mob_overlay_peer_endpoints` + `mob_overlay_epoch` are derived projections; monotony is guarded by the per-overlay epoch but not re-derivable from MobMachine state alone | derived projection w/ authoritative shadow | pure projection | The pattern is already documented and the two-epoch-namespace split is correct. No remediation required — this is a "how we classify projections" documentation point. | none |
-| F5 | `meerkat-runtime/src/meerkat_machine/mod.rs:417` | `comms_drain_slots: RwLock<HashMap<SessionId, CommsDrainSlot>>` lives parallel to `sessions` — two per-session maps | single-owner violation by composition | unified session entry | Move `CommsDrainSlot` into `RuntimeSessionEntry` so "session exists" is one HashMap insertion; eliminates the class of bugs where the two maps go out of sync. | 0.7 |
-| F6 | `meerkat-mcp/src/router.rs:886-911` | MCP router is per-session by construction, but `mcp.toml` config is user/project scoped — reconnect coordination across sessions is not represented | configuration read at session build time; no wider authority over reconnect | shared reconnect authority optional | Not urgent; this is by design (each session's MCP bindings are independent). If we want cross-session reconnect coordination later, introduce a `UserMcpAuthority` outside Meerkat/MobMachine. Flagged for 0.8+. | 0.8+ |
-| F7 | `meerkat-core/src/session.rs:38` | `messages: Arc<Vec<Message>>` has no type-level append-only witness; any code holding `&mut Session` can call `.fork_at(0)` and replace | convention-driven | typed witness | Introduce `AppendOnlyMessages` newtype exposing only `.push()`/`.extend()`, not arbitrary `&mut Vec`. `fork_at` becomes an explicit fork, not a truncation of the same session. | 0.7 |
+| F1 | `crates/meerkat-core/src/session_store.rs:62` | `SessionStore::save(&Session)` allows truncate-and-replace; no type-level append-only guarantee | trait-wide destructive replace | append-or-extend only | Option A: split trait into `SessionSnapshotStore::write_snapshot` (derived, caller-asserted idempotent) + explicit `AppendOnlySessionStore` with `append_messages()`. Option B: formalize the doc (snapshot = projection) and route all persistence through the EventStore only, making SessionStore a test-only convenience. | 0.7 |
+| F2 | `crates/meerkat-runtime/src/meerkat_machine/dsl.rs` (supervisor_bound_*) | Supervisor authorization has companion trust edge in router `TrustedPeers` | split ownership with step-lock | single owner | **Closed in C-F2 via option (b)**: step-lock formalised as a generated handoff obligation pair in `supervisor_trust_bundle` composition — `supervisor_trust_publish` (producer effect `PublishSupervisorTrustEdge` → feedback `SupervisorTrustEdgePublished` / `SupervisorTrustEdgePublishFailed`) and `supervisor_trust_revoke` (producer effect `RevokeSupervisorTrustEdge` → feedback `SupervisorTrustEdgeRevoked` / `SupervisorTrustEdgeRevokeFailed`), both with `ClosurePolicy::AckRequired`. Compat bridge: `crates/meerkat-machine-schema/src/compat/supervisor_trust_bridge.rs`; composition: `supervisor_trust_bundle_composition` in `catalog/compositions.rs`; seam-inventory entry: `## Declared Handoff Obligation Pairs`. Option (a) rejected as out-of-scope: `AuthMachine` is per-binding auth-lease lifecycle; supervisor-binding trust is a per-session fact and already lives on `MeerkatMachine`. | closed (C-F2) |
+| F3 | `crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs:112` | `peer_ingress_mob_id` references MobId with no structural "mob-exists" invariant in MeerkatMachine | cross-machine id reference | foreign-key w/ cleanup discipline | **Closed in C-F3**: added `mob_destroying_session_ingress` handoff obligation pair on the `mob_destroy_session_ingress_bundle` compat composition — producer effect `RequestSessionIngressDetachForMobDestroy { mob_id, agent_runtime_id }` → realising actor `mob_destroy_session_ingress_owner` → feedback `SessionIngressDetachedForMobDestroy` (success) or `SessionIngressDetachFailedForMobDestroy` (failure). `closure_policy: AckRequired`. Compat bridge: `crates/meerkat-machine-schema/src/compat/mob_destroy_session_ingress_bridge.rs`; composition: `mob_destroy_session_ingress_bundle_composition` in `catalog/compositions.rs`. `xtask seam-inventory` now carries a `## Destroy-obligation Pairing (C-F3)` section that walks every canonical routed `Request*Destroy*` effect and flags any without a paired ingress-detach protocol — zero debt with the pair in place; flags 1+ debt if the pair is removed. | closed (C-F3) |
+| F4 | `crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs:177-179` | `mob_overlay_peer_endpoints` + `mob_overlay_epoch` are derived projections; monotony is guarded by the per-overlay epoch but not re-derivable from MobMachine state alone | derived projection w/ authoritative shadow | pure projection | The pattern is already documented and the two-epoch-namespace split is correct. No remediation required — this is a "how we classify projections" documentation point. | none |
+| F5 | `crates/meerkat-runtime/src/meerkat_machine/mod.rs:417` | `comms_drain_slots: RwLock<HashMap<SessionId, CommsDrainSlot>>` lives parallel to `sessions` — two per-session maps | single-owner violation by composition | unified session entry | Move `CommsDrainSlot` into `RuntimeSessionEntry` so "session exists" is one HashMap insertion; eliminates the class of bugs where the two maps go out of sync. | 0.7 |
+| F6 | `crates/meerkat-mcp/src/router.rs:886-911` | MCP router is per-session by construction, but `mcp.toml` config is user/project scoped — reconnect coordination across sessions is not represented | configuration read at session build time; no wider authority over reconnect | shared reconnect authority optional | Not urgent; this is by design (each session's MCP bindings are independent). If we want cross-session reconnect coordination later, introduce a `UserMcpAuthority` outside Meerkat/MobMachine. Flagged for 0.8+. | 0.8+ |
+| F7 | `crates/meerkat-core/src/session.rs:38` | `messages: Arc<Vec<Message>>` has no type-level append-only witness; any code holding `&mut Session` can call `.fork_at(0)` and replace | convention-driven | typed witness | Introduce `AppendOnlyMessages` newtype exposing only `.push()`/`.extend()`, not arbitrary `&mut Vec`. `fork_at` becomes an explicit fork, not a truncation of the same session. | 0.7 |
 
 ## Section 4: Wave-C Implications
 

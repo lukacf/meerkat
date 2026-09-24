@@ -15,6 +15,7 @@ fn test_server_path() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
         .parent()
+        .and_then(std::path::Path::parent)
         .expect("workspace root")
         .join("target")
         .join("debug")

@@ -10,7 +10,7 @@
 //!
 //! Deterministic: scripted member client, loopback port-0 listeners, no
 //! live providers. The full failure matrix lives in
-//! meerkat-mob/tests/cross_host_flows.rs (int lane).
+//! crates/meerkat-mob/tests/cross_host_flows.rs (int lane).
 
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

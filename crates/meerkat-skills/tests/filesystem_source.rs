@@ -6,7 +6,7 @@
 //! scans `<root>/<skill_dir>/SKILL.md`, constructs a typed `SkillKey` from
 //! the configured `source_uuid` + directory slug, and fails `load()` for a
 //! mismatched source_uuid. The old "slash path parsing" and "collection.md
-//! fallback" paths are gone (source docstring at `meerkat-skills/src/source/
+//! fallback" paths are gone (source docstring at `crates/meerkat-skills/src/source/
 //! filesystem.rs:3`). These tests cover the surface that actually exists in
 //! wave-c — recursive scan finds nested SKILL.md files, `list()` applies
 //! the `SkillFilter`, and `load()` enforces source-uuid matching.

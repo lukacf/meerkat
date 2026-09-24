@@ -4189,7 +4189,7 @@ class MeerkatClient:
         return await self.peers(session_id)
 
     # Typed literal aliases mirror the Rust `CommsCommandRequest` enum
-    # (`meerkat-core/src/comms.rs`). Invalid discriminator values are rejected
+    # (`crates/meerkat-core/src/comms.rs`). Invalid discriminator values are rejected
     # at the server's typed-serde boundary — these aliases document the
     # closed-world shape for callers.
     _CommsKind = Literal[

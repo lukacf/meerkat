@@ -82,7 +82,7 @@ the agent loop through `meerkat_llm_core::LlmClientAdapter`, which implements
 `AgentLlmClient`; the `meerkat-client` crate remains a compatibility re-export
 shim.
 
-`meerkat-machine-kernels/src/generated/` is the ordinary typed kernel surface.
+`crates/meerkat-machine-kernels/src/generated/` is the ordinary typed kernel surface.
 The generic interpreter in `src/runtime.rs` is available as
 `test_oracle::GeneratedMachineKernel` only with the `test-oracle` feature.
 Production authority work belongs in the catalog-owned DSL and the production
@@ -114,11 +114,11 @@ typed `SchemaFromTheFuture` refusal checked preflight before WAL), sibling
 `<file>.mfence` per-operation fence guards (offline `rkat storage migrate`
 takes the exclusive side), and `classify_sqlite_error`. The
 `meerkat_core::StorageMigrator` diagnose seam is what `rkat storage doctor`
-renders (disk implementation: `meerkat-store/src/doctor.rs`; the CLI storage
+renders (disk implementation: `crates/meerkat-store/src/doctor.rs`; the CLI storage
 verbs dispatch before runtime-scope resolution). Backends prove the store
 contracts against `meerkat-store-conformance` (per-trait capability
 profiles; the in-repo stores run the same suite in
-`meerkat-store/tests/conformance.rs`).
+`crates/meerkat-store/tests/conformance.rs`).
 
 ## Key Traits
 
@@ -140,7 +140,7 @@ profiles; the in-repo stores run the same suite in
 | `MemoryStore` | Semantic memory: index/search + lifecycle (`drop_scope`, paged `enumerate_scoped`; defaults are typed `Unsupported`) | `HnswMemoryStore` (lazy per-scope loading), `SimpleMemoryStore` (meerkat-memory) |
 | `OpsLifecycleRegistry` | Async operation tracking (wait_all, collect_completed, bounded retention, timestamps, concurrency, detached wake) | `RuntimeOpsLifecycleRegistry` (meerkat-runtime) |
 | `MobToolsFactory` | Late-binding session-scoped mob tool construction | `AgentMobToolSurfaceFactory` (meerkat-mob-mcp) |
-| `StorageMigrator` | Shape-stable storage diagnose seam (`diagnose(&DiagnoseScope) → StorageDiagnosis`; mutation verbs arrive as defaulted methods) | `DiskStorageMigrator` (meerkat-store/src/doctor.rs) |
+| `StorageMigrator` | Shape-stable storage diagnose seam (`diagnose(&DiagnoseScope) → StorageDiagnosis`; mutation verbs arrive as defaulted methods) | `DiskStorageMigrator` (crates/meerkat-store/src/doctor.rs) |
 
 ### WorkGraph traits (defined in meerkat-workgraph)
 
@@ -181,7 +181,7 @@ profiles; the in-repo stores run the same suite in
 
 | Trait | Purpose | Implementors |
 |-------|---------|-------------|
-| `RealmStorageProvider` | One provider supplies all durable stores for a realm (`open(RealmOpenContext) → RealmStoreSet` with per-slot `DurabilityDeclaration`s over the seven required domains; optional `migrator()` hook) | `DiskStorageProvider` (meerkat/src/storage_provider.rs); downstream remote/mobkit providers |
+| `RealmStorageProvider` | One provider supplies all durable stores for a realm (`open(RealmOpenContext) → RealmStoreSet` with per-slot `DurabilityDeclaration`s over the seven required domains; optional `migrator()` hook) | `DiskStorageProvider` (crates/meerkat/src/storage_provider.rs); downstream remote/mobkit providers |
 
 ### Mob traits (defined in meerkat-mob)
 
@@ -236,11 +236,11 @@ profiles; the in-repo stores run the same suite in
 | `TranscriptUserRole::InjectedContext` | Slot-derived typed role for host-attached ambient context (separate user-channel messages; excluded from memory indexing; save-guard remains CompactionSummary-only) |
 | `MemoryIndexExclusion::{CompactionSummary, InjectedContext}` | Typed indexing exclusions consulted by `Message::indexable_content()` via `transcript_role` |
 | `StartTurnRequest.injected_context` / `CreateSessionRequest.injected_context` / `WorkSpec.injected_context` | Typed delivery slots for injected context on the submit-work paths (service, RPC/REST params, mob work lane, `BridgeDeliveryPayload` for remote members) |
-| `CompactionWindow` / `CuratedCompactionSummary` | Curator inputs (same as the LLM path) and validated non-empty summary newtype — meerkat-core/src/compact.rs |
+| `CompactionWindow` / `CuratedCompactionSummary` | Curator inputs (same as the LLM path) and validated non-empty summary newtype — crates/meerkat-core/src/compact.rs |
 | `MemoryOwner`-scoped `drop_scope` / `MemoryEnumerationRequest` / `MemoryEnumerationPage` / `MemoryRecord` | MemoryStore lifecycle + enumeration vocabulary (raw-row offset paging; `source_overlap` + `indexed_after` filters) |
 | `SenderContentTaint` / `SendTaintOverride` | Core-owned comms content-taint vocabulary; envelope field is inside the signed `MessageKind` region; per-send override is tri-state (absent = inherit runtime declaration); `SystemNoticeBlock::Comms.sender_taint` is the transcript carrier |
 | `ToolExecutionPolicy` / `ExecutionPolicyGatedDispatcher` | Sealed resolved form of `ops::ToolAccessPolicy` + list-preserving call-level execution gate (deny = ordinary `access_denied` tool error; wraps outermost in the factory; `Inherit` resolves to the parent's effective policy) |
-| `TargetBinding::HostRunnable` / `ScheduleRunnableHost` / `HostRunnableRegistry` | Host-registered schedule runnables delivered through the normal occurrence lifecycle (meerkat-schedule/src/runnable.rs) |
+| `TargetBinding::HostRunnable` / `ScheduleRunnableHost` / `HostRunnableRegistry` | Host-registered schedule runnables delivered through the normal occurrence lifecycle (crates/meerkat-schedule/src/runnable.rs) |
 | `SessionTranscriptRevisionListQuery` / `SessionServiceHistoryExt::list_transcript_revisions` | Revision-list read (RPC `session/transcript_revisions`); head reads remain `read_transcript_revision` + `RevisionSelector::Current` |
 | `HookToolCall.provenance` / `HookLlmResponse.server_tool_content` | Synchronous dispatch-time projections of `ToolProvenance` / `ServerToolKind` for foreground hook classification |
 
@@ -251,11 +251,11 @@ superseded by the current-design note below the table.
 
 | Type | Purpose |
 |------|---------|
-| `BoundSessionCommit` | Sealed snapshot+typed-session pair on `CoreApplyOutput` (one private `committed` field; `with_session` is the only typed mint) — meerkat-core/src/lifecycle/core_executor.rs |
-| `DurableTailRecoveryRequest` | Sealed recovery request; only constructor `from_classification` requires the classifier's `DurableTailClassified` effect — meerkat-runtime/src/recovery.rs |
-| `SessionError::DurableTailHeldForRecovery` / `DurableEvidenceQuarantined` + `DurableResumeHold` | Typed durable resume holds (`SESSION_DURABLE_*` codes, `durable_resume_hold` structured payload) — meerkat-core/src/service/mod.rs |
+| `BoundSessionCommit` | Sealed snapshot+typed-session pair on `CoreApplyOutput` (one private `committed` field; `with_session` is the only typed mint) — crates/meerkat-core/src/lifecycle/core_executor.rs |
+| `DurableTailRecoveryRequest` | Sealed recovery request; only constructor `from_classification` requires the classifier's `DurableTailClassified` effect — crates/meerkat-runtime/src/recovery.rs |
+| `SessionError::DurableTailHeldForRecovery` / `DurableEvidenceQuarantined` + `DurableResumeHold` | Typed durable resume holds (`SESSION_DURABLE_*` codes, `durable_resume_hold` structured payload) — crates/meerkat-core/src/service/mod.rs |
 | `ResumeSessionLoad` / `SessionResumeUnavailableReason` / `MobFailureClass::TargetArchived` | Typed mob resume seam (`MobSessionService::load_session_for_resume` is required, no default) — meerkat-mob |
-| `RuntimeStore::{load_committed_boundary_receipts, load_input_states_with_versions}` + `InputRowVersionConflict` / `MachineLifecycleVersionConflict` | Recovery reads + fenced-record conflicts; `expected_row_digest` is enforced inside the writing transaction — meerkat-runtime/src/store/mod.rs |
+| `RuntimeStore::{load_committed_boundary_receipts, load_input_states_with_versions}` + `InputRowVersionConflict` / `MachineLifecycleVersionConflict` | Recovery reads + fenced-record conflicts; `expected_row_digest` is enforced inside the writing transaction — crates/meerkat-runtime/src/store/mod.rs |
 | `meerkat_runtime::stack_relief` | Fresh-task child-agent construction (never nested in a parent's poll stack) |
 
 **Current recovery/commit design:** `recover_durable_tail(store, session_id)`
@@ -275,18 +275,18 @@ re-paired.
 
 | Type | Purpose |
 |------|---------|
-| `Released0810ImportReceipt` / `ImportedReleased0810Session` | Single-use exact-0.8.10 activation import; store consumes the receipt while replacing released physical identity with current authority — meerkat-core/src/session/import_0810.rs |
-| `RunCheckpointReceipt` + `RunCheckpointAuthority::{WholeBlob, HeadCanonical}` | Latest exact provisional physical candidate for one active run; never serialized inside `Session` — meerkat-core/src/persistence_contract.rs |
-| `WholeBlobProvisionalTailAuthority` / `HeadCanonicalProvisionalTailAuthority` | Profile-specific base/run/candidate identity plus contiguous candidate sequence — meerkat-core/src/persistence_contract.rs |
-| `WholeBlobStoreAuthority` / `HeadCanonicalStoreAuthority` | Committed profile-specific physical authority: row revision+SHA or store revision+boundary head+head token — meerkat-runtime/src/store/mod.rs |
-| `RuntimeSessionCatalogEntry` | Transcript-free, graph-free catalog projection committed atomically with body authority — meerkat-runtime/src/store/mod.rs |
+| `Released0810ImportReceipt` / `ImportedReleased0810Session` | Single-use exact-0.8.10 activation import; store consumes the receipt while replacing released physical identity with current authority — crates/meerkat-core/src/session/import_0810.rs |
+| `RunCheckpointReceipt` + `RunCheckpointAuthority::{WholeBlob, HeadCanonical}` | Latest exact provisional physical candidate for one active run; never serialized inside `Session` — crates/meerkat-core/src/persistence_contract.rs |
+| `WholeBlobProvisionalTailAuthority` / `HeadCanonicalProvisionalTailAuthority` | Profile-specific base/run/candidate identity plus contiguous candidate sequence — crates/meerkat-core/src/persistence_contract.rs |
+| `WholeBlobStoreAuthority` / `HeadCanonicalStoreAuthority` | Committed profile-specific physical authority: row revision+SHA or store revision+boundary head+head token — crates/meerkat-runtime/src/store/mod.rs |
+| `RuntimeSessionCatalogEntry` | Transcript-free, graph-free catalog projection committed atomically with body authority — crates/meerkat-runtime/src/store/mod.rs |
 
 ### 0.8.23-HEAD additions
 
 | Type | Purpose |
 |------|---------|
 | `ToolAccessPolicy::ReadOnly` / `ToolMutationClass` | Fail-closed call-level read-only intent based only on the owning dispatcher's positive declaration; unknown and provider-bypassing tools are not inferred safe |
-| `BoundedSubmission` / `SubmitBound` / `BoundedSubmitReport` | Mandatory-idempotency runtime admission with a caller-observation bound and typed admitted/collapsed/refused/timed-out fate - meerkat-runtime/src/bounded_submit.rs |
+| `BoundedSubmission` / `SubmitBound` / `BoundedSubmitReport` | Mandatory-idempotency runtime admission with a caller-observation bound and typed admitted/collapsed/refused/timed-out fate - crates/meerkat-runtime/src/bounded_submit.rs |
 | `AgentEvent::TurnUsageAccountingUnmeasured` / `TurnUsageAccountingIdentityDisputed` | Separate completion from missing or disputed provider accounting; `TurnCompleted.usage` is optional |
 | `JobHealthCoverage` / `JobHealthReading` / `JobHealthSummary` | Separate job outbox and runtime inbox backlog, declare census coverage, and preserve unreadable as a third state |
 | `LiveOpenTransport::Webrtc` / `LiveWebrtcAnswerParams` / `LiveWebrtcAnswerResult` | Feature-gated WebRTC selection and single-use SDP offer/answer signaling over `live/webrtc/answer` |

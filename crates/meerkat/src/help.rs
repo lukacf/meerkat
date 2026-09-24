@@ -305,7 +305,7 @@ mod tests {
             inventory_sentence.split('`').skip(1).step_by(2).collect();
         assert_eq!(
             documented_features, declared_shipping_features,
-            "facade feature inventory must list exactly the shipping features declared in meerkat/Cargo.toml"
+            "facade feature inventory must list exactly the shipping features declared in crates/meerkat/Cargo.toml"
         );
         assert!(
             MEERKAT_PLATFORM_API_REFERENCE.contains("rkat help <QUESTION>"),

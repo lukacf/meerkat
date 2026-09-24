@@ -24,7 +24,7 @@ ISOLATED_TARGETS="${MEERKAT_PUBLISH_DRY_RUN_ISOLATED_TARGETS:-1}"
 if [[ "$ISOLATED_TARGETS" != 1 && "$ISOLATED_TARGETS" != true ]]; then
   mkdir -p "$tmp_dir/target/package"
   rm -f "$tmp_dir/target/package/meerkat-core"
-  ln -s "$ROOT/meerkat-core" "$tmp_dir/target/package/meerkat-core"
+  ln -s "$ROOT/crates/meerkat-core" "$tmp_dir/target/package/meerkat-core"
 fi
 
 PACKAGES=()
@@ -45,7 +45,7 @@ run_publish() {
   if [[ "$ISOLATED_TARGETS" == 1 || "$ISOLATED_TARGETS" == true ]]; then
     mkdir -p "$target_dir/package"
     rm -f "$target_dir/package/meerkat-core"
-    ln -s "$ROOT/meerkat-core" "$target_dir/package/meerkat-core"
+    ln -s "$ROOT/crates/meerkat-core" "$target_dir/package/meerkat-core"
   fi
   if CARGO_TARGET_DIR="$target_dir" "$CARGO" publish -p "$pkg" --dry-run --allow-dirty --config "$cfg" > "$log_file" 2>&1; then
     printf "%s:ok\n" "$pkg" > "$result_file"

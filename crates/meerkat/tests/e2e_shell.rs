@@ -212,7 +212,7 @@ async fn integration_real_shell_background_spawn() {
 /// E2E: Background job reaches terminal state and is retrievable via status
 ///
 /// Note: drain_completed() is tested in-crate by CHOKE-001-IT in
-/// meerkat-tools/src/builtin/shell/job_manager.rs. This test verifies
+/// crates/meerkat-tools/src/builtin/shell/job_manager.rs. This test verifies
 /// the public job status API reflects completion.
 #[tokio::test]
 #[ignore = "lane:e2e-system"]

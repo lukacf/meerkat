@@ -92,7 +92,7 @@ ITEM-6 seed list at the end can be read top-down.
 
 ### 1. `projection_refresh_dirty` + `projection_known_updated_at` (realtime WS loop)
 
-Location: `meerkat-rpc/src/realtime_ws.rs` (locals at
+Location: `crates/meerkat-rpc/src/realtime_ws.rs` (locals at
 `realtime_ws.rs:918`, `919`; channel `projection_refresh_rx` at
 `realtime_ws.rs:926`; drain sites around `1240`, `1433`, `1580`, `1629`,
 `1660`, `1678`, `1712`, `1856`).
@@ -141,7 +141,7 @@ are deleted. Trust truth lives in exactly one place.
 
 ### 3. `subscriber_registry` + `interaction_stream_registry` (comms-runtime maps)
 
-Location: `meerkat-comms/src/runtime/comms_runtime.rs:952–953` (fields on
+Location: `crates/meerkat-comms/src/runtime/comms_runtime.rs:952–953` (fields on
 `CommsRuntime`); maintained on correlation insert/remove at
 `comms_runtime.rs:451`, `476`, `575`, `598`, `654`, `657`, `1660`, `1672`,
 `1679`, `1720`, `1743`, `1763`, `1766`. Shape: map from interaction id →
@@ -180,8 +180,8 @@ must be added to this audit in a follow-up pass.
 
 ### 4. `Roster.state` (`RosterEntry.state: MemberState`, phase 5G overlay)
 
-Location: `meerkat-mob/src/roster.rs:85–95` (field), `meerkat-mob/src/roster.rs:603`
-(`sync_retiring_projection`); `meerkat-mob/src/runtime/actor.rs:768`
+Location: `crates/meerkat-mob/src/roster.rs:85–95` (field), `crates/meerkat-mob/src/roster.rs:603`
+(`sync_retiring_projection`); `crates/meerkat-mob/src/runtime/actor.rs:768`
 (`sync_retiring_projection_into_roster`), called at `actor.rs:4220`,
 `actor.rs:5673`.
 
@@ -216,8 +216,8 @@ formalize it — noted as a future tightening, not action-required today.
 
 ### 5. `MobActor.phase_watch_tx` + `MobHandle.phase_watch_rx`
 
-Location: `meerkat-mob/src/runtime/actor.rs:297–305` (tx field with
-doc comment); `meerkat-mob/src/runtime/handle.rs:552–559` (rx field with
+Location: `crates/meerkat-mob/src/runtime/actor.rs:297–305` (tx field with
+doc comment); `crates/meerkat-mob/src/runtime/handle.rs:552–559` (rx field with
 doc comment); writer: `apply_dsl_input` (`actor.rs:724`) and
 `apply_dsl_signal` (`actor.rs:740`).
 
@@ -256,7 +256,7 @@ return.
 Location: confirmed *absent*. The Phase-5G cut removed
 `lifecycle_phase_projection: Arc<AtomicU8>` from `MobActor` and
 `state: Arc<AtomicU8>` from `MobHandle`. Lock-in test:
-`meerkat-mob/tests/shadow_state_absent.rs`.
+`crates/meerkat-mob/tests/shadow_state_absent.rs`.
 
 - **Canonical source.** DSL `lifecycle_phase` (see field 5 for the
   projection seam that replaced the atomic).
@@ -271,10 +271,10 @@ its replacement, audited as field 5).**
 
 ### 7. `RealtimeAttachmentStatus` (runtime-facing projection of DSL realtime binding)
 
-Location: `meerkat-runtime/src/meerkat_machine/dispatch_control.rs:435`
+Location: `crates/meerkat-runtime/src/meerkat_machine/dispatch_control.rs:435`
 (pure function `project_realtime_attachment_status`), consumed through
 `SessionServiceRuntimeExt::realtime_attachment_status` at
-`meerkat-runtime/src/meerkat_machine/traits.rs:159`.
+`crates/meerkat-runtime/src/meerkat_machine/traits.rs:159`.
 
 - **Canonical source.** Two DSL fields:
   `MeerkatMachineState.realtime_binding_state` and
@@ -298,11 +298,11 @@ through the same `SessionServiceRuntimeExt` seam.
 
 ### 8. `tool_visibility_state` (session metadata)
 
-Location: store at `meerkat-core/src/session.rs:762–776`
+Location: store at `crates/meerkat-core/src/session.rs:762–776`
 (`set_tool_visibility_state` / `tool_visibility_state`); write sites in
-`meerkat-core/src/agent/runner.rs` (261, 419, 618) and
-`meerkat-core/src/agent/builder.rs` (353, 411); persistence rollback at
-`meerkat-session/src/persistent.rs:75`
+`crates/meerkat-core/src/agent/runner.rs` (261, 419, 618) and
+`crates/meerkat-core/src/agent/builder.rs` (353, 411); persistence rollback at
+`crates/meerkat-session/src/persistent.rs:75`
 (`rollback_tool_visibility_state_snapshot`).
 
 - **Canonical source.** Session metadata map (`metadata` on `Session`).
@@ -316,7 +316,7 @@ Location: store at `meerkat-core/src/session.rs:762–776`
 the audit brief listed it as projection-shaped; the name has "state" in
 it but the owner is the session metadata map itself. DSL exposes it
 through `SessionToolVisibilityState`
-(`meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs` catalog
+(`crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs` catalog
 entries at lines 18/28). No action.
 
 ---
@@ -340,7 +340,7 @@ matches. Only mentions are in `docs/architecture/realtime-259-audit.md`,
 
 ### 10. MobActor runtime-only maps (`run_tasks`, `run_cancel_tokens`, `flow_streams`, `mcp_servers`, `autonomous_initial_turns`, `retired_event_index`, `pending_spawns`, `restore_diagnostics`, `edge_locks`)
 
-Location: `meerkat-mob/src/runtime/actor.rs:268–292`.
+Location: `crates/meerkat-mob/src/runtime/actor.rs:268–292`.
 
 These are the `BTreeMap` / `HashSet` / `HashMap`-shaped fields on
 `MobActor`. The roadmap specifically called out "any `BTreeMap<K, V>` on
@@ -366,7 +366,7 @@ the current ones do not.
   - `pending_spawns`: wrapped by `PendingSpawnLineage`. Its semantic
     counterpart `MobOrchestratorAuthority.pending_spawn_count` is DSL-
     owned; the lineage struct carries the task/metadata coupling
-    (see `xtask/src/ownership_ledger.rs:2118–2132`).
+    (see `crates/xtask/src/ownership_ledger.rs:2118–2132`).
   - `restore_diagnostics`: error bookkeeping for restore failures;
     purely informational.
   - `edge_locks`: concurrency primitives, not state.
@@ -388,7 +388,7 @@ action-required today.
 
 ### 11. `RealtimePendingTurn` / `product_turn_in_flight` / `product_turn_committed` / `product_output_started` (realtime WS locals)
 
-Location: `meerkat-rpc/src/realtime_ws.rs:904`, `915–917`. Co-located
+Location: `crates/meerkat-rpc/src/realtime_ws.rs:904`, `915–917`. Co-located
 with field 1 but tracking "is there a provider turn in flight" rather
 than session freshness.
 
@@ -444,8 +444,8 @@ enum with explicit guards. No action in this PR.
 
 ### 13. `McpRouter.projection` (tool-routing snapshot)
 
-Location: `meerkat-mcp/src/router.rs:931` (field);
-`meerkat-mcp/src/router.rs:869–886` (`RouterProjectionSnapshot` shape);
+Location: `crates/meerkat-mcp/src/router.rs:931` (field);
+`crates/meerkat-mcp/src/router.rs:869–886` (`RouterProjectionSnapshot` shape);
 publish site `publish_projection_snapshot` at `router.rs:1855`; drain
 callers at `router.rs:1105`, `1259`, `1398`, `1736`, `1984`, `2093`;
 read sites `projection_tools` (`router.rs:1919`), `projection_catalog`
@@ -495,7 +495,7 @@ See seed B below.
 
 ### 14. `McpRouterAdapter` fallback caches (`tools_cache`, `catalog_cache`, `pending_sources_cache`, `surface_snapshot_cache`)
 
-Location: `meerkat-mcp/src/adapter.rs:28–31` (fields with
+Location: `crates/meerkat-mcp/src/adapter.rs:28–31` (fields with
 `/// Tool visibility and routing come from the router's atomically
 published projection snapshot. The adapter keeps a best-effort fallback
 copy so `tools()` can stay non-blocking under lock contention.`
@@ -558,15 +558,15 @@ B for a combined McpRouter/adapter hygiene pass if it is done at all.
 
 ### 15. `SessionLlmIdentity.auth_binding` (dogma-flagged write-through projection)
 
-Location: `meerkat-core/src/session.rs:921`; projection construction
+Location: `crates/meerkat-core/src/session.rs:921`; projection construction
 in `SessionMetadata::llm_identity()` (`session.rs:926–934`); write-back
 in `SessionMetadata::apply_llm_identity()` (`session.rs:937–943`);
 canonical owner `SessionMetadata.auth_binding` at `session.rs:891`;
 resume re-install in
-`meerkat-core/src/session_recovery.rs:278–281`; downstream consumers
-in `meerkat-core/src/agent/builder.rs:577–582`
+`crates/meerkat-core/src/session_recovery.rs:278–281`; downstream consumers
+in `crates/meerkat-core/src/agent/builder.rs:577–582`
 (`with_auth_binding_binding_key`) and
-`meerkat-core/src/agent.rs:866–869` (runner binding key).
+`crates/meerkat-core/src/agent.rs:866–869` (runner binding key).
 
 - **Canonical source.** `SessionMetadata.auth_binding` — persisted,
   dogma-§1 canonical owner. The field docstring at `session.rs:917–919`
@@ -653,8 +653,8 @@ admission. The mirror methods `sync_trusted_peer_*` and the runtime's
 
 ### Seed B — `McpRouter` / `McpRouterAdapter` projection hygiene (optional tightening)
 
-- **Crate / file:** `meerkat-mcp/src/router.rs`,
-  `meerkat-mcp/src/adapter.rs`
+- **Crate / file:** `crates/meerkat-mcp/src/router.rs`,
+  `crates/meerkat-mcp/src/adapter.rs`
 - **Shape:** neither field is shadow-truth; this seed is an optional
   hygiene pass, only to take on if someone is already touching MCP
   plumbing.

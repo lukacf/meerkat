@@ -225,7 +225,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 machine_anchor(
                     "meerkat_machine",
                     "MeerkatMachine",
-                    "meerkat-runtime/src/meerkat_machine/mod.rs",
+                    "crates/meerkat-runtime/src/meerkat_machine/mod.rs",
                     "authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, deferred session stage, deferred session keep-alive update, deferred session promotion, deferred session archive, deferred session drop, mob operator access resolution/restoration/profile mutation/create scope/manage scope/spawn-profile scope, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify input terminality, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, runtime Reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, MCP server lifecycle, peer ready operation, peer request, peer response, peer ingress, peer endpoint projection, session context advancement, interaction stream, product turn, ingress, supervisor trust-edge publication/revocation, trust reconcile, ops barrier, local endpoint, admission, completion, completion consumer cursors, compaction, submit op event, progress reported op, terminate op, resolve op lifecycle transition rejected feedback, notify op watcher, recover op record, classify operation terminality, classify recovered operation record, recover ops completion cursor, recover/advance completion consumer cursors, evict completed op, collect completed op, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure",
                     CoverageClaims::none()
                         .transitions(&[
@@ -373,7 +373,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 machine_anchor(
                     "meerkat_public_surface",
                     "MeerkatMachine",
-                    "meerkat/src/meerkat_machine.rs",
+                    "crates/meerkat/src/meerkat_machine.rs",
                     "MeerkatMachine snapshot/diagnostic facade",
                     CoverageClaims::none(),
                 ),
@@ -525,14 +525,14 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 machine_anchor(
                     "mob_handle_surface",
                     "MobMachine",
-                    "meerkat-mob/src/runtime/handle.rs",
+                    "crates/meerkat-mob/src/runtime/handle.rs",
                     "identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing",
                     CoverageClaims::none(),
                 ),
                 machine_anchor(
                     "mob_actor_authority",
                     "MobMachine",
-                    "meerkat-mob/src/runtime/actor.rs",
+                    "crates/meerkat-mob/src/runtime/actor.rs",
                     "MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, recover durable incarnations, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, classify exact autonomous shutdown interruption versus terminal retirement anchors, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff pending/replay and resolve started/callback pending/failed/clear, wiring graph, and session binding",
                     CoverageClaims::none()
                         .transitions(&[
@@ -598,7 +598,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 machine_anchor(
                     "mob_owner_bridge_cleanup_authority",
                     "MobMachine",
-                    "meerkat-mob-mcp/src/lib.rs",
+                    "crates/meerkat-mob-mcp/src/lib.rs",
                     "MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants",
                     CoverageClaims::none().invariants(&[
                         "owner_bridge_cleanup_requires_owner",
@@ -609,7 +609,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 machine_anchor(
                     "mob_coordination_board_authority",
                     "MobMachine",
-                    "meerkat-mob/src/coordination.rs",
+                    "crates/meerkat-mob/src/coordination.rs",
                     "MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects",
                     CoverageClaims::none()
                         .transitions(&[
@@ -637,7 +637,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 machine_anchor(
                     "mob_operator_admission_authority",
                     "MobMachine",
-                    "meerkat-mob-mcp/src/agent_tools.rs",
+                    "crates/meerkat-mob-mcp/src/agent_tools.rs",
                     "MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)",
                     CoverageClaims::none().effects(&[
                         "CreateMobAdmissionResolved",
@@ -647,7 +647,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 machine_anchor(
                     "mob_membership_classifier_authority",
                     "MobMachine",
-                    "meerkat-mob/src/runtime/actor.rs",
+                    "crates/meerkat-mob/src/runtime/actor.rs",
                     "MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate or admitted from machine-owned binding and pending-spawn state; compute respawn generation successor; reconcile desired members to spawn retain or retire against current bindings emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects",
                     CoverageClaims::none()
                         .transitions(&[
@@ -671,7 +671,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 machine_anchor(
                     "mob_flow_fault_topology_escalation_authority",
                     "MobMachine",
-                    "meerkat-mob/src/runtime/flow.rs",
+                    "crates/meerkat-mob/src/runtime/flow.rs",
                     "MobMachine flow-step fault, topology-edge, and supervisor-escalation classifiers owned by the flow engine: classify step output fault retry or terminal malformed json into a step fault disposition; evaluate topology edge rule allow deny or default into a policy decision verdict; and escalate to supervisor target found with a real supervisor identity or no eligible target, emitting the step output fault classified, topology edge verdict resolved, supervisor escalation requested, and supervisor escalation failed effects",
                     CoverageClaims::none().effects(&[
                         "FlowStepTerminal",
@@ -823,7 +823,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "schedule_lifecycle",
                 "ScheduleLifecycleMachine",
-                "meerkat-schedule/src/lifecycle.rs",
+                "crates/meerkat-schedule/src/lifecycle.rs",
                 "Schedule::apply domain-facing lifecycle transition seam over create, revise, update planning config active or paused, planning window, pause, resume, delete, supersede pending occurrences, sync target snapshot for active or paused materialized session bindings, revision, and planning cursor rules",
                 CoverageClaims::none()
                     .transitions(&[
@@ -870,7 +870,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "occurrence_lifecycle",
                 "OccurrenceLifecycleMachine",
-                "meerkat-schedule/src/lifecycle.rs",
+                "crates/meerkat-schedule/src/lifecycle.rs",
                 "Occurrence::planned_from_schedule and Occurrence::apply domain-facing lifecycle transition seam over plan occurrence from pending, sync target snapshot from pending or claimed materialized bindings, record receipt from pending, claimed, dispatching, awaiting completion, completed, skipped, misfired, superseded, or delivery failed result projection, classify due no action, due claim eligible, due misfire required, due lease expired, claim, claimed, dispatch, await completion, complete, resolve runtime completion outcome, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification",
                 CoverageClaims::none()
                     .transitions(&[
@@ -1007,7 +1007,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 machine_anchor(
                     "auth_lease_handle",
                     "AuthMachine",
-                    "meerkat-runtime/src/handles/auth_lease.rs",
+                    "crates/meerkat-runtime/src/handles/auth_lease.rs",
                     "per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it",
                     CoverageClaims::none()
                         .transitions(&[
@@ -1021,7 +1021,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 machine_anchor(
                     "oauth_flow_handle",
                     "AuthMachine",
-                    "meerkat-runtime/src/handles/oauth_flow.rs",
+                    "crates/meerkat-runtime/src/handles/oauth_flow.rs",
                     "per-binding AuthMachine-owned OAuth browser and device flow lifecycle authority for admit, verify, begin poll, finish poll, consume, expire, valid, expiring, expired, refreshing, and reauth required phases",
                     CoverageClaims::none().transitions(&[
                         "AdmitOAuthBrowserFlowValid",
@@ -1118,7 +1118,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "approval_lifecycle_authority",
                 "ApprovalLifecycleMachine",
-                "meerkat-core/src/generated/approval_lifecycle.rs",
+                "crates/meerkat-core/src/generated/approval_lifecycle.rs",
                 "generated ApprovalLifecycleMachine owner for CreateRejectedEmptyAllowedDecisions, CreateRejectedAlreadyExists, CreatePending, RestoreRejectedDuplicate, RestoreRejectedEmptyAllowedDecisions, RestorePending, RestoreExpired, RestoreCancelled, RestoreApproved, RestoreDenied, RestoreRejectedInvalidRecord, ObserveExpiryRejectedMissing, ObserveExpiryExpiresPending, ObserveExpiryPendingNoop, ObserveExpiryApprovedNoop, ObserveExpiryDeniedNoop, ObserveExpiryExpiredNoop, ObserveExpiryCancelledNoop, DecideRejectedMissing, DecideRejectedExpired, DecideRejectedAlreadyDecided, DecideRejectedApproveNotAllowed, DecideRejectedDenyNotAllowed, DecideApprove, DecideDeny, ApprovalStatusResolved, and ApprovalLifecycleRejected",
                 CoverageClaims::none()
                     .transitions(&[
@@ -1211,7 +1211,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "detached_job_authority",
                 "DetachedJobMachine",
-                "meerkat-jobs/src/service.rs",
+                "crates/meerkat-jobs/src/service.rs",
                 "generated detached-job lifecycle authority with mechanical CAS and typed projection",
                 CoverageClaims::none()
                     .transitions(&[
@@ -1341,7 +1341,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "runtime_delivery_authority",
                 "RuntimeDeliveryMachine",
-                "meerkat-runtime/src/delivery_inbox.rs",
+                "crates/meerkat-runtime/src/delivery_inbox.rs",
                 "generated runtime delivery identity, sequence, and ordered application authority with mechanical store CAS",
                 CoverageClaims::none()
                     .transitions(&[
@@ -1387,7 +1387,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "session_document_authority",
                 "SessionDocumentMachine",
-                "meerkat-core/src/generated/session_document.rs",
+                "crates/meerkat-core/src/generated/session_document.rs",
                 "generated SessionDocumentMachine owner for MarkSessionInitialTurnPendingInactiveOrPending, MarkSessionInitialTurnPendingConsumed, StartSessionInitialTurnPending, StartSessionInitialTurnInactive, StartSessionInitialTurnConsumed, ResolveSessionFirstTurnOverridesAllowed, ResolveSessionFirstTurnOverridesDenied, StageSessionInitialPromptStore, StageSessionInitialPromptClear, StageSessionToolResults, ConsumeSessionDeferredInputsPending, ConsumeSessionDeferredInputsInactive, ConsumeSessionDeferredInputsConsumed, RestoreSessionConsumedInputs, RestoreSessionConsumedInputsNoPhaseRollback, RecoverSessionFirstTurnPhase, ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeAssistantTurnInterruptedInvalid, ResolveRealtimeAssistantTurnInterruptedValid, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, AuthorizeRestoreRealtimeTranscriptState, SessionFirstTurnPhaseResolved, SessionFirstTurnOverridesResolved, SessionInitialPromptStageResolved, SessionToolResultsStageResolved, SessionConsumedInputsRestoreResolved, SessionFirstTurnPhaseRecovered, RealtimeTranscriptEventResolved, RealtimeMaterializeCandidateResolved, RealtimeTranscriptSnapshotRestoreAuthorized, AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, RestoreSessionBuildState, SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, and SessionBuildStateRestoreAuthorized",
                 CoverageClaims::none()
                     .transitions(&[
@@ -1583,7 +1583,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "session_turn_admission_authority",
                 "SessionTurnAdmissionMachine",
-                "meerkat-session/src/generated/session_turn_admission.rs",
+                "crates/meerkat-session/src/generated/session_turn_admission.rs",
                 "generated SessionTurnAdmissionMachine owner for the ephemeral turn-admission lifecycle: ProjectTurnAdmission, ClaimTurn, AbortClaim, BeginTurn, ResolveTurn, FinalizeTurnToShutdown, FinalizeTurnToIdle, RequestInterruptAdmittedFirst, RequestInterruptAdmittedDuplicate, RequestInterruptRunningFirst, RequestInterruptRunningDuplicate, RequestShutdownImmediateIdle, RequestShutdownImmediateAdmitted, RequestShutdownDeferredRunning, RequestShutdownDeferredCompleting, RequestShutdownAlreadyShuttingDown, ResolvePendingAdmissionDrained, AuthorizeSessionTeardown, AuthorizeCancelAfterBoundaryAdmitted, AuthorizeCancelAfterBoundaryRunning, AuthorizeStartTurnDispatchAdmitted, AuthorizeStartTurnDispatchShuttingDown, ResolveDispositionContentTurn, ResolveDispositionResumePendingWithBoundary, ResolveDispositionResumePendingWithoutBoundary, ResolveDispositionDirectPrompt, ResolveDispositionDirectPending, ResolveDispositionDirectNoPending, ResolveRuntimeKeepAliveEnable, ResolveRuntimeKeepAlivePreserve, and ResolveLastStartTurnPublicTerminalNoPending; effects TurnAdmissionProjected, TurnInterruptRequested, PendingAdmissionDrainRequested, SessionTeardownAuthorized, StartTurnDispatchResolved, CancelAfterBoundaryAuthorized, StartTurnDispositionResolved, StartTurnPublicTerminalResolved, RuntimeKeepAliveResolved; invariants shutdown_phase_is_not_active, drain_obligation_only_while_shutting_down, and teardown_authorization_only_after_drain",
                 CoverageClaims::none()
                     .transitions(&[
@@ -1759,7 +1759,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "workgraph_lifecycle",
                 "WorkGraphLifecycleMachine",
-                "meerkat-workgraph/src/machine.rs",
+                "crates/meerkat-workgraph/src/machine.rs",
                 "WorkGraphMachine domain-facing lifecycle transition seam over CreateDefaultOrOpen, CreateRequestedBlocked, CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ClassifyBlockerSatisfiedCompleted, ClassifyBlockerUnsatisfiedAbsent, ClassifyBlockerUnsatisfiedOpen, ClassifyBlockerUnsatisfiedInProgress, ClassifyBlockerUnsatisfiedBlocked, ClassifyBlockerUnsatisfiedCancelled, ClassifyBlockerUnsatisfiedFailed, ClassifyTerminalityAbsent, ClassifyTerminalityOpen, ClassifyTerminalityInProgress, ClassifyTerminalityBlocked, ClassifyTerminalityCompleted, ClassifyTerminalityCancelled, ClassifyTerminalityFailed, ValidateLink, CloseOpenDefaultOrCompleted, CloseInProgressDefaultOrCompleted, CloseBlockedDefaultOrCompleted, CloseOpenRequestedCancelled, CloseInProgressRequestedCancelled, CloseBlockedRequestedCancelled, CloseOpenRequestedFailed, CloseInProgressRequestedFailed, CloseBlockedRequestedFailed, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, ClassifyCreateStatusAdmissionOpen, ClassifyCreateStatusAdmissionBlocked, ClassifyCreateStatusAdmissionDeniedAbsent, ClassifyCreateStatusAdmissionDeniedInProgress, ClassifyCreateStatusAdmissionDeniedCompleted, ClassifyCreateStatusAdmissionDeniedCancelled, ClassifyCreateStatusAdmissionDeniedFailed, ClassifyPublicConfirmationAdmissionSelfAttest, ClassifyPublicConfirmationAdmissionHostConfirmed, ClassifyPublicConfirmationAdmissionPrincipalConfirmed, ClassifyPublicConfirmationAdmissionSupervisor, ClassifyPublicConfirmationAdmissionReviewerQuorum, ClassifyCompletionPolicyMutationAdmissionUnchanged, ClassifyCompletionPolicyMutationAdmissionChanged; effects Created, Updated, Claimed, Released, Blocked, BlockerSatisfied, BlockerUnsatisfied, LifecycleTerminal, LifecycleNonTerminal, LinkValidated, Closed, EvidenceAdded, CreateStatusAdmissionClassified, PublicConfirmationAdmissionClassified, CompletionPolicyMutationAdmissionClassified; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, blocker satisfaction, public status defaults, terminality classification, create status admission, public confirmation admission, completion policy mutation admission, and topology legality",
                 CoverageClaims::none()
                     .transitions(&[
@@ -2108,7 +2108,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "work_attention_lifecycle",
                 "WorkAttentionLifecycleMachine",
-                "meerkat-workgraph/src/machine.rs",
+                "crates/meerkat-workgraph/src/machine.rs",
                 "WorkAttentionMachine domain-facing lifecycle transition seam over Pause, Resume, Stop, and Supersede; effects AttentionPaused, AttentionResumed, AttentionStopped, AttentionSuperseded; invariants live_has_no_terminal_time, paused_has_pause_state, superseded_records_successor; Paused may have no deadline; revision, timed pause eligibility, stopped state, and supersession target ownership",
                 CoverageClaims::none()
                     .transitions(&[
@@ -2159,7 +2159,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "work_execution_lifecycle",
                 "WorkExecutionLifecycleMachine",
-                "meerkat-workgraph/src/execution_machine.rs",
+                "crates/meerkat-workgraph/src/execution_machine.rs",
                 "WorkExecutionMachine owns the durable bind, launch uncertainty, Flow observation, evidence projection, and WorkGraph closure handoff lifecycle",
                 CoverageClaims::none()
                     .transitions(&[
@@ -2232,7 +2232,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "temporary_council_lifecycle",
                 "TemporaryCouncilLifecycleMachine",
-                "meerkat-mob/src/machines/temporary_council_lifecycle.rs",
+                "crates/meerkat-mob/src/machines/temporary_council_lifecycle.rs",
                 "TemporaryCouncilLifecycleMachine owns one temporary-council record: request-identity binding, discussion/merge advance, immutable result sealing (executed or coordinator-interrupted), cleanup settlement versus retained debt, and the recovery-sweep verdict",
                 CoverageClaims::none()
                     .transitions(&[
@@ -2457,7 +2457,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "forked_participant_lifecycle",
                 "ForkedParticipantLifecycleMachine",
-                "meerkat-mob/src/machines/forked_participant_lifecycle.rs",
+                "crates/meerkat-mob/src/machines/forked_participant_lifecycle.rs",
                 "ForkedParticipantLifecycleMachine owns one source-owned capability record: reservation identity, durable fork activation identity, bounded single-holder attachment admission, revocation, expiry, and cleanup debt",
                 CoverageClaims::none()
                     .transitions(&[
@@ -2650,14 +2650,14 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 route_anchor(
                     "mob_meerkat_seam",
                     "binding_request_reaches_meerkat",
-                    "meerkat-mob/src/runtime/actor.rs",
+                    "crates/meerkat-mob/src/runtime/actor.rs",
                     "MobMachine to MeerkatMachine seam realization for binding requests, work submission, cancellation, lifecycle notices, terminal outcomes, and peer ingress",
                     CoverageClaims::none(),
                 ),
                 machine_anchor(
                     "meerkat_runtime_entry",
                     "MeerkatMachine",
-                    "meerkat-runtime/src/meerkat_machine/mod.rs",
+                    "crates/meerkat-runtime/src/meerkat_machine/mod.rs",
                     "MeerkatMachine command authority consuming runtime binding, admitted work, cancellation, lifecycle, terminal, and peer ingress seam traffic",
                     CoverageClaims::none(),
                 ),
@@ -2686,21 +2686,21 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 route_anchor(
                     "job_outbox_projector",
                     "job_terminal_enters_runtime_inbox",
-                    "meerkat/src/job_delivery.rs",
+                    "crates/meerkat/src/job_delivery.rs",
                     "mechanical job outbox projector submits stable delivery identity into runtime-owned durable authority before acknowledging the job",
                     CoverageClaims::none().routes(&["job_terminal_enters_runtime_inbox"]),
                 ),
                 route_anchor(
                     "job_notification_outbox_projector",
                     "job_notification_enters_runtime_inbox",
-                    "meerkat/src/job_delivery.rs",
+                    "crates/meerkat/src/job_delivery.rs",
                     "mechanical notification outbox projection uses a job-scoped stable runtime delivery identity",
                     CoverageClaims::none().routes(&["job_notification_enters_runtime_inbox"]),
                 ),
                 route_anchor(
                     "runtime_delivery_inbox",
                     "runtime_delivery_commit_acknowledges_job_outbox",
-                    "meerkat-runtime/src/delivery_inbox.rs",
+                    "crates/meerkat-runtime/src/delivery_inbox.rs",
                     "generated runtime delivery commit and exact reuse provide the only acknowledgements accepted by the job projector",
                     CoverageClaims::none().routes(&[
                         "runtime_delivery_commit_acknowledges_job_outbox",
@@ -2710,7 +2710,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 route_anchor(
                     "job_runtime_delivery_schema",
                     "runtime_delivery_reuse_acknowledges_job_outbox",
-                    "meerkat-machine-schema/src/catalog/compositions.rs",
+                    "crates/meerkat-machine-schema/src/catalog/compositions.rs",
                     "formal enqueued two-store job and runtime delivery composition",
                     CoverageClaims::none(),
                 ),
@@ -2748,21 +2748,21 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 route_anchor(
                     "schedule_service",
                     "revision_supersede_enters_occurrence_authority",
-                    "meerkat-schedule/src/service.rs",
+                    "crates/meerkat-schedule/src/service.rs",
                     "schedule service precursor for revision supersession, rolling planning, occurrence materialization, pause resume, and delete lifecycle routing",
                     CoverageClaims::none(),
                 ),
                 route_anchor(
                     "schedule_store",
                     "revision_supersede_enters_occurrence_authority",
-                    "meerkat-schedule/src/store.rs",
+                    "crates/meerkat-schedule/src/store.rs",
                     "schedule store contract precursor for transactional claim, supersede persistence, occurrence progress, and revision-aware planning cursor updates",
                     CoverageClaims::none(),
                 ),
                 route_anchor(
                     "schedule_bundle_schema",
                     "revision_supersede_enters_occurrence_authority",
-                    "meerkat-machine-schema/src/catalog/compositions.rs",
+                    "crates/meerkat-machine-schema/src/catalog/compositions.rs",
                     "formal schedule bundle composition",
                     CoverageClaims::none(),
                 ),
@@ -2791,21 +2791,21 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 route_anchor(
                     "schedule_driver",
                     "revision_supersede_enters_occurrence_authority",
-                    "meerkat-schedule/src/driver.rs",
+                    "crates/meerkat-schedule/src/driver.rs",
                     "mechanical scheduler driver precursor for runtime-target claim, revision supersede, handoff, lease expiry, delivery failure, and completion feedback",
                     CoverageClaims::none(),
                 ),
                 route_anchor(
                     "runtime_delivery_precursor",
                     "revision_supersede_enters_occurrence_authority",
-                    "meerkat-rpc/src/session_runtime.rs",
+                    "crates/meerkat-rpc/src/session_runtime.rs",
                     "runtime-owned prompt/event delivery precursor that scheduling must hand off into for dispatch, completion, failure, and lease recovery",
                     CoverageClaims::none(),
                 ),
                 route_anchor(
                     "schedule_runtime_bundle_schema",
                     "revision_supersede_enters_occurrence_authority",
-                    "meerkat-machine-schema/src/catalog/compositions.rs",
+                    "crates/meerkat-machine-schema/src/catalog/compositions.rs",
                     "formal schedule runtime bundle composition",
                     CoverageClaims::none(),
                 ),
@@ -2835,21 +2835,21 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 route_anchor(
                     "schedule_driver",
                     "revision_supersede_enters_occurrence_authority",
-                    "meerkat-schedule/src/driver.rs",
+                    "crates/meerkat-schedule/src/driver.rs",
                     "mechanical scheduler driver precursor for mob-target claim, revision supersede, handoff, lease expiry, delivery failure, and completion feedback",
                     CoverageClaims::none(),
                 ),
                 route_anchor(
                     "mob_delivery_precursor",
                     "revision_supersede_enters_occurrence_authority",
-                    "meerkat-mob-mcp/src/lib.rs",
+                    "crates/meerkat-mob-mcp/src/lib.rs",
                     "mob-owned action delivery precursor that scheduling must hand off into for dispatch, completion, target materialization failure, and lease recovery",
                     CoverageClaims::none(),
                 ),
                 route_anchor(
                     "schedule_mob_bundle_schema",
                     "revision_supersede_enters_occurrence_authority",
-                    "meerkat-machine-schema/src/catalog/compositions.rs",
+                    "crates/meerkat-machine-schema/src/catalog/compositions.rs",
                     "formal schedule mob bundle composition",
                     CoverageClaims::none(),
                 ),
@@ -2879,14 +2879,14 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 machine_anchor(
                     "adaptive_mob_bundle_kernel",
                     "MobMachine",
-                    "meerkat-mob/src/runtime/handle.rs",
+                    "crates/meerkat-mob/src/runtime/handle.rs",
                     "adaptive Mobpack control mob owns the adaptive run kernel while layer mobs publish terminal classifications through the driver seam",
                     CoverageClaims::none(),
                 ),
                 machine_anchor(
                     "adaptive_mob_bundle_driver",
                     "MobMachine",
-                    "meerkat-mob/src/generated/adaptive_mob_bundle.rs",
+                    "crates/meerkat-mob/src/generated/adaptive_mob_bundle.rs",
                     "generated adaptive bundle driver watches layer terminal classification and dispatches typed terminal feedback into the control mob adaptive kernel",
                     CoverageClaims::none(),
                 ),
@@ -2903,14 +2903,14 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 machine_anchor(
                     "auth_lease_handle",
                     "AuthMachine",
-                    "meerkat-runtime/src/handles/auth_lease.rs",
+                    "crates/meerkat-runtime/src/handles/auth_lease.rs",
                     "runtime auth lease owner consumes canonical AuthMachine lifecycle acquire, refresh, reauth, release, wake, and publication events",
                     CoverageClaims::none(),
                 ),
                 machine_anchor(
                     "auth_lease_bundle_schema",
                     "AuthMachine",
-                    "meerkat-machine-schema/src/catalog/compositions.rs",
+                    "crates/meerkat-machine-schema/src/catalog/compositions.rs",
                     "formal AuthMachine lifecycle publication handoff composition",
                     CoverageClaims::none(),
                 ),
@@ -2927,14 +2927,14 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 route_anchor(
                     "workgraph_attention_service_close",
                     "work_item_close_stops_attention",
-                    "meerkat-workgraph/src/service.rs",
+                    "crates/meerkat-workgraph/src/service.rs",
                     "WorkGraph service close path realizes the canonical WorkGraph Closed to WorkAttention Stop route with an atomic item-and-attention CAS update",
                     CoverageClaims::none(),
                 ),
                 route_anchor(
                     "workgraph_attention_bundle_schema",
                     "work_item_close_stops_attention",
-                    "meerkat-machine-schema/src/catalog/compositions.rs",
+                    "crates/meerkat-machine-schema/src/catalog/compositions.rs",
                     "formal WorkGraph item closure to WorkAttention stop composition",
                     CoverageClaims::none(),
                 ),
@@ -2951,14 +2951,14 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 machine_anchor(
                     "workgraph_flow_bridge_owner",
                     "WorkExecutionLifecycleMachine",
-                    "meerkat-mob/src/workgraph_flow.rs",
+                    "crates/meerkat-mob/src/workgraph_flow.rs",
                     "mechanical Mob composition facade realizes generated WorkExecution launch, evidence, and closure obligations and returns typed feedback",
                     CoverageClaims::none(),
                 ),
                 machine_anchor(
                     "workgraph_flow_bundle_schema",
                     "WorkExecutionLifecycleMachine",
-                    "meerkat-machine-schema/src/catalog/compositions.rs",
+                    "crates/meerkat-machine-schema/src/catalog/compositions.rs",
                     "formal WorkExecution lifecycle handoff composition for Mob Flow attempts",
                     CoverageClaims::none(),
                 ),
@@ -3162,14 +3162,14 @@ mod tests {
             machine_anchor(
                 "claiming_anchor",
                 "MeerkatMachine",
-                "meerkat-runtime/src/meerkat_machine/mod.rs",
+                "crates/meerkat-runtime/src/meerkat_machine/mod.rs",
                 "prose mentioning register session everywhere",
                 CoverageClaims::none().transitions(&["RegisterSession"]),
             ),
             machine_anchor(
                 "non_claiming_anchor",
                 "MeerkatMachine",
-                "meerkat/src/meerkat_machine.rs",
+                "crates/meerkat/src/meerkat_machine.rs",
                 "prose also mentioning register session",
                 CoverageClaims::none(),
             ),

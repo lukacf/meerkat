@@ -7696,7 +7696,7 @@ impl AgentFactory {
 
 /// The live A→B `brain_swap` proof over the real runtime loop.
 ///
-/// It lives inside this module rather than in `meerkat/tests/` because the
+/// It lives inside this module rather than in `crates/meerkat/tests/` because the
 /// availability logic it must NOT bypass reads the factory's own provider
 /// registry: proving the ordinary registration path requires substituting a
 /// credential-free provider runtime in that private slot, and exposing a
@@ -10587,7 +10587,7 @@ mod tests {
                 .expect("open sqlite session store"),
         );
         // Production sqlite-realm wiring: the HeadCanonicalV1 runtime
-        // authority shares the session-store file (meerkat/src/persistence.rs).
+        // authority shares the session-store file (crates/meerkat/src/persistence.rs).
         let runtime_store = Arc::new(
             meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(sqlite_path)
                 .expect("open head-canonical runtime store"),

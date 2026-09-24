@@ -9,7 +9,7 @@
 //! truncation.
 //!
 //! Predicted failure mode today: per the plan, `fork_at` at
-//! `meerkat-core/src/session.rs:798` was described as preserving the
+//! `crates/meerkat-core/src/session.rs:798` was described as preserving the
 //! parent's `SessionId`. If the current implementation already rotates
 //! via `SessionId::new()`, this test will pass today — which is itself
 //! a signal that the plan's baseline assumption about F7 has shifted.

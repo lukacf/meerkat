@@ -352,7 +352,7 @@ fn propagation_report_with_close_failure_is_not_clean() {
 // state from the calling surface, so each test stands up a minimal
 // session-store-backed runtime and constructs an orchestrator directly
 // (no RPC SessionRuntime in sight). RPC's R11 tests in
-// `meerkat-rpc/src/session_runtime.rs::tests` continue to cover the
+// `crates/meerkat-rpc/src/session_runtime.rs::tests` continue to cover the
 // thin shim path.
 #[cfg(all(
     feature = "session-store",

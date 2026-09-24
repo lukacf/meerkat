@@ -19,11 +19,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="${1:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 EXCLUDE="${2:-}"
 
-# name<TAB>directory for every top-level workspace manifest. Only the [package]
+# name<TAB>directory for every workspace member manifest (crates/*, tests/*). Only the [package]
 # section counts: several crates declare [[bin]] targets whose names collide
 # with other crates' package names.
 crate_table="$(
-  for manifest in "${ROOT}"/*/Cargo.toml; do
+  for manifest in "${ROOT}"/*/Cargo.toml "${ROOT}"/crates/*/Cargo.toml "${ROOT}"/tests/integration/Cargo.toml "${ROOT}"/tests/fixtures/*/Cargo.toml; do
     [[ -f "${manifest}" ]] || continue
     awk -v dir="$(dirname "${manifest}")" '
       /^[[:space:]]*\[/ { in_package = ($0 ~ /^[[:space:]]*\[package\][[:space:]]*$/) }

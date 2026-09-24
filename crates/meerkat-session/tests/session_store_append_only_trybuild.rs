@@ -144,7 +144,7 @@ async fn append_only_save_guard_rejects_equal_length_replacement() {
 /// Fork contract (F7 companion): `Session::fork_at` returns a distinct
 /// `SessionId`, so a "fork with a shorter history" is a new identity on
 /// a new event log, not a same-session shrink. Duplicates the stricter
-/// tripwire at `meerkat-core/tests/fork_at_rotates_session_id.rs` —
+/// tripwire at `crates/meerkat-core/tests/fork_at_rotates_session_id.rs` —
 /// kept here so a downstream consumer reading only this file sees the
 /// full append-only contract.
 #[test]

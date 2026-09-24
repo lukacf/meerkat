@@ -60,7 +60,7 @@ matches=$(cd "$ROOT_DIR" && rg -n -H -e "$PATTERN" \
   --glob '!target-*/**' \
   --glob '!**/node_modules/**' \
   --glob '!scripts/deprecated_backend_scan.sh' \
-  --glob '!xtask/tests/buildbuddy_static_lanes.rs' \
+  --glob '!crates/xtask/tests/buildbuddy_static_lanes.rs' \
   --glob '!nohup.out' \
   . || true)
 

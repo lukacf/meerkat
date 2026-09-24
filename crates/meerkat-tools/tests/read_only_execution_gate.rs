@@ -9,7 +9,7 @@
 //! Coverage boundary: this is a subset of the factory chain, not a replica of
 //! it. `AgentFactory` also places `ToolGateway`, the catalog-control sibling,
 //! and the memory / schedule / workgraph / mob / comms sibling dispatchers
-//! under the same gate (meerkat/src/factory.rs, tool composition steps), and
+//! under the same gate (crates/meerkat/src/factory.rs, tool composition steps), and
 //! none of those are exercised here: meerkat-tools is upstream of the facade,
 //! so composing through the factory is not reachable from this crate's test
 //! target. A future wrapper inserted there that forgets to forward

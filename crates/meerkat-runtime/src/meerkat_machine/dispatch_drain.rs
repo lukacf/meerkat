@@ -90,7 +90,7 @@ impl MeerkatMachine {
                 // keep-alive-only self-loop that doesn't mutate those
                 // fields; the ownership-establishing transitions are
                 // `AttachSessionIngress` / `AttachMobIngress` at
-                // `meerkat-runtime/src/meerkat_machine/dsl.rs:6375-6407`.
+                // `crates/meerkat-runtime/src/meerkat_machine/dsl.rs:6375-6407`.
                 //
                 // When a `comms_runtime` is provided:
                 //   - If `mob_id` is present → fire `AttachMobIngress` to

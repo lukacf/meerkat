@@ -696,7 +696,7 @@ pub enum CredentialSourceSpec {
     PlatformDefault,
     /// External command that prints a bearer token on stdout. Reference:
     /// Codex `external_bearer.rs:17-157`. The runner lives in
-    /// `meerkat-client/src/auth_store/command.rs`.
+    /// `crates/meerkat-client/src/auth_store/command.rs`.
     Command {
         program: PathBuf,
         #[serde(default)]

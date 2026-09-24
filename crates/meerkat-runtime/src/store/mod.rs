@@ -9079,7 +9079,7 @@ pub trait RuntimeStore: Send + Sync {
     //
     // Raw record-JSON accessors only: the TYPED record and the
     // transition-derived persistence authorities live mob-side
-    // (`meerkat-mob/src/runtime/host_actor.rs`); this store never interprets
+    // (`crates/meerkat-mob/src/runtime/host_actor.rs`); this store never interprets
     // the blob. CAS compares the full serialized record, mirroring the
     // `mob_runtime_supervisors` mechanics.
 

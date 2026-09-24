@@ -760,7 +760,8 @@ async fn public_agentbuilder_rejects_standalone_core_injections_loudly() {
 fn public_agentfactory_value_is_not_core_policy_authority() {
     let mut builder = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     builder.pop();
-    builder.push("meerkat-core/src/agent/builder.rs");
+    builder.pop();
+    builder.push("crates/meerkat-core/src/agent/builder.rs");
     let builder = std::fs::read_to_string(&builder).expect("read core AgentBuilder implementation");
 
     assert!(

@@ -108,7 +108,7 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
-        "//meerkat:__pkg__",
+        "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
         "CARGO_PKG_VERSION": "0.8.41",
@@ -119,11 +119,11 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat:meerkat_anthropic_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_gemini_agent_factory_build",
-        "//meerkat:meerkat_llm_core_agent_factory_build",
-        "//meerkat:meerkat_openai_agent_factory_build",
+        "//crates/meerkat:meerkat_anthropic_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_gemini_agent_factory_build",
+        "//crates/meerkat:meerkat_llm_core_agent_factory_build",
+        "//crates/meerkat:meerkat_openai_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-client",
         normal = True,
@@ -297,7 +297,9 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [],
+    data = [
+        "//crates/meerkat:package_runfiles",
+    ],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",

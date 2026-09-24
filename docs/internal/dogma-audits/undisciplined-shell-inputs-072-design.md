@@ -18,7 +18,7 @@ legitimate interleavings.
 
 ## Mechanisms (all existing, cited)
 
-- **DSL transitions**: `meerkat-machine-schema/src/catalog/dsl/*.rs`. Syntax:
+- **DSL transitions**: `crates/meerkat-machine-schema/src/catalog/dsl/*.rs`. Syntax:
   `transition Name { on input X { .. } guard ".." { .. } update { .. } to Phase emit Effect { .. } }`.
   Self-loop with empty `update {}` is a legal no-op transition (precedent:
   `ObserveCredentialFreshnessValid`, auth_machine.rs:279).
@@ -26,7 +26,7 @@ legitimate interleavings.
   clause; seam-inventory (`xtask seam-inventory`, run by `make seam-inventory`
   and `rmat-audit`) audits them.
 - **C-F3 teardown pairing**: typed declarations in
-  `meerkat-machine-schema/src/catalog/compositions.rs` —
+  `crates/meerkat-machine-schema/src/catalog/compositions.rs` —
   `Route { teardown: Some(EffectTeardownClass::DestroyRequest { detach_obligation: protocol_id(..) }) }`
   (compositions.rs:534) paired with
   `EffectHandoffProtocol { teardown: Some(TeardownObligationClass::DetachBeforeDestroy) }`
@@ -36,10 +36,10 @@ legitimate interleavings.
 - **Codegen/verify**: `cargo xtask machine-codegen --all` regenerates;
   `cargo xtask machine-verify --all` runs drift + TLC; `make machine-check-drift`
   gates CI. Generated MeerkatMachine code is macro-expanded into
-  `meerkat-runtime/src/meerkat_machine/dsl.rs` etc.
+  `crates/meerkat-runtime/src/meerkat_machine/dsl.rs` etc.
 - **Dispatch**: shells stage inputs via `stage_session_dsl_input` /
   `commit_session_dsl_transition`; rejection classification lives in
-  `meerkat-runtime/src/meerkat_machine/dispatch_session.rs:99-111`.
+  `crates/meerkat-runtime/src/meerkat_machine/dispatch_session.rs:99-111`.
 
 ## Architecture decisions
 

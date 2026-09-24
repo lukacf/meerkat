@@ -24,7 +24,7 @@
 //! process-global; `std::env::set_var` races sibling test threads).
 //! TODO(evidence): port the memo-free re-exec child idiom — see
 //! `cold_restart_resume_continues_persisted_history_without_process_memos`
-//! in `meerkat/tests/cold_restart_resume.rs` — to at least the
+//! in `crates/meerkat/tests/cold_restart_resume.rs` — to at least the
 //! compaction-rewrite resume contract here, so the post-compaction cold
 //! decode is also proven without process memos.
 

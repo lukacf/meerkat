@@ -29,7 +29,7 @@ fn mcp_binary_path() -> Option<PathBuf> {
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent()?;
+    let workspace_root = manifest_dir.parent()?.parent()?;
     let debug = workspace_root.join("target/debug/rkat-mcp");
     if debug.exists() {
         return Some(debug);

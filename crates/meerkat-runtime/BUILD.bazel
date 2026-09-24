@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_runtime",
-    aliases = aliases(package_name = "meerkat-runtime"),
+    aliases = aliases(package_name = "crates/meerkat-runtime"),
     crate_name = "meerkat_runtime",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -74,7 +74,7 @@ rust_library(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
     ),
     deps = [
@@ -88,14 +88,14 @@ rust_library(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_runtime_test_support",
-    aliases = aliases(package_name = "meerkat-runtime"),
+    aliases = aliases(package_name = "crates/meerkat-runtime"),
     crate_name = "meerkat_runtime",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -144,7 +144,7 @@ rust_library(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
     ),
     deps = [
@@ -158,14 +158,14 @@ rust_library(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_runtime_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-runtime"),
+    aliases = aliases(package_name = "crates/meerkat-runtime"),
     crate_name = "meerkat_runtime",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -195,7 +195,7 @@ rust_library(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
     ),
     deps = [
@@ -209,14 +209,14 @@ rust_library(
         "//crates/meerkat:meerkat_sqlite_agent_factory_build",
         "//crates/meerkat:meerkat_store_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_runtime_agent_factory_build_test_support",
-    aliases = aliases(package_name = "meerkat-runtime"),
+    aliases = aliases(package_name = "crates/meerkat-runtime"),
     crate_name = "meerkat_runtime",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -247,7 +247,7 @@ rust_library(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
     ),
     deps = [
@@ -261,7 +261,7 @@ rust_library(
         "//crates/meerkat:meerkat_sqlite_agent_factory_build",
         "//crates/meerkat:meerkat_store_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
     ),
 )
@@ -269,7 +269,7 @@ rust_library(
 rust_test(
     name = "meerkat_runtime_unit_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -322,7 +322,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -339,7 +339,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -348,7 +348,7 @@ rust_test(
 rust_test(
     name = "auth_reauth_notice_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -397,7 +397,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -414,7 +414,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -423,7 +423,7 @@ rust_test(
 rust_test(
     name = "bounded_submit_contract_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -469,7 +469,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -486,7 +486,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -495,7 +495,7 @@ rust_test(
 rust_test(
     name = "composition_dispatch_is_the_path_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -543,7 +543,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -560,7 +560,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -569,7 +569,7 @@ rust_test(
 rust_test(
     name = "composition_driver_contract_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -617,7 +617,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -634,7 +634,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -643,7 +643,7 @@ rust_test(
 rust_test(
     name = "control_plane_contract_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -691,7 +691,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -708,7 +708,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -717,7 +717,7 @@ rust_test(
 rust_test(
     name = "core_apply_terminal_truth_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -771,7 +771,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -788,7 +788,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -797,7 +797,7 @@ rust_test(
 rust_test(
     name = "detached_wake_contract_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -843,7 +843,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -860,7 +860,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -869,7 +869,7 @@ rust_test(
 rust_test(
     name = "driver_ephemeral_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -915,7 +915,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -932,7 +932,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -941,7 +941,7 @@ rust_test(
 rust_test(
     name = "driver_persistent_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -987,7 +987,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1004,7 +1004,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1013,7 +1013,7 @@ rust_test(
 rust_test(
     name = "durable_delivery_inbox_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1058,7 +1058,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1075,7 +1075,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1084,7 +1084,7 @@ rust_test(
 rust_test(
     name = "durable_tail_recovery_authorization_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1130,7 +1130,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1147,7 +1147,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1156,7 +1156,7 @@ rust_test(
 rust_test(
     name = "gpt_live_generated_authority_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1201,7 +1201,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1218,7 +1218,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1227,7 +1227,7 @@ rust_test(
 rust_test(
     name = "handles_dispatch_through_dispatcher_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1278,7 +1278,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1295,7 +1295,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1304,7 +1304,7 @@ rust_test(
 rust_test(
     name = "meerkat_machine_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1352,7 +1352,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1369,7 +1369,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1378,7 +1378,7 @@ rust_test(
 rust_test(
     name = "ops_lifecycle_contract_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1424,7 +1424,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1441,7 +1441,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1450,7 +1450,7 @@ rust_test(
 rust_test(
     name = "ops_lifecycle_persistence_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1496,7 +1496,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1513,7 +1513,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1522,7 +1522,7 @@ rust_test(
 rust_test(
     name = "peer_handling_mode_contract_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1568,7 +1568,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1585,7 +1585,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1594,7 +1594,7 @@ rust_test(
 rust_test(
     name = "peer_ingress_fact_ratchet_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1642,7 +1642,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1659,7 +1659,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1668,7 +1668,7 @@ rust_test(
 rust_test(
     name = "peer_interaction_dsl_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1714,7 +1714,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1731,7 +1731,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1740,7 +1740,7 @@ rust_test(
 rust_test(
     name = "peer_projection_dsl_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1786,7 +1786,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1803,7 +1803,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1812,7 +1812,7 @@ rust_test(
 rust_test(
     name = "peer_projection_producer_wiring_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1860,7 +1860,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1877,7 +1877,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1886,7 +1886,7 @@ rust_test(
 rust_test(
     name = "pre_ledger_realm_bridge_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1938,7 +1938,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1955,7 +1955,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -1964,7 +1964,7 @@ rust_test(
 rust_test(
     name = "recovery_contract_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2016,7 +2016,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2033,7 +2033,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -2042,7 +2042,7 @@ rust_test(
 rust_test(
     name = "recovery_replay_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2088,7 +2088,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2105,7 +2105,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -2114,7 +2114,7 @@ rust_test(
 rust_test(
     name = "regression_comms_runtime_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2162,7 +2162,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2179,7 +2179,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -2188,7 +2188,7 @@ rust_test(
 rust_test(
     name = "runtime_bindings_contract_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2234,7 +2234,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2251,7 +2251,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -2260,7 +2260,7 @@ rust_test(
 rust_test(
     name = "runtime_ingress_control_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2306,7 +2306,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2323,7 +2323,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -2332,7 +2332,7 @@ rust_test(
 rust_test(
     name = "runtime_terminal_publication_contract_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2380,7 +2380,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2397,7 +2397,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -2406,7 +2406,7 @@ rust_test(
 rust_test(
     name = "trust_reconcile_add_failure_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2455,7 +2455,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2472,7 +2472,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -2481,7 +2481,7 @@ rust_test(
 rust_test(
     name = "trust_reconcile_concurrency_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2530,7 +2530,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2547,7 +2547,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -2556,7 +2556,7 @@ rust_test(
 rust_test(
     name = "turn_content_shape_contract_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2604,7 +2604,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2621,7 +2621,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -2630,7 +2630,7 @@ rust_test(
 rust_test(
     name = "turn_metadata_single_construction_site_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2678,7 +2678,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2695,7 +2695,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -2704,7 +2704,7 @@ rust_test(
 rust_test(
     name = "unregister_drain_contract_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2750,7 +2750,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2767,7 +2767,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),
@@ -2776,7 +2776,7 @@ rust_test(
 rust_test(
     name = "whole_blob_repair_test",
     aliases = aliases(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2822,7 +2822,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2839,7 +2839,7 @@ rust_test(
         "//crates/meerkat-sqlite:meerkat_sqlite",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-runtime",
+        package_name = "crates/meerkat-runtime",
         normal = True,
         normal_dev = True,
     ),

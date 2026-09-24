@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_anthropic",
-    aliases = aliases(package_name = "meerkat-anthropic"),
+    aliases = aliases(package_name = "crates/meerkat-anthropic"),
     crate_name = "meerkat_anthropic",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -65,7 +65,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-anthropic",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "crates/meerkat-anthropic",
         proc_macro = True,
     ),
     deps = [
@@ -75,14 +75,14 @@ rust_library(
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-models:meerkat_models",
     ] + all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "crates/meerkat-anthropic",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_anthropic_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-anthropic"),
+    aliases = aliases(package_name = "crates/meerkat-anthropic"),
     crate_name = "meerkat_anthropic",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -103,7 +103,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-anthropic",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "crates/meerkat-anthropic",
         proc_macro = True,
     ),
     deps = [
@@ -113,7 +113,7 @@ rust_library(
         "//crates/meerkat:meerkat_llm_core_agent_factory_build",
         "//crates/meerkat:meerkat_models_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "crates/meerkat-anthropic",
         normal = True,
     ),
 )
@@ -121,7 +121,7 @@ rust_library(
 rust_test(
     name = "meerkat_anthropic_unit_test",
     aliases = aliases(
-        package_name = "meerkat-anthropic",
+        package_name = "crates/meerkat-anthropic",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -157,7 +157,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "crates/meerkat-anthropic",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -169,7 +169,7 @@ rust_test(
         "//crates/meerkat-models:meerkat_models",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "crates/meerkat-anthropic",
         normal = True,
         normal_dev = True,
     ),
@@ -178,7 +178,7 @@ rust_test(
 rust_test(
     name = "oauth_resolve_test",
     aliases = aliases(
-        package_name = "meerkat-anthropic",
+        package_name = "crates/meerkat-anthropic",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -214,7 +214,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "crates/meerkat-anthropic",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -227,7 +227,7 @@ rust_test(
         "//crates/meerkat-models:meerkat_models",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-anthropic",
+        package_name = "crates/meerkat-anthropic",
         normal = True,
         normal_dev = True,
     ),

@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_machine_schema",
-    aliases = aliases(package_name = "meerkat-machine-schema"),
+    aliases = aliases(package_name = "crates/meerkat-machine-schema"),
     crate_name = "meerkat_machine_schema",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -64,20 +64,20 @@ rust_library(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
     ),
     deps = [
         "//crates/meerkat-core:meerkat_core",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_machine_schema_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-machine-schema"),
+    aliases = aliases(package_name = "crates/meerkat-machine-schema"),
     crate_name = "meerkat_machine_schema",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -97,13 +97,13 @@ rust_library(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
     ),
     deps = [
         "//crates/meerkat:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
     ),
 )
@@ -111,7 +111,7 @@ rust_library(
 rust_test(
     name = "meerkat_machine_schema_unit_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -158,14 +158,14 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
     deps = [
         "//crates/meerkat-core:meerkat_core",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -174,7 +174,7 @@ rust_test(
 rust_test(
     name = "auth_machine_oauth_flow_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -209,7 +209,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -217,7 +217,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -226,7 +226,7 @@ rust_test(
 rust_test(
     name = "auth_machine_release_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -261,7 +261,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -269,7 +269,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -278,7 +278,7 @@ rust_test(
 rust_test(
     name = "catalog_typed_round_trip_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -313,7 +313,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -321,7 +321,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -330,7 +330,7 @@ rust_test(
 rust_test(
     name = "defer_input_totality_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -365,7 +365,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -373,7 +373,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -382,7 +382,7 @@ rust_test(
 rust_test(
     name = "docs_machine_authority_alignment_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -423,7 +423,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -431,7 +431,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -440,7 +440,7 @@ rust_test(
 rust_test(
     name = "draining_registration_fence_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -475,7 +475,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -483,7 +483,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -492,7 +492,7 @@ rust_test(
 rust_test(
     name = "forked_participant_lifecycle_machine_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -527,7 +527,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -535,7 +535,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -544,7 +544,7 @@ rust_test(
 rust_test(
     name = "gpt_live_authority_contract_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -578,7 +578,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -586,7 +586,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -595,7 +595,7 @@ rust_test(
 rust_test(
     name = "identity_roundtrip_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -630,7 +630,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -638,7 +638,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -647,7 +647,7 @@ rust_test(
 rust_test(
     name = "model_routing_handoff_lifecycle_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -682,7 +682,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -690,7 +690,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -699,7 +699,7 @@ rust_test(
 rust_test(
     name = "named_type_binding_covers_catalog_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -734,7 +734,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -742,7 +742,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -751,7 +751,7 @@ rust_test(
 rust_test(
     name = "peer_endpoint_structural_equivalence_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -786,7 +786,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -794,7 +794,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -803,7 +803,7 @@ rust_test(
 rust_test(
     name = "placed_lifecycle_origin_fence_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -838,7 +838,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -846,7 +846,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -855,7 +855,7 @@ rust_test(
 rust_test(
     name = "runtime_authority_reconciliation_totality_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -890,7 +890,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -898,7 +898,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -907,7 +907,7 @@ rust_test(
 rust_test(
     name = "schema_construction_cache_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -942,7 +942,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -950,7 +950,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -959,7 +959,7 @@ rust_test(
 rust_test(
     name = "schema_contracts_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -998,7 +998,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1006,7 +1006,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -1015,7 +1015,7 @@ rust_test(
 rust_test(
     name = "stopped_phase_revival_lattice_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1050,7 +1050,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1058,7 +1058,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),
@@ -1067,7 +1067,7 @@ rust_test(
 rust_test(
     name = "temporary_council_lifecycle_machine_test",
     aliases = aliases(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1102,7 +1102,7 @@ rust_test(
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1110,7 +1110,7 @@ rust_test(
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-schema",
+        package_name = "crates/meerkat-machine-schema",
         normal = True,
         normal_dev = True,
     ),

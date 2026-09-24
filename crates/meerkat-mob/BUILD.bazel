@@ -65,7 +65,7 @@ exports_files(
 
 rust_library(
     name = "meerkat_mob",
-    aliases = aliases(package_name = "meerkat-mob"),
+    aliases = aliases(package_name = "crates/meerkat-mob"),
     crate_name = "meerkat_mob",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -104,7 +104,7 @@ rust_library(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
     ),
     deps = [
@@ -121,14 +121,14 @@ rust_library(
         "//crates/meerkat:meerkat_session_agent_factory_build",
         "//crates/meerkat:meerkat_sqlite_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_mob_with_runtime_test_support",
-    aliases = aliases(package_name = "meerkat-mob"),
+    aliases = aliases(package_name = "crates/meerkat-mob"),
     crate_name = "meerkat_mob",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -179,7 +179,7 @@ rust_library(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
     ),
     deps = [
@@ -196,7 +196,7 @@ rust_library(
         "//crates/meerkat:meerkat_sqlite_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
     ),
 )
@@ -204,7 +204,7 @@ rust_library(
 rust_test(
     name = "meerkat_mob_unit_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -265,7 +265,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -286,7 +286,7 @@ rust_test(
         "//crates/meerkat:meerkat_sqlite_agent_factory_build",
         "//crates/meerkat:meerkat_store_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -295,7 +295,7 @@ rust_test(
 rust_test(
     name = "cold_restart_mob_resume_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -351,7 +351,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -372,7 +372,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -381,7 +381,7 @@ rust_test(
 rust_test(
     name = "cross_host_events_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -435,7 +435,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -456,7 +456,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -465,7 +465,7 @@ rust_test(
 rust_test(
     name = "cross_host_flows_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -519,7 +519,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -540,7 +540,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -549,7 +549,7 @@ rust_test(
 rust_test(
     name = "cross_host_live_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -605,7 +605,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -626,7 +626,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -635,7 +635,7 @@ rust_test(
 rust_test(
     name = "cross_host_wiring_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -689,7 +689,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -710,7 +710,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -719,7 +719,7 @@ rust_test(
 rust_test(
     name = "dispatcher_rule_synthetic_injection_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -772,7 +772,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -793,7 +793,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -802,7 +802,7 @@ rust_test(
 rust_test(
     name = "flow_frame_recovery_tests_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -853,7 +853,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -874,7 +874,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -883,7 +883,7 @@ rust_test(
 rust_test(
     name = "forked_participant_attached_spawn_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -937,7 +937,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -958,7 +958,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -967,7 +967,7 @@ rust_test(
 rust_test(
     name = "forked_participant_capabilities_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1018,7 +1018,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1039,7 +1039,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -1048,7 +1048,7 @@ rust_test(
 rust_test(
     name = "forked_participant_containment_rule_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1099,7 +1099,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1120,7 +1120,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -1129,7 +1129,7 @@ rust_test(
 rust_test(
     name = "forked_participant_host_attached_spawn_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1183,7 +1183,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1204,7 +1204,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -1213,7 +1213,7 @@ rust_test(
 rust_test(
     name = "forked_participant_routing_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1267,7 +1267,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1288,7 +1288,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -1297,7 +1297,7 @@ rust_test(
 rust_test(
     name = "host_actor_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1348,7 +1348,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1369,7 +1369,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -1378,7 +1378,7 @@ rust_test(
 rust_test(
     name = "host_actor_persistence_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1432,7 +1432,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1453,7 +1453,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -1462,7 +1462,7 @@ rust_test(
 rust_test(
     name = "host_bind_ceremony_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1518,7 +1518,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1539,7 +1539,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -1548,7 +1548,7 @@ rust_test(
 rust_test(
     name = "host_forked_participant_attachment_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1599,7 +1599,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1620,7 +1620,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -1629,7 +1629,7 @@ rust_test(
 rust_test(
     name = "host_forked_participant_live_daemon_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1682,7 +1682,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1703,7 +1703,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -1712,7 +1712,7 @@ rust_test(
 rust_test(
     name = "host_materialize_serving_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1768,7 +1768,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1789,7 +1789,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -1798,7 +1798,7 @@ rust_test(
 rust_test(
     name = "host_member_release_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1852,7 +1852,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1873,7 +1873,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -1882,7 +1882,7 @@ rust_test(
 rust_test(
     name = "host_member_revival_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1938,7 +1938,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1959,7 +1959,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -1968,7 +1968,7 @@ rust_test(
 rust_test(
     name = "host_orphan_reconciliation_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2022,7 +2022,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2043,7 +2043,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -2052,7 +2052,7 @@ rust_test(
 rust_test(
     name = "host_release_disposal_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2105,7 +2105,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2126,7 +2126,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -2135,7 +2135,7 @@ rust_test(
 rust_test(
     name = "host_resume_recovery_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2189,7 +2189,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2210,7 +2210,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -2219,7 +2219,7 @@ rust_test(
 rust_test(
     name = "kickoff_spawn_teardown_quiesce_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2270,7 +2270,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2291,7 +2291,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -2300,7 +2300,7 @@ rust_test(
 rust_test(
     name = "member_revival_rebinding_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2351,7 +2351,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2372,7 +2372,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -2381,7 +2381,7 @@ rust_test(
 rust_test(
     name = "member_session_bindings_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2432,7 +2432,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2453,7 +2453,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -2462,7 +2462,7 @@ rust_test(
 rust_test(
     name = "member_turn_options_public_api_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2513,7 +2513,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2534,7 +2534,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -2543,7 +2543,7 @@ rust_test(
 rust_test(
     name = "member_upcall_lane_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2599,7 +2599,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2620,7 +2620,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -2629,7 +2629,7 @@ rust_test(
 rust_test(
     name = "mob_host_binding_authority_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2680,7 +2680,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2701,7 +2701,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -2710,7 +2710,7 @@ rust_test(
 rust_test(
     name = "mob_orchestrator_kernel_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2761,7 +2761,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2782,7 +2782,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -2791,7 +2791,7 @@ rust_test(
 rust_test(
     name = "multi_host_machine_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2842,7 +2842,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2863,7 +2863,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -2872,7 +2872,7 @@ rust_test(
 rust_test(
     name = "placed_member_respawn_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -2926,7 +2926,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -2947,7 +2947,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -2956,7 +2956,7 @@ rust_test(
 rust_test(
     name = "placed_spawn_carrier_store_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -3007,7 +3007,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -3028,7 +3028,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -3037,7 +3037,7 @@ rust_test(
 rust_test(
     name = "remote_spawn_ladder_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -3091,7 +3091,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -3112,7 +3112,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -3121,7 +3121,7 @@ rust_test(
 rust_test(
     name = "remote_spawn_materialization_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -3175,7 +3175,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -3196,7 +3196,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -3205,7 +3205,7 @@ rust_test(
 rust_test(
     name = "scope_matrix_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -3262,7 +3262,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -3283,7 +3283,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -3292,7 +3292,7 @@ rust_test(
 rust_test(
     name = "shadow_state_absent_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -3343,7 +3343,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -3364,7 +3364,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -3373,7 +3373,7 @@ rust_test(
 rust_test(
     name = "smoke_mob_flow_runtime_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -3429,7 +3429,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -3450,7 +3450,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -3459,7 +3459,7 @@ rust_test(
 rust_test(
     name = "smoke_mob_generated_image_comms_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -3512,7 +3512,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -3533,7 +3533,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -3542,7 +3542,7 @@ rust_test(
 rust_test(
     name = "smoke_mob_idle_burn_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -3593,7 +3593,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -3614,7 +3614,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -3623,7 +3623,7 @@ rust_test(
 rust_test(
     name = "smoke_mob_pictionary_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -3674,7 +3674,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -3695,7 +3695,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -3704,7 +3704,7 @@ rust_test(
 rust_test(
     name = "smoke_mob_resume_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -3757,7 +3757,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -3778,7 +3778,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -3787,7 +3787,7 @@ rust_test(
 rust_test(
     name = "smoke_mob_turn_latency_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -3840,7 +3840,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -3861,7 +3861,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),
@@ -3870,7 +3870,7 @@ rust_test(
 rust_test(
     name = "turn_boundary_fork_forwarding_test",
     aliases = aliases(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -3926,7 +3926,7 @@ rust_test(
         "//crates/meerkat-machine-derive:meerkat_machine_derive",
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -3947,7 +3947,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mob",
+        package_name = "crates/meerkat-mob",
         normal = True,
         normal_dev = True,
     ),

@@ -59,6 +59,13 @@ them.
 - The default Anthropic model is `claude-opus-5-5` (was `claude-opus-5`). The
   global catalog default stays `gpt-6-astra`.
 
+### Fixed
+
+- Bazel: generated BUILD files pass the real package path (`crates/<name>`)
+  to crate_universe's `all_crate_deps` and `aliases`; after the crates/ move
+  they passed the bare crate name and the full Bazel graph failed to load in
+  release validation (v0.8.42 tag run 36047905303).
+
 ## [0.8.41] - 2026-09-23
 
 ### Added

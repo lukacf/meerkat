@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_store_conformance",
-    aliases = aliases(package_name = "meerkat-store-conformance"),
+    aliases = aliases(package_name = "crates/meerkat-store-conformance"),
     crate_name = "meerkat_store_conformance",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -62,13 +62,13 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-store-conformance",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-store-conformance",
+        package_name = "crates/meerkat-store-conformance",
         proc_macro = True,
     ),
     deps = [
         "//crates/meerkat-core:meerkat_core",
     ] + all_crate_deps(
-        package_name = "meerkat-store-conformance",
+        package_name = "crates/meerkat-store-conformance",
         normal = True,
     ),
 )
@@ -76,7 +76,7 @@ rust_library(
 rust_test(
     name = "meerkat_store_conformance_unit_test",
     aliases = aliases(
-        package_name = "meerkat-store-conformance",
+        package_name = "crates/meerkat-store-conformance",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -109,14 +109,14 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-store-conformance",
+        package_name = "crates/meerkat-store-conformance",
         proc_macro = True,
         proc_macro_dev = True,
     ),
     deps = [
         "//crates/meerkat-core:meerkat_core",
     ] + all_crate_deps(
-        package_name = "meerkat-store-conformance",
+        package_name = "crates/meerkat-store-conformance",
         normal = True,
         normal_dev = True,
     ),

@@ -44,7 +44,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_live",
-    aliases = aliases(package_name = "meerkat-live"),
+    aliases = aliases(package_name = "crates/meerkat-live"),
     crate_name = "meerkat_live",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -67,7 +67,7 @@ rust_library(
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-live",
+        package_name = "crates/meerkat-live",
         proc_macro = True,
     ),
     deps = [
@@ -79,14 +79,14 @@ rust_library(
         "@meerkat_live_crates//:webrtc-0.14.0",
         "@meerkat_live_crates//:webrtc-media-0.11.0",
     ] + all_crate_deps(
-        package_name = "meerkat-live",
+        package_name = "crates/meerkat-live",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_live_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-live"),
+    aliases = aliases(package_name = "crates/meerkat-live"),
     crate_name = "meerkat_live",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -111,7 +111,7 @@ rust_library(
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-live",
+        package_name = "crates/meerkat-live",
         proc_macro = True,
     ),
     deps = [
@@ -123,7 +123,7 @@ rust_library(
         "@meerkat_live_crates//:webrtc-0.14.0",
         "@meerkat_live_crates//:webrtc-media-0.11.0",
     ] + all_crate_deps(
-        package_name = "meerkat-live",
+        package_name = "crates/meerkat-live",
         normal = True,
     ),
 )
@@ -131,7 +131,7 @@ rust_library(
 rust_test(
     name = "meerkat_live_unit_test",
     aliases = aliases(
-        package_name = "meerkat-live",
+        package_name = "crates/meerkat-live",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -176,7 +176,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-live",
+        package_name = "crates/meerkat-live",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -190,7 +190,7 @@ rust_test(
         "@meerkat_live_crates//:webrtc-0.14.0",
         "@meerkat_live_crates//:webrtc-media-0.11.0",
     ] + all_crate_deps(
-        package_name = "meerkat-live",
+        package_name = "crates/meerkat-live",
         normal = True,
         normal_dev = True,
     ),

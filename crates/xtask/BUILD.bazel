@@ -48,7 +48,7 @@ filegroup(
 
 rust_library(
     name = "xtask",
-    aliases = aliases(package_name = "xtask"),
+    aliases = aliases(package_name = "crates/xtask"),
     crate_name = "xtask",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -66,7 +66,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/xtask",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
     ),
     deps = [
@@ -74,7 +74,7 @@ rust_library(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
     ),
 )
@@ -82,7 +82,7 @@ rust_library(
 rust_test(
     name = "xtask_unit_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -187,7 +187,7 @@ rust_test(
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -196,7 +196,7 @@ rust_test(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),
@@ -204,7 +204,7 @@ rust_test(
 
 rust_binary(
     name = "xtask_bin",
-    aliases = aliases(package_name = "xtask"),
+    aliases = aliases(package_name = "crates/xtask"),
     crate_name = "xtask",
     crate_root = "src/main.rs",
     crate_features = [
@@ -223,7 +223,7 @@ rust_binary(
         "CARGO_MANIFEST_DIR": "crates/xtask",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
     ),
     deps = [
@@ -232,7 +232,7 @@ rust_binary(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
     ),
 )
@@ -240,7 +240,7 @@ rust_binary(
 rust_test(
     name = "buildbuddy_static_lanes_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -315,7 +315,7 @@ rust_test(
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -325,7 +325,7 @@ rust_test(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),
@@ -334,7 +334,7 @@ rust_test(
 rust_test(
     name = "ci_gate_requires_rmat_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -381,7 +381,7 @@ rust_test(
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -391,7 +391,7 @@ rust_test(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),
@@ -400,7 +400,7 @@ rust_test(
 rust_test(
     name = "effect_authority_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -462,7 +462,7 @@ rust_test(
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -472,7 +472,7 @@ rust_test(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),
@@ -481,7 +481,7 @@ rust_test(
 rust_test(
     name = "machines_contracts_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -534,7 +534,7 @@ rust_test(
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -544,7 +544,7 @@ rust_test(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),
@@ -553,7 +553,7 @@ rust_test(
 rust_test(
     name = "no_provider_data_in_core_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -600,7 +600,7 @@ rust_test(
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -610,7 +610,7 @@ rust_test(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),
@@ -619,7 +619,7 @@ rust_test(
 rust_test(
     name = "protocol_codegen_drift_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -721,7 +721,7 @@ rust_test(
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -731,7 +731,7 @@ rust_test(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),
@@ -740,7 +740,7 @@ rust_test(
 rust_test(
     name = "release_workflow_asset_manifest_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -790,7 +790,7 @@ rust_test(
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -800,7 +800,7 @@ rust_test(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),
@@ -809,7 +809,7 @@ rust_test(
 rust_test(
     name = "released_enum_ordinals_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -856,7 +856,7 @@ rust_test(
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -866,7 +866,7 @@ rust_test(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),
@@ -875,7 +875,7 @@ rust_test(
 rust_test(
     name = "rmat_audit_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -927,7 +927,7 @@ rust_test(
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -937,7 +937,7 @@ rust_test(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),
@@ -946,7 +946,7 @@ rust_test(
 rust_test(
     name = "rmat_strict_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -992,7 +992,7 @@ rust_test(
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1002,7 +1002,7 @@ rust_test(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),
@@ -1011,7 +1011,7 @@ rust_test(
 rust_test(
     name = "runtime_authority_bypass_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1056,7 +1056,7 @@ rust_test(
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1066,7 +1066,7 @@ rust_test(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),
@@ -1075,7 +1075,7 @@ rust_test(
 rust_test(
     name = "seam_inventory_strict_test",
     aliases = aliases(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1121,7 +1121,7 @@ rust_test(
         "RUSTFMT_LINUX": "$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1131,7 +1131,7 @@ rust_test(
         "//crates/xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
-        package_name = "xtask",
+        package_name = "crates/xtask",
         normal = True,
         normal_dev = True,
     ),

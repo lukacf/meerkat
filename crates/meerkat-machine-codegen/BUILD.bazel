@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_machine_codegen",
-    aliases = aliases(package_name = "meerkat-machine-codegen"),
+    aliases = aliases(package_name = "crates/meerkat-machine-codegen"),
     crate_name = "meerkat_machine_codegen",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -62,21 +62,21 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-codegen",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         proc_macro = True,
     ),
     deps = [
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_machine_codegen_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-machine-codegen"),
+    aliases = aliases(package_name = "crates/meerkat-machine-codegen"),
     crate_name = "meerkat_machine_codegen",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -94,14 +94,14 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-codegen",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         proc_macro = True,
     ),
     deps = [
         "//crates/meerkat:meerkat_core_agent_factory_build",
         "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
     ),
 )
@@ -109,7 +109,7 @@ rust_library(
 rust_test(
     name = "meerkat_machine_codegen_unit_test",
     aliases = aliases(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -142,7 +142,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -154,7 +154,7 @@ rust_test(
         "//crates/meerkat:meerkat_schedule_agent_factory_build",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
     ),
@@ -163,7 +163,7 @@ rust_test(
 rust_test(
     name = "artifacts_semantic_model_test",
     aliases = aliases(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -199,7 +199,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -212,7 +212,7 @@ rust_test(
         "//crates/meerkat:meerkat_schedule_agent_factory_build",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
     ),
@@ -221,7 +221,7 @@ rust_test(
 rust_test(
     name = "named_type_binding_respected_test",
     aliases = aliases(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -257,7 +257,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -270,7 +270,7 @@ rust_test(
         "//crates/meerkat:meerkat_schedule_agent_factory_build",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
     ),
@@ -279,7 +279,7 @@ rust_test(
 rust_test(
     name = "render_contracts_test",
     aliases = aliases(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -320,7 +320,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -333,7 +333,7 @@ rust_test(
         "//crates/meerkat:meerkat_schedule_agent_factory_build",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
     ),
@@ -342,7 +342,7 @@ rust_test(
 rust_test(
     name = "routed_effect_module_shape_test",
     aliases = aliases(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -380,7 +380,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -393,7 +393,7 @@ rust_test(
         "//crates/meerkat:meerkat_schedule_agent_factory_build",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
     ),
@@ -402,7 +402,7 @@ rust_test(
 rust_test(
     name = "runtime_alphabet_parity_test",
     aliases = aliases(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -442,7 +442,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -455,7 +455,7 @@ rust_test(
         "//crates/meerkat:meerkat_schedule_agent_factory_build",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
     ),
@@ -464,7 +464,7 @@ rust_test(
 rust_test(
     name = "runtime_schema_parity_test",
     aliases = aliases(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -504,7 +504,7 @@ rust_test(
         "WORKSPACE_ROOT": ".",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -517,7 +517,7 @@ rust_test(
         "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-codegen",
+        package_name = "crates/meerkat-machine-codegen",
         normal = True,
         normal_dev = True,
     ),

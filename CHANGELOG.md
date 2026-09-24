@@ -374,6 +374,13 @@ them.
 
 ### Fixed
 
+- The BuildBuddy Native submitter job's timeout covers its lane budget: the
+  job allowed 30 minutes while `MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS` is
+  3000 seconds, so a full-fresh release validation whose unit, integration-fast
+  and clippy lanes needed more than 30 minutes was cancelled by the job
+  timeout (v0.8.41 release run 35947161758) instead of finishing inside the
+  budget. The job now allows 60 minutes.
+
 - `meerkat-session` test scaffolding: the same-length in-place corruption
   test waited for nothing between the original append and the corrupting
   rewrite, so on a filesystem with coarse timestamps (the BuildBuddy release

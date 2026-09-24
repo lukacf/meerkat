@@ -61,6 +61,14 @@ them.
 
 ### Fixed
 
+- The web SDK wasm build locates `crates/meerkat-web-runtime`, and the doctrine
+  count guard skips the dated audit reports that moved under `docs/internal`.
+- A meerkat-core contract test's expected user config path had been rewritten
+  to `.config/crates/meerkat` by the layout change; restored to `.config/meerkat`.
+  Shipped code was not affected.
+- The facade agent-builder policy canary writes its downstream probe manifests
+  with `crates/<name>` path dependencies; after the crates/ move they pointed at
+  the old root-level crate directories and the feature-matrix release lane failed.
 - Bazel: generated BUILD files pass the real package path (`crates/<name>`)
   to crate_universe's `all_crate_deps` and `aliases`; after the crates/ move
   they passed the bare crate name and the full Bazel graph failed to load in

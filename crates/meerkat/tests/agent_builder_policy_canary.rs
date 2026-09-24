@@ -352,7 +352,7 @@ fn bazel_target_block<'a>(source: &'a str, name: &str) -> Option<&'a str> {
 fn downstream_safe_code_cannot_forge_factory_policy_finalizer() -> std::io::Result<()> {
     let dependencies = format!(
         r#"meerkat-core = {{ path = "{}" }}"#,
-        repo_root().join("meerkat-core").display()
+        repo_root().join("crates").join("meerkat-core").display()
     );
     let Some(output) = run_downstream_cargo_fixture(
         "downstream_safe_code_cannot_forge_factory_policy_finalizer",
@@ -395,8 +395,8 @@ futures = "0.3"
 inventory = "0.3"
 meerkat-core = {{ path = "{}" }}
 meerkat-runtime = {{ path = "{}" }}"#,
-        repo_root().join("meerkat-core").display(),
-        repo_root().join("meerkat-runtime").display()
+        repo_root().join("crates").join("meerkat-core").display(),
+        repo_root().join("crates").join("meerkat-runtime").display()
     );
     let Some(output) = run_downstream_cargo_fixture(
         "downstream_unsafe_code_cannot_enter_factory_policy_finalizer",
@@ -448,8 +448,8 @@ fn downstream_public_cargo_facade_agentbuilder_links_without_repo_cfg() -> std::
 futures = "0.3"
 meerkat = {{ path = "{}", default-features = false }}
 meerkat-core = {{ path = "{}" }}"#,
-        repo_root().join("meerkat").display(),
-        repo_root().join("meerkat-core").display()
+        repo_root().join("crates").join("meerkat").display(),
+        repo_root().join("crates").join("meerkat-core").display()
     );
     let Some(output) = run_downstream_cargo_fixture(
         "downstream_public_cargo_facade_agentbuilder_links_without_repo_cfg",
@@ -1714,7 +1714,7 @@ fn bridge_suffix_build_scripts_fail_closed_without_docs_rs_or_a_core_checkout() 
 fn dependent_build_scripts_derive_the_suffix_core_exports() {
     let scratch = tempfile::tempdir().expect("tempdir");
     let out_dir = workspace_layout(scratch.path());
-    let core_manifest_dir = repo_root().join("meerkat-core");
+    let core_manifest_dir = repo_root().join("crates").join("meerkat-core");
 
     let core_binary = compile_build_script("crates/meerkat-core/build.rs", scratch.path());
     let core = run_build_script(

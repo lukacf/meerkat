@@ -228,8 +228,12 @@ fn doctrine_count_claims_match_canonical_registry() {
 
     let mut stale = Vec::new();
     for path in files {
-        // Archived snapshots are frozen history, not live doctrine.
-        if path.components().any(|c| c.as_os_str() == "archive") {
+        // Archived snapshots and dated audit reports are frozen history, not
+        // live doctrine.
+        if path
+            .components()
+            .any(|c| c.as_os_str() == "archive" || c.as_os_str() == "audit")
+        {
             continue;
         }
         let text = std::fs::read_to_string(&path)

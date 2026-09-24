@@ -515,12 +515,15 @@ function packWithinBudget(pkgs, weights, maxShards, model) {
   }
 }
 
-function matrixOf(shards) {
-  return JSON.stringify({
-    include: shards.length > 0
-      ? shards.map((shard) => ({ name: shard.name, packages: shard.package_flags }))
-      : [{ name: "none", packages: "" }],
-  });
+// A consumer job that runs is guarded by `if:` on the corresponding count,
+// so an empty plan gets a placeholder only where GitHub would otherwise
+// reject an empty matrix on a job that still runs (never for the
+// push-to-main unit lanes, which are skipped outright for a plan with no
+// Rust-relevant change; run 35939276400 failed a "none" shard there).
+function matrixOf(shards, { placeholder = true } = {}) {
+  const include = shards.map((shard) => ({ name: shard.name, packages: shard.package_flags }));
+  if (include.length === 0 && placeholder) include.push({ name: "none", packages: "" });
+  return JSON.stringify({ include });
 }
 
 function githubOutput(result) {
@@ -547,7 +550,7 @@ function githubOutput(result) {
   scalar("unit_deferred", result.unit_deferred.join(" "));
   scalar("unit_deferred_count", String(result.unit_deferred.length));
   scalar("main_unit_shard_count", String(result.main_unit_shards.length));
-  scalar("main_unit_shard_matrix", matrixOf(result.main_unit_shards));
+  scalar("main_unit_shard_matrix", matrixOf(result.main_unit_shards, { placeholder: false }));
   return `${lines.join("\n")}\n`;
 }
 

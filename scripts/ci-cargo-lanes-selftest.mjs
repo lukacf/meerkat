@@ -323,9 +323,20 @@ for (const path of [
 }
 {
   const result = run(["--format", "github", "--", "docs/index.mdx"]);
-  const matrixLine = result.stdout.split("\n").find((line) => line.startsWith("shard_matrix="));
-  assert.deepEqual(JSON.parse(matrixLine.slice("shard_matrix=".length)).include, [{ name: "none", packages: "" }]);
-  assert.ok(result.stdout.includes("rust_changed=false"));
+  const lines = Object.fromEntries(result.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  assert.deepEqual(JSON.parse(lines.shard_matrix).include, [{ name: "none", packages: "" }]);
+  assert.equal(lines.rust_changed, "false");
+  // A docs-only push to main has no unit lanes: the main-unit matrix is
+  // empty (no "none" shard for the job to trip over) and its count is 0.
+  assert.deepEqual(JSON.parse(lines.main_unit_shard_matrix), { include: [] });
+  assert.equal(lines.main_unit_shard_count, "0");
+  assert.equal(lines.unit_shard_count, "0");
+  assert.equal(lines.unit_deferred, "");
+}
+{
+  const plan = planFor(["CHANGELOG.md"]);
+  assert.equal(plan.rust_changed, false);
+  assert.deepEqual(plan.main_unit_shards, [], "a CHANGELOG-only merge yields no main unit lanes");
 }
 
 // Bad arguments fail loudly.

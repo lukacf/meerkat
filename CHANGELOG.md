@@ -374,6 +374,12 @@ them.
 
 ### Fixed
 
+- A push to `main` with no Rust-relevant change (a CHANGELOG-only merge)
+  no longer fails CI: the classifier emits an empty main-unit matrix for
+  such a plan instead of a placeholder shard, the `main-unit`, `wasm-check`
+  and `sdk-host` lanes are skipped, and the gate accepts "no unit lanes
+  required" on `main` exactly as on a pull request (run 35939276400 failed
+  the placeholder shard and blocked the release gate's required green CI).
 - The BuildBuddy cargo-equivalent lanes' workspace copy now carries every
   package's `BUILD.bazel` and the `tools/buildbuddy` lane scripts. The root
   `//:workspace_runfiles` glob cannot see inside Bazel packages and excludes

@@ -508,8 +508,10 @@ jobs:
     name: Main unit tests (${{ matrix.name }})
     needs: changes
     # Post-merge only: the whole workspace, including the meerkat-mob compile
-    # chain that the pull-request unit lane defers; no wall-clock budget.
-    if: ${{ github.event_name == 'push' }}
+    # chain that the pull-request unit lane defers; no wall-clock budget. A
+    # push with no Rust-relevant change (a docs-only merge) has no unit lanes,
+    # exactly as on a pull request.
+    if: ${{ github.event_name == 'push' && needs.changes.outputs.rust_changed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -640,7 +642,7 @@ jobs:
     name: wasm32 check
     needs: changes
     # Post-merge only (12 min measured); pull requests defer it.
-    if: ${{ github.event_name == 'push' }}
+    if: ${{ github.event_name == 'push' && needs.changes.outputs.rust_changed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -685,7 +687,7 @@ jobs:
     name: Python + TypeScript SDK suites
     needs: changes
     # Post-merge only (13 min measured); pull requests defer it.
-    if: ${{ github.event_name == 'push' }}
+    if: ${{ github.event_name == 'push' && (needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.sdk_host == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -771,6 +773,7 @@ jobs:
           SDK_HOST_RESULT: ${{ needs.sdk-host.result }}
           RUST_CHANGED: ${{ needs.changes.outputs.rust_changed }}
           IS_MAIN_PUSH: ${{ github.event_name == 'push' }}
+          SDK_HOST: ${{ needs.changes.outputs.sdk_host }}
           MODE: ${{ needs.changes.outputs.mode }}
           REASON: ${{ needs.changes.outputs.reason }}
           SHARD_COUNT: ${{ needs.changes.outputs.shard_count }}
@@ -840,11 +843,23 @@ jobs:
               forbid_failure "${lane%%:*}" "${lane##*:}"
             done
           fi
-          if [[ "${IS_MAIN_PUSH}" == "true" ]]; then
+          if [[ "${IS_MAIN_PUSH}" == "true" && "${RUST_CHANGED}" == "true" ]]; then
             # Post-merge coverage of everything the pull request deferred.
             require_ran "Main unit tests" "${MAIN_UNIT_RESULT}"
             require_ran "wasm32 check" "${WASM_CHECK_RESULT}"
             require_ran "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+          elif [[ "${IS_MAIN_PUSH}" == "true" ]]; then
+            # No Rust-relevant change on main: no unit lanes are required,
+            # exactly as on a pull request; the SDK suites run only when SDK
+            # paths changed.
+            echo "no Rust-relevant change: no unit lanes required on this main push."
+            forbid_failure "Main unit tests" "${MAIN_UNIT_RESULT}"
+            forbid_failure "wasm32 check" "${WASM_CHECK_RESULT}"
+            if [[ "${SDK_HOST}" == "true" ]]; then
+              require_ran "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+            else
+              forbid_failure "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+            fi
           else
             for lane in "Main unit tests":"${MAIN_UNIT_RESULT}" "wasm32 check":"${WASM_CHECK_RESULT}" "Python + TypeScript SDK suites":"${SDK_HOST_RESULT}"; do
               forbid_failure "${lane%%:*}" "${lane##*:}"

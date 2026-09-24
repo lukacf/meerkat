@@ -32,7 +32,7 @@ const PROVIDER_NAMES: &[&str] = &["anthropic", "gemini", "openai"];
 
 /// Explicit default model ID per provider. This product policy is independent
 /// of [`ModelTier`].
-const DEFAULT_ANTHROPIC: &str = "claude-opus-5";
+const DEFAULT_ANTHROPIC: &str = "claude-opus-5-5";
 const DEFAULT_OPENAI: &str = "gpt-6-astra";
 const DEFAULT_GEMINI: &str = "gemini-3.8-flash";
 

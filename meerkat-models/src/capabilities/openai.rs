@@ -22,6 +22,22 @@ const GPT6_ASTRA_EFFORT: &[EffortLevel] = &[
     EffortLevel::Max,
 ];
 
+/// GPT-6 Sol and Luna accept the full ladder including `none`; the documented
+/// default is `medium`. Chat Completions supports function calling for these
+/// two only with `reasoning_effort: none`; meerkat drives them through the
+/// Responses API, where function calling is unrestricted.
+/// Sources:
+///   - https://developers.openai.com/api/docs/models/gpt-6-sol
+///   - https://developers.openai.com/api/docs/models/gpt-6-luna
+const GPT6_SOL_LUNA_EFFORT: &[EffortLevel] = &[
+    EffortLevel::None,
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::Xhigh,
+    EffortLevel::Max,
+];
+
 /// Reasoning-effort levels accepted by recent GPT-5.x models (5.4, 5.5, 5.5-pro).
 ///
 /// Verified against the live API: `minimal` is rejected with
@@ -132,6 +148,96 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         thinking: ThinkingSupport::None,
         supports_reasoning: true,
         effort_levels: GPT6_ASTRA_EFFORT,
+        openai_responses_params: None,
+        supports_web_search: true,
+        supports_mid_conversation_system_messages: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(600),
+    },
+    // Source: https://developers.openai.com/api/docs/models/gpt-6-sol
+    // Built for complex coding and agentic workflows. 1,050,000 context window with a separate
+    // 922,000 input ceiling, 128,000 max output (reasoning tokens included),
+    // text/image input, text output, knowledge cutoff 2026-04-20. Pricing at
+    // catalog time: $2 input / $0.20 cached input / $10 output per
+    // MTok. Responses, Chat Completions and Batch; no Realtime/Live.
+    ModelCapabilities {
+        id: "gpt-6-sol",
+        provider: Provider::OpenAI,
+        display_name: "GPT-6 Sol",
+        tier: ModelTier::Supported,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "gpt-6",
+        context_window: Some(1_050_000),
+        max_input_tokens: Some(922_000),
+        max_output_tokens: Some(128_000),
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        supports_reasoning: true,
+        effort_levels: GPT6_SOL_LUNA_EFFORT,
+        openai_responses_params: None,
+        supports_web_search: true,
+        supports_mid_conversation_system_messages: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(600),
+    },
+    // Source: https://developers.openai.com/api/docs/models/gpt-6-luna
+    // The efficient GPT-6 tier for focused, high-volume tasks. 1,050,000 context window with a separate
+    // 922,000 input ceiling, 128,000 max output (reasoning tokens included),
+    // text/image input, text output, knowledge cutoff 2026-05-18. Pricing at
+    // catalog time: $0.10 input / $0.01 cached input / $0.50 output per
+    // MTok. Responses, Chat Completions and Batch; no Realtime/Live.
+    ModelCapabilities {
+        id: "gpt-6-luna",
+        provider: Provider::OpenAI,
+        display_name: "GPT-6 Luna",
+        tier: ModelTier::Supported,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "gpt-6",
+        context_window: Some(1_050_000),
+        max_input_tokens: Some(922_000),
+        max_output_tokens: Some(128_000),
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        supports_reasoning: true,
+        effort_levels: GPT6_SOL_LUNA_EFFORT,
         openai_responses_params: None,
         supports_web_search: true,
         supports_mid_conversation_system_messages: true,

@@ -35,6 +35,20 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- Model catalog: Claude Opus 5.5 (`claude-opus-5-5`: 1M context, 128K output,
+  adaptive-only thinking that cannot be disabled, low..max effort with a
+  `medium` default) and GPT-6 Sol (`gpt-6-sol`) and GPT-6 Luna (`gpt-6-luna`):
+  1,050,000 context with a 922,000 input ceiling, 128,000 output, text and
+  image input, reasoning effort `none`..`max`. GPT-6 Astra was already
+  cataloged; there is no GPT-6 Terra model in OpenAI's catalog.
+
+### Changed
+
+- The default Anthropic model is `claude-opus-5-5` (was `claude-opus-5`). The
+  global catalog default stays `gpt-6-astra`.
+
 ## [0.8.41] - 2026-09-23
 
 ### Added

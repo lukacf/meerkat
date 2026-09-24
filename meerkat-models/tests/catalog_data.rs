@@ -193,7 +193,7 @@ fn claude_fable_51_is_recommended_without_changing_default_ladder() {
         allowed_models(Provider::Anthropic).any(|id| id == "claude-fable-5-1"),
         "claude-fable-5-1 must be in the Anthropic allowlist"
     );
-    assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-5"));
+    assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-5-5"));
     assert_eq!(global_default_model(), "gpt-6-astra");
 }
 
@@ -213,7 +213,7 @@ fn gemini_38_owns_the_default_and_recommendation_ladder() {
 }
 
 #[test]
-fn claude_opus_5_is_cataloged_and_owns_the_anthropic_default() {
+fn claude_opus_5_remains_cataloged_without_owning_the_anthropic_default() {
     let entry =
         entry_for(Provider::Anthropic, "claude-opus-5").expect("claude-opus-5 must be in catalog");
     assert_eq!(entry.provider, "anthropic");
@@ -225,7 +225,45 @@ fn claude_opus_5_is_cataloged_and_owns_the_anthropic_default() {
         "claude-opus-5 must be in the Anthropic allowlist"
     );
     assert_eq!(infer_provider("claude-opus-5"), Some(Provider::Anthropic));
-    assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-5"));
+    assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-5-5"));
+}
+
+#[test]
+fn claude_opus_5_5_is_cataloged_and_owns_the_anthropic_default() {
+    let entry = entry_for(Provider::Anthropic, "claude-opus-5-5")
+        .expect("claude-opus-5-5 must be in catalog");
+    assert_eq!(entry.provider, "anthropic");
+    assert_eq!(entry.display_name, "Claude Opus 5.5");
+    assert_eq!(entry.tier, ModelTier::Recommended);
+    assert_eq!(entry.context_window, Some(1_000_000));
+    assert_eq!(entry.max_output_tokens, Some(128_000));
+    assert!(
+        allowed_models(Provider::Anthropic).any(|id| id == "claude-opus-5-5"),
+        "claude-opus-5-5 must be in the Anthropic allowlist"
+    );
+    assert_eq!(infer_provider("claude-opus-5-5"), Some(Provider::Anthropic));
+    assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-5-5"));
+    assert_eq!(global_default_model(), "gpt-6-astra");
+}
+
+#[test]
+fn gpt_6_sol_and_luna_are_cataloged_without_changing_the_openai_default() {
+    for (id, name) in [("gpt-6-sol", "GPT-6 Sol"), ("gpt-6-luna", "GPT-6 Luna")] {
+        let entry = entry_for(Provider::OpenAI, id)
+            .unwrap_or_else(|| panic!("{id} must be in the catalog"));
+        assert_eq!(entry.provider, "openai");
+        assert_eq!(entry.display_name, name);
+        assert_eq!(entry.tier, ModelTier::Supported);
+        assert_eq!(entry.context_window, Some(1_050_000));
+        assert_eq!(entry.max_output_tokens, Some(128_000));
+        assert!(
+            allowed_models(Provider::OpenAI).any(|allowed| allowed == id),
+            "{id} must be in the OpenAI allowlist"
+        );
+        assert_eq!(infer_provider(id), Some(Provider::OpenAI));
+    }
+    assert_eq!(default_model(Provider::OpenAI), Some("gpt-6-astra"));
+    assert_eq!(global_default_model(), "gpt-6-astra");
 }
 
 #[test]
@@ -315,8 +353,15 @@ fn gpt_6_astra_owns_defaults_and_projects_independent_input_limit() {
             .profile_witness_for_provider(Provider::Other, "gpt-6-astra")
             .is_none()
     );
-    for entry in catalog().iter().filter(|entry| entry.id != "gpt-6-astra") {
-        assert_eq!(entry.max_input_tokens, None, "{}", entry.id);
+    // The separate input ceiling is a GPT-6 family property (Astra, Sol and
+    // Luna all document 922,000); every other catalog entry projects none.
+    for entry in catalog() {
+        let family = capabilities_for(Provider::OpenAI, entry.id).map(|caps| caps.model_family);
+        if family == Some("gpt-6") {
+            assert_eq!(entry.max_input_tokens, Some(922_000), "{}", entry.id);
+        } else {
+            assert_eq!(entry.max_input_tokens, None, "{}", entry.id);
+        }
     }
 }
 

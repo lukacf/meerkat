@@ -220,6 +220,66 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         beta_headers: ADAPTIVE_COMPACTION_BETAS,
         call_timeout_secs: Some(300),
     },
+    // Claude Opus 5.5
+    //
+    // Sources:
+    //   - Model overview (API ID claude-opus-5-5, 1M context, 128k output,
+    //     $4 / $20 per MTok, cache reads $0.20; same tokenizer and feature
+    //     surface as Claude Opus 5):
+    //     https://platform.claude.com/docs/en/about-claude/models/overview
+    //   - What's new (thinking cannot be disabled: `{type: "disabled"}` and
+    //     `budget_tokens` return 400 at every effort level; effort default is
+    //     `medium`; forced `tool_choice` `any`/`tool` returns 400; computer
+    //     use only through `computer_toolset_20260801`):
+    //     https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5
+    //   - Effort: https://platform.claude.com/docs/en/build-with-claude/effort
+    //     (low/medium/high/xhigh/max)
+    //
+    // The row mirrors claude-opus-5: adaptive-only thinking (meerkat never
+    // emits `{type: "disabled"}`, so the 400 cannot be triggered from the
+    // catalog surface), the full low..max effort ladder, compaction +
+    // structured outputs + web search, sampling parameters removed,
+    // budget_tokens removed. Meerkat-owned operational default: Opus-tier
+    // 300s call timeout. Default Anthropic model since 0.8.42.
+    ModelCapabilities {
+        id: "claude-opus-5-5",
+        provider: Provider::Anthropic,
+        display_name: "Claude Opus 5.5",
+        tier: ModelTier::Recommended,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "claude-opus-5",
+        context_window: Some(1_000_000),
+        max_input_tokens: None,
+        max_output_tokens: Some(128_000),
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::AnthropicAdaptiveOnly,
+        supports_reasoning: false,
+        effort_levels: CLAUDE_5_OPUS_48_47_EFFORT,
+        openai_responses_params: None,
+        supports_web_search: true,
+        supports_mid_conversation_system_messages: true,
+        supports_inference_geo: true,
+        supports_compaction: true,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        call_timeout_secs: Some(300),
+    },
     // Claude Opus 5
     //
     // Claude 5 family sibling of Fable 5 (API ID claude-opus-5, announced

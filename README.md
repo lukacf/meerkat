@@ -166,7 +166,7 @@ Current catalog defaults:
 
 | Provider | Default |
 |----------|---------|
-| Anthropic | `claude-opus-5` |
+| Anthropic | `claude-opus-5-5` |
 | OpenAI | `gpt-6-astra` |
 | Gemini | `gemini-3.8-flash` |
 
@@ -354,7 +354,7 @@ component:
 
 ```rust
 let mut agent = AgentBuilder::new()
-    .model("claude-opus-5")
+    .model("claude-opus-5-5")
     .system_prompt("You are an incident triage component.")
     .output_schema(OutputSchema::new(triage_schema)?)
     .budget(BudgetLimits::default().with_max_tokens(2_000))

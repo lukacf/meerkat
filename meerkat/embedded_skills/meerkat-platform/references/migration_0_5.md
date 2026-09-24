@@ -1,1 +1,0 @@
-../../../../.claude/skills/meerkat-platform/references/migration_0_5.md

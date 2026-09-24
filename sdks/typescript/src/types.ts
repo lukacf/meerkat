@@ -892,7 +892,7 @@ export type CommsSendReceipt = Generated.CommsSendResult & {
 // ---------------------------------------------------------------------------
 // comms/send typed command surface.
 //
-// Mirrors the Rust `CommsCommandRequest` enum (`meerkat-core/src/comms.rs`).
+// Mirrors the Rust `CommsCommandRequest` enum (`crates/meerkat-core/src/comms.rs`).
 // Invalid discriminator values are rejected at the server's typed-serde
 // boundary — these aliases document the closed-world shape for callers.
 // ---------------------------------------------------------------------------

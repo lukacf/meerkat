@@ -280,5 +280,5 @@ retries = 2
 #
 # PR #286 also removed the s44 retry=2 entry that had been added by
 # smoke-fixes PR #285 — the lexically-orthogonal SWARM_MARKER_7F3X2A
-# marker + the fix in `meerkat-openai/src/live.rs` obviated the need for
+# marker + the fix in `crates/meerkat-openai/src/live.rs` obviated the need for
 # retry absorption on that scenario.

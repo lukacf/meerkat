@@ -58,7 +58,7 @@ STRING_LITERAL = re.compile(r'"([^"\n]*)"|\'([^\'\n]*)\'')
 SDK_STRING_ALLOWLIST: dict[str, str] = {
     "tool/execute": (
         "server->client reverse request the SDKs *receive* to run a "
-        "registered callback tool (meerkat-rpc/src/callback_dispatcher.rs); "
+        "registered callback tool (crates/meerkat-rpc/src/callback_dispatcher.rs); "
         "never a client-callable catalog method"
     ),
     "lukacf/meerkat": (
@@ -371,7 +371,7 @@ def main() -> int:
     # type that exists nowhere fails closed).
     # -------------------------------------------------------------------
     schema_types = collect_schema_type_names(root / "artifacts" / "schemas")
-    surface_types = collect_surface_type_names(root / "meerkat-rpc" / "src")
+    surface_types = collect_surface_type_names(root / "crates" / "meerkat-rpc" / "src")
     resolvable = schema_types | surface_types | UNTYPED_REFS
 
     unresolved: list[str] = []

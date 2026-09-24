@@ -13,7 +13,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 - `(none)`
 
 ## Driver
-- `adaptive_mob_bundle_driver` (`AdaptiveMobBundleDriver` in `meerkat-mob/src/generated/adaptive_mob_bundle.rs`)
+- `adaptive_mob_bundle_driver` (`AdaptiveMobBundleDriver` in `crates/meerkat-mob/src/generated/adaptive_mob_bundle.rs`)
   - watches:
     - `layer_mob::FlowRunPublicResultClassified`
   - dispatches:
@@ -35,8 +35,8 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `adaptive_mob_bundle_kernel` (machine `MobMachine`): `meerkat-mob/src/runtime/handle.rs` — adaptive Mobpack control mob owns the adaptive run kernel while layer mobs publish terminal classifications through the driver seam
-- `adaptive_mob_bundle_driver` (machine `MobMachine`): `meerkat-mob/src/generated/adaptive_mob_bundle.rs` — generated adaptive bundle driver watches layer terminal classification and dispatches typed terminal feedback into the control mob adaptive kernel
+- `adaptive_mob_bundle_kernel` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/handle.rs` — adaptive Mobpack control mob owns the adaptive run kernel while layer mobs publish terminal classifications through the driver seam
+- `adaptive_mob_bundle_driver` (machine `MobMachine`): `crates/meerkat-mob/src/generated/adaptive_mob_bundle.rs` — generated adaptive bundle driver watches layer terminal classification and dispatches typed terminal feedback into the control mob adaptive kernel
 
 ### Scenarios
 - `layer-terminal-feedback` — a terminal child layer mob is observed by the adaptive bundle driver and fed back to the control mob adaptive kernel without a direct static route

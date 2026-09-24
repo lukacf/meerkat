@@ -64,15 +64,15 @@ if $PKG_OK; then
 fi
 
 # ── 2. Contract version parity ─────────────────────────────────────────────
-# Source of truth: ContractVersion::CURRENT in meerkat-contracts/src/version.rs
+# Source of truth: ContractVersion::CURRENT in crates/meerkat-contracts/src/version.rs
 
 RUST_CONTRACT=$(sed -n '/pub const CURRENT/,/};/{
     s/.*major: \([0-9]*\).*/\1/p
     s/.*minor: \([0-9]*\).*/\1/p
     s/.*patch: \([0-9]*\).*/\1/p
-}' "$ROOT/meerkat-contracts/src/version.rs" | paste -sd. -)
+}' "$ROOT/crates/meerkat-contracts/src/version.rs" | paste -sd. -)
 RUST_CONTRACT_PRE=$(sed -n 's/.*pub const PRERELEASE: Option<&'\''static str> = Some("\([^"]*\)").*/\1/p' \
-    "$ROOT/meerkat-contracts/src/version.rs")
+    "$ROOT/crates/meerkat-contracts/src/version.rs")
 if [ -n "$RUST_CONTRACT_PRE" ]; then
     RUST_CONTRACT="${RUST_CONTRACT}-${RUST_CONTRACT_PRE}"
 fi
@@ -113,7 +113,7 @@ if [ -n "$TS_CONTRACT" ] && [ "$RUST_CONTRACT" != "$TS_CONTRACT" ]; then
 fi
 if [ "$RUST_CONTRACT" != "$CARGO_VER" ]; then
     red "FAIL: contract version ($RUST_CONTRACT) != package version ($CARGO_VER)"
-    red "  Run: scripts/release-hook.sh or manually update meerkat-contracts/src/version.rs"
+    red "  Run: scripts/release-hook.sh or manually update crates/meerkat-contracts/src/version.rs"
     CONTRACT_OK=false
     FAIL=1
 fi

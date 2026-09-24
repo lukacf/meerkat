@@ -214,7 +214,7 @@ export interface CustomModelEntry {
 /**
  * Mob definition passed to {@link MeerkatRuntime.createMob}.
  *
- * Matches Rust `MobDefinition` in `meerkat-mob/src/definition.rs`.
+ * Matches Rust `MobDefinition` in `crates/meerkat-mob/src/definition.rs`.
  */
 export interface MobDefinition {
   id: string;
@@ -240,7 +240,7 @@ export interface MobDefinition {
 /**
  * Profile template for spawning agents.
  *
- * Matches Rust `Profile` in `meerkat-mob/src/profile.rs`.
+ * Matches Rust `Profile` in `crates/meerkat-mob/src/profile.rs`.
  * Note: there is NO `system_prompt` field — prompts are built from skills.
  */
 export interface Profile {

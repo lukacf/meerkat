@@ -1,0 +1,660 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+rust_library(
+    name = "meerkat_auth_core",
+    aliases = aliases(package_name = "meerkat-auth-core"),
+    crate_name = "meerkat_auth_core",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-auth-core",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+    ] + all_crate_deps(
+        package_name = "meerkat-auth-core",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_auth_core_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-auth-core"),
+    crate_name = "meerkat_auth_core",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//crates/meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-auth-core",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_llm_core_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-auth-core",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "meerkat_auth_core_unit_test",
+    aliases = aliases(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "meerkat_auth_core",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    tags = [
+        "fast",
+        "unit",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-auth-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "aws_sts_authorizer_test",
+    aliases = aliases(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "aws_sts_authorizer",
+    crate_root = "tests/aws_sts_authorizer.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/test_sa_key.pem",
+    ],
+    srcs = [
+        "tests/aws_sts_authorizer.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "aws_sts_authorizer",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-auth-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "azure_ad_authorizer_test",
+    aliases = aliases(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "azure_ad_authorizer",
+    crate_root = "tests/azure_ad_authorizer.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/test_sa_key.pem",
+    ],
+    srcs = [
+        "tests/azure_ad_authorizer.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "azure_ad_authorizer",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-auth-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "google_auth_authorizer_test",
+    aliases = aliases(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "google_auth_authorizer",
+    crate_root = "tests/google_auth_authorizer.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/test_sa_key.pem",
+    ],
+    srcs = [
+        "tests/google_auth_authorizer.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "google_auth_authorizer",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+        "//:test_fixtures",
+        "//tests/fixtures/machine-dsl-tests:package_runfiles",
+        "//tests/fixtures/mcp-test-server:package_runfiles",
+        "//tests/fixtures/surface-build-fixtures:package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-auth-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "oauth_flow_test",
+    aliases = aliases(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "oauth_flow",
+    crate_root = "tests/oauth_flow.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/test_sa_key.pem",
+    ],
+    srcs = [
+        "tests/oauth_flow.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "oauth_flow",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-auth-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "refresh_coordinator_crossproc_test",
+    aliases = aliases(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "refresh_coordinator_crossproc",
+    crate_root = "tests/refresh_coordinator_crossproc.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/test_sa_key.pem",
+    ],
+    srcs = [
+        "tests/refresh_coordinator_crossproc.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "refresh_coordinator_crossproc",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-auth-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "refresh_coordinator_inproc_test",
+    aliases = aliases(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "refresh_coordinator_inproc",
+    crate_root = "tests/refresh_coordinator_inproc.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/test_sa_key.pem",
+    ],
+    srcs = [
+        "tests/refresh_coordinator_inproc.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "refresh_coordinator_inproc",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-auth-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "token_lifecycle_clear_test",
+    aliases = aliases(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "token_lifecycle_clear",
+    crate_root = "tests/token_lifecycle_clear.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/test_sa_key.pem",
+    ],
+    srcs = [
+        "tests/token_lifecycle_clear.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "token_lifecycle_clear",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-auth-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "token_store_contract_test",
+    aliases = aliases(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "token_store_contract",
+    crate_root = "tests/token_store_contract.rs",
+    crate_features = [
+        "file-lock",
+        "gcp-auth",
+        "keyring",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "tests/fixtures/test_sa_key.pem",
+    ],
+    srcs = [
+        "tests/token_store_contract.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "token_store_contract",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-auth-core",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-auth-core",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+test_suite(
+    name = "fast_tests",
+    tests = [
+        ":aws_sts_authorizer_test",
+        ":azure_ad_authorizer_test",
+        ":google_auth_authorizer_test",
+        ":meerkat_auth_core_unit_test",
+        ":oauth_flow_test",
+        ":refresh_coordinator_crossproc_test",
+        ":refresh_coordinator_inproc_test",
+        ":token_lifecycle_clear_test",
+        ":token_store_contract_test",
+    ],
+)

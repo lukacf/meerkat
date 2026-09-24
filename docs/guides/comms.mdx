@@ -103,7 +103,7 @@ graph TD
 
 ## Identity and cryptography
 
-Each agent has an Ed25519 keypair managed by the `Keypair` type (`meerkat-comms/src/identity.rs`).
+Each agent has an Ed25519 keypair managed by the `Keypair` type (`crates/meerkat-comms/src/identity.rs`).
 
 - **Key generation**: `Keypair::generate()` creates a new random keypair using `OsRng`.
 - **Key persistence**: `Keypair::save(dir)` writes `identity.key` (mode `0600` on Unix) and `identity.pub` to disk. `Keypair::load(dir)` reads them back. `Keypair::load_or_generate(dir)` is the canonical entry point.
@@ -166,7 +166,7 @@ names come back from.
 
 ## Trust model
 
-Agents maintain trusted peers in a `TrustStore` (`meerkat-comms/src/trust.rs`), keyed by the canonical `PeerId` — a UUIDv5 derived from the peer's Ed25519 public key. `PeerName` is display-only metadata: duplicate names across entries are legal, while a duplicate `PeerId` is a hard error. Resolving a name to a `PeerId` (`TrustStore::resolve_name`) returns a typed `TrustResolveError::Ambiguous` when more than one entry shares the name — the store never guesses.
+Agents maintain trusted peers in a `TrustStore` (`crates/meerkat-comms/src/trust.rs`), keyed by the canonical `PeerId` — a UUIDv5 derived from the peer's Ed25519 public key. `PeerName` is display-only metadata: duplicate names across entries are legal, while a duplicate `PeerId` is a hard error. Resolving a name to a `PeerId` (`TrustStore::resolve_name`) returns a typed `TrustResolveError::Ambiguous` when more than one entry shares the name — the store never guesses.
 
 <Accordion title="TrustEntry structure and file format">
 ```rust
@@ -206,7 +206,7 @@ or composition authority. The shape is shown here for diagnostics only:
 
 ### Trust enforcement
 
-Incoming connections are validated in `handle_connection()` (`meerkat-comms/src/io_task.rs`):
+Incoming connections are validated in `handle_connection()` (`crates/meerkat-comms/src/io_task.rs`):
 
 <Steps>
   <Step title="Read envelope">
@@ -249,7 +249,7 @@ signed peer codec.
 
 **TCP transport**: TCP listeners are spawned by `spawn_tcp_listener()`. Accepts connections and processes each in a dedicated tokio task.
 
-**Inproc transport**: The `InprocRegistry` (`meerkat-comms/src/inproc.rs`) is a process-global registry segmented by namespace. Meerkat uses realm-scoped namespaces so inproc peers from different realms are isolated by default. Messages are delivered directly in-memory without serialization.
+**Inproc transport**: The `InprocRegistry` (`crates/meerkat-comms/src/inproc.rs`) is a process-global registry segmented by namespace. Meerkat uses realm-scoped namespaces so inproc peers from different realms are isolated by default. Messages are delivered directly in-memory without serialization.
 
 - `InprocRegistry::global()` returns the singleton
 - `register_with_meta_in_namespace(...)` adds an agent in a namespace
@@ -355,7 +355,7 @@ may have committed the envelope before the acknowledgement was lost, so this
 is not automatic retry authority.
 
 <Accordion title="MessageIntent variants">
-The `MessageIntent` enum (`meerkat-comms/src/agent/types.rs`) is the
+The `MessageIntent` enum (`crates/meerkat-comms/src/agent/types.rs`) is the
 receiver-side classification of incoming requests and lifecycle notices. It is
 not an input vocabulary: none of the strings in this table can be passed as the
 `intent` of the `send_request` tool.
@@ -612,7 +612,7 @@ block" call.
 
 ## Inbox
 
-The `Inbox` (`meerkat-comms/src/inbox.rs`) is a bounded queue (default capacity: 1024) with a `Notify` mechanism for waking waiting tasks.
+The `Inbox` (`crates/meerkat-comms/src/inbox.rs`) is a bounded queue (default capacity: 1024) with a `Notify` mechanism for waking waiting tasks.
 
 - `Inbox::new_transport_only()` creates transport plumbing without semantic peer-admission authority; its sender rejects semantic inbox items
 - runtime peer/event ingress uses the classified queue with an installed machine handle and returns a typed admission outcome (`Admitted` or `Dropped { reason }`); inbox-full, closed-session, and untrusted-sender drops are explicit, never silent

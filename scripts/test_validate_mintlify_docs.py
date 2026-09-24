@@ -116,6 +116,22 @@ class MintlifyLinkValidationTests(unittest.TestCase):
         code, errors = self.run_validator()
         self.assertEqual(code, 0, errors)
 
+    def test_internal_docs_are_exempt_from_navigation_checks(self) -> None:
+        self.write_rest_page("/api/rpc#capabilities%2Fget")
+        internal = self.docs / "internal" / "notes"
+        internal.mkdir(parents=True)
+        (internal / "scratch.md").write_text("# Scratch\n\nNot a public page.\n", encoding="utf-8")
+        (internal / "generated.json").write_text("{}", encoding="utf-8")
+        code, errors = self.run_validator()
+        self.assertEqual(code, 0, errors)
+
+    def test_unlisted_public_page_still_fails(self) -> None:
+        self.write_rest_page("/api/rpc#capabilities%2Fget")
+        (self.docs / "api" / "orphan.mdx").write_text("# Orphan\n", encoding="utf-8")
+        code, errors = self.run_validator()
+        self.assertEqual(code, 1)
+        self.assertIn("public docs file is not in docs.json navigation: docs/api/orphan.mdx", errors)
+
     def test_link_to_a_missing_page_fails(self) -> None:
         self.write_rest_page("/api/rpc-v2")
         code, errors = self.run_validator()

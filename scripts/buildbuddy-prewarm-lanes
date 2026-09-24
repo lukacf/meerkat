@@ -30,15 +30,15 @@ run_lane() {
 
 case "${profile}" in
   dev)
-    run_lane source build //meerkat-machine-dsl-core:meerkat_machine_dsl_core --jobs=64 --color=no --curses=no &
+    run_lane source build //crates/meerkat-machine-dsl-core:meerkat_machine_dsl_core --jobs=64 --color=no --curses=no &
     pid_source=$!
-    run_lane source-clippy owned-clippy-rbe meerkat-machine-dsl-core/src/lib.rs --jobs=64 --color=no --curses=no &
+    run_lane source-clippy owned-clippy-rbe crates/meerkat-machine-dsl-core/src/lib.rs --jobs=64 --color=no --curses=no &
     pid_source_clippy=$!
-    run_lane exact-test fast-test //meerkat-mob:member_session_bindings_test --jobs=64 &
+    run_lane exact-test fast-test //crates/meerkat-mob:member_session_bindings_test --jobs=64 &
     pid_exact=$!
-    run_lane support-local fast-test-local //meerkat:sdk_agentfactory_test //meerkat:sdk_structured_output_test --color=no --curses=no &
+    run_lane support-local fast-test-local //crates/meerkat:sdk_agentfactory_test //crates/meerkat:sdk_structured_output_test --color=no --curses=no &
     pid_support=$!
-    run_lane support-clippy owned-clippy-rbe meerkat/tests/support/test_session_store.rs --jobs=64 --color=no --curses=no &
+    run_lane support-clippy owned-clippy-rbe crates/meerkat/tests/support/test_session_store.rs --jobs=64 --color=no --curses=no &
     pid_support_clippy=$!
     wait_for_all "${pid_source}" "${pid_source_clippy}" "${pid_exact}" "${pid_support}" "${pid_support_clippy}"
     ;;

@@ -52,14 +52,14 @@ For simultaneous reviewers in the same checkout, set a distinct `RUST_LANE_ID` f
 ### 3. XFAIL Detection
 Search for ignored tests that might be hiding failures:
 ```bash
-grep -r "#\[ignore\]" meerkat-core/src/ meerkat-core/tests/
+grep -r "#\[ignore\]" crates/meerkat-core/src/ crates/meerkat-core/tests/
 ```
 Ignored tests are only acceptable if they reference an external bug number.
 
 ### 4. Stub Detection
 ```bash
-grep -r "todo!" meerkat-core/src/
-grep -r "unimplemented!" meerkat-core/src/
+grep -r "todo!" crates/meerkat-core/src/
+grep -r "unimplemented!" crates/meerkat-core/src/
 ```
 
 ### 5. Trace Data Flow

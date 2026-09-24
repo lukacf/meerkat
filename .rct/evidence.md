@@ -20,13 +20,13 @@ commands, commit SHA, timestamp, and output excerpts or artifact paths.
   - `cargo test -p meerkat-core image_generation -- --nocapture`
   - `cargo test -p meerkat-core --test image_generation_contracts -- --nocapture`
   - `cargo check -p meerkat-openai -p meerkat-gemini -p meerkat-anthropic -p meerkat-contracts -p rkat -p meerkat-rpc`
-  - `rg -n "todo!\(|unimplemented!\(|panic!\(\"not implemented|TODO|FIXME|HACK|XXX|future work|deferred|placeholder|not yet implemented" meerkat-core/src/image_generation.rs meerkat-core/src/types.rs meerkat-core/tests/image_generation_contracts.rs .rct docs/architecture/assistant-image-generation-substrate.md`
+  - `rg -n "todo!\(|unimplemented!\(|panic!\(\"not implemented|TODO|FIXME|HACK|XXX|future work|deferred|placeholder|not yet implemented" crates/meerkat-core/src/image_generation.rs crates/meerkat-core/src/types.rs crates/meerkat-core/tests/image_generation_contracts.rs .rct docs/architecture/assistant-image-generation-substrate.md`
 - Output excerpts:
   - `cargo test -p meerkat-core image_generation`: `7 passed; 0 failed`
   - `cargo test -p meerkat-core --test image_generation_contracts`: `2 passed; 0 failed`
   - `cargo check ...`: `Finished dev profile ... target(s) in 56.66s`
   - Stub scan found only the pre-existing `placeholders` serialization comment in
-    `meerkat-core/src/types.rs`, not a new implementation stub.
+    `crates/meerkat-core/src/types.rs`, not a new implementation stub.
 
 ## Phase 0 Blocker Fix Evidence
 

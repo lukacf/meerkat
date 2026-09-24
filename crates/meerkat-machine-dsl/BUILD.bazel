@@ -1,0 +1,70 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+rust_proc_macro(
+    name = "meerkat_machine_dsl",
+    aliases = aliases(package_name = "meerkat-machine-dsl"),
+    crate_name = "meerkat_machine_dsl",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-dsl",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat-machine-dsl-core:meerkat_machine_dsl_core",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-dsl",
+        normal = True,
+    ),
+)

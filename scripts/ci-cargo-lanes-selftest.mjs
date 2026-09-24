@@ -70,7 +70,7 @@ function assertLanes(plan, label) {
 // Core touch: the direct lane is meerkat-core alone; the closure is nearly
 // the whole workspace (everything depends on core).
 {
-  const plan = planFor(["meerkat-core/src/lib.rs"]);
+  const plan = planFor(["crates/meerkat-core/src/lib.rs"]);
   assert.equal(plan.mode, "packages");
   assert.deepEqual(plan.packages, ["meerkat-core"]);
   assertLanes(plan, "core touch");
@@ -88,7 +88,7 @@ function assertLanes(plan, label) {
 // request and no pull-request unit lane; its unit tests are named as
 // deferred to the push-to-main run. The chain is computed from metadata.
 {
-  const plan = planFor(["meerkat-mob/src/lib.rs"]);
+  const plan = planFor(["crates/meerkat-mob/src/lib.rs"]);
   assert.equal(plan.mode, "packages");
   assert.deepEqual(plan.packages, ["meerkat-mob"]);
   assert.equal(plan.shards.length, 1, "clippy lane for mob");
@@ -104,7 +104,7 @@ function assertLanes(plan, label) {
   }
 }
 {
-  const plan = planFor(["meerkat-cli/src/main.rs", "meerkat-session/src/lib.rs"]);
+  const plan = planFor(["crates/meerkat-cli/src/main.rs", "crates/meerkat-session/src/lib.rs"]);
   assert.deepEqual(plan.unit_deferred, ["rkat"]);
   assert.deepEqual(plan.unit_shards.map((shard) => shard.packages), [["meerkat-session"]]);
   assertLanes(plan, "cli + session");
@@ -137,7 +137,7 @@ function assertLanes(plan, label) {
 
 // Documentation inside a crate directory is not a build input either.
 {
-  const plan = planFor(["meerkat-core/README.md"]);
+  const plan = planFor(["crates/meerkat-core/README.md"]);
   assert.equal(plan.rust_changed, false);
   assert.equal(plan.mode, "none");
 }
@@ -194,7 +194,7 @@ for (const path of [
 // A generated machine kernel is both machine authority and a Rust source
 // owned by meerkat-machine-kernels.
 {
-  const plan = planFor(["meerkat-machine-kernels/src/generated/meerkat.rs"]);
+  const plan = planFor(["crates/meerkat-machine-kernels/src/generated/meerkat.rs"]);
   assert.equal(plan.mode, "packages");
   assert.deepEqual(plan.packages, ["meerkat-machine-kernels"]);
   assert.equal(plan.machine_authority, true);
@@ -212,7 +212,7 @@ for (const path of [
 
 // A crate manifest selects its crate (and the closure through dependents).
 {
-  const plan = planFor(["meerkat-openai/Cargo.toml", "meerkat/src/help.rs"]);
+  const plan = planFor(["crates/meerkat-openai/Cargo.toml", "crates/meerkat/src/help.rs"]);
   assert.equal(plan.mode, "packages");
   assert.deepEqual(plan.packages, ["meerkat", "meerkat-openai"]);
   assertLanes(plan, "manifest + facade");
@@ -223,15 +223,15 @@ for (const path of [
 // Many changed packages are packed into the shard cap, never dropped.
 {
   const paths = [
-    "meerkat-core/src/lib.rs",
-    "meerkat-runtime/src/lib.rs",
-    "meerkat-mob/src/lib.rs",
-    "meerkat-rpc/src/lib.rs",
-    "meerkat-rest/src/lib.rs",
-    "meerkat-cli/src/main.rs",
-    "meerkat-session/src/lib.rs",
-    "meerkat-store/src/lib.rs",
-    "xtask/src/main.rs",
+    "crates/meerkat-core/src/lib.rs",
+    "crates/meerkat-runtime/src/lib.rs",
+    "crates/meerkat-mob/src/lib.rs",
+    "crates/meerkat-rpc/src/lib.rs",
+    "crates/meerkat-rest/src/lib.rs",
+    "crates/meerkat-cli/src/main.rs",
+    "crates/meerkat-session/src/lib.rs",
+    "crates/meerkat-store/src/lib.rs",
+    "crates/xtask/src/main.rs",
   ];
   const plan = planFor(paths, ["--max-shards", "4"]);
   assert.equal(plan.mode, "packages");
@@ -277,7 +277,7 @@ for (const path of [
 
 // GitHub output: every key the workflow reads, and a well-formed matrix.
 {
-  const result = run(["--format", "github", "--", "meerkat-core/src/lib.rs"]);
+  const result = run(["--format", "github", "--", "crates/meerkat-core/src/lib.rs"]);
   assert.equal(result.status, 0, result.stderr);
   const lines = Object.fromEntries(
     result.stdout.trim().split("\n").map((line) => {
@@ -314,7 +314,7 @@ for (const path of [
   assert.ok(Number(lines.main_unit_shard_count) >= 2);
 }
 {
-  const result = run(["--format", "github", "--", "meerkat-mob/src/lib.rs"]);
+  const result = run(["--format", "github", "--", "crates/meerkat-mob/src/lib.rs"]);
   const lines = Object.fromEntries(result.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
   assert.equal(lines.unit_shard_count, "0");
   assert.equal(lines.unit_deferred, "meerkat-mob");
@@ -341,7 +341,7 @@ for (const path of [
 
 // Bad arguments fail loudly.
 {
-  const result = run(["--format", "yaml", "--", "meerkat-core/src/lib.rs"]);
+  const result = run(["--format", "yaml", "--", "crates/meerkat-core/src/lib.rs"]);
   assert.notEqual(result.status, 0, "invalid format is an error");
 }
 

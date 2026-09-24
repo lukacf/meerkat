@@ -7,9 +7,9 @@ generated formal artifacts.
 
 Running the generator writes self-contained HTML posters to:
 
-- `docs-internal/machine-posters/index.html`
-- `docs-internal/machine-posters/meerkat_machine.html`
-- `docs-internal/machine-posters/mob_machine.html`
+- `docs/internal/machine-posters/index.html`
+- `docs/internal/machine-posters/meerkat_machine.html`
+- `docs/internal/machine-posters/mob_machine.html`
 
 ## Source of Truth
 

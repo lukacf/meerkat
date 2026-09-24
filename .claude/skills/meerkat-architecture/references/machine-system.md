@@ -6,7 +6,7 @@ Load this reference when working on DSL definitions, schema catalog, generated k
 
 The machine roster is owned by `canonical_machine_schemas()` and the
 composition roster by `canonical_composition_schemas()`, both in
-`meerkat-machine-schema/src/catalog/mod.rs`. Per-machine production owners are
+`crates/meerkat-machine-schema/src/catalog/mod.rs`. Per-machine production owners are
 owned by `canonical_machine_production_owner_relations()` in the same file
 (public mirror: `docs/reference/machine-authority.mdx`). Do not maintain a
 hand-written machine list or machine count in this reference — read the
@@ -15,11 +15,11 @@ beyond the original seven machines, e.g. `ApprovalLifecycleMachine`,
 `SessionDocumentMachine`, and `SessionTurnAdmissionMachine`, the latter owned by
 `meerkat-session`, not absorbed into `MeerkatMachine`).
 
-Catalog authoritative directory: `meerkat-machine-schema/src/catalog/dsl/` — one
+Catalog authoritative directory: `crates/meerkat-machine-schema/src/catalog/dsl/` — one
 DSL source file per canonical machine, plus
 `session_persistence_version_authority.rs`: a catalog-generated *scoped*
 authority (generated into
-`meerkat-core/src/generated/session_persistence_version_authority.rs`) that
+`crates/meerkat-core/src/generated/session_persistence_version_authority.rs`) that
 enforces fail-closed acceptance of persisted session schema versions. It is
 registered for production-schema parity but intentionally not part of
 `canonical_machine_schemas()` — do not count it as a canonical machine.
@@ -33,7 +33,7 @@ The DSL is a single source that produces two artifacts:
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │  DSL SOURCE (single source of truth)                               │
-│  meerkat-machine-schema/src/catalog/dsl/*.rs                       │
+│  crates/meerkat-machine-schema/src/catalog/dsl/*.rs                       │
 │  (one file per machine in canonical_machine_schemas())             │
 │                                                                    │
 │  machine_dsl! {                                                    │
@@ -77,7 +77,7 @@ The DSL is a single source that produces two artifacts:
                ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │  RUNTIME SHELL (handwritten, mechanics only)                       │
-│  meerkat-runtime/src/meerkat_machine/*, driver/*, ops_lifecycle.rs │
+│  crates/meerkat-runtime/src/meerkat_machine/*, driver/*, ops_lifecycle.rs │
 │                                                                    │
 │  Holds per-session Arc<Mutex<MeerkatMachineAuthority>>.            │
 │  dsl_apply(input) locks, calls kernel.apply, realizes effects.     │
@@ -94,27 +94,27 @@ Phase 1 of the foundational machine-authority convergence is closed. There is on
 
 Ratchets that must stay green:
 
-- `meerkat-machine-codegen/tests/render_contracts.rs`
+- `crates/meerkat-machine-codegen/tests/render_contracts.rs`
   - generated kernel modules must be schema-fed from the catalog, not rendered from production source files;
   - production bridges must import catalog-owned helper semantics such as `OptionValueExt`;
   - `flow_run`, `flow_frame`, and `loop_iteration` are audited as MobMachine-owned fail-closed projection reducers, not canonical machines.
-- `meerkat-machine-codegen/tests/runtime_schema_parity.rs`
+- `crates/meerkat-machine-codegen/tests/runtime_schema_parity.rs`
   - catalog/production schemas must match shape for all canonical machines;
   - drift inventory and count tests must remain empty after convergence.
-- `meerkat-machine-codegen/tests/runtime_alphabet_parity.rs`
+- `crates/meerkat-machine-codegen/tests/runtime_alphabet_parity.rs`
   - command classification is typed via `MeerkatMachineCommandClassificationRecord` and `MobMachineCommandClassificationRecord`;
   - every semantic command maps to catalog inputs or a typed shell-mechanic reason;
   - string whitelists, wildcard bypasses, and command-name folklore are forbidden.
 
-Do not add `machine! { ... }` or equivalent handwritten production machine bodies outside `meerkat-machine-schema/src/catalog/dsl/`. If production needs a new semantic field, transition, effect, or invariant, lift it into the catalog first, regenerate artifacts, run drift/parity checks, and then adapt bridge code.
+Do not add `machine! { ... }` or equivalent handwritten production machine bodies outside `crates/meerkat-machine-schema/src/catalog/dsl/`. If production needs a new semantic field, transition, effect, or invariant, lift it into the catalog first, regenerate artifacts, run drift/parity checks, and then adapt bridge code.
 
 Governance gates are typed syn-AST/fact gates in `xtask`, not source-text scanners (the old shell-script scanners were deleted; the few remaining `scripts/*` gate entries are thin wrappers that exec xtask):
 
-- `xtask effect-authority` (`xtask/src/effect_authority.rs`) — effect realization must trace to machine authority.
-- `xtask ownership-ledger --check-drift` (`xtask/src/ownership_ledger.rs`) — semantic-fact ownership ledger with mechanically-resolved anchors; drift fails the gate.
-- `xtask bridge-classifier` (`xtask/src/bridge_classifier.rs`) — bridge wire types must not re-interpret `ResponseStatus`; terminality goes through `meerkat_core::interaction::classify_response_terminality` (Makefile entry: `bridge-no-responsestatus-gate`).
-- `xtask rmat-audit --strict` (`xtask/src/rmat_audit.rs`) — syn-AST read/write seam enforcement.
-- `xtask seam-inventory` (`xtask/src/seam_inventory.rs`) — every Local/External effect needs an explicit classification (`EffectTeardownClass` coherence lives here) and routed effects must resolve via the typed Route table.
+- `xtask effect-authority` (`crates/xtask/src/effect_authority.rs`) — effect realization must trace to machine authority.
+- `xtask ownership-ledger --check-drift` (`crates/xtask/src/ownership_ledger.rs`) — semantic-fact ownership ledger with mechanically-resolved anchors; drift fails the gate.
+- `xtask bridge-classifier` (`crates/xtask/src/bridge_classifier.rs`) — bridge wire types must not re-interpret `ResponseStatus`; terminality goes through `meerkat_core::interaction::classify_response_terminality` (Makefile entry: `bridge-no-responsestatus-gate`).
+- `xtask rmat-audit --strict` (`crates/xtask/src/rmat_audit.rs`) — syn-AST read/write seam enforcement.
+- `xtask seam-inventory` (`crates/xtask/src/seam_inventory.rs`) — every Local/External effect needs an explicit classification (`EffectTeardownClass` coherence lives here) and routed effects must resolve via the typed Route table.
 
 `make rmat-audit` runs effect-authority + ownership-ledger drift + strict RMAT; all gates run in `make ci`.
 
@@ -222,7 +222,7 @@ separate case: `RuntimeAuthLeaseHandle` routes them to per-binding
 
 Pattern: trait in meerkat-core, impl in meerkat-runtime, `Arc<dyn Trait>` on `SessionRuntimeBindings` (also in meerkat-core).
 
-Current handle traits carried by `SessionRuntimeBindings` (all in `meerkat-core/src/handles.rs`):
+Current handle traits carried by `SessionRuntimeBindings` (all in `crates/meerkat-core/src/handles.rs`):
 - `TurnStateHandle` — for turn execution transitions
 - `CommsDrainHandle` — for comms drain lifecycle
 - `ExternalToolSurfaceHandle` — for MCP tool surface transitions
@@ -245,7 +245,7 @@ decisions and authorities return typed outcomes such as
 accessors expose core-owned projections. `SessionClaimHandle::try_acquire`
 returns the RAII `SessionClaim` token with its dedicated `SessionClaimError`.
 
-MeerkatMachine-owned impls in `meerkat-runtime/src/handles/` hold
+MeerkatMachine-owned impls in `crates/meerkat-runtime/src/handles/` hold
 `Arc<HandleDslAuthority>`, which wraps the session's real
 `Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>`, not a private per-handle copy.
 `prepare_bindings()` constructs one `HandleDslAuthority` per session and passes
@@ -258,7 +258,7 @@ MobMachine in-crate access: `MobActor.dsl_authority: MobMachineAuthority` is dir
 
 ## Compositions
 
-Compositions live in `meerkat-machine-schema/src/catalog/compositions.rs` and
+Compositions live in `crates/meerkat-machine-schema/src/catalog/compositions.rs` and
 are exposed by `canonical_composition_schemas()` in `catalog/mod.rs`. Do not
 maintain a hand-written composition list or count here — read the registry
 (a previous six-item copy of the list in this file drifted stale; the public
@@ -268,14 +268,14 @@ the MeerkatMachine ↔ MobMachine handoff).
 
 Compositions express effect-disposition rules: which effects emitted by one machine are consumed as inputs by another, which obligations must be realized before a terminal, and which protocol helpers get codegen'd.
 
-Handoff feedback bindings are TYPE-checked, not name-matched: `HandleBridgeFeedbackBinding` entries (meerkat-machine-schema/src/composition.rs) bind a handoff's feedback route to a concrete input variant, and composition-schema validation fails closed with `MissingHandoffFeedbackBinding` / `HandoffFeedbackBindingTypeMismatch` when a binding is absent or its parameter types do not line up with the target input.
+Handoff feedback bindings are TYPE-checked, not name-matched: `HandleBridgeFeedbackBinding` entries (crates/meerkat-machine-schema/src/composition.rs) bind a handoff's feedback route to a concrete input variant, and composition-schema validation fails closed with `MissingHandoffFeedbackBinding` / `HandoffFeedbackBindingTypeMismatch` when a binding is absent or its parameter types do not line up with the target input.
 
-Generated protocol adapters land in each crate's `src/generated/` (e.g., `meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs`). These are not hand-edited; regenerate via `make machine-codegen` when the catalog changes.
+Generated protocol adapters land in each crate's `src/generated/` (e.g., `crates/meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs`). These are not hand-edited; regenerate via `make machine-codegen` when the catalog changes.
 
 ## Dogma for machine work
 
 Per the machine-authority doctrine summarized in `docs/reference/machine-authority.mdx`
-and archived historically at `docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`:
+and archived historically at `docs/internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`:
 
 1. **One semantic fact, one owner.** If something can mutate machine state, the machine owns it. Shell copies of DSL-owned fields are shadow truth and must be eliminated (see Phase 5G).
 2. **Machines own semantics, shell owns mechanics.** Transition tables belong in the DSL. Handwritten match tables on `(phase, input)` tuples in shell code are authority-reimplementation in disguise.
@@ -284,8 +284,8 @@ and archived historically at `docs-internal/archive/public-docs-removed-2026-05-
 
 ## What the workspace looks like in the target state
 
-- `meerkat-machine-schema/src/catalog/dsl/` holds one DSL file per registry entry of `canonical_machine_schemas()` (the registry owns the machine roster and count). Shared catalog helpers in that directory are allowed; no production crate authors a competing machine body.
-- Canonical compositions live in `meerkat-machine-schema/src/catalog/compositions.rs`, registered by `canonical_composition_schemas()` (the registry owns the roster and count).
+- `crates/meerkat-machine-schema/src/catalog/dsl/` holds one DSL file per registry entry of `canonical_machine_schemas()` (the registry owns the machine roster and count). Shared catalog helpers in that directory are allowed; no production crate authors a competing machine body.
+- Canonical compositions live in `crates/meerkat-machine-schema/src/catalog/compositions.rs`, registered by `canonical_composition_schemas()` (the registry owns the roster and count).
 - Zero `*_authority.rs` files containing handwritten match-table state machines. Files named `dsl_authority.rs` are runtime adapter plumbing (not state machines); other authority-named helpers must be projections, planners, or sealed mutators with no semantic transition table.
 - Runtime shell holds a per-session
   `Arc<Mutex<MeerkatMachineAuthority>>`; each `MobActor` owns one
@@ -293,7 +293,7 @@ and archived historically at `docs-internal/archive/public-docs-removed-2026-05-
   implementations that route through those authorities, IO mechanics
   (channels, handles, wall-clock timestamps), and observability projections
   (history logs and diagnostic snapshots).
-- Handle traits in `meerkat-core/src/handles.rs` give cross-crate access to
+- Handle traits in `crates/meerkat-core/src/handles.rs` give cross-crate access to
   machine-owned transitions and projections. The turn, drain, external-tool,
   peer, admission, model-routing, MCP, session-context, session-claim, and
   interaction-stream handles share the session's MeerkatMachine authority;
@@ -304,16 +304,16 @@ and archived historically at `docs-internal/archive/public-docs-removed-2026-05-
 
 ## Key files to read when touching the machine system
 
-- `meerkat-machine-schema/src/catalog/dsl/<machine>.rs` — DSL source (truth)
-- `meerkat-machine-schema/src/catalog/mod.rs` — `canonical_machine_schemas()` registry
-- `meerkat-machine-schema/src/catalog/compositions.rs` — composition definitions
-- `meerkat-machine-kernels/src/generated/` — ordinary typed generated kernel modules
-- `meerkat-machine-kernels/src/runtime.rs` — optional generic interpreter, exported as `test_oracle::GeneratedMachineKernel` only with `test-oracle`; production bridges invoke catalog-owned DSL bodies instead
-- `meerkat-runtime/src/meerkat_machine/dsl.rs` — MeerkatMachine DSL + runtime-local re-exports
-- `meerkat-runtime/src/meerkat_machine/dsl_authority.rs` — DSL adapter plumbing (NOT a handwritten authority)
-- `meerkat-runtime/src/handles/` — runtime impls of handle traits; the `HandleDslAuthority` shared wrapper
-- `meerkat-core/src/handles.rs` — handle trait definitions
-- `meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings` (the cross-crate seam)
+- `crates/meerkat-machine-schema/src/catalog/dsl/<machine>.rs` — DSL source (truth)
+- `crates/meerkat-machine-schema/src/catalog/mod.rs` — `canonical_machine_schemas()` registry
+- `crates/meerkat-machine-schema/src/catalog/compositions.rs` — composition definitions
+- `crates/meerkat-machine-kernels/src/generated/` — ordinary typed generated kernel modules
+- `crates/meerkat-machine-kernels/src/runtime.rs` — optional generic interpreter, exported as `test_oracle::GeneratedMachineKernel` only with `test-oracle`; production bridges invoke catalog-owned DSL bodies instead
+- `crates/meerkat-runtime/src/meerkat_machine/dsl.rs` — MeerkatMachine DSL + runtime-local re-exports
+- `crates/meerkat-runtime/src/meerkat_machine/dsl_authority.rs` — DSL adapter plumbing (NOT a handwritten authority)
+- `crates/meerkat-runtime/src/handles/` — runtime impls of handle traits; the `HandleDslAuthority` shared wrapper
+- `crates/meerkat-core/src/handles.rs` — handle trait definitions
+- `crates/meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings` (the cross-crate seam)
 - `docs/reference/machine-authority.mdx` — public machine-authority summary
-- `docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md` — historical dogma archive
-- `xtask/src/machines.rs` — codegen/drift/verify xtask command implementations
+- `docs/internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md` — historical dogma archive
+- `crates/xtask/src/machines.rs` — codegen/drift/verify xtask command implementations

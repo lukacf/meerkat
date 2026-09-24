@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DetachedJobMachine`
 
 ### Code Anchors
-- `detached_job_authority` (machine `DetachedJobMachine`): `meerkat-jobs/src/service.rs` — generated detached-job lifecycle authority with mechanical CAS and typed projection
+- `detached_job_authority` (machine `DetachedJobMachine`): `crates/meerkat-jobs/src/service.rs` — generated detached-job lifecycle authority with mechanical CAS and typed projection
 
 ### Scenarios
 - `detached_job_reopen_preserves_committed_authority` — recovery rehydrates the committed attempt, fence, lease, checkpoint, and runner handle without minting new authority

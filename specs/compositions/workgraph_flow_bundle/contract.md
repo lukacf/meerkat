@@ -35,8 +35,8 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `workgraph_flow_bridge_owner` (machine `WorkExecutionLifecycleMachine`): `meerkat-mob/src/workgraph_flow.rs` — mechanical Mob composition facade realizes generated WorkExecution launch, evidence, and closure obligations and returns typed feedback
-- `workgraph_flow_bundle_schema` (machine `WorkExecutionLifecycleMachine`): `meerkat-machine-schema/src/catalog/compositions.rs` — formal WorkExecution lifecycle handoff composition for Mob Flow attempts
+- `workgraph_flow_bridge_owner` (machine `WorkExecutionLifecycleMachine`): `crates/meerkat-mob/src/workgraph_flow.rs` — mechanical Mob composition facade realizes generated WorkExecution launch, evidence, and closure obligations and returns typed feedback
+- `workgraph_flow_bundle_schema` (machine `WorkExecutionLifecycleMachine`): `crates/meerkat-machine-schema/src/catalog/compositions.rs` — formal WorkExecution lifecycle handoff composition for Mob Flow attempts
 
 ### Scenarios
 - `flow-launch-feedback` — a durable WorkExecution launch obligation is realized by Mob and closed only by typed started, observed, uncertain, or failed feedback

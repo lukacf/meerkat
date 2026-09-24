@@ -48,7 +48,7 @@ Common commands:
 
 Examples:
   BUILDBUDDY_BAZEL_COMMAND=workspace-fast-rbe scripts/buildbuddy-bazel-poc --jobs=64
-  BUILDBUDDY_BAZEL_COMMAND=owned-clippy-rbe scripts/buildbuddy-bazel-poc meerkat/src/lib.rs --jobs=64
+  BUILDBUDDY_BAZEL_COMMAND=owned-clippy-rbe scripts/buildbuddy-bazel-poc crates/meerkat/src/lib.rs --jobs=64
 
 Use scripts/buildbuddy-changed-gate --dry-run <path> to inspect selected labels
 without running Bazel.
@@ -331,7 +331,7 @@ case "${command}" in
     # older build, and the lane would run it silently. The materializer now
     # cross-checks each artifact against this invocation's build events, so
     # an omission fails loudly at materialize time instead.
-    default_target="@wasm_pack_darwin_arm64//:wasm-pack //tests/integration:e2e_smoke_lane_test //tests/integration:e2e_artifacts_bin //tests/integration:gpt_live_public_e2e_test //meerkat:live_meerkat_regression_test //meerkat:smoke_meerkat_sdk_test //meerkat-cli:rkat //meerkat-cli:cli_mobpack_live_smoke_test //meerkat-cli:live_smoke_cli_test //meerkat-cli:storage_migrate_test //meerkat-cli:system_mob_host_daemon_test //meerkat-comms:e2e_test //meerkat-mcp-server:rkat_mcp_bin //meerkat-mcp-server:live_mcp_matrix_test //meerkat-mob:smoke_mob_flow_runtime_test //meerkat-mob:smoke_mob_generated_image_comms_test //meerkat-mob:smoke_mob_idle_burn_test //meerkat-mob:smoke_mob_resume_test //meerkat-mob:smoke_mob_turn_latency_test //meerkat-rest:rkat_rest_bin //meerkat-rest:live_rest_matrix_test //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:live_smoke_rpc_test //tests/integration:smoke_shared_realm_test //tests/integration:smoke_model_fallback_test //tests/integration:smoke_mob_fork_off_test"
+    default_target="@wasm_pack_darwin_arm64//:wasm-pack //tests/integration:e2e_smoke_lane_test //tests/integration:e2e_artifacts_bin //tests/integration:gpt_live_public_e2e_test //crates/meerkat:live_meerkat_regression_test //crates/meerkat:smoke_meerkat_sdk_test //crates/meerkat-cli:rkat //crates/meerkat-cli:cli_mobpack_live_smoke_test //crates/meerkat-cli:live_smoke_cli_test //crates/meerkat-cli:storage_migrate_test //crates/meerkat-cli:system_mob_host_daemon_test //crates/meerkat-comms:e2e_test //crates/meerkat-mcp-server:rkat_mcp_bin //crates/meerkat-mcp-server:live_mcp_matrix_test //crates/meerkat-mob:smoke_mob_flow_runtime_test //crates/meerkat-mob:smoke_mob_generated_image_comms_test //crates/meerkat-mob:smoke_mob_idle_burn_test //crates/meerkat-mob:smoke_mob_resume_test //crates/meerkat-mob:smoke_mob_turn_latency_test //crates/meerkat-rest:rkat_rest_bin //crates/meerkat-rest:live_rest_matrix_test //crates/meerkat-rpc:rkat_rpc_bin //crates/meerkat-rpc:live_smoke_rpc_test //tests/integration:smoke_shared_realm_test //tests/integration:smoke_model_fallback_test //tests/integration:smoke_mob_fork_off_test"
     extra_args+=(
       --remote_download_outputs=toplevel
       --color=no
@@ -373,7 +373,7 @@ case "${command}" in
   machine-authority-rbe)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//xtask:machine_verify_all_tlc_test //xtask:machines_contracts_test //xtask:protocol_codegen_drift_test //xtask:runtime_authority_bypass_test //meerkat-machine-schema:docs_machine_authority_alignment_test //meerkat-machine-codegen:render_contracts_test //meerkat-machine-codegen:runtime_alphabet_parity_test //meerkat-machine-codegen:runtime_schema_parity_test"
+    default_target="//crates/xtask:machine_verify_all_tlc_test //crates/xtask:machines_contracts_test //crates/xtask:protocol_codegen_drift_test //crates/xtask:runtime_authority_bypass_test //crates/meerkat-machine-schema:docs_machine_authority_alignment_test //crates/meerkat-machine-codegen:render_contracts_test //crates/meerkat-machine-codegen:runtime_alphabet_parity_test //crates/meerkat-machine-codegen:runtime_schema_parity_test"
     extra_args+=(
       --test_output=errors
       --test_summary=terse
@@ -384,7 +384,7 @@ case "${command}" in
   rmat-audit-rbe)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//xtask:effect_authority_test //xtask:runtime_authority_bypass_test //xtask:rmat_audit_test //xtask:rmat_strict_test"
+    default_target="//crates/xtask:effect_authority_test //crates/xtask:runtime_authority_bypass_test //crates/xtask:rmat_audit_test //crates/xtask:rmat_strict_test"
     extra_args+=(
       --test_output=errors
       --test_summary=terse
@@ -395,7 +395,7 @@ case "${command}" in
   seam-inventory-rbe)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//xtask:seam_inventory_strict_test"
+    default_target="//crates/xtask:seam_inventory_strict_test"
     extra_args+=(
       --test_output=errors
       --test_summary=terse
@@ -406,7 +406,7 @@ case "${command}" in
   fmt-static-rbe)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//xtask:buildbuddy_static_lanes_test"
+    default_target="//crates/xtask:buildbuddy_static_lanes_test"
     extra_args+=(
       --test_output=errors
       --test_summary=terse
@@ -480,31 +480,31 @@ case "${command}" in
   release-build-macos-arm64)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    default_target="//crates/meerkat-cli:rkat //crates/meerkat-rpc:rkat_rpc_bin //crates/meerkat-rest:rkat_rest_bin //crates/meerkat-mcp-server:rkat_mcp_bin"
     extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel)
     ;;
   release-build-macos-x86)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
-    extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel --platforms=//platforms:macos_x86_64)
+    default_target="//crates/meerkat-cli:rkat //crates/meerkat-rpc:rkat_rpc_bin //crates/meerkat-rest:rkat_rest_bin //crates/meerkat-mcp-server:rkat_mcp_bin"
+    extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel --platforms=//tools/bazel/platforms:macos_x86_64)
     ;;
   release-build-linux-x86)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-linux-rbe}"
-    default_target="//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    default_target="//crates/meerkat-cli:rkat //crates/meerkat-rpc:rkat_rpc_bin //crates/meerkat-rest:rkat_rest_bin //crates/meerkat-mcp-server:rkat_mcp_bin"
     extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel)
     ;;
   release-build-linux-arm64)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-linux-arm64-rbe}"
-    default_target="//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    default_target="//crates/meerkat-cli:rkat //crates/meerkat-rpc:rkat_rpc_bin //crates/meerkat-rest:rkat_rest_bin //crates/meerkat-mcp-server:rkat_mcp_bin"
     extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel --linkopt=-fuse-ld=bfd)
     ;;
   release-build-windows-x86)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-windows-rbe}"
-    default_target="//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    default_target="//crates/meerkat-cli:rkat //crates/meerkat-rpc:rkat_rpc_bin //crates/meerkat-rest:rkat_rest_bin //crates/meerkat-mcp-server:rkat_mcp_bin"
     msvc_ver="${BUILDBUDDY_WINDOWS_MSVC_VERSION:-14.42.34433}"
     msvc_edition="${BUILDBUDDY_WINDOWS_MSVC_EDITION:-Professional}"
     msvc_root="C:/Program Files/Microsoft Visual Studio/2022/${msvc_edition}"
@@ -767,7 +767,7 @@ case "${command}" in
     )
     ;;
   *)
-    default_target="//meerkat-machine-dsl-core:meerkat_machine_dsl_core"
+    default_target="//crates/meerkat-machine-dsl-core:meerkat_machine_dsl_core"
     ;;
 esac
 if [[ "${requested_command}" == affected-fast-test || "${requested_command}" == affected-fast-test-local || "${requested_command}" == owned-fast-test || "${requested_command}" == owned-fast-test-local || "${requested_command}" == owned-build || "${requested_command}" == owned-build-local || "${requested_command}" == affected-build || "${requested_command}" == affected-build-local || "${requested_command}" == affected-clippy || "${requested_command}" == affected-clippy-rbe || "${requested_command}" == owned-clippy || "${requested_command}" == owned-clippy-rbe || "${requested_command}" == workspace-build-clippy-rbe || "${requested_command}" == feature-clippy-rbe ]]; then
@@ -909,7 +909,7 @@ if [[ "${config}" == buildbuddy-macos-rbe* ]]; then
     --macos_sdk_version="${macos_sdk_version}"
     --macos_minimum_os="${macos_minimum_os}"
     --host_macos_minimum_os="${macos_minimum_os}"
-    --xcode_version_config=//platforms:rbe_xcodes
+    --xcode_version_config=//tools/bazel/platforms:rbe_xcodes
     --xcode_version="${xcode_version}"
   )
 fi

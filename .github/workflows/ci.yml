@@ -338,7 +338,7 @@ jobs:
           path: |
             specs/machines
             specs/compositions
-            meerkat-machine-kernels/src/generated
+            crates/meerkat-machine-kernels/src/generated
           if-no-files-found: error
           retention-days: 1
 
@@ -359,12 +359,12 @@ jobs:
         with:
           name: fresh-protocol-artifacts
           path: |
-            meerkat-core/src/generated
-            meerkat-session/src/generated
-            meerkat-mob/src/generated
-            meerkat-mcp/src/generated
-            meerkat-runtime/src/generated
-            meerkat-workgraph/src/generated
+            crates/meerkat-core/src/generated
+            crates/meerkat-session/src/generated
+            crates/meerkat-mob/src/generated
+            crates/meerkat-mcp/src/generated
+            crates/meerkat-runtime/src/generated
+            crates/meerkat-workgraph/src/generated
           if-no-files-found: error
           retention-days: 1
 

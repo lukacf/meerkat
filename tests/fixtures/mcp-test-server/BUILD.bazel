@@ -1,0 +1,73 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+rust_binary(
+    name = "mcp_test_server",
+    aliases = aliases(package_name = "tests/fixtures/mcp-test-server"),
+    crate_name = "mcp_test_server",
+    crate_root = "src/main.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "mcp-test-server",
+        "CARGO_MANIFEST_DIR": "tests/fixtures/mcp-test-server",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "tests/fixtures/mcp-test-server",
+        proc_macro = True,
+    ),
+    deps = all_crate_deps(
+        package_name = "tests/fixtures/mcp-test-server",
+        normal = True,
+    ),
+)

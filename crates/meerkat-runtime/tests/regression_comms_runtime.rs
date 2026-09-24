@@ -1,0 +1,923 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+//! Regression tests for comms → RuntimeDriver path.
+//!
+//! These tests mirror the 12 behavioral contracts from
+//! crates/meerkat-core/tests/regression_comms_host.rs but exercise them
+//! through the v9 RuntimeDriver input acceptance path.
+//!
+//! Each test verifies:
+//! - Correct PeerConvention mapping (CommsInputBridge)
+//! - Correct PolicyDecision (DefaultPolicyTable)
+//! - Correct wake/no-wake semantics
+//! - Correct InputState lifecycle transitions
+
+use meerkat_core::comms::PeerId;
+use meerkat_core::interaction::{
+    InboxInteraction, InteractionContent, InteractionId, PeerIngressEnvelopeFacts,
+    PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressIdentity, ResponseStatus,
+};
+use meerkat_core::lifecycle::RunId;
+use meerkat_runtime::comms_bridge::classified_interaction_to_runtime_input;
+use meerkat_runtime::driver::ephemeral::{EphemeralRuntimeDriver, PostAdmissionSignal};
+use meerkat_runtime::identifiers::LogicalRuntimeId;
+use meerkat_runtime::input::{Input, InputDurability, PeerConvention};
+use meerkat_runtime::input_state::InputLifecycleState;
+use meerkat_runtime::policy_table::DefaultPolicyTable;
+use meerkat_runtime::runtime_state::RuntimeState;
+use meerkat_runtime::traits::RuntimeDriver;
+use uuid::Uuid;
+
+fn bind_running(driver: &mut EphemeralRuntimeDriver) -> RunId {
+    let run_id = RunId::new();
+    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
+    driver.contract_begin_run_authority(run_id.clone()).unwrap();
+    assert_eq!(driver.runtime_state(), RuntimeState::Running);
+    run_id
+}
+
+fn iid() -> InteractionId {
+    InteractionId(Uuid::now_v7())
+}
+
+fn response_route_id() -> PeerId {
+    PeerId::from_uuid(Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f4").unwrap())
+}
+
+fn make_message(from: &str, body: &str) -> InboxInteraction {
+    InboxInteraction {
+        objective_id: None,
+        sender_taint: None,
+        from_route: None,
+        id: iid(),
+        from: from.into(),
+        content: InteractionContent::Message {
+            body: body.into(),
+            blocks: None,
+        },
+        rendered_text: format!("[{from}]: {body}"),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
+    }
+}
+
+fn make_message_with_blocks(from: &str, body: &str) -> InboxInteraction {
+    InboxInteraction {
+        objective_id: None,
+        sender_taint: None,
+        from_route: None,
+        id: iid(),
+        from: from.into(),
+        content: InteractionContent::Message {
+            body: body.into(),
+            blocks: Some(vec![
+                meerkat_core::types::ContentBlock::Text { text: body.into() },
+                meerkat_core::types::ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: "abc123".into(),
+                },
+            ]),
+        },
+        rendered_text: format!("[{from}]: {body}"),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
+    }
+}
+
+fn make_response(from: &str, status: ResponseStatus) -> InboxInteraction {
+    let in_reply_to = iid();
+    InboxInteraction {
+        objective_id: None,
+        sender_taint: None,
+        from_route: Some(response_route_id()),
+        id: iid(),
+        from: from.into(),
+        content: InteractionContent::Response {
+            in_reply_to,
+            status,
+            result: serde_json::json!({"ok": true}),
+            blocks: None,
+        },
+        rendered_text: format!("[{from}]: response ({status:?})"),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
+    }
+}
+
+fn make_request(from: &str, intent: &str) -> InboxInteraction {
+    InboxInteraction {
+        objective_id: None,
+        sender_taint: None,
+        from_route: None,
+        id: iid(),
+        from: from.into(),
+        content: InteractionContent::Request {
+            intent: intent.into(),
+            // K15: lifecycle-classed requests must carry the typed peer
+            // subject (a missing subject is rejected at ingress); the field
+            // is inert payload for non-lifecycle intents.
+            params: serde_json::json!({ "peer": from }),
+            blocks: None,
+        },
+        rendered_text: format!("[{from}]: request ({intent})"),
+        handling_mode: meerkat_core::types::HandlingMode::Queue,
+        render_metadata: None,
+    }
+}
+
+fn rid() -> LogicalRuntimeId {
+    LogicalRuntimeId::new("test-runtime")
+}
+
+fn runtime_input_for_interaction(
+    interaction: &InboxInteraction,
+    runtime_id: &LogicalRuntimeId,
+) -> Input {
+    let peer_id = interaction.from_route.unwrap_or_else(response_route_id);
+    let candidate = test_peer_input_candidate_from_interaction(interaction.clone(), peer_id);
+    classified_interaction_to_runtime_input(&candidate, runtime_id)
+        .expect("test interaction should project to runtime input")
+}
+
+fn test_peer_input_candidate_from_interaction(
+    interaction: InboxInteraction,
+    peer_id: PeerId,
+) -> meerkat_core::interaction::PeerInputCandidate {
+    let handle = test_peer_comms_handle();
+    let facts = PeerIngressEnvelopeFacts {
+        item_id: interaction.id.to_string(),
+        from_peer: interaction.from.clone(),
+        from_peer_id: peer_id,
+        kind: match &interaction.content {
+            InteractionContent::Message { body, .. }
+            | InteractionContent::IncarnationFencedMessage { body, .. } => {
+                PeerIngressEnvelopeKind::Message { body: body.clone() }
+            }
+            InteractionContent::Request { intent, params, .. } => {
+                PeerIngressEnvelopeKind::Request {
+                    intent: intent.clone(),
+                    params: params.clone(),
+                }
+            }
+            InteractionContent::Response {
+                in_reply_to,
+                status,
+                result,
+                ..
+            } => PeerIngressEnvelopeKind::Response {
+                in_reply_to: in_reply_to.to_string(),
+                status: *status,
+                result: result.clone(),
+            },
+        },
+    };
+    let admission =
+        meerkat_core::handles::PeerCommsHandle::classify_external_envelope(handle.as_ref(), facts)
+            .expect("generated peer-comms authority should classify test interaction");
+    // R084: the admitted sender identity comes from the machine-echoed
+    // canonical peer id on the classification effect, not the local input.
+    let canonical_from_peer_id = admission
+        .from_peer_id
+        .expect("generated envelope classification should echo the canonical sender peer id");
+    let classification = admission.classification;
+    let convention = match &interaction.content {
+        InteractionContent::Message { .. }
+        | InteractionContent::IncarnationFencedMessage { .. } => {
+            meerkat_core::PeerIngressConvention::Message
+        }
+        InteractionContent::Request { intent, .. } => {
+            if let Some(kind) = classification.lifecycle_kind {
+                let peer = admission
+                    .lifecycle_peer
+                    .clone()
+                    .expect("generated lifecycle classification should include a peer subject");
+                meerkat_core::PeerIngressConvention::Lifecycle { kind, peer }
+            } else {
+                let request_id = admission
+                    .request_id
+                    .clone()
+                    .expect("generated request classification should include request id");
+                meerkat_core::PeerIngressConvention::Request {
+                    request_id,
+                    intent: intent.clone(),
+                }
+            }
+        }
+        InteractionContent::Response { status, .. } => {
+            let in_reply_to = admission
+                .request_id
+                .as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                .map(InteractionId)
+                .expect("generated response classification should include in-reply-to id");
+            meerkat_core::PeerIngressConvention::Response {
+                in_reply_to,
+                status: *status,
+            }
+        }
+    };
+    let ingress = PeerIngressFact::peer(
+        interaction.id,
+        classification.class,
+        classification.kind,
+        Some(classification.auth),
+        PeerIngressIdentity::new(canonical_from_peer_id, interaction.from.clone(), convention),
+    );
+    let mut candidate = meerkat_core::interaction::PeerInputCandidate::new(
+        interaction,
+        ingress,
+        admission.lifecycle_peer,
+    );
+    candidate.response_terminality = classification.response_terminality;
+    // R084: the canonical sender id propagates ingress facts -> machine
+    // signal -> classification effect -> admitted candidate unchanged.
+    assert_eq!(
+        candidate.from_peer_id(),
+        Some(peer_id),
+        "canonical sender peer id must survive ingress -> signal -> effect -> candidate"
+    );
+    candidate
+}
+
+fn test_peer_comms_handle() -> std::sync::Arc<dyn meerkat_core::handles::PeerCommsHandle> {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test peer-comms runtime should build");
+        runtime.block_on(async move {
+            let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+            let session_id = meerkat_core::SessionId::new();
+            let bindings = machine
+                .prepare_bindings(session_id)
+                .await
+                .expect("generated MeerkatMachine should prepare test peer-comms bindings");
+            std::sync::Arc::clone(bindings.peer_comms())
+        })
+    })
+    .join()
+    .expect("test peer-comms authority thread should finish")
+}
+
+// ---------------------------------------------------------------------------
+// §1: Completed response triggers continuation (wake) when idle
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn completed_response_idle_wakes() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+    let interaction = make_response("peer-1", ResponseStatus::Completed);
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    // Verify bridge mapping
+    if let Input::Peer(ref p) = input {
+        assert!(matches!(
+            p.convention,
+            Some(PeerConvention::ResponseTerminal { .. })
+        ));
+        assert_eq!(p.header.durability, InputDurability::Durable);
+    } else {
+        panic!("Expected PeerInput");
+    }
+
+    // Verify policy: terminal response + idle → StageRunStart + WakeIfIdle
+    let policy = DefaultPolicyTable::resolve(&input, true);
+    assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
+
+    // Verify driver behavior
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::WakeLoop
+    );
+}
+
+#[tokio::test]
+async fn completed_response_admission_stamps_apply_intent_without_context_projection() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+    let interaction = make_response("peer-1", ResponseStatus::Completed);
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    let meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } = outcome else {
+        panic!("expected terminal peer response to be accepted");
+    };
+
+    let semantics = driver
+        .admitted_runtime_semantics(&input_id)
+        .expect("accepted input should have runtime semantics");
+    assert_eq!(
+        semantics.execution_kind(),
+        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
+    );
+    assert_eq!(
+        semantics.peer_response_terminal_apply_intent(),
+        Some(
+            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContentAndRun
+        )
+    );
+    assert_eq!(
+        driver.input_phase(&input_id),
+        Some(InputLifecycleState::Queued)
+    );
+    let projection = driver
+        .admitted_primitive_projection(&input_id)
+        .expect("accepted input should have primitive projection");
+    assert!(
+        projection.append.is_some(),
+        "terminal response must carry its typed comms notice append so the mandatory \
+         requester reaction turn has model-visible content"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §2: Accepted response injects context, no continuation (no wake)
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn accepted_response_policy_no_wake_keeps_idle_admission_passive() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+    let interaction = make_response("peer-1", ResponseStatus::Accepted);
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    // Verify bridge: Accepted → ResponseProgress
+    if let Input::Peer(ref p) = input {
+        assert!(matches!(
+            p.convention,
+            Some(PeerConvention::ResponseProgress { .. })
+        ));
+        assert_eq!(p.header.durability, InputDurability::Ephemeral);
+    } else {
+        panic!("Expected PeerInput");
+    }
+
+    // Verify policy per §17: progress → StageRunBoundary + NoWake + Coalesce + OnRunComplete
+    let policy = DefaultPolicyTable::resolve(&input, true);
+    assert_eq!(
+        policy.apply_mode,
+        meerkat_runtime::ApplyMode::StageRunBoundary
+    );
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::None);
+    assert_eq!(policy.queue_mode, meerkat_runtime::QueueMode::Coalesce);
+    assert_eq!(
+        policy.consume_point,
+        meerkat_runtime::ConsumePoint::OnRunComplete
+    );
+
+    // Verify driver: accepted and queued without waking the idle loop. A
+    // progress response remains passive until a later run boundary.
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted(), "unexpected outcome: {outcome:?}");
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
+
+    // Input should be queued (StageRunBoundary queues for boundary application)
+    if let meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } = &outcome {
+        assert_eq!(
+            driver.input_phase(input_id),
+            Some(InputLifecycleState::Queued)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §3: Failed response triggers continuation (wake) when idle
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn failed_response_idle_wakes() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+    let interaction = make_response("peer-1", ResponseStatus::Failed);
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    // Verify bridge: Failed → ResponseTerminal
+    if let Input::Peer(ref p) = input {
+        assert!(matches!(
+            p.convention,
+            Some(PeerConvention::ResponseTerminal {
+                status: meerkat_runtime::ResponseTerminalStatus::Failed,
+                ..
+            })
+        ));
+    } else {
+        panic!("Expected PeerInput");
+    }
+
+    // Verify: terminal response + idle → wake
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::WakeLoop
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §4: Response + passthrough message: both queued
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn response_with_passthrough_message_both_queued() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    // Accept a completed response
+    let resp = make_response("peer-1", ResponseStatus::Completed);
+    let input1 = runtime_input_for_interaction(&resp, &rid());
+    let outcome1 = driver.accept_input(input1).await.unwrap();
+
+    // Accept a message
+    let msg = make_message("peer-2", "hello");
+    let input2 = runtime_input_for_interaction(&msg, &rid());
+    let outcome2 = driver.accept_input(input2).await.unwrap();
+
+    // Both should be queued
+    assert_eq!(driver.queue_lane().len(), 2);
+    assert!(outcome1.is_accepted());
+    assert!(outcome2.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::WakeLoop
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §5: Response after completed host turn triggers continuation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn response_after_completed_turn_wakes() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    // The completed host turn leaves the driver idle before the late terminal
+    // response is admitted.
+    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
+
+    // Now idle — accept a terminal response
+    let resp = make_response("peer-1", ResponseStatus::Completed);
+    let input = runtime_input_for_interaction(&resp, &rid());
+    let outcome = driver.accept_input(input).await.unwrap();
+
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::WakeLoop
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §6: Peer lifecycle batching — multiple peer_added collapse
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn peer_lifecycle_accepts_as_requests() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    // Silent intents (mob.peer_added) are PeerInput with Request convention
+    let req1 = make_request("peer-1", "mob.peer_added");
+    let input1 = runtime_input_for_interaction(&req1, &rid());
+
+    if let Input::Peer(ref p) = input1 {
+        assert!(matches!(p.convention, Some(PeerConvention::Request { .. })));
+    }
+
+    // Policy: peer_request + idle → StageRunStart + WakeIfIdle
+    let policy = DefaultPolicyTable::resolve(&input1, true);
+    assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
+
+    let outcome = driver.accept_input(input1).await.unwrap();
+    assert!(outcome.is_accepted());
+}
+
+// ---------------------------------------------------------------------------
+// §7: Peer lifecycle net-out: add + retire same peer cancels
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn peer_lifecycle_net_out_both_accepted() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    // Both arrive as separate inputs — the v9 path accepts both individually
+    // (batching/coalescing happens at the queue level, not acceptance)
+    let added = make_request("peer-1", "mob.peer_added");
+    let retired = make_request("peer-1", "mob.peer_retired");
+
+    let input1 = runtime_input_for_interaction(&added, &rid());
+    let input2 = runtime_input_for_interaction(&retired, &rid());
+
+    let o1 = driver.accept_input(input1).await.unwrap();
+    let o2 = driver.accept_input(input2).await.unwrap();
+
+    assert!(o1.is_accepted());
+    assert!(o2.is_accepted());
+    assert_eq!(driver.queue_lane().len(), 2); // Both queued individually
+}
+
+// ---------------------------------------------------------------------------
+// §8: Silent comms intent — no LLM turn (maps to Request, policy wakes)
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn silent_intent_maps_to_request_with_wake() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    let interaction = make_request("coordinator", "mob.peer_added");
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    // Under v9, silent intents are PeerInput(Request). The runtime's policy
+    // resolves request inputs through the same staged-run wake path; caller
+    // intent metadata remains on the typed input rather than a stringly side
+    // channel.
+    let policy = DefaultPolicyTable::resolve(&input, true);
+    assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+}
+
+// ---------------------------------------------------------------------------
+// §9: Non-silent comms intent triggers LLM turn
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn non_silent_intent_triggers_wake() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    let interaction = make_request("coordinator", "custom.action");
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    let policy = DefaultPolicyTable::resolve(&input, true);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::WakeLoop
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §10: Message interaction triggers host-mode run
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn message_triggers_wake() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    let interaction = make_message("peer-1", "hello world");
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    // peer_message + idle → StageRunStart + WakeIfIdle
+    let policy = DefaultPolicyTable::resolve(&input, true);
+    assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::WakeLoop
+    );
+    assert_eq!(driver.queue_lane().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// §11: Request interaction triggers host-mode run
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn request_triggers_wake() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    let interaction = make_request("peer-1", "analyze");
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::WakeLoop
+    );
+}
+
+#[tokio::test]
+async fn request_prompt_uses_rendered_text_projection() {
+    let interaction = make_request("peer-1", "custom.action");
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    if let Input::Peer(peer) = input {
+        assert_eq!(peer.content.text_content(), interaction.rendered_text);
+    } else {
+        panic!("Expected PeerInput");
+    }
+}
+
+#[tokio::test]
+async fn response_prompt_uses_rendered_text_projection() {
+    let interaction = make_response("peer-1", ResponseStatus::Completed);
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    if let Input::Peer(peer) = input {
+        assert_eq!(peer.content.text_content(), interaction.rendered_text);
+    } else {
+        panic!("Expected PeerInput");
+    }
+}
+
+#[tokio::test]
+async fn message_blocks_survive_bridge() {
+    let interaction = make_message_with_blocks("peer-1", "look");
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    if let Input::Peer(peer) = input {
+        // `content` is the single typed owner: block-bearing messages carry
+        // the original multimodal blocks; any text projection is derived at
+        // read time, never stored alongside.
+        assert!(matches!(
+            peer.content,
+            meerkat_core::types::ContentInput::Blocks(_)
+        ));
+    } else {
+        panic!("Expected PeerInput");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §12: Empty inbox — no turns
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn no_input_no_wake() {
+    let driver = EphemeralRuntimeDriver::new(rid());
+    // No accept_input called — queue empty, no wake
+    assert!(driver.queue_lane().is_empty());
+    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
+}
+
+// ---------------------------------------------------------------------------
+// Additional: Message while running with explicit Queue — queue policy, no interrupt
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn message_while_running_with_explicit_queue_stays_queued() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    // Start a run
+    bind_running(&mut driver);
+
+    let interaction = make_message("peer-1", "hello");
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    // peer_message + running + explicit Queue → StageRunStart + no interrupt
+    let policy = DefaultPolicyTable::resolve(&input, false);
+    assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::None);
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Additional: Steered message while running — cooperative interrupt
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn message_with_steer_while_running_requests_cooperative_interrupt() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    // Start a run
+    bind_running(&mut driver);
+
+    let mut interaction = make_message("peer-1", "hello");
+    interaction.handling_mode = meerkat_core::types::HandlingMode::Steer;
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    // peer_message + explicit steer + running → StageRunBoundary + cooperative interrupt
+    let policy = DefaultPolicyTable::resolve(&input, false);
+    assert_eq!(
+        policy.apply_mode,
+        meerkat_runtime::ApplyMode::StageRunBoundary
+    );
+    assert_eq!(
+        policy.wake_mode,
+        meerkat_runtime::WakeMode::InterruptYielding
+    );
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::RequestImmediateProcessing
+    );
+}
+
+#[tokio::test]
+async fn message_without_steer_while_running_interrupts_yielding_turn() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    bind_running(&mut driver);
+
+    let interaction = make_message("peer-1", "hello");
+    let mut input = runtime_input_for_interaction(&interaction, &rid());
+    if let Input::Peer(peer) = &mut input {
+        peer.handling_mode = None;
+    }
+
+    // Generated admission authority treats default peer messages as queued
+    // work, but asks a running turn to yield so the queued peer work is not
+    // stranded behind a long active turn.
+    let policy = DefaultPolicyTable::resolve(&input, false);
+    assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
+    assert_eq!(
+        policy.wake_mode,
+        meerkat_runtime::WakeMode::InterruptYielding
+    );
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    let meerkat_runtime::AcceptOutcome::Accepted { policy, .. } = &outcome else {
+        panic!("expected accepted outcome");
+    };
+    assert_eq!(
+        policy.wake_mode,
+        meerkat_runtime::WakeMode::InterruptYielding
+    );
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::InterruptYielding
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Additional: Terminal response while running — staged for the next run and
+// guaranteed to wake the loop once the active turn reaches idle.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn terminal_response_while_running_requests_idle_wake() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    bind_running(&mut driver);
+
+    let interaction = make_response("peer-1", ResponseStatus::Completed);
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    // peer_response_terminal + running → StageRunStart + WakeIfIdle.
+    // This is intentionally not an interrupt. The wake only guarantees the
+    // loop re-checks the queue when the current run settles back to idle.
+    let policy = DefaultPolicyTable::resolve(&input, false);
+    assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::WakeLoop,
+        "terminal peer response accepted while running is queued for the next idle boundary; \
+         the generated admission signal wakes the next idle re-check"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §13: Terminal response produces exactly one Peer input — no synthetic Continuation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn drain_terminal_response_produces_exactly_one_peer_input() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    // Build a terminal response interaction and convert to runtime input.
+    let interaction = make_response("peer-1", ResponseStatus::Completed);
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    // The bridge must produce a Peer input, not a Continuation.
+    assert!(
+        matches!(&input, Input::Peer(_)),
+        "terminal response must map to Peer, got {:?}",
+        input.kind_id()
+    );
+
+    // Accept through the driver.
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+
+    // Exactly 1 input in the queue — zero Continuations.
+    assert_eq!(
+        driver.queue_lane().len(),
+        1,
+        "terminal response must produce exactly 1 queued input"
+    );
+
+    // Verify the queued input is a Peer with ResponseTerminal convention.
+    let queued_ids = driver.queue_lane();
+    let queued_state = driver.input_state(&queued_ids[0]).unwrap();
+    if let Some(Input::Peer(peer)) = &queued_state.persisted_input {
+        assert!(
+            matches!(
+                peer.convention,
+                Some(PeerConvention::ResponseTerminal { .. })
+            ),
+            "queued input must be ResponseTerminal"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §14: Terminal response + Steer handling_mode while running
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn terminal_response_with_steer_policy_while_running() {
+    // Build a terminal response with Steer handling_mode.
+    let in_reply_to = iid();
+    let interaction = InboxInteraction {
+        objective_id: None,
+        sender_taint: None,
+        from_route: Some(response_route_id()),
+        id: iid(),
+        from: "peer-1".into(),
+        content: InteractionContent::Response {
+            in_reply_to,
+            status: ResponseStatus::Completed,
+            result: serde_json::json!({"ok": true}),
+            blocks: None,
+        },
+        rendered_text: "[peer-1]: response (Completed)".into(),
+        handling_mode: meerkat_core::types::HandlingMode::Steer,
+        render_metadata: None,
+    };
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    // While running: explicit steer uses cooperative interrupt semantics at the
+    // policy layer, and ingress still requests immediate processing via the
+    // typed steer signal. The terminal apply intent remains StageRunStart.
+    let policy = DefaultPolicyTable::resolve(&input, false);
+    assert_eq!(
+        policy.wake_mode,
+        meerkat_runtime::WakeMode::InterruptYielding
+    );
+    assert_eq!(
+        policy.routing_disposition,
+        meerkat_runtime::RoutingDisposition::Steer
+    );
+    assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
+
+    // Verify driver behavior while running.
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+    bind_running(&mut driver);
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::RequestImmediateProcessing
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §15: Terminal response + Steer handling_mode while idle
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn terminal_response_with_steer_policy_while_idle() {
+    // Build a terminal response with Steer handling_mode.
+    let in_reply_to = iid();
+    let interaction = InboxInteraction {
+        objective_id: None,
+        sender_taint: None,
+        from_route: Some(response_route_id()),
+        id: iid(),
+        from: "peer-1".into(),
+        content: InteractionContent::Response {
+            in_reply_to,
+            status: ResponseStatus::Completed,
+            result: serde_json::json!({"ok": true}),
+            blocks: None,
+        },
+        rendered_text: "[peer-1]: response (Completed)".into(),
+        handling_mode: meerkat_core::types::HandlingMode::Steer,
+        render_metadata: None,
+    };
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    // While idle: should get WakeIfIdle + Steer with the machine-owned
+    // terminal apply intent preserved as StageRunStart.
+    let policy = DefaultPolicyTable::resolve(&input, true);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
+    assert_eq!(
+        policy.routing_disposition,
+        meerkat_runtime::RoutingDisposition::Steer
+    );
+    assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
+
+    // Verify driver behavior while idle.
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::RequestImmediateProcessing
+    );
+}

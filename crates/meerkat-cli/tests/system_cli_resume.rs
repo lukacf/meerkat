@@ -1,0 +1,298 @@
+#![cfg(feature = "integration-real-tests")]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+use std::path::PathBuf;
+use tokio::process::Command;
+use tokio::time::{Duration, timeout};
+
+use meerkat::{Config, SessionId, open_realm_persistence_in};
+use meerkat_store::RealmOrigin;
+use tempfile::TempDir;
+
+fn rkat_binary_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_rkat") {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return Some(path.canonicalize().unwrap_or(path));
+        }
+    }
+
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        let debug = target_dir.join("debug/rkat");
+        if debug.exists() {
+            return Some(debug);
+        }
+        let release = target_dir.join("release/rkat");
+        if release.exists() {
+            return Some(release);
+        }
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent()?.parent()?;
+    let codex_debug = workspace_root.join("target-codex/debug/rkat");
+    if codex_debug.exists() {
+        return Some(codex_debug);
+    }
+    let codex_release = workspace_root.join("target-codex/release/rkat");
+    if codex_release.exists() {
+        return Some(codex_release);
+    }
+    let debug = workspace_root.join("target/debug/rkat");
+    if debug.exists() {
+        return Some(debug);
+    }
+    let release = workspace_root.join("target/release/rkat");
+    if release.exists() {
+        return Some(release);
+    }
+    None
+}
+
+fn skip_if_no_prereqs() -> bool {
+    let mut missing = Vec::new();
+
+    if rkat_binary_path().is_none() {
+        missing.push("rkat binary (build with cargo build -p meerkat-cli)");
+    }
+
+    if missing.is_empty() {
+        return false;
+    }
+
+    eprintln!("Skipping: missing {}", missing.join(" and "));
+    true
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-system"]
+async fn integration_real_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>> {
+    if skip_if_no_prereqs() {
+        return Ok(());
+    }
+
+    if std::env::var("RUN_TEST_CLI_RESUME_INNER").is_ok() {
+        return inner_test_cli_resume_tools().await;
+    }
+
+    let temp_dir = TempDir::new()?;
+    let project_dir = temp_dir.path().join("project");
+    tokio::fs::create_dir_all(project_dir.join(".rkat")).await?;
+
+    let data_dir = temp_dir.path().join("data");
+    tokio::fs::create_dir_all(&data_dir).await?;
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
+
+    let status = Command::new(std::env::current_exe()?)
+        .arg("integration_real_cli_resume_tools")
+        .arg("--ignored")
+        .env("RUN_TEST_CLI_RESUME_INNER", "1")
+        .env("CARGO_BIN_EXE_rkat", &rkat)
+        .env("HOME", temp_dir.path())
+        .env("XDG_DATA_HOME", &data_dir)
+        .env("TEST_PROJECT_DIR", &project_dir)
+        .env("TEST_DATA_DIR", &data_dir)
+        .status()
+        .await?;
+
+    assert!(status.success(), "inner test failed");
+    Ok(())
+}
+
+async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>> {
+    let project_dir = std::env::var("TEST_PROJECT_DIR")?;
+    let data_dir = std::env::var("TEST_DATA_DIR")?;
+    let home_dir = std::env::var("HOME")?;
+    let project_dir = std::path::PathBuf::from(project_dir);
+    let data_dir = std::path::PathBuf::from(data_dir);
+    let home_dir = std::path::PathBuf::from(home_dir);
+
+    // Change to project dir so .rkat is found
+    std::env::set_current_dir(&project_dir)?;
+
+    let mut config = Config::default();
+    config.agent.max_tokens_per_turn = Some(128);
+    let config_toml = toml::to_string_pretty(&config)?;
+    tokio::fs::write(project_dir.join(".rkat/config.toml"), config_toml).await?;
+
+    let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
+    let output = timeout(
+        Duration::from_secs(120),
+        Command::new(&rkat)
+            .current_dir(&project_dir)
+            .env("RKAT_TEST_CLIENT", "1")
+            .args([
+                "run",
+                "Say the word 'ok' and nothing else.",
+                "--yolo",
+                "--output",
+                "json",
+            ])
+            .output(),
+    )
+    .await??;
+
+    if !output.status.success() {
+        return Err(format!(
+            "rkat run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())?;
+    let session_id = parsed["session_id"]
+        .as_str()
+        .ok_or("session_id missing in response")?
+        .to_string();
+
+    let session_ref = parsed["session_ref"]
+        .as_str()
+        .ok_or("session_ref missing in response")?;
+    let realm_id = session_ref
+        .split_once(':')
+        .map(|(realm_id, _)| realm_id)
+        .ok_or("session_ref missing realm prefix")?;
+    let realm_show = Command::new(&rkat)
+        .current_dir(&project_dir)
+        .env("HOME", &home_dir)
+        .env("XDG_DATA_HOME", &data_dir)
+        .args(["realm", "show", realm_id])
+        .output()
+        .await?;
+    if !realm_show.status.success() {
+        return Err(format!(
+            "rkat realm show failed: {}",
+            String::from_utf8_lossy(&realm_show.stderr)
+        )
+        .into());
+    }
+    let realm_show_stdout = String::from_utf8_lossy(&realm_show.stdout);
+    let realms_root = realm_show_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("state_root: "))
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| format!("state_root missing in realm show output: {realm_show_stdout}"))?;
+    let (_manifest, persistence) =
+        open_realm_persistence_in(&realms_root, realm_id, None, Some(RealmOrigin::Workspace))
+            .await?;
+    let store = persistence.session_store();
+
+    let session = store
+        .load(&SessionId::parse(&session_id)?)
+        .await?
+        .ok_or("session not found")?;
+    let metadata = session.session_metadata().ok_or("metadata missing")?;
+    assert_eq!(
+        metadata.tooling.builtins,
+        meerkat_core::ToolCategoryOverride::Enable,
+        "builtins should be recorded"
+    );
+    assert_eq!(
+        metadata.tooling.shell,
+        meerkat_core::ToolCategoryOverride::Enable,
+        "shell should be recorded for yolo"
+    );
+    assert_eq!(
+        metadata.tooling.memory,
+        meerkat_core::ToolCategoryOverride::Enable,
+        "memory should be recorded for yolo"
+    );
+
+    let original_model = metadata.model.clone();
+    let original_max_tokens = metadata.max_tokens;
+    let original_tooling = metadata.tooling.clone();
+    let original_provider = metadata.provider;
+
+    let mut config_alt = config.clone();
+    config_alt.agent.model = "gpt-4o-mini".into();
+    config_alt.agent.max_tokens_per_turn = Some(7);
+    let config_toml = toml::to_string_pretty(&config_alt)?;
+    tokio::fs::write(project_dir.join(".rkat/config.toml"), config_toml).await?;
+
+    let output = timeout(
+        Duration::from_secs(120),
+        Command::new(&rkat)
+            .current_dir(&project_dir)
+            .env("RKAT_TEST_CLIENT", "1")
+            .args(["run", "--resume", &session_id, "Continue."])
+            .output(),
+    )
+    .await??;
+
+    if !output.status.success() {
+        return Err(format!(
+            "rkat run --resume failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    let session = store
+        .load(&SessionId::parse(&session_id)?)
+        .await?
+        .ok_or("session not found after resume")?;
+    let metadata = session
+        .session_metadata()
+        .ok_or("metadata missing after resume")?;
+
+    assert_eq!(metadata.model, original_model, "model should persist");
+    assert_eq!(
+        metadata.max_tokens, original_max_tokens,
+        "max_tokens should persist"
+    );
+    assert_eq!(
+        metadata.provider, original_provider,
+        "provider should persist"
+    );
+    assert_eq!(metadata.tooling.builtins, original_tooling.builtins);
+    assert_eq!(metadata.tooling.shell, original_tooling.shell);
+    assert_eq!(metadata.tooling.comms, original_tooling.comms);
+
+    let output = timeout(
+        Duration::from_secs(120),
+        Command::new(&rkat)
+            .current_dir(&project_dir)
+            .env("RKAT_TEST_CLIENT", "1")
+            .args([
+                "run",
+                "--resume",
+                &session_id,
+                "--tools",
+                "workspace",
+                "Continue.",
+            ])
+            .output(),
+    )
+    .await??;
+
+    if !output.status.success() {
+        return Err(format!(
+            "rkat run --resume --tools workspace failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    let session = store
+        .load(&SessionId::parse(&session_id)?)
+        .await?
+        .ok_or("session not found after resume override")?;
+    let metadata = session
+        .session_metadata()
+        .ok_or("metadata missing after resume override")?;
+    assert_eq!(
+        metadata.tooling.builtins,
+        meerkat_core::ToolCategoryOverride::Enable
+    );
+    assert_eq!(
+        metadata.tooling.shell,
+        meerkat_core::ToolCategoryOverride::Enable
+    );
+    assert_eq!(
+        metadata.tooling.memory,
+        meerkat_core::ToolCategoryOverride::Disable
+    );
+    Ok(())
+}

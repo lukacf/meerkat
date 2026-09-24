@@ -2,7 +2,7 @@
 
 ## wasm_bindgen Exports
 
-(Verify against `meerkat-web-runtime/src/lib.rs` for the current tree; names
+(Verify against `crates/meerkat-web-runtime/src/lib.rs` for the current tree; names
 below are the exact JS-visible identifiers.)
 
 The `meerkat-web-runtime` crate exposes the browser bootstrap, session, mob,
@@ -20,7 +20,7 @@ are the exact JS-visible identifiers in the Rust binding.
 | `register_tool_callback` | name, description, schema JSON, callback | `()` | Register a promise-returning JS tool callback; requires initialized runtime state |
 | `register_js_tool` | name, description, schema JSON | `()` | Synchronous registration; dispatch reports pending detached host work, not completion; requires initialized runtime state |
 | `clear_tool_callbacks` | — | `()` | Clear all registered JS tool callbacks |
-| `register_external_auth_resolver` | callback (or `undefined` / `null` to clear) | `()` | Register a JS-side resolver that the agent factory calls to obtain a typed `ExternalAuthLease` for a given `authBinding`. Subsequent calls overwrite. Defined in `meerkat-web-runtime/src/external_auth.rs`. |
+| `register_external_auth_resolver` | callback (or `undefined` / `null` to clear) | `()` | Register a JS-side resolver that the agent factory calls to obtain a typed `ExternalAuthLease` for a given `authBinding`. Subsequent calls overwrite. Defined in `crates/meerkat-web-runtime/src/external_auth.rs`. |
 | `has_external_auth_resolver` | — | bool | Check whether a JS-side external auth resolver is registered |
 
 For a fire-and-forget tool, the host observes `ToolCallRequested`, performs the
@@ -106,7 +106,7 @@ unwraps `mobs`, and `mob.flowStatus()` unwraps `run` (or returns `null`).
 ### Comms
 
 There are no current low-level `comms_peers` / `comms_send` wasm-bindgen
-exports in `meerkat-web-runtime/src/lib.rs`. Browser comms flow through
+exports in `crates/meerkat-web-runtime/src/lib.rs`. Browser comms flow through
 member-directed work (`mob_member_send`, `Member.send(...)`) and the comms tools
 available to agents during turns.
 

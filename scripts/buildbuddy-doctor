@@ -90,7 +90,7 @@ else
   bad ".bazelrc is missing buildbuddy-macos-rbe config"
 fi
 
-if grep -q 'platforms=//platforms:macos_arm64' .bazelrc &&
+if grep -q 'platforms=//tools/bazel/platforms:macos_arm64' .bazelrc &&
   grep -q 'OSFamily=darwin' .bazelrc &&
   grep -q 'Arch=arm64' .bazelrc; then
   pass "BuildBuddy RBE config targets macOS arm64 executors"
@@ -162,16 +162,16 @@ else
   bad "Bazel selector did not enumerate build labels"
 fi
 
-support_test_labels="$(./scripts/bazel-affected-fast-tests.mjs --owned --test meerkat/tests/support/test_session_store.rs)"
-if [[ "${support_test_labels}" == *"//meerkat:sdk_agentfactory_test"* ]] &&
-  [[ "${support_test_labels}" == *"//meerkat:sdk_structured_output_test"* ]]; then
+support_test_labels="$(./scripts/bazel-affected-fast-tests.mjs --owned --test crates/meerkat/tests/support/test_session_store.rs)"
+if [[ "${support_test_labels}" == *"//crates/meerkat:sdk_agentfactory_test"* ]] &&
+  [[ "${support_test_labels}" == *"//crates/meerkat:sdk_structured_output_test"* ]]; then
   pass "Bazel selector narrows integration support edits to importing tests"
 else
   bad "Bazel selector did not select exact importing integration tests"
   printf '%s\n' "${support_test_labels}" >&2
 fi
 
-required_feature_test_labels="$(./scripts/bazel-affected-fast-tests.mjs --owned --test --empty-if-no-labels meerkat-cli/tests/cli_mobpack_live_smoke.rs)"
+required_feature_test_labels="$(./scripts/bazel-affected-fast-tests.mjs --owned --test --empty-if-no-labels crates/meerkat-cli/tests/cli_mobpack_live_smoke.rs)"
 if [[ -z "${required_feature_test_labels}" ]]; then
   pass "Bazel selector avoids broad fast tests for required-feature test edits"
 else
@@ -179,29 +179,29 @@ else
   printf '%s\n' "${required_feature_test_labels}" >&2
 fi
 
-required_feature_build_labels="$(./scripts/bazel-affected-fast-tests.mjs --owned --build meerkat-cli/tests/cli_mobpack_live_smoke.rs)"
-required_feature_clippy_labels="$(./scripts/bazel-affected-fast-tests.mjs --owned --clippy meerkat-cli/tests/cli_mobpack_live_smoke.rs)"
-if [[ "${required_feature_build_labels}" == "//meerkat-cli:cli_mobpack_live_smoke_test" ]] &&
-  [[ "${required_feature_clippy_labels}" == "//meerkat-cli:cli_mobpack_live_smoke_test" ]]; then
+required_feature_build_labels="$(./scripts/bazel-affected-fast-tests.mjs --owned --build crates/meerkat-cli/tests/cli_mobpack_live_smoke.rs)"
+required_feature_clippy_labels="$(./scripts/bazel-affected-fast-tests.mjs --owned --clippy crates/meerkat-cli/tests/cli_mobpack_live_smoke.rs)"
+if [[ "${required_feature_build_labels}" == "//crates/meerkat-cli:cli_mobpack_live_smoke_test" ]] &&
+  [[ "${required_feature_clippy_labels}" == "//crates/meerkat-cli:cli_mobpack_live_smoke_test" ]]; then
   pass "Bazel selector narrows required-feature build/clippy edits to the exact test target"
 else
   bad "Bazel selector did not narrow required-feature build/clippy edits"
   printf 'build: %s\nclippy: %s\n' "${required_feature_build_labels}" "${required_feature_clippy_labels}" >&2
 fi
 
-optional_required_feature_build_labels="$(./scripts/bazel-affected-fast-tests.mjs --owned --build xtask/tests/machines_contracts.rs)"
-optional_required_feature_clippy_labels="$(./scripts/bazel-affected-fast-tests.mjs --owned --clippy xtask/tests/machines_contracts.rs)"
-if [[ "${optional_required_feature_build_labels}" == "//xtask:machines_contracts_test" ]] &&
-  [[ "${optional_required_feature_clippy_labels}" == "//xtask:machines_contracts_test" ]]; then
+optional_required_feature_build_labels="$(./scripts/bazel-affected-fast-tests.mjs --owned --build crates/xtask/tests/machines_contracts.rs)"
+optional_required_feature_clippy_labels="$(./scripts/bazel-affected-fast-tests.mjs --owned --clippy crates/xtask/tests/machines_contracts.rs)"
+if [[ "${optional_required_feature_build_labels}" == "//crates/xtask:machines_contracts_test" ]] &&
+  [[ "${optional_required_feature_clippy_labels}" == "//crates/xtask:machines_contracts_test" ]]; then
   pass "Bazel selector narrows optional-dependency required-feature edits"
 else
   bad "Bazel selector did not narrow optional-dependency required-feature edits"
   printf 'build: %s\nclippy: %s\n' "${optional_required_feature_build_labels}" "${optional_required_feature_clippy_labels}" >&2
 fi
 
-changed_gate_dry_run="$(./scripts/buildbuddy-agent-gate --dry-run --working-tree xtask/tests/machines_contracts.rs 2>&1 || true)"
-if [[ "${changed_gate_dry_run}" == *"build-targets: //xtask:machines_contracts_test"* ]] &&
-  [[ "${changed_gate_dry_run}" == *"clippy-targets: //xtask:machines_contracts_test"* ]] &&
+changed_gate_dry_run="$(./scripts/buildbuddy-agent-gate --dry-run --working-tree crates/xtask/tests/machines_contracts.rs 2>&1 || true)"
+if [[ "${changed_gate_dry_run}" == *"build-targets: //crates/xtask:machines_contracts_test"* ]] &&
+  [[ "${changed_gate_dry_run}" == *"clippy-targets: //crates/xtask:machines_contracts_test"* ]] &&
   [[ "${changed_gate_dry_run}" == *"plan: combined build+clippy"* ]]; then
   pass "BuildBuddy dry-run explains required-feature exact target routing"
 else
@@ -209,9 +209,9 @@ else
   printf '%s\n' "${changed_gate_dry_run}" >&2
 fi
 
-mixed_changed_gate_dry_run="$(./scripts/buildbuddy-changed-gate --owned --dry-run meerkat/tests/support/test_session_store.rs xtask/tests/machines_contracts.rs 2>&1 || true)"
-if [[ "${mixed_changed_gate_dry_run}" == *"test-targets: //meerkat:sdk_agentfactory_test //meerkat:sdk_structured_output_test"* ]] &&
-  [[ "${mixed_changed_gate_dry_run}" == *"clippy-targets: //meerkat:sdk_agentfactory_test //meerkat:sdk_structured_output_test //xtask:machines_contracts_test"* ]] &&
+mixed_changed_gate_dry_run="$(./scripts/buildbuddy-changed-gate --owned --dry-run crates/meerkat/tests/support/test_session_store.rs crates/xtask/tests/machines_contracts.rs 2>&1 || true)"
+if [[ "${mixed_changed_gate_dry_run}" == *"test-targets: //crates/meerkat:sdk_agentfactory_test //crates/meerkat:sdk_structured_output_test"* ]] &&
+  [[ "${mixed_changed_gate_dry_run}" == *"clippy-targets: //crates/meerkat:sdk_agentfactory_test //crates/meerkat:sdk_structured_output_test //crates/xtask:machines_contracts_test"* ]] &&
   [[ "${mixed_changed_gate_dry_run}" == *"plan: split test + clippy"* ]]; then
   pass "BuildBuddy mixed fast/non-fast edits keep exact clippy coverage"
 else
@@ -219,7 +219,7 @@ else
   printf '%s\n' "${mixed_changed_gate_dry_run}" >&2
 fi
 
-broad_changed_gate_dry_run="$(./scripts/buildbuddy-changed-gate --owned --dry-run meerkat-cli/src/main.rs meerkat-store/src/realm.rs 2>&1 || true)"
+broad_changed_gate_dry_run="$(./scripts/buildbuddy-changed-gate --owned --dry-run crates/meerkat-cli/src/main.rs crates/meerkat-store/src/realm.rs 2>&1 || true)"
 if [[ "${broad_changed_gate_dry_run}" == *"plan: split test + clippy"* ]] &&
   [[ "${broad_changed_gate_dry_run}" == *"split-execution: serial"* ]]; then
   pass "BuildBuddy broad source edits use serial split cache warmup"
@@ -243,10 +243,10 @@ oai_rt_rs_version="$(awk -F'"' '/^oai-rt-rs = / { print $2; exit }' Cargo.toml)"
 if [[ "${oai_rt_rs_version}" == "=0.4.1" ]] &&
   grep -Fq 'features = ["experimental-gpt-live"]' Cargo.toml &&
   ! grep -Fq 'oai-rt-rs = { path = ' Cargo.toml &&
-  [[ ! -e third-party/oai-rt-rs/Cargo.toml ]] &&
+  [[ ! -e tools/third-party/oai-rt-rs/Cargo.toml ]] &&
   ! grep -Fq 'crate = "oai-rt-rs"' MODULE.bazel &&
   grep -Fq 'crates__oai-rt-rs-0.4.1' MODULE.bazel.lock &&
-  ! grep -Fq 'third-party/oai-rt-rs' MODULE.bazel.lock; then
+  ! grep -Fq 'tools/third-party/oai-rt-rs' MODULE.bazel.lock; then
   pass "oai-rt-rs resolves the published experimental GPT Live crate"
 else
   bad "oai-rt-rs is not locked to the published experimental GPT Live crate"
@@ -348,7 +348,7 @@ fi
 dispatch_log_root="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-buildbuddy-dispatch-doctor.XXXXXX")"
 dispatch_dry_run="$(
   MEERKAT_BUILDBUDDY_LOG_ROOT="${dispatch_log_root}" \
-    ./scripts/buildbuddy-ci-dispatch --mode changed-paths --paths meerkat-runtime/src/input_ledger.rs --dry-run 2>&1 || true
+    ./scripts/buildbuddy-ci-dispatch --mode changed-paths --paths crates/meerkat-runtime/src/input_ledger.rs --dry-run 2>&1 || true
 )"
 if [[ -s "${dispatch_log_root}/dispatch-context.txt" ]] &&
   [[ -s "${dispatch_log_root}/dispatch-inputs.txt" ]] &&
@@ -523,12 +523,12 @@ else
 fi
 
 sdk_only="$(printf 'sdks/typescript/src/runtime.ts\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
-wasm_only="$(printf 'meerkat-web-runtime/src/lib.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
+wasm_only="$(printf 'crates/meerkat-web-runtime/src/lib.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
 feature_only="$(printf 'scripts/run-surface-feature-matrix\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
 audit_only="$(printf 'deny.toml\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
-machine_runtime="$(printf 'meerkat-runtime/src/meerkat_machine_tests.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
-session_core="$(printf 'meerkat-session/src/persistent.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
-mob_core="$(printf 'meerkat-mob/src/runtime/actor.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
+machine_runtime="$(printf 'crates/meerkat-runtime/src/meerkat_machine_tests.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
+session_core="$(printf 'crates/meerkat-session/src/persistent.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
+mob_core="$(printf 'crates/meerkat-mob/src/runtime/actor.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)"
 if grep -Fq 'sdk_changed=true' <<<"${sdk_only}" &&
   grep -Fq 'wasm_changed=false' <<<"${sdk_only}" &&
   grep -Fq 'wasm_changed=true' <<<"${wasm_only}" &&
@@ -606,27 +606,27 @@ else
   bad "BuildBuddy SDK, WASM, or audit lane is still static, host-only, or unmapped"
 fi
 
-if grep -Fq '//xtask:machine_verify_all_tlc_test' scripts/buildbuddy-bazel-poc &&
-  grep -Fq '//meerkat-machine-schema:docs_machine_authority_alignment_test' scripts/buildbuddy-bazel-poc &&
-  grep -Fq 'name = "machine_verify_all_tlc_test"' xtask/BUILD.bazel &&
-  grep -Fq 'machine-verify --all --skip-cargo-tests' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq -- '--skip-tlc-composition meerkat_mob_seam' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq -- '--skip-tlc-composition adaptive_mob_bundle' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq 'running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq 'witness-layer_terminal_feedback.cfg' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq 'tlc -workers' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq 'JAVA_TOOL_OPTIONS' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq -- '-Xss256m' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq -- '-XX:+UseParallelGC' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq 'adaptive_mob_bundle` has a canonical route' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq 'ci.cfg structural-invariant contract' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq 'ci.cfg structural-invariant validation' xtask/src/machines.rs &&
-  grep -Fq 'tlc not on PATH but this lane advertises TLC-backed verification' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq 'MACHINE_VERIFY_TLC_DRIFT_ONLY' xtask/tests/machine_verify_all_tlc_test.sh &&
-  grep -Fq '@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin' xtask/BUILD.bazel &&
-  grep -Fq '@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib' xtask/BUILD.bazel &&
-  grep -Fq '"RUSTFMT": "$(rootpath tests/rustfmt_host.sh)"' xtask/BUILD.bazel &&
-  grep -Fq 'export RUSTFMT' xtask/tests/machine_verify_all_tlc_test.sh; then
+if grep -Fq '//crates/xtask:machine_verify_all_tlc_test' scripts/buildbuddy-bazel-poc &&
+  grep -Fq '//crates/meerkat-machine-schema:docs_machine_authority_alignment_test' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'name = "machine_verify_all_tlc_test"' crates/xtask/BUILD.bazel &&
+  grep -Fq 'machine-verify --all --skip-cargo-tests' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq -- '--skip-tlc-composition meerkat_mob_seam' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq -- '--skip-tlc-composition adaptive_mob_bundle' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'witness-layer_terminal_feedback.cfg' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'tlc -workers' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'JAVA_TOOL_OPTIONS' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq -- '-Xss256m' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq -- '-XX:+UseParallelGC' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'adaptive_mob_bundle` has a canonical route' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'ci.cfg structural-invariant contract' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'ci.cfg structural-invariant validation' crates/xtask/src/machines.rs &&
+  grep -Fq 'tlc not on PATH but this lane advertises TLC-backed verification' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq 'MACHINE_VERIFY_TLC_DRIFT_ONLY' crates/xtask/tests/machine_verify_all_tlc_test.sh &&
+  grep -Fq '@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin' crates/xtask/BUILD.bazel &&
+  grep -Fq '@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib' crates/xtask/BUILD.bazel &&
+  grep -Fq '"RUSTFMT": "$(rootpath tests/rustfmt_host.sh)"' crates/xtask/BUILD.bazel &&
+  grep -Fq 'export RUSTFMT' crates/xtask/tests/machine_verify_all_tlc_test.sh; then
   pass "BuildBuddy machine-authority lane runs hermetic machine-verify with hermetic rustfmt, canonical TLC JVM stack/GC policy, bounded adaptive witness, broad-composition structural guards, and fails closed when tlc is absent"
 else
   bad "BuildBuddy machine-authority lane does not run hermetic machine-verify, lacks the canonical TLC JVM stack/GC policy or bounded adaptive witness/broad-composition structural guards, or still launders a silent no-TLC drift fallback as TLC verification"
@@ -635,10 +635,10 @@ fi
 if grep -Fq 'default_target="//:surface_feature_matrix_builds"' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'command="build"' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'name = "surface_feature_matrix_builds"' BUILD.bazel &&
-  grep -Fq 'meerkat_rpc_surface_min' meerkat-rpc/BUILD.bazel &&
-  grep -Fq 'meerkat_rest_surface_comms' meerkat-rest/BUILD.bazel &&
-  grep -Fq 'meerkat_mcp_server_surface_comms' meerkat-mcp-server/BUILD.bazel &&
-  grep -Fq 'rkat_surface_session_store_comms_mcp_bin' meerkat-cli/BUILD.bazel; then
+  grep -Fq 'meerkat_rpc_surface_min' crates/meerkat-rpc/BUILD.bazel &&
+  grep -Fq 'meerkat_rest_surface_comms' crates/meerkat-rest/BUILD.bazel &&
+  grep -Fq 'meerkat_mcp_server_surface_comms' crates/meerkat-mcp-server/BUILD.bazel &&
+  grep -Fq 'rkat_surface_session_store_comms_mcp_bin' crates/meerkat-cli/BUILD.bazel; then
   pass "BuildBuddy surface feature matrix uses Bazel-native feature-variant build targets"
 else
   bad "BuildBuddy surface feature matrix still routes through cargo-in-shell"
@@ -646,7 +646,7 @@ fi
 
 release_surface_count="$(
   awk '
-    index($0, "//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin") {
+    index($0, "//crates/meerkat-cli:rkat //crates/meerkat-rpc:rkat_rpc_bin //crates/meerkat-rest:rkat_rest_bin //crates/meerkat-mcp-server:rkat_mcp_bin") {
       count += 1
     }
     END { print count + 0 }
@@ -718,7 +718,7 @@ if grep -Fq 'name = "e2e_system_tests"' BUILD.bazel &&
   grep -Fq 'seam-inventory-rbe' scripts/buildbuddy-ci-lane &&
   grep -Fq 'system_e2e_command="e2e-system-rbe"' scripts/buildbuddy-ci-workspace &&
   grep -Fq 'RKAT_TEST_BIN_RKAT_RPC' tests/integration/BUILD.bazel &&
-  grep -Fq 'CARGO_BIN_EXE_rkat' meerkat-cli/BUILD.bazel; then
+  grep -Fq 'CARGO_BIN_EXE_rkat' crates/meerkat-cli/BUILD.bazel; then
   pass "BuildBuddy CI has native unit, integration-fast, and e2e lanes"
 else
   bad "BuildBuddy CI is missing native test lane wiring"

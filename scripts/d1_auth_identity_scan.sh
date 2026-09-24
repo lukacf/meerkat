@@ -36,12 +36,12 @@ PATTERNS=(
 )
 
 SCAN_PATHS=(
-  "meerkat-rest/src/auth_endpoints.rs"
-  "meerkat-rpc/src/handlers/auth.rs"
-  "meerkat-web-runtime/src/external_auth.rs"
-  "meerkat-openai/src/runtime/mod.rs"
-  "meerkat-anthropic/src/runtime/mod.rs"
-  "meerkat-gemini/src/runtime/mod.rs"
+  "crates/meerkat-rest/src/auth_endpoints.rs"
+  "crates/meerkat-rpc/src/handlers/auth.rs"
+  "crates/meerkat-web-runtime/src/external_auth.rs"
+  "crates/meerkat-openai/src/runtime/mod.rs"
+  "crates/meerkat-anthropic/src/runtime/mod.rs"
+  "crates/meerkat-gemini/src/runtime/mod.rs"
 )
 
 BLOCKED=()

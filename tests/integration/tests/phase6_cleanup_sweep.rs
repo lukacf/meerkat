@@ -116,7 +116,7 @@ fn phase6_deletions() -> Vec<(&'static str, &'static str, &'static [&'static str
     vec![
         (
             "resolve_provider_credentials",
-            "meerkat/src/factory.rs::resolve_provider_credentials (plan §6.1)",
+            "crates/meerkat/src/factory.rs::resolve_provider_credentials (plan §6.1)",
             NO_SKIP,
         ),
         (

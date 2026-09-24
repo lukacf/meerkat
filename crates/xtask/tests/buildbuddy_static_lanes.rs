@@ -1,0 +1,982 @@
+#![allow(clippy::expect_used, clippy::panic)]
+
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const LIVE_WORKSPACE_RUNFILES: &str = "required";
+
+fn repo_root() -> PathBuf {
+    assert_eq!(LIVE_WORKSPACE_RUNFILES, "required");
+    xtask::public_contracts::repo_root().expect("resolve repo root")
+}
+
+fn read(path: impl AsRef<Path>) -> String {
+    let path = path.as_ref();
+    fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
+}
+
+fn read_utf8(path: impl AsRef<Path>) -> Option<String> {
+    fs::read_to_string(path).ok()
+}
+
+fn walk_files(root: &Path, files: &mut Vec<PathBuf>) {
+    if !root.exists() {
+        return;
+    }
+    for entry in
+        fs::read_dir(root).unwrap_or_else(|err| panic!("read dir {}: {err}", root.display()))
+    {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if entry.file_type().expect("file type").is_dir() {
+            let parent_name = path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if matches!(
+                name,
+                ".git"
+                    | ".rct"
+                    | ".rkat"
+                    | "bazel-bin"
+                    | "bazel-out"
+                    | "bazel-testlogs"
+                    | "node_modules"
+            ) || (parent_name == ".claude" && name == "worktrees")
+                || name.starts_with("target")
+                || name.starts_with("bazel-")
+            {
+                continue;
+            }
+            walk_files(&path, files);
+        } else {
+            files.push(path);
+        }
+    }
+}
+
+fn relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn quoted_after(text: &str, needle: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut rest = text;
+    while let Some(idx) = rest.find(needle) {
+        rest = &rest[idx + needle.len()..];
+        if let Some(first) = rest.find('"') {
+            let after_first = &rest[first + 1..];
+            if let Some(second) = after_first.find('"') {
+                out.insert(after_first[..second].to_string());
+                rest = &after_first[second + 1..];
+            }
+        }
+    }
+    out
+}
+
+fn find_all_between(text: &str, start: &str, end: &str) -> Option<String> {
+    let start_idx = text.find(start)? + start.len();
+    let rest = &text[start_idx..];
+    let end_idx = rest.find(end)?;
+    Some(rest[..end_idx].to_string())
+}
+
+fn workspace_member_dirs(root: &Path) -> Vec<PathBuf> {
+    let workspace: toml::Value =
+        toml::from_str(&read(root.join("Cargo.toml"))).expect("parse Cargo.toml");
+    workspace["workspace"]["members"]
+        .as_array()
+        .expect("workspace members")
+        .iter()
+        .filter_map(|member| member.as_str())
+        .filter(|member| !member.contains('*'))
+        .map(|member| root.join(member))
+        .collect()
+}
+
+#[test]
+fn linux_release_rbe_provides_hermetic_cmake_for_vendored_opus() {
+    let root = repo_root();
+    let module = read(root.join("MODULE.bazel"));
+
+    for (architecture, digest, triple) in [
+        (
+            "aarch64",
+            "9ae2b709ed3aaef504dd25fb6abe7dd4df68cd46824e45d7ee89ae57951d215a",
+            "aarch64-unknown-linux-gnu",
+        ),
+        (
+            "x86_64",
+            "9114e33358a9efc93d6ea658805280fc3201b882b944a4d946edd9472fd1eec7",
+            "x86_64-unknown-linux-gnu",
+        ),
+    ] {
+        let repository = format!("cmake_linux_{architecture}");
+        let executable = format!("@@+http_archive+{repository}//:bin/cmake");
+        assert!(
+            module.contains(&format!("name = \"{repository}\""))
+                && module.contains(&format!("sha256 = \"{digest}\""))
+                && module.contains(&format!(
+                    "strip_prefix = \"cmake-3.30.9-linux-{architecture}\""
+                ))
+                && module.contains(&format!(
+                    "build_script_data = [\"@@+http_archive+{repository}//:runtime\"]"
+                ))
+                && module.contains(&format!("\"CMAKE\": \"$(execpath {executable})\""))
+                && module.contains(&format!("build_script_tools = [\"{executable}\"]"))
+                && module.contains(&format!("triples = [\"{triple}\"]")),
+            "Linux {architecture} release RBE must pin CMake and pass its executable plus runtime to audiopus_sys"
+        );
+    }
+}
+
+#[test]
+fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
+    let root = repo_root();
+    let launcher = read(root.join("scripts/buildbuddy-bazel-poc"));
+    let build = read(root.join("crates/xtask/BUILD.bazel"));
+    let wrapper = read(root.join("crates/xtask/tests/machine_verify_all_tlc_test.sh"));
+    let doctor = read(root.join("scripts/buildbuddy-doctor"));
+
+    let lane = find_all_between(&launcher, "machine-authority-rbe)", ";;")
+        .expect("machine-authority-rbe lane block");
+    assert!(
+        lane.contains("default_target=\"//crates/xtask:machine_verify_all_tlc_test "),
+        "machine-authority-rbe must start with explicit machine-verify TLC target; block:\n{lane}"
+    );
+    assert!(
+        build.contains("name = \"machine_verify_all_tlc_test\""),
+        "xtask BUILD must declare machine_verify_all_tlc_test"
+    );
+    assert!(
+        build.contains("args = [\"$(rootpath :xtask_bin)\"]")
+            && build.contains("\":xtask_bin\"")
+            && build.contains("\"//:workspace_runfiles\"")
+            && build.contains(
+                "\"@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin\"",
+            )
+            && build.contains(
+                "\"@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib\"",
+            )
+            && build.contains("\"tests/rustfmt_host.sh\"")
+            && build.contains(
+                "\"@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin\"",
+            )
+            && build.contains(
+                "\"@@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustc_lib\"",
+            )
+            && build.contains("\"RUSTFMT\": \"$(rootpath tests/rustfmt_host.sh)\"")
+            && build.contains(
+                "\"RUSTFMT_DARWIN\": \"$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin)\"",
+            )
+            && build.contains(
+                "\"RUSTFMT_LINUX\": \"$(rootpath @@rules_rust++rust+rustfmt_nightly-2026-04-16__x86_64-unknown-linux-gnu_tools//:rustfmt_bin)\"",
+            ),
+        "machine_verify_all_tlc_test must run xtask with workspace runfiles and hermetic rustfmt"
+    );
+    assert!(
+        wrapper.contains("machine-verify --all --skip-cargo-tests")
+            && wrapper.contains("--skip-tlc-composition meerkat_mob_seam")
+            && wrapper.contains("--skip-tlc-composition adaptive_mob_bundle")
+            && wrapper.contains(
+                "running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness"
+            )
+            && wrapper.contains("witness-layer_terminal_feedback.cfg")
+            && wrapper.contains("tlc -workers")
+            && wrapper.contains("JAVA_TOOL_OPTIONS")
+            && wrapper.contains("-Xss256m")
+            && wrapper.contains("-XX:+UseParallelGC")
+            && wrapper.contains("adaptive_mob_bundle` has a canonical route")
+            && wrapper.contains("ci.cfg structural-invariant contract")
+            && wrapper.contains("export RUSTFMT"),
+        "machine_verify_all_tlc_test wrapper must normalize RUSTFMT, give direct TLC witnesses the canonical JVM stack/GC policy, prove the bounded adaptive witness, and run hermetic machine-verify with documented broad-composition TLC scale skips"
+    );
+    assert!(
+        doctor.contains("machine_verify_all_tlc_test")
+            && doctor.contains("machine-verify --all")
+            && doctor.contains("bounded adaptive witness")
+            && doctor.contains("hermetic rustfmt"),
+        "buildbuddy-doctor must guard the machine-authority TLC mapping and rustfmt runfiles"
+    );
+}
+
+#[test]
+fn gcp_feature_matrix_lane_fans_out_remote_cargo_actions() {
+    let root = repo_root();
+    let launcher = read(root.join("scripts/buildbuddy-bazel-poc"));
+    let build = read(root.join("tools/buildbuddy/BUILD.bazel"));
+    let wrapper = read(root.join("tools/buildbuddy/cargo_lane_test.sh"));
+    let full_wrapper = read(root.join("tools/buildbuddy/full_lane_test.sh"));
+    let workflow = read(root.join(".github/workflows/buildbuddy.yml"));
+    let setup = read(root.join(".github/actions/setup-buildbuddy-ci/action.yml"));
+
+    let split_targets = [
+        (
+            "feature_matrix_tools_comms_cargo_equivalent_test",
+            "test-feature-matrix-tools-comms",
+        ),
+        (
+            "feature_matrix_tools_mcp_cargo_equivalent_test",
+            "test-feature-matrix-tools-mcp",
+        ),
+        (
+            "feature_matrix_tools_comms_mcp_cargo_equivalent_test",
+            "test-feature-matrix-tools-comms-mcp",
+        ),
+        (
+            "feature_matrix_meerkat_openai_memory_cargo_equivalent_test",
+            "test-feature-matrix-meerkat-openai-memory",
+        ),
+        (
+            "feature_matrix_meerkat_gemini_jsonl_cargo_equivalent_test",
+            "test-feature-matrix-meerkat-gemini-jsonl",
+        ),
+        (
+            "feature_matrix_meerkat_all_providers_check_cargo_equivalent_test",
+            "test-feature-matrix-meerkat-all-providers-check",
+        ),
+        (
+            "feature_matrix_mob_minimal_cargo_equivalent_test",
+            "test-feature-matrix-mob-minimal",
+        ),
+        (
+            "feature_matrix_mob_runtime_adapter_cargo_equivalent_test",
+            "test-feature-matrix-mob-runtime-adapter",
+        ),
+        (
+            "feature_matrix_meerkat_all_providers_tests_cargo_equivalent_test",
+            "test-feature-matrix-meerkat-all-providers-tests",
+        ),
+    ];
+
+    let lane = find_all_between(&launcher, "feature-matrix-lib-rbe)", ";;")
+        .expect("feature-matrix-lib-rbe lane block");
+    assert!(
+        lane.contains(
+            "default_target=\"//tools/buildbuddy:feature_matrix_lib_cargo_equivalent_tests\""
+        ),
+        "feature-matrix-lib-rbe must target the split test suite; block:\n{lane}"
+    );
+    assert!(
+        !lane.contains(
+            "default_target=\"//tools/buildbuddy:feature_matrix_lib_cargo_equivalent_test\""
+        ),
+        "feature-matrix-lib-rbe must not target only the monolithic compatibility test"
+    );
+    assert!(
+        build.contains("name = \"feature_matrix_lib_cargo_equivalent_tests\""),
+        "tools/buildbuddy BUILD must declare the split feature matrix test suite"
+    );
+    assert!(
+        !build.contains("\ndef "),
+        "tools/buildbuddy BUILD must stay Bazel-9-compatible; put helper functions in .bzl files"
+    );
+    assert!(
+        build.contains("\"feature_matrix_lib_cargo_equivalent_test\": \"test-feature-matrix-lib\""),
+        "tools/buildbuddy BUILD should keep the monolithic compatibility target"
+    );
+
+    for (target, arg) in split_targets {
+        assert!(
+            build.contains(&format!("\"{target}\": \"{arg}\"")),
+            "split feature matrix target {target} must map to {arg}"
+        );
+        assert!(
+            wrapper.contains(&format!("{arg})")),
+            "cargo_lane_test.sh must handle split lane {arg}"
+        );
+    }
+
+    let wasm_lane = find_all_between(&launcher, "wasm-contract-rbe)", ";;")
+        .expect("wasm-contract-rbe lane block");
+    assert!(
+        wasm_lane
+            .contains("default_target=\"//tools/buildbuddy:wasm_contract_cargo_equivalent_tests\""),
+        "wasm-contract-rbe must target the split wasm contract test suite; block:\n{wasm_lane}"
+    );
+    assert!(
+        build.contains("name = \"wasm_contract_cargo_equivalent_tests\""),
+        "tools/buildbuddy BUILD must declare the split wasm contract test suite"
+    );
+    for (target, arg) in [
+        (
+            "wasm_contract_browser_contract_cargo_equivalent_test",
+            "wasm-contract-browser-contract",
+        ),
+        (
+            "wasm_contract_release_targets_cargo_equivalent_test",
+            "wasm-contract-release-targets",
+        ),
+        (
+            "wasm_contract_external_resolver_cargo_equivalent_test",
+            "wasm-contract-external-resolver",
+        ),
+    ] {
+        assert!(
+            build.contains(&format!("\"{target}\": \"{arg}\"")),
+            "split wasm contract target {target} must map to {arg}"
+        );
+        assert!(
+            full_wrapper.contains(&format!("{arg})")),
+            "full_lane_test.sh must handle split wasm contract lane {arg}"
+        );
+    }
+
+    assert!(
+        setup.contains("submitter, native, doctor"),
+        "setup-buildbuddy-ci must document the lightweight submitter profile"
+    );
+    assert!(
+        setup.contains("inputs.profile == 'submitter' || inputs.profile == 'doctor'"),
+        "submitter profile must install Rust because Bazel target selection still reads cargo metadata locally"
+    );
+    assert!(
+        workflow.contains("group: gcp\n          profile: submitter"),
+        "GCP submit-only job should use the lightweight submitter profile and let remote Bazel executors do compilation"
+    );
+    assert!(
+        workflow.contains("group: gcp-governance\n          profile: submitter"),
+        "GCP governance submitter should remain a separate visible job"
+    );
+    assert!(
+        workflow.contains("group: gcp-sdk-suites\n          profile: submitter")
+            && workflow.contains("group: gcp-wasm-check\n          profile: submitter")
+            && workflow.contains("group: gcp-minimal-feature\n          profile: submitter")
+            && workflow.contains("group: gcp-feature-matrix\n          profile: submitter")
+            && workflow.contains("group: gcp-security-audit\n          profile: submitter"),
+        "GCP WASM/SDK/feature/audit submitters should stay split into separate visible jobs"
+    );
+    assert!(
+        !workflow.contains("group: gcp-wasm-feature\n          profile: submitter")
+            && !workflow.contains("group: gcp-wasm-compile\n          profile: submitter")
+            && !workflow.contains("group: gcp-feature-audit\n          profile: submitter"),
+        "GCP WASM/SDK/feature/audit submitters must not collapse back into serial batches"
+    );
+}
+
+#[test]
+fn rust_sources_are_formatted() {
+    let root = repo_root();
+    let rustfmt = std::env::var_os("RUSTFMT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("rustfmt"));
+    let mut files = Vec::new();
+    for member in workspace_member_dirs(&root) {
+        walk_files(&member, &mut files);
+    }
+    let mut rust_files: Vec<_> = files
+        .into_iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .filter(|path| !relative(&root, path).contains("/tests/compile_fail/"))
+        .collect();
+    rust_files.sort();
+    assert!(!rust_files.is_empty(), "no Rust files found");
+
+    let output = Command::new(rustfmt)
+        .args(["--edition", "2024", "--check"])
+        .args(&rust_files)
+        .output()
+        .expect("run rustfmt --check");
+    assert!(
+        output.status.success(),
+        "rustfmt --check failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn public_version_surfaces_are_in_sync() {
+    let root = repo_root();
+    let workspace: toml::Value =
+        toml::from_str(&read(root.join("Cargo.toml"))).expect("parse Cargo.toml");
+    let cargo_version = workspace["workspace"]["package"]["version"]
+        .as_str()
+        .expect("workspace package version");
+
+    let pyproject: toml::Value =
+        toml::from_str(&read(root.join("sdks/python/pyproject.toml"))).expect("parse pyproject");
+    let python_version = pyproject["project"]["version"]
+        .as_str()
+        .expect("python sdk version");
+
+    let ts_package: serde_json::Value =
+        serde_json::from_str(&read(root.join("sdks/typescript/package.json")))
+            .expect("parse TypeScript package.json");
+    let ts_version = ts_package["version"]
+        .as_str()
+        .expect("typescript sdk version");
+
+    let web_package: serde_json::Value =
+        serde_json::from_str(&read(root.join("sdks/web/package.json")))
+            .expect("parse web package.json");
+    let web_version = web_package["version"].as_str().expect("web sdk version");
+
+    assert_eq!(python_version, cargo_version, "Python SDK version mismatch");
+    assert_eq!(ts_version, cargo_version, "TypeScript SDK version mismatch");
+    assert_eq!(web_version, cargo_version, "Web SDK version mismatch");
+
+    let version_rs = read(root.join("crates/meerkat-contracts/src/version.rs"));
+    let mut parts = Vec::new();
+    let current = find_all_between(&version_rs, "pub const CURRENT: Self = Self {", "};")
+        .expect("ContractVersion::CURRENT");
+    for key in ["major", "minor", "patch"] {
+        let needle = format!("{key}:");
+        let idx = current
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing {key}"));
+        let digits: String = current[idx + needle.len()..]
+            .chars()
+            .skip_while(char::is_ascii_whitespace)
+            .take_while(char::is_ascii_digit)
+            .collect();
+        assert!(!digits.is_empty(), "missing numeric {key}");
+        parts.push(digits);
+    }
+    let mut contract_version = parts.join(".");
+    if let Some(prerelease) = find_all_between(
+        &version_rs,
+        "pub const PRERELEASE: Option<&'static str> = Some(\"",
+        "\");",
+    ) {
+        contract_version.push('-');
+        contract_version.push_str(&prerelease);
+    }
+    assert_eq!(contract_version, cargo_version, "contract version mismatch");
+
+    let schema_version: serde_json::Value =
+        serde_json::from_str(&read(root.join("artifacts/schemas/version.json")))
+            .expect("parse schema version");
+    assert_eq!(
+        schema_version["contract_version"].as_str(),
+        Some(cargo_version),
+        "schema contract version mismatch"
+    );
+
+    let py_types = read(root.join("sdks/python/meerkat/generated/types.py"));
+    assert!(
+        py_types.contains(&format!("CONTRACT_VERSION = \"{cargo_version}\"")),
+        "Python generated CONTRACT_VERSION is stale"
+    );
+    let ts_types = read(root.join("sdks/typescript/src/generated/types.ts"));
+    assert!(
+        ts_types.contains(&format!(
+            "export const CONTRACT_VERSION = \"{cargo_version}\";"
+        )),
+        "TypeScript generated CONTRACT_VERSION is stale"
+    );
+
+    let dependencies = workspace["workspace"]["dependencies"]
+        .as_table()
+        .expect("workspace dependencies");
+    for (name, value) in dependencies {
+        if name.starts_with("meerkat") {
+            let Some(dep_version) = value.get("version").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            assert_eq!(
+                dep_version, cargo_version,
+                "internal dependency {name} has stale version"
+            );
+        }
+    }
+}
+
+#[test]
+fn rpc_catalog_router_docs_and_sdk_wrappers_are_aligned() {
+    let root = repo_root();
+    let router = read(root.join("crates/meerkat-rpc/src/router.rs"));
+    let catalog = read(root.join("crates/meerkat-contracts/src/rpc_catalog.rs"));
+    let docs = read(root.join("docs/api/rpc.mdx"));
+
+    let mut router_methods = BTreeSet::new();
+    for line in router.lines().filter(|line| line.contains("=>")) {
+        if let Some(first) = line.find('"')
+            && let Some(second) = line[first + 1..].find('"')
+        {
+            let method = &line[first + 1..first + 1 + second];
+            if method == "initialize"
+                || (method.starts_with(char::is_alphabetic) && method.contains('/'))
+            {
+                router_methods.insert(method.to_string());
+            }
+        }
+    }
+    router_methods.remove("initialized");
+
+    // Router-only compatibility shims intentionally remain absent from the public
+    // catalog and docs. Keep this in sync with scripts/verify-rpc-surface-alignment.sh.
+    router_methods.remove("skills/inspect");
+
+    let mut catalog_methods = BTreeSet::new();
+    for needle in [
+        "RpcMethodDescriptor::typed(",
+        "RpcMethodDescriptor::result_only(",
+    ] {
+        catalog_methods.extend(quoted_after(&catalog, needle));
+    }
+
+    assert_eq!(
+        router_methods, catalog_methods,
+        "router/catalog RPC method drift"
+    );
+
+    let overview =
+        find_all_between(&docs, "## Method overview", "## Protocol").expect("RPC method overview");
+    let mut docs_methods = BTreeSet::new();
+    for line in overview.lines() {
+        let line = line.trim_start();
+        if !line.starts_with("| `") {
+            continue;
+        }
+        if let Some(first) = line.find('`')
+            && let Some(second) = line[first + 1..].find('`')
+        {
+            let method = &line[first + 1..first + 1 + second];
+            if method == "initialize" || method.contains('/') {
+                docs_methods.insert(method.to_string());
+            }
+        }
+    }
+    assert_eq!(
+        docs_methods, catalog_methods,
+        "docs/catalog RPC method drift"
+    );
+
+    let internal_exclusions: BTreeSet<_> = [
+        "initialize",
+        "tools/register",
+        "session/stream_open",
+        "session/stream_close",
+        "mob/stream_open",
+        "mob/stream_close",
+    ]
+    .into_iter()
+    .collect();
+    let mut files = Vec::new();
+    walk_files(&root.join("sdks/typescript/src"), &mut files);
+    let ts_blob = files
+        .iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("ts"))
+        .map(read)
+        .collect::<Vec<_>>()
+        .join("\n");
+    files.clear();
+    walk_files(&root.join("sdks/python/meerkat"), &mut files);
+    let py_blob = files
+        .iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("py"))
+        .map(read)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let missing_ts: Vec<_> = catalog_methods
+        .iter()
+        .filter(|method| !internal_exclusions.contains(method.as_str()))
+        .filter(|method| !ts_blob.contains(method.as_str()))
+        .collect();
+    let missing_py: Vec<_> = catalog_methods
+        .iter()
+        .filter(|method| !internal_exclusions.contains(method.as_str()))
+        .filter(|method| !py_blob.contains(method.as_str()))
+        .collect();
+    assert!(
+        missing_ts.is_empty(),
+        "TypeScript SDK missing methods: {missing_ts:?}"
+    );
+    assert!(
+        missing_py.is_empty(),
+        "Python SDK missing methods: {missing_py:?}"
+    );
+}
+
+#[test]
+fn retired_public_surface_tokens_stay_out_of_unowned_paths() {
+    let root = repo_root();
+    let terms = [
+        "event/push",
+        "send_message",
+        "send_request",
+        "send_response",
+        "list_peers",
+        "inject_with_subscription",
+        "EventInjector",
+        "SubscribableInjector",
+        "interaction_subscriber",
+        "event_injector",
+    ];
+    let scan_paths = [
+        "docs",
+        ".claude/skills/meerkat-platform",
+        "sdks",
+        "CHANGELOG.md",
+        "crates/meerkat/src",
+        "crates/meerkat-cli",
+        "crates/meerkat-core",
+        "crates/meerkat-comms",
+        "crates/meerkat-rest",
+        "crates/meerkat-rpc",
+        "crates/meerkat-session",
+        "crates/meerkat-tools",
+        "crates/meerkat-contracts/src/version.rs",
+    ];
+    let allowed_prefixes = [
+        "docs/",
+        ".claude/skills/meerkat-platform/",
+        "sdks/",
+        "CHANGELOG.md",
+        "crates/meerkat/",
+        "crates/meerkat-cli/",
+        "crates/meerkat-core/",
+        "crates/meerkat-comms/",
+        "crates/meerkat-rpc/",
+        "crates/meerkat-rest/",
+        "crates/meerkat-session/",
+        "crates/meerkat-tools/",
+        "crates/meerkat-contracts/src/version.rs",
+    ];
+
+    let mut blocked = Vec::new();
+    for scan_path in scan_paths {
+        let path = root.join(scan_path);
+        let mut files = if path.is_file() {
+            vec![path]
+        } else {
+            Vec::new()
+        };
+        if root.join(scan_path).is_dir() {
+            walk_files(&root.join(scan_path), &mut files);
+        }
+        for file in files {
+            let rel = relative(&root, &file);
+            let Some(text) = read_utf8(&file) else {
+                continue;
+            };
+            if terms.iter().any(|term| text.contains(term))
+                && !allowed_prefixes
+                    .iter()
+                    .any(|prefix| rel.starts_with(prefix))
+            {
+                blocked.push(rel);
+            }
+        }
+    }
+    assert!(
+        blocked.is_empty(),
+        "legacy public-surface tokens outside allowlist: {blocked:?}"
+    );
+}
+
+#[test]
+fn retired_session_control_names_are_absent() {
+    let root = repo_root();
+    let terms = [
+        "session/runtime_state",
+        "session/accept_input",
+        "session/retire_runtime",
+        "session/reset_runtime",
+        "session/input_state",
+        "session/inputs",
+        "/sessions/{id}/runtime-state",
+        "/sessions/{id}/accept-input",
+        "/sessions/{id}/retire-runtime",
+        "/sessions/{id}/reset-runtime",
+        "/sessions/{id}/inputs",
+        "/sessions/{session_id}/inputs/{input_id}",
+    ];
+    let scan_paths = [
+        "docs",
+        "sdks",
+        "artifacts",
+        "crates/meerkat-contracts",
+        "crates/meerkat-rest",
+        "crates/meerkat-rpc",
+        "tools/sdk-codegen",
+    ];
+    let mut matches = Vec::new();
+    for scan_path in scan_paths {
+        let mut files = Vec::new();
+        walk_files(&root.join(scan_path), &mut files);
+        for file in files {
+            let rel = relative(&root, &file);
+            if rel.starts_with("docs/internal/")
+                || rel.starts_with("docs/dogma-")
+                || rel.starts_with("docs/wave-")
+                || rel.starts_with("artifacts/")
+            {
+                continue;
+            }
+            let Some(text) = read_utf8(&file) else {
+                continue;
+            };
+            for term in terms {
+                if text.contains(term) {
+                    matches.push(format!("{rel}: {term}"));
+                }
+            }
+        }
+    }
+    assert!(
+        matches.is_empty(),
+        "retired session-control names remain: {matches:?}"
+    );
+}
+
+#[test]
+fn deprecated_backend_references_stay_rejected_only() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    walk_files(&root, &mut files);
+    let mut matches = Vec::new();
+    for file in files {
+        let rel = relative(&root, &file);
+        if rel == "CHANGELOG.md"
+            || rel == "scripts/deprecated_backend_scan.sh"
+            || rel.starts_with("artifacts/")
+            || rel.starts_with(".rct/")
+            || rel.starts_with(".rct-")
+            || rel.starts_with(".claude/skills/")
+            || rel.contains("/node_modules/")
+        {
+            continue;
+        }
+        let Some(text) = read_utf8(&file) else {
+            continue;
+        };
+        if !(text.contains("redb")
+            || text.contains("Redb")
+            || text.contains("sessions_redb_path")
+            || text.contains("memory.redb")
+            || text.contains("session_index.redb")
+            || text.contains("redb-store"))
+        {
+            continue;
+        }
+        let allowed = text.contains("rejects_unsupported_redb_backend")
+            || text.contains("\"backend\": \"redb\"")
+            || text.contains("redb backend must be rejected")
+            || text.contains("unsupported") && text.contains("redb")
+            || text.contains("avoids opening redb at")
+            || text.contains("only checks the redb store");
+        if !allowed {
+            matches.push(rel);
+        }
+    }
+    assert!(
+        matches.is_empty(),
+        "deprecated backend references remain: {matches:?}"
+    );
+}
+
+#[test]
+fn bridge_code_does_not_reinterpret_response_status() {
+    let root = repo_root();
+    let bridge_files = [
+        "crates/meerkat-mob/src/runtime/supervisor_bridge.rs",
+        "crates/meerkat-mob/src/runtime/local_bridge.rs",
+        "crates/meerkat-contracts/src/wire/supervisor_bridge.rs",
+    ];
+    let mut violations = Vec::new();
+    for rel in bridge_files {
+        let text = read(root.join(rel));
+        let mut in_test = false;
+        for (idx, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("mod tests") {
+                in_test = true;
+            }
+            if in_test || trimmed.starts_with("//") || trimmed.starts_with("///") {
+                continue;
+            }
+            if line.contains("ResponseStatus::Completed")
+                || line.contains("ResponseStatus::Failed")
+                || line.contains("ResponseStatus::Accepted")
+                || (line.contains("match") && line.contains("ResponseStatus"))
+            {
+                violations.push(format!("{rel}:{}: {line}", idx + 1));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "bridge code reinterprets ResponseStatus directly: {violations:?}"
+    );
+}
+
+#[test]
+fn supervisor_bridge_protocol_version_checks_stay_in_typed_owner() {
+    let root = repo_root();
+    let owner = "crates/meerkat-contracts/src/wire/supervisor_bridge.rs";
+    let source_roots = [
+        root.join("crates/meerkat-contracts/src"),
+        root.join("crates/meerkat-mob/src"),
+        root.join("crates/meerkat-runtime/src"),
+    ];
+    let mut files = Vec::new();
+    for source_root in source_roots {
+        walk_files(&source_root, &mut files);
+    }
+
+    let mut violations = Vec::new();
+    for path in files {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = relative(&root, &path);
+        if rel == owner || rel.ends_with("/tests.rs") || rel.contains("/tests/") {
+            continue;
+        }
+        let text = read(&path);
+        let mut in_test = false;
+        for (idx, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("mod tests") {
+                in_test = true;
+            }
+            if in_test || trimmed.starts_with("//") || trimmed.starts_with("///") {
+                continue;
+            }
+            let raw_field = line.contains("protocol_version: u32");
+            let raw_supported_check =
+                line.contains("supervisor_bridge_protocol_version_supported(");
+            let raw_ordering_check = line.contains("protocol_version <")
+                || line.contains("protocol_version >")
+                || line.contains("protocol_version ==")
+                || line.contains("protocol_version !=");
+            if raw_field || raw_supported_check || raw_ordering_check {
+                violations.push(format!("{rel}:{}: {line}", idx + 1));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "supervisor bridge protocol version checks must route through BridgeProtocolVersion in {owner}: {violations:?}"
+    );
+}
+
+#[test]
+fn generated_header_truthfulness_is_clean() {
+    let root = repo_root();
+    let emit_paths = xtask::audit_generated_headers::live_emit_paths();
+    let marker = xtask::audit_generated_headers::generated_marker();
+    let mut violations = Vec::new();
+
+    for rel in &emit_paths {
+        let path = root.join(rel);
+        if !path.exists() {
+            continue;
+        }
+        let contents = read(&path);
+        if !contents.lines().take(8).any(|line| line.contains(&marker)) {
+            violations.push(format!("missing marker: {}", rel.display()));
+        }
+    }
+
+    let mut files = Vec::new();
+    walk_files(&root, &mut files);
+    for path in files {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = path.strip_prefix(&root).unwrap_or(&path).to_path_buf();
+        if emit_paths.contains(&rel) {
+            continue;
+        }
+        let Some(contents) = read_utf8(&path) else {
+            continue;
+        };
+        if contents.lines().take(8).any(|line| line.contains(&marker)) {
+            violations.push(format!("forbidden marker: {}", rel.display()));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "generated header audit violations: {violations:?}"
+    );
+}
+
+#[test]
+fn buildbuddy_external_repo_cache_repair_catches_replanting_symlink_failures() {
+    let root = repo_root();
+    let launcher = read(root.join("scripts/buildbuddy-bazel-poc"));
+    let doctor = read(root.join("scripts/buildbuddy-doctor"));
+
+    assert!(
+        launcher.contains("--repo_contents_cache=")
+            && launcher.contains("fetch_corruption_signature")
+            && launcher.contains("error replanting symlinks in repo")
+            && launcher.contains("clean --expunge"),
+        "BuildBuddy launcher must repair Bazel external-repo symlink replanting failures"
+    );
+    assert!(
+        doctor.contains("error replanting symlinks in repo"),
+        "buildbuddy-doctor must guard the Bazel external-repo replanting signature"
+    );
+}
+
+#[test]
+fn e2e_smoke_lane_launchers_allow_parallel_test_processes() {
+    let root = repo_root();
+    let cargo_config = read(root.join(".cargo/config.toml"));
+    let launcher = read(root.join("scripts/buildbuddy-bazel-poc"));
+    let build = read(root.join("BUILD.bazel"));
+    let buildbuddy_dev = read(root.join("scripts/buildbuddy-dev"));
+    let run_backend_lane = read(root.join("scripts/run-build-backend-lane"));
+    let readme = read(root.join("tests/live_smoke/README.md"));
+
+    let smoke_alias = cargo_config
+        .lines()
+        .find(|line| line.starts_with("e2e-smoke = "))
+        .expect("e2e-smoke cargo alias");
+    assert!(
+        !smoke_alias.contains("--test-threads=1"),
+        "cargo e2e-smoke must not serialize the whole smoke lane: {smoke_alias}"
+    );
+
+    let smoke_rbe_block =
+        find_all_between(&launcher, "e2e-smoke-rbe)", ";;").expect("e2e-smoke-rbe block");
+    assert!(
+        !smoke_rbe_block.contains("--test_arg=--test-threads=1"),
+        "BuildBuddy e2e-smoke-rbe must not serialize the whole smoke lane: {smoke_rbe_block}"
+    );
+    let smoke_turbo_block = find_all_between(&launcher, "e2e-smoke-turbo-s-rbe)", ";;")
+        .expect("e2e-smoke-turbo-s-rbe block");
+    assert!(
+        smoke_turbo_block.contains("default_target=\"//:e2e_smoke_turbo_s\""),
+        "Turbo S must target the sharded smoke suite: {smoke_turbo_block}"
+    );
+    assert!(
+        build.contains("name = \"e2e_smoke_turbo_s\"")
+            && build.contains("E2E_SMOKE_TURBO_S_SCENARIOS")
+            && build.contains("E2E_SMOKE_TURBO_S_FLOW_RUNTIME_TESTS")
+            && build.contains("scripts/buildbuddy-e2e-smoke-flow-runtime-shard-test"),
+        "root BUILD must declare Turbo S scenario and flow-runtime shards"
+    );
+    assert!(
+        buildbuddy_dev.contains("e2e-smoke-turbo-s-rbe")
+            && run_backend_lane
+                .contains("MEERKAT_E2E_EXECUTION_MODE=\"${MEERKAT_E2E_EXECUTION_MODE:-prebuilt}\""),
+        "BuildBuddy smoke developer launchers must expose Turbo S and use prebuilt follow-up mode"
+    );
+
+    let serialized_smoke_doc = readme
+        .lines()
+        .find(|line| line.contains("e2e_smoke_lane") && line.contains("--test-threads=1"));
+    assert!(
+        serialized_smoke_doc.is_none(),
+        "smoke lane docs must not recommend whole-lane serialization: {serialized_smoke_doc:?}"
+    );
+}

@@ -376,9 +376,9 @@ function plan(args) {
     );
     result.wasm = changed.some(
       (path) =>
-        path.startsWith("meerkat-web-runtime/") ||
-        path.startsWith("meerkat-contracts/") ||
-        path.startsWith("meerkat-cli/src/web_runtime_template/"),
+        path.startsWith("crates/meerkat-web-runtime/") ||
+        path.startsWith("crates/meerkat-contracts/") ||
+        path.startsWith("crates/meerkat-cli/src/web_runtime_template/"),
     );
   } else {
     result.generated_contract = true;
@@ -459,7 +459,7 @@ function plan(args) {
     result.mode = "none";
     result.reason = "no Rust build-relevant paths changed";
     result.docs_only = changed !== null && changed.every(
-      (path) => /^(docs\/|docs-internal\/|CHANGELOG\.md|README\.md|AGENTS\.md|CLAUDE\.md|.*\.mdx?$)/.test(path),
+      (path) => /^(docs\/|docs\/internal\/|CHANGELOG\.md|README\.md|AGENTS\.md|CLAUDE\.md|.*\.mdx?$)/.test(path),
     );
   }
 

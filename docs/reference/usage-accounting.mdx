@@ -181,10 +181,10 @@ For this ordinary tool-loop example, read that as follows.
 
 These numbers are pinned by
 `turn_rows_cover_one_call_while_the_run_total_is_session_cumulative` in
-`meerkat-core/src/agent/usage_accounting_tests.rs`, which drives the real agent
+`crates/meerkat-core/src/agent/usage_accounting_tests.rs`, which drives the real agent
 loop, and the `CumulativeUsage` arithmetic is pinned by
 `cumulative_usage_matches_documented_aggregation_example` in
-`meerkat-core/src/types/tests.rs`. If this page and those tests disagree,
+`crates/meerkat-core/src/types/tests.rs`. If this page and those tests disagree,
 `make docs-check` fails.
 
 ## What not to sum

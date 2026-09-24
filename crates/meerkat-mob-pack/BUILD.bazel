@@ -1,0 +1,166 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+rust_library(
+    name = "meerkat_mob_pack",
+    aliases = aliases(package_name = "meerkat-mob-pack"),
+    crate_name = "meerkat_mob_pack",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-pack",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-mob-pack",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-mob-pack",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_mob_pack_with_runtime_test_support",
+    aliases = aliases(package_name = "meerkat-mob-pack"),
+    crate_name = "meerkat_mob_pack",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//crates/meerkat-cli:__pkg__",
+        "//crates/meerkat-mob-pack:__pkg__",
+        "//crates/meerkat-web-runtime:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-pack",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-mob-pack",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-mob-pack",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "meerkat_mob_pack_unit_test",
+    aliases = aliases(
+        package_name = "meerkat-mob-pack",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "meerkat_mob_pack",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-pack",
+    },
+    tags = [
+        "fast",
+        "unit",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-mob-pack",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-mob-pack",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+test_suite(
+    name = "fast_tests",
+    tests = [
+        ":meerkat_mob_pack_unit_test",
+    ],
+)

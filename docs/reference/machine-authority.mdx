@@ -31,7 +31,7 @@ legal, and what effects follow.
 ## Canonical Machines
 
 The canonical registry is `canonical_machine_schemas()` in
-`meerkat-machine-schema/src/catalog/mod.rs`.
+`crates/meerkat-machine-schema/src/catalog/mod.rs`.
 
 | Machine | Production owner | Scope |
 | --- | --- | --- |
@@ -67,15 +67,15 @@ Two scoped authorities sit outside the canonical registry.
 
 `SessionPersistenceVersionAuthority` owns admission of released session
 envelope and metadata schema versions. Its catalog DSL lives at
-`meerkat-machine-schema/src/catalog/dsl/session_persistence_version_authority.rs`,
+`crates/meerkat-machine-schema/src/catalog/dsl/session_persistence_version_authority.rs`,
 and its production expansion lives at
-`meerkat-core/src/generated/session_persistence_version_authority.rs`. It is a
+`crates/meerkat-core/src/generated/session_persistence_version_authority.rs`. It is a
 small restore-time authority, not a persistence-currentness or recovery
 authority, and it has no entry in `canonical_machine_schemas()`.
 
 `MobHostBindingAuthority` (catalog DSL source
-`meerkat-machine-schema/src/catalog/dsl/mob_host_binding_authority.rs`,
-production expansion `meerkat-mob/src/machines/mob_host_binding_authority.rs`).
+`crates/meerkat-machine-schema/src/catalog/dsl/mob_host_binding_authority.rs`,
+production expansion `crates/meerkat-mob/src/machines/mob_host_binding_authority.rs`).
 It is the member host's process-scoped, mob-keyed admission and dedup
 authority for host-addressed mob commands: supervisor bind/rebind/revoke,
 host-command admission, materialize admission/preflight with success-only
@@ -83,7 +83,7 @@ dedup memory, release admission with recorded-disposal replay, and the remote
 turn-outcome journal. It follows the `session_persistence_version_authority`
 precedent — one shared DSL body expanded into both crates, pinned by a
 dedicated production-schema parity test
-(`meerkat-mob/tests/mob_host_binding_authority.rs`) and by kernel tests
+(`crates/meerkat-mob/tests/mob_host_binding_authority.rs`) and by kernel tests
 instead of TLC — so it carries seam-inventory dispositions like any machine
 but has no poster, no generated kernel, and no entry in
 `canonical_machine_schemas()`.
@@ -94,7 +94,7 @@ Principal control-scope grants (multi-host mobs §8) follow the
 `GrantOperatorScopes` / `RevokeOperatorScopes` transitions, and the in-machine
 revalidation of caller-proposed revoke partitions — while scope *resolution*
 lives shell-side in the sealed `ResolvedControlPolicy`
-(`meerkat-mob/src/control_policy.rs`): private shape, one `resolve()` mint
+(`crates/meerkat-mob/src/control_policy.rs`): private shape, one `resolve()` mint
 path, no serde, fail-closed to the empty scope set. Expiry is data: the
 machine never reads a clock; the enforcement chokepoint reads the wall clock
 once per decision and passes `now_ms` in as a parameter, so a restored mob's
@@ -248,7 +248,7 @@ live authority path.
 ## Canonical Compositions
 
 The canonical registry is `canonical_composition_schemas()` in
-`meerkat-machine-schema/src/catalog/mod.rs`.
+`crates/meerkat-machine-schema/src/catalog/mod.rs`.
 
 | Composition | Purpose |
 | --- | --- |
@@ -281,11 +281,11 @@ Generated and checked artifacts live in:
 
 | Artifact | Path |
 | --- | --- |
-| Catalog DSL | `meerkat-machine-schema/src/catalog/dsl/` |
-| Generated kernels | `meerkat-machine-kernels/src/generated/` |
+| Catalog DSL | `crates/meerkat-machine-schema/src/catalog/dsl/` |
+| Generated kernels | `crates/meerkat-machine-kernels/src/generated/` |
 | Machine specs | `specs/machines/` |
 | Composition specs | `specs/compositions/` |
-| Code generation | `meerkat-machine-codegen/` |
+| Code generation | `crates/meerkat-machine-codegen/` |
 
 ## Contribution Rules
 

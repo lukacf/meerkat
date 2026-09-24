@@ -402,7 +402,7 @@ class Usage(TypedDict, total=False):
     The worked example lives in `docs/reference/usage-accounting.mdx`. Its
     numbers are pinned against the agent loop by
     `turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`
-    (`meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's
+    (`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's
     arithmetic by `cumulative_usage_matches_documented_aggregation_example`.
     """
     cache_creation_tokens: NotRequired[Optional[int]]

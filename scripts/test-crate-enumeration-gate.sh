@@ -26,7 +26,7 @@ FIXTURE_PATH_DEPS=3
 
 # The four release binaries the packaging check inspects by path, plus one
 # ordinary library crate that stands in for a newly added member.
-BAZEL_BINARY_DIRS=(meerkat-cli meerkat-rpc meerkat-rest meerkat-mcp-server)
+BAZEL_BINARY_DIRS=(crates/meerkat-cli crates/meerkat-rpc crates/meerkat-rest crates/meerkat-mcp-server)
 BAZEL_BINARY_TARGETS=(rkat rkat_rpc_bin rkat_rest_bin rkat_mcp_bin)
 
 write_manifest() {
@@ -106,8 +106,8 @@ build_fixture() {
   local index
   for index in "${!BAZEL_BINARY_DIRS[@]}"; do
     local crate_dir="${BAZEL_BINARY_DIRS[$index]}"
-    local crate_name="${crate_dir}"
-    [[ "$crate_dir" == "meerkat-cli" ]] && crate_name="rkat"
+    local crate_name="${crate_dir##*/}"
+    [[ "$crate_dir" == "crates/meerkat-cli" ]] && crate_name="rkat"
     write_manifest "$crate_dir" "$crate_name"
     members+=("$crate_dir")
     cat > "${FIXTURE}/${crate_dir}/BUILD.bazel" <<EOF
@@ -135,9 +135,9 @@ EOF
     # trailing two must NOT count: a path with no version pin is not part of
     # the workspace-version contract, and a registry dep has no path at all.
     echo '[workspace.dependencies]'
-    printf 'meerkat-rpc = { version = "%s", path = "meerkat-rpc" }\n' "${FIXTURE_VERSION}"
-    printf 'meerkat-rest = { version = "%s", path = "meerkat-rest" }\n' "${FIXTURE_VERSION}"
-    printf 'meerkat-mcp-server = { version = "%s", path = "meerkat-mcp-server" }\n' "${FIXTURE_VERSION}"
+    printf 'meerkat-rpc = { version = "%s", path = "crates/meerkat-rpc" }\n' "${FIXTURE_VERSION}"
+    printf 'meerkat-rest = { version = "%s", path = "crates/meerkat-rest" }\n' "${FIXTURE_VERSION}"
+    printf 'meerkat-mcp-server = { version = "%s", path = "crates/meerkat-mcp-server" }\n' "${FIXTURE_VERSION}"
     echo 'vendored-thing = { path = "third-party/vendored-thing" }'
     echo 'serde = "1"'
   } > "${FIXTURE}/Cargo.toml"
@@ -239,10 +239,10 @@ cat > "${FIXTURE}/scripts/generate-patch-config.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 echo "[patch.crates-io]"
-echo "rkat = { path = \"${FIXTURE}/meerkat-cli\" }"
-echo "meerkat-rpc = { path = \"${FIXTURE}/meerkat-rpc\" }"
-echo "meerkat-rest = { path = \"${FIXTURE}/meerkat-rest\" }"
-echo "meerkat-mcp-server = { path = \"${FIXTURE}/meerkat-mcp-server\" }"
+echo "rkat = { path = \"${FIXTURE}/crates/meerkat-cli\" }"
+echo "meerkat-rpc = { path = \"${FIXTURE}/crates/meerkat-rpc\" }"
+echo "meerkat-rest = { path = \"${FIXTURE}/crates/meerkat-rest\" }"
+echo "meerkat-mcp-server = { path = \"${FIXTURE}/crates/meerkat-mcp-server\" }"
 EOF
 chmod +x "${FIXTURE}/scripts/generate-patch-config.sh"
 status="$(run_gate "${TEST_ROOT}/patch-map.log" "${fixture_crates[@]}")"

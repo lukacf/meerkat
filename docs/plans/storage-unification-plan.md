@@ -62,12 +62,12 @@ these axes:
 
 1. **Surfaces disagree on storage defaults — root *and* identity.** The CLI
    defaults to workspace-derived realm ids under a project-local
-   `<context-root>/.rkat/realms` (`meerkat-cli/src/main.rs`,
+   `<context-root>/.rkat/realms` (`crates/meerkat-cli/src/main.rs`,
    `default_cli_state_root`). The RPC, REST, and MCP servers default to
    **isolated** (freshly generated) realm ids under the user-global
    `dirs::data_dir()/meerkat/realms` (`RealmSelection::Isolated` in each
    server `main.rs`; `default_state_root()` in
-   `meerkat-core/src/runtime_bootstrap.rs`). By default the surfaces therefore
+   `crates/meerkat-core/src/runtime_bootstrap.rs`). By default the surfaces therefore
    do not collide — they quietly do completely unrelated things. The split-brain
    hazard (the same realm id materialized under two roots) arises as soon as a
    realm id is shared deliberately: an explicit `--realm` given to surfaces
@@ -80,21 +80,21 @@ these axes:
    six times (5s vs 60s). No migration framework exists anywhere — every
    store relies on `CREATE TABLE IF NOT EXISTS` plus bespoke legacy-upgrade
    functions. *Correction from review:* the runtime store is **not** one of
-   the offenders on main — `meerkat-runtime/src/store/sqlite.rs` already uses
+   the offenders on main — `crates/meerkat-runtime/src/store/sqlite.rs` already uses
    `meerkat_store::sqlite_store::{open_connection, begin_immediate_transaction}`
    for all production paths; its `busy_timeout(Duration::ZERO)` survives only
    in the deliberate legacy-migration maintenance opener. The consolidation
    work is real, but it is harmonization of defaults, not a contention-bug
    fix. Deployments on older release lines should verify which release picked
    up the runtime-store opener unification.
-3. **A shadowed `dirs` module in core.** `meerkat-core/src/config.rs` defines
+3. **A shadowed `dirs` module in core.** `crates/meerkat-core/src/config.rs` defines
    a local `pub mod dirs` whose `home_dir()` reads only `$HOME`, shadowing the
    platform-aware `dirs` crate within that file. `Config::global_config_path()`
    and `data_dir()` are HOME-only while realm, auth, and REST paths use the
    real crate — two notions of "home" inside one crate.
 4. **Duplicated resolution logic.** `find_project_root` exists twice with
-   different `exists()`/directory semantics (`meerkat-core/src/config.rs`,
-   `meerkat-tools/src/builtin/project.rs`); `default_state_root()` /
+   different `exists()`/directory semantics (`crates/meerkat-core/src/config.rs`,
+   `crates/meerkat-tools/src/builtin/project.rs`); `default_state_root()` /
    `default_realms_root()` are identical duplicates in core and store;
    `home_dir` stubs exist in both `config.rs` and `mcp_config.rs`.
 5. **Dead config trap.** `StorageConfig.directory` defaults to a
@@ -103,7 +103,7 @@ these axes:
    XDG `data_dir/meerkat/realms`, config/project state under `.rkat/` and
    `~/.rkat/`, credentials under XDG `config_dir/meerkat/credentials`, plus a
    fourth platform-state-dir location for comms identity keys
-   (`meerkat/src/sdk.rs`).
+   (`crates/meerkat/src/sdk.rs`).
 
 Two facts the original draft got wrong are corrected above: the
 `sessions.sqlite3` busy-timeout mismatch is already fixed on main, and the
@@ -119,7 +119,7 @@ hand-rolled BigQuery implementations of `SessionStore`, mobkit's
 `RuntimeStore` or `ScheduleStore`, so it runs a shadow scheduler. Its session
 store invented transcript chunking to survive whole-blob saves and drove the
 `IncrementalSessionStore` contract now in
-`meerkat-core/src/session_store.rs`. BigQuery cannot do cheap in-place CAS;
+`crates/meerkat-core/src/session_store.rs`. BigQuery cannot do cheap in-place CAS;
 revision guards are emulated with windowed reads, and a store-contract
 ambiguity for append-only media has already produced a production incident
 (orphan high-version sibling rows making every subsequent save permanently
@@ -252,7 +252,7 @@ StorageLayout {
 - **Naming preserves existing parameter semantics.** Today's
   `user_config_root` parameters are *home-like*: the CLI resolves
   `cli.user_config_root.or_else(dirs::home_dir)` and helpers append `.rkat`
-  themselves (`meerkat-cli/src/main.rs`, `meerkat/src/sdk.rs`,
+  themselves (`crates/meerkat-cli/src/main.rs`, `crates/meerkat/src/sdk.rs`,
   `mcp_config.rs`). Substituting a "means `~/.rkat`" field for those
   parameters would produce `~/.rkat/.rkat`. The layout therefore carries
   both `user_home_root` (the compatibility boundary existing parameters map
@@ -260,14 +260,14 @@ StorageLayout {
   parameters are deprecated onto `user_home_root` with unchanged meaning.
 - **Session-comms identity is an explicit slot.** Its current
   platform-specific default (`canonical_session_comms_identity_root` in
-  `meerkat/src/sdk.rs`) is durable key material; if the layout omitted it,
+  `crates/meerkat/src/sdk.rs`) is durable key material; if the layout omitted it,
   the Phase 5 anti-ambient-resolution gate would either exempt it forever or
   a naive port would silently relocate — and thereby rotate — identity keys.
   The slot preserves the existing resolution exactly.
 
 - **Invocation context and project root are distinct fields.** MCP config
   discovery deliberately checks only the exact directory and forbids walk-up
-  for security (`meerkat-core/src/mcp_config.rs`, `find_project_mcp`). That
+  for security (`crates/meerkat-core/src/mcp_config.rs`, `find_project_mcp`). That
   trust boundary is preserved: MCP keys off `invocation_context`; storage and
   project config may key off the walked-up `project_root`.
 - **Realm-id-first root resolution.** Resolve the `RealmId` *before* choosing
@@ -340,7 +340,7 @@ merging per-realm files into one `realm.sqlite3` for cross-domain atomicity.
 Review showed (a) session, schedule, and runtime tables already co-tenant
 `sessions.sqlite3` in the sqlite realm backend, and (b) runtime authority and
 session projection are deliberately committed through separate trait calls
-with distinct failure handling (`meerkat-session/src/persistent.rs`) — file
+with distinct failure handling (`crates/meerkat-session/src/persistent.rs`) — file
 co-location cannot make separate trait calls transactional, and remote
 backends will never have cross-domain transactions anyway (the recovery
 protocol is the contract, per Phase 0). Revisit only if a concrete
@@ -450,7 +450,7 @@ fail-closed.
 check is a point-in-time predicate (a new writer can open immediately after
 it passes), and the manifest lock goes stale after 30 seconds, can be removed
 by another process, and its guard deletes the replacement lock unconditionally
-on drop (`meerkat-store/src/realm.rs`). Phase 6 introduces a dedicated
+on drop (`crates/meerkat-store/src/realm.rs`). Phase 6 introduces a dedicated
 **exclusive maintenance fence**: an OS-level lock plus ownership token with
 heartbeat, spanning *both* candidate roots, held through quiescence → WAL
 checkpoint → copy → validate → publish. Migration refuses to start without

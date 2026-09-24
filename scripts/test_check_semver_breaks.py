@@ -159,7 +159,7 @@ class ReportParsingTests(unittest.TestCase):
                 "trait_method_added",
                 "trait method meerkat_jobs::DetachedJobStore::count_pending_outbox_jobs "
                 "in file /Users/luka/.codex/worktrees/release-0824/meerkat/"
-                "meerkat-jobs/src/store.rs:167",
+                "crates/meerkat-jobs/src/store.rs:167",
                 ("DetachedJobStore", "count_pending_outbox_jobs"),
             ),
         ]

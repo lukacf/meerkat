@@ -89,19 +89,19 @@ generated_contract_path() {
     tools/sdk-codegen/*|tools/sdk-codegen/**/*)
       return 0
       ;;
-    meerkat-contracts/src/emit.rs|meerkat-contracts/src/rpc_catalog.rs|meerkat-contracts/src/rest_catalog.rs|meerkat-contracts/src/wire/*)
+    crates/meerkat-contracts/src/emit.rs|crates/meerkat-contracts/src/rpc_catalog.rs|crates/meerkat-contracts/src/rest_catalog.rs|crates/meerkat-contracts/src/wire/*)
       return 0
       ;;
-    meerkat-rpc/src/*|meerkat-rpc/src/**/*)
+    crates/meerkat-rpc/src/*|crates/meerkat-rpc/src/**/*)
       return 0
       ;;
-    meerkat-rest/src/*|meerkat-rest/src/**/*)
+    crates/meerkat-rest/src/*|crates/meerkat-rest/src/**/*)
       return 0
       ;;
-    meerkat-mcp/src/router.rs)
+    crates/meerkat-mcp/src/router.rs)
       return 0
       ;;
-    meerkat-mob-mcp/src/*|meerkat-mob-mcp/src/**/*)
+    crates/meerkat-mob-mcp/src/*|crates/meerkat-mob-mcp/src/**/*)
       return 0
       ;;
     docs/api/*|docs/api/**/*)
@@ -110,7 +110,7 @@ generated_contract_path() {
     sdks/python/README.md|sdks/typescript/README.md|sdks/web/README.md)
       return 0
       ;;
-    xtask/src/public_contracts.rs|xtask/tests/protocol_codegen_drift.rs)
+    crates/xtask/src/public_contracts.rs|crates/xtask/tests/protocol_codegen_drift.rs)
       return 0
       ;;
   esac

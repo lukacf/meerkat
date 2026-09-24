@@ -1,0 +1,639 @@
+#![allow(clippy::panic, clippy::unwrap_used)]
+
+use meerkat_core::AgentToolDispatcher;
+use meerkat_core::error::ToolError;
+use meerkat_core::ops::ToolDispatchOutcome;
+use meerkat_core::types::{ToolCallView, ToolResult};
+use meerkat_tools::builtin::{
+    BuiltinToolConfig, CompositeDispatcher, MemoryTaskStore, ToolPolicyLayer,
+};
+use serde_json::json;
+use std::path::Path;
+use std::sync::Arc;
+
+/// Concrete project root for contract tests. The composite now fails closed
+/// without a concrete root rather than laundering the ambient process CWD
+/// (dogma row #299), so tests must supply one explicitly. The crate manifest
+/// dir is a stable, real directory.
+fn test_project_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+}
+
+async fn dispatch_tool(
+    dispatcher: &dyn AgentToolDispatcher,
+    name: &str,
+    args: serde_json::Value,
+) -> Result<ToolResult, ToolError> {
+    let args_raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+    let call = ToolCallView {
+        id: "test-1",
+        name,
+        args: &args_raw,
+    };
+    dispatcher
+        .dispatch(call)
+        .await
+        .map(|outcome| outcome.result)
+}
+
+#[tokio::test]
+async fn test_rct_contracts_tool_dispatcher_contract() -> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryTaskStore::new());
+    let config = BuiltinToolConfig::default();
+
+    let dispatcher =
+        CompositeDispatcher::new(store, &config, Some(test_project_root()), None, None, None)?;
+
+    let tools = dispatcher.tools();
+    assert!(!tools.is_empty());
+    Ok(())
+}
+
+#[test]
+fn test_rct_contracts_tool_policy_schema_contract() -> Result<(), Box<dyn std::error::Error>> {
+    let config = BuiltinToolConfig {
+        policy: ToolPolicyLayer::new().enable_tool("shell_jobs"),
+        ..Default::default()
+    };
+
+    let encoded = serde_json::to_value(&config)?;
+    let decoded: BuiltinToolConfig = serde_json::from_value(encoded)?;
+    assert!(decoded.policy.enable.contains("shell_jobs"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_rct_contracts_task_store_persistence_contract()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryTaskStore::new());
+    let config = BuiltinToolConfig::default();
+    let tool =
+        CompositeDispatcher::new(store, &config, Some(test_project_root()), None, None, None)?;
+
+    let result = dispatch_tool(
+        &tool,
+        "task_create",
+        json!({"subject":"Test","description":"Persist"}),
+    )
+    .await?;
+    let value: serde_json::Value = serde_json::from_str(&result.text_content())
+        .unwrap_or_else(|_| json!(result.text_content()));
+    assert!(value.get("id").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_rct_contracts_inv_004_task_tools_session_id() -> Result<(), Box<dyn std::error::Error>>
+{
+    let store = Arc::new(MemoryTaskStore::new());
+    let config = BuiltinToolConfig::default();
+    let tool = CompositeDispatcher::new(
+        store,
+        &config,
+        Some(test_project_root()),
+        None,
+        None,
+        Some("test-session-123".into()),
+    )?;
+
+    let result = dispatch_tool(
+        &tool,
+        "task_create",
+        json!({"subject":"Task","description":"Track session"}),
+    )
+    .await?;
+    let value: serde_json::Value = serde_json::from_str(&result.text_content())
+        .unwrap_or_else(|_| json!(result.text_content()));
+    assert_eq!(
+        value.get("created_by_session").and_then(|v| v.as_str()),
+        Some("test-session-123")
+    );
+    Ok(())
+}
+
+#[test]
+fn test_rct_contracts_all_builtin_schemas_have_required_field()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryTaskStore::new());
+    let config = BuiltinToolConfig::default();
+    let dispatcher =
+        CompositeDispatcher::new(store, &config, Some(test_project_root()), None, None, None)?;
+
+    for tool in dispatcher.tools().iter() {
+        let schema = &tool.input_schema;
+        assert_eq!(schema["type"], "object");
+        let _props = schema.get("properties").ok_or("missing properties")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn test_rct_contracts_inv_007_builtin_task_persistence_strategy()
+-> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_core::AgentToolDispatcher;
+    // Contract: Builtin task storage strategy must be configurable
+    let store = Arc::new(MemoryTaskStore::new());
+    let config = BuiltinToolConfig::default();
+
+    let dispatcher =
+        CompositeDispatcher::new(store, &config, Some(test_project_root()), None, None, None)?;
+
+    // Verify task_create is available as a tool
+    let tools = dispatcher.tools();
+    assert!(tools.iter().any(|t| t.name == "task_create"));
+    Ok(())
+}
+
+#[test]
+fn test_rct_contracts_shell_defaults_contract() -> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_tools::builtin::shell::ShellConfig;
+    use std::path::PathBuf;
+
+    let tool = ShellConfig {
+        enabled: true,
+        default_timeout_secs: 30,
+        restrict_to_project: true,
+        shell: "nu".into(),
+        shell_path: None,
+        project_root: PathBuf::from("/tmp"),
+        max_completed_jobs: 10,
+        completed_job_ttl_secs: 60,
+        max_concurrent_processes: 5,
+        security_mode: meerkat_core::SecurityMode::Unrestricted,
+        security_patterns: vec![],
+        env_vars: std::collections::HashMap::new(),
+    };
+    let json_str = serde_json::to_string(&tool)?;
+    let json_val: serde_json::Value = serde_json::from_str(&json_str)?;
+    assert_eq!(json_val["shell"], "nu");
+    Ok(())
+}
+
+#[test]
+fn test_rct_contracts_no_manual_tool_schema_literals() -> Result<(), Box<dyn std::error::Error>> {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = crate_root
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or("missing workspace root")?
+        .to_path_buf();
+
+    let mut offenders = Vec::new();
+    scan_for_manual_input_schema_literals(&workspace_root, &workspace_root, &mut offenders)?;
+
+    assert!(
+        offenders.is_empty(),
+        "Manual tool schema literals found:\n{}",
+        offenders.join("\n")
+    );
+    Ok(())
+}
+
+/// Whether `path` is a whole-file module the PARENT declares under
+/// `#[cfg(test)]`.
+///
+/// The scanner needs this because such a file carries no in-file
+/// `#[cfg(test)]` for the line tracking below to observe. Answering it from
+/// the `_tests.rs` filename alone would be a permanent hole rather than an
+/// exemption: any production file that later adopts the name would leave this
+/// dogma gate silently, and nothing would say so. The declaration is cheap to
+/// verify, so it is verified.
+fn declared_as_cfg_test_module(path: &Path) -> std::io::Result<bool> {
+    let (Some(stem), Some(dir)) = (path.file_stem().and_then(|s| s.to_str()), path.parent()) else {
+        return Ok(false);
+    };
+
+    let mut parents: Vec<std::path::PathBuf> = ["mod.rs", "lib.rs", "main.rs"]
+        .iter()
+        .map(|name| dir.join(name))
+        .collect();
+    // The 2018-edition sibling form: `foo.rs` beside the `foo/` directory.
+    if let (Some(dir_name), Some(grandparent)) =
+        (dir.file_name().and_then(|name| name.to_str()), dir.parent())
+    {
+        parents.push(grandparent.join(format!("{dir_name}.rs")));
+    }
+
+    let declaration = format!("mod {stem};");
+    for parent in parents {
+        let Ok(contents) = std::fs::read_to_string(&parent) else {
+            continue;
+        };
+        // `#[cfg(test)]` must still be in force at the declaration: it may be
+        // followed by further attributes or comments, but any other item
+        // between the two means the attribute belonged to that item instead.
+        let mut cfg_test_in_force = false;
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.contains("#[cfg(test)]") {
+                cfg_test_in_force = true;
+                continue;
+            }
+            if line.ends_with(&declaration) {
+                return Ok(cfg_test_in_force);
+            }
+            if !line.is_empty() && !line.starts_with("//") && !line.starts_with("#[") {
+                cfg_test_in_force = false;
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+#[test]
+fn cfg_test_module_exemption_is_verified_not_inferred_from_the_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("declared_tests.rs"), "// test module\n").unwrap();
+    std::fs::write(root.join("undeclared_tests.rs"), "// not a test module\n").unwrap();
+    std::fs::write(root.join("adjacent_tests.rs"), "// not a test module\n").unwrap();
+    std::fs::write(
+        root.join("lib.rs"),
+        "#[cfg(test)]\nmod declared_tests;\n\n\
+         #[cfg(test)]\nstruct Fixture;\nmod adjacent_tests;\n\n\
+         mod undeclared_tests;\n",
+    )
+    .unwrap();
+
+    assert!(
+        declared_as_cfg_test_module(&root.join("declared_tests.rs")).unwrap(),
+        "a module the parent declares under #[cfg(test)] is exempt"
+    );
+    assert!(
+        !declared_as_cfg_test_module(&root.join("undeclared_tests.rs")).unwrap(),
+        "the `_tests.rs` name alone must not buy an exemption"
+    );
+    assert!(
+        !declared_as_cfg_test_module(&root.join("adjacent_tests.rs")).unwrap(),
+        "a #[cfg(test)] consumed by an intervening item does not reach the declaration"
+    );
+    assert!(
+        !declared_as_cfg_test_module(&root.join("declared.rs")).unwrap(),
+        "an undeclared file is scanned even when the parent exists"
+    );
+}
+
+fn scan_for_manual_input_schema_literals(
+    root: &Path,
+    dir: &Path,
+    offenders: &mut Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+
+        if path.is_dir() {
+            match file_name.as_ref() {
+                ".git" | "target" | "tests" => continue,
+                _ => {}
+            }
+
+            scan_for_manual_input_schema_literals(root, &path, offenders)?;
+            continue;
+        }
+
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+
+        // Whole-file test modules are declared `#[cfg(test)] mod foo_tests;`
+        // in the PARENT, so the in-file `#[cfg(test)]` tracking below cannot
+        // observe that the file is test-only.
+        if declared_as_cfg_test_module(&path)? {
+            continue;
+        }
+
+        let contents = std::fs::read_to_string(&path)?;
+        let mut in_test_module = false;
+        let mut test_brace_depth = 0;
+
+        for (idx, line) in contents.lines().enumerate() {
+            // Track entry into #[cfg(test)] modules
+            if line.contains("#[cfg(test)]") {
+                in_test_module = true;
+                test_brace_depth = 0;
+            }
+
+            // Track brace depth when inside test module
+            if in_test_module {
+                test_brace_depth += line.chars().filter(|&c| c == '{').count();
+                test_brace_depth =
+                    test_brace_depth.saturating_sub(line.chars().filter(|&c| c == '}').count());
+                if test_brace_depth == 0 && line.contains('}') {
+                    in_test_module = false;
+                }
+                continue; // Skip test code
+            }
+
+            if contains_manual_input_schema_literal(line) {
+                let rel = path.strip_prefix(root).unwrap_or(&path);
+                offenders.push(format!("{}:{}: {}", rel.display(), idx + 1, line.trim()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn contains_manual_input_schema_literal(line: &str) -> bool {
+    for needle in [
+        "input_schema: serde_json::json!(",
+        "input_schema: json!(",
+        "input_schema:serde_json::json!(",
+        "input_schema:json!(",
+    ] {
+        let Some(pos) = line.find(needle) else {
+            continue;
+        };
+
+        // Don't trip over our own pattern strings.
+        if line[..pos].ends_with('"') {
+            continue;
+        }
+
+        return true;
+    }
+
+    false
+}
+
+// =============================================================================
+// Regression tests for PR review findings
+// =============================================================================
+
+/// Regression test: Shell job tools must use correct names in allowlist.
+/// The tool names are shell_job_status, shell_jobs, shell_job_cancel (not job_*).
+#[tokio::test]
+async fn test_regression_shell_job_tool_names() -> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_tools::builtin::shell::ShellConfig;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new()?;
+    let shell_config = ShellConfig {
+        enabled: true,
+        project_root: temp_dir.path().to_path_buf(),
+        ..Default::default()
+    };
+
+    // Enable shell tools via allowlist with CORRECT names
+    let config = BuiltinToolConfig {
+        policy: ToolPolicyLayer::new()
+            .enable_tool("shell")
+            .enable_tool("shell_job_status")
+            .enable_tool("shell_jobs")
+            .enable_tool("shell_job_cancel"),
+        ..Default::default()
+    };
+
+    let store = Arc::new(MemoryTaskStore::new());
+    let dispatcher =
+        CompositeDispatcher::new(store, &config, None, Some(shell_config), None, None)?;
+
+    let tools = dispatcher.tools();
+    let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+
+    // Verify all shell tools are exposed with correct names
+    assert!(tool_names.contains(&"shell"), "shell tool missing");
+    assert!(
+        tool_names.contains(&"shell_job_status"),
+        "shell_job_status missing (was 'job_status' exposed instead?)"
+    );
+    assert!(
+        tool_names.contains(&"shell_jobs"),
+        "shell_jobs missing (was 'jobs_list' exposed instead?)"
+    );
+    assert!(
+        tool_names.contains(&"shell_job_cancel"),
+        "shell_job_cancel missing (was 'job_cancel' exposed instead?)"
+    );
+
+    // Verify OLD incorrect names are NOT present
+    assert!(
+        !tool_names.contains(&"job_status"),
+        "job_status should not exist - use shell_job_status"
+    );
+    assert!(
+        !tool_names.contains(&"jobs_list"),
+        "jobs_list should not exist - use shell_jobs"
+    );
+    assert!(
+        !tool_names.contains(&"job_cancel"),
+        "job_cancel should not exist - use shell_job_cancel"
+    );
+
+    Ok(())
+}
+
+/// Regression test: ToolDispatcherBuilder must populate registry from router tools.
+/// Without this, dispatch_call validation always fails with NotFound.
+#[tokio::test]
+async fn test_regression_builder_populates_registry() -> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_tools::builder::{
+        BuiltinDispatcherConfig, ToolDispatcherBuilder, ToolDispatcherConfig, ToolDispatcherSource,
+    };
+    use std::time::Duration;
+
+    let store = Arc::new(MemoryTaskStore::new());
+    let config = BuiltinToolConfig::default();
+
+    let dispatcher_config = ToolDispatcherConfig {
+        source: ToolDispatcherSource::Composite(Box::new(BuiltinDispatcherConfig {
+            store,
+            config,
+            project_root: Some(test_project_root()),
+            shell_config: None,
+            external: None,
+            session_id: None,
+            ops_lifecycle: None,
+        })),
+        comms: None,
+        default_timeout: Duration::from_secs(30),
+    };
+
+    let dispatcher = ToolDispatcherBuilder::new(dispatcher_config)
+        .build()
+        .await?;
+
+    // The dispatcher should have tools from the router
+    let tools = dispatcher.tools();
+    assert!(!tools.is_empty(), "Registry should have tools from router");
+    assert!(
+        tools.iter().any(|t| t.name == "task_list"),
+        "task_list should be registered"
+    );
+
+    // dispatch_call should succeed for a valid tool (not NotFound)
+    let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+    let call = ToolCallView {
+        id: "test-1",
+        name: "task_list",
+        args: &args_raw,
+    };
+
+    let result = dispatcher.dispatch_call(call).await;
+    assert!(
+        result.is_ok(),
+        "dispatch_call should succeed, not return NotFound: {result:?}"
+    );
+
+    Ok(())
+}
+
+/// Regression test: ToolDispatcher::dispatch must enforce timeout.
+/// Without timeout, a hanging tool blocks the agent loop indefinitely.
+#[tokio::test]
+async fn test_regression_dispatcher_timeout_enforced() -> Result<(), Box<dyn std::error::Error>> {
+    use async_trait::async_trait;
+    use meerkat_core::types::ToolDef;
+    use meerkat_tools::dispatcher::ToolDispatcher;
+    use meerkat_tools::schema::empty_object_schema;
+    use std::time::Duration;
+
+    /// A tool dispatcher that hangs forever
+    struct HangingDispatcher;
+
+    #[async_trait]
+    impl AgentToolDispatcher for HangingDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([Arc::new(ToolDef {
+                name: "hang".into(),
+                description: "Hangs forever".to_string(),
+                input_schema: empty_object_schema(),
+                provenance: None,
+            })])
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            let _ = call;
+            // Hang forever
+            std::future::pending().await
+        }
+    }
+
+    let router = Arc::new(HangingDispatcher);
+
+    // Very short timeout
+    let dispatcher = ToolDispatcher::new(router).with_timeout(Duration::from_millis(50));
+
+    let start = std::time::Instant::now();
+    let result = dispatch_tool(&dispatcher, "hang", json!({})).await;
+    let elapsed = start.elapsed();
+
+    // Should timeout quickly, not hang
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "dispatch should timeout quickly, took {elapsed:?}"
+    );
+    assert!(result.is_err(), "dispatch should return timeout error");
+
+    // Verify it's a Timeout error (not ExecutionFailed)
+    // Regression: Previously timeouts were mapped to ExecutionFailed, which broke
+    // error classification (metrics, retries) that rely on the "timeout" error code.
+    match result {
+        Ok(_) => return Err("Expected timeout error, got Ok".into()),
+        Err(ToolError::Timeout { name, timeout_ms }) => {
+            assert_eq!(name, "hang", "Timeout should include tool name");
+            assert_eq!(
+                timeout_ms, 50,
+                "Timeout should include configured timeout_ms"
+            );
+        }
+        Err(ToolError::ExecutionFailed { message }) => {
+            return Err(format!(
+                "Regression: Timeout was incorrectly mapped to ExecutionFailed: {message}"
+            )
+            .into());
+        }
+        Err(other) => {
+            return Err(format!("Expected Timeout error, got: {other:?}").into());
+        }
+    }
+
+    // Verify the error code is "timeout" (for classification)
+    let err = ToolError::timeout("test", 100);
+    assert_eq!(err.error_code(), "timeout");
+
+    Ok(())
+}
+
+/// Regression test: CompositeDispatcher must deduplicate external tools.
+/// Without deduplication, LLMs receive duplicate tool definitions and may
+/// generate args for the wrong schema.
+#[tokio::test]
+async fn test_regression_composite_deduplicates_external_tools()
+-> Result<(), Box<dyn std::error::Error>> {
+    use async_trait::async_trait;
+    use meerkat_core::types::ToolDef;
+
+    /// An external dispatcher that provides a tool with the same name as a builtin
+    struct DuplicatingDispatcher;
+
+    #[async_trait]
+    impl AgentToolDispatcher for DuplicatingDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([
+                // Duplicate of builtin
+                Arc::new(ToolDef {
+                    name: "task_list".into(),
+                    description: "External task_list (should be shadowed)".to_string(),
+                    input_schema: json!({"type": "object", "properties": {"external": {"type": "boolean"}}}),
+                    provenance: None,
+                }),
+                // Unique external tool
+                Arc::new(ToolDef {
+                    name: "external_only".into(),
+                    description: "External-only tool".to_string(),
+                    input_schema: json!({"type": "object"}),
+                    provenance: None,
+                }),
+            ])
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            let value = json!({"from": "external", "tool": call.name});
+            Ok(ToolResult::new(call.id.to_string(), value.to_string(), false).into())
+        }
+    }
+
+    let store = Arc::new(MemoryTaskStore::new());
+    let config = BuiltinToolConfig::default();
+    let external = Arc::new(DuplicatingDispatcher) as Arc<dyn AgentToolDispatcher>;
+
+    let dispatcher = CompositeDispatcher::new(
+        store,
+        &config,
+        Some(test_project_root()),
+        None,
+        Some(external),
+        None,
+    )?;
+    let tools = dispatcher.tools();
+
+    // Count occurrences of task_list
+    let task_list_count = tools.iter().filter(|t| t.name == "task_list").count();
+    assert_eq!(
+        task_list_count, 1,
+        "task_list should appear exactly once, not duplicated (found {task_list_count})"
+    );
+
+    // Verify the builtin version is kept (check description doesn't say "External")
+    let task_list = tools
+        .iter()
+        .find(|t| t.name == "task_list")
+        .ok_or("task_list should exist")?;
+    assert!(
+        !task_list.description.contains("External"),
+        "Builtin task_list should take precedence over external"
+    );
+
+    // Verify unique external tool is still included
+    assert!(
+        tools.iter().any(|t| t.name == "external_only"),
+        "Unique external tools should still be included"
+    );
+
+    Ok(())
+}

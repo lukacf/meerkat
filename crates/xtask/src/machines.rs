@@ -1,0 +1,6507 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env, fs,
+    io::Write as _,
+    path::{Path, PathBuf},
+    process::{Command, ExitStatus, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::{Context, Result, anyhow, bail};
+use clap::{Args, ValueEnum};
+use meerkat_machine_codegen::{
+    composition_route_coverage_operator_name, composition_scheduler_coverage_operator_name,
+    composition_witness_cfg_name, merge_mapping_document, render_composition_ci_cfg,
+    render_composition_contract_markdown, render_composition_driver,
+    render_composition_mapping_coverage, render_composition_semantic_model,
+    render_composition_witness_cfg, render_generated_kernel_mod, render_machine_ci_cfg,
+    render_machine_contract_markdown, render_machine_kernel_module,
+    render_machine_mapping_coverage, render_machine_semantic_model,
+};
+use meerkat_machine_schema::{
+    CompositionCoverageManifest, CompositionSchema, CoverageClaims, CoverageSchemaTarget,
+    MachineCoverageManifest, MachineProductionOwnerRelation, MachineSchema, SemanticCoverageEntry,
+    TriggerKind, canonical_composition_coverage_manifests, canonical_composition_schemas,
+    canonical_machine_coverage_manifests, canonical_machine_production_owner_relations,
+    canonical_machine_schemas, scheduler_rule_coverage_name,
+};
+use quote::ToTokens;
+use serde::Serialize;
+use syn::spanned::Spanned;
+use syn::visit::Visit;
+
+#[derive(Debug, Clone, Args)]
+pub struct SelectionArgs {
+    /// Operate on every registered machine and composition.
+    #[arg(long)]
+    pub all: bool,
+    /// Restrict work to one or more machine names or machine slugs.
+    #[arg(long = "machine")]
+    pub machines: Vec<String>,
+    /// Restrict work to one or more composition names.
+    #[arg(long = "composition")]
+    pub compositions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct VerifyArgs {
+    #[command(flatten)]
+    selection: SelectionArgs,
+    /// Validate the canonical registry only and skip TLC execution.
+    #[arg(long)]
+    skip_tlc: bool,
+    /// Skip TLC for selected broad compositions after drift validation.
+    #[arg(long = "skip-tlc-composition")]
+    skip_tlc_compositions: Vec<String>,
+    /// Skip Cargo-backed kernel/owner tests after drift and TLC checks.
+    ///
+    /// Bazel remote tests run from runfiles, not from a Git checkout, so the
+    /// Cargo-backed post-checks are covered by Bazel test targets instead.
+    #[arg(long)]
+    skip_cargo_tests: bool,
+    /// TLC config profile to run.
+    #[arg(long, value_enum, default_value_t = VerifyProfile::Ci)]
+    profile: VerifyProfile,
+    /// TLC worker count. Defaults to local core count or TLC_WORKERS.
+    #[arg(long)]
+    workers: Option<usize>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct HopcroftArgs {
+    #[command(flatten)]
+    selection: SelectionArgs,
+    /// TLC config profile to dump.
+    #[arg(long, value_enum, default_value_t = VerifyProfile::Ci)]
+    profile: VerifyProfile,
+    /// TLC worker count. Defaults to local core count or TLC_WORKERS.
+    #[arg(long)]
+    workers: Option<usize>,
+    /// Seed the initial quotient partition with a state observation signature.
+    #[arg(long, value_enum, default_value_t = HopcroftObservation::None)]
+    observation: HopcroftObservation,
+    /// Persist DOT dumps, TLC logs, and JSON summaries under this directory.
+    #[arg(long)]
+    artifact_dir: Option<PathBuf>,
+    /// Emit the full audit map: field-ablation summaries plus mixed-phase pair audits.
+    #[arg(long)]
+    audit_map: bool,
+    /// Reuse an existing `graph.dot` under `--artifact-dir` instead of rerunning TLC.
+    #[arg(long)]
+    reuse_existing_dump: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum VerifyProfile {
+    Ci,
+    Deep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HopcroftObservation {
+    /// Pure behavior quotient seeded with a single initial partition.
+    None,
+    /// Preserve the `phase` snapshot as part of the observation signature.
+    Phase,
+    /// Preserve the full snapshot (minus `model_step_count`) as the observation signature.
+    Full,
+}
+
+pub fn machine_codegen(args: SelectionArgs) -> Result<()> {
+    let registry = CanonicalRegistry::load();
+    registry.validate()?;
+
+    let selection = registry.select(&args)?;
+    let root = repo_root()?;
+    println!(
+        "machine-codegen: {} machine(s), {} composition(s)",
+        selection.machines.len(),
+        selection.compositions.len()
+    );
+    machine_codegen_at_root(&root, &selection)
+}
+
+pub fn machine_verify(args: VerifyArgs) -> Result<()> {
+    let registry = CanonicalRegistry::load();
+    registry.validate()?;
+
+    let selection = registry.select(&args.selection)?;
+    let root = repo_root()?;
+    let workers = resolve_tlc_workers(args.workers)?;
+    let skip_tlc_compositions =
+        resolve_skip_tlc_compositions(&selection, &args.skip_tlc_compositions)?;
+    println!(
+        "machine-verify ({:?}): {} machine(s), {} composition(s), tlc={}",
+        args.profile,
+        selection.machines.len(),
+        selection.compositions.len(),
+        !args.skip_tlc
+    );
+    machine_verify_at_root(
+        &root,
+        &selection,
+        !args.skip_tlc,
+        !args.skip_cargo_tests,
+        args.profile,
+        workers,
+        &skip_tlc_compositions,
+    )
+}
+
+pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
+    let registry = CanonicalRegistry::load();
+    registry.validate()?;
+
+    let selection = registry.select(&args.selection)?;
+    let root = repo_root()?;
+    ensure_no_drift(&root, &selection)?;
+
+    if !args.reuse_existing_dump && which::which("tlc").is_err() {
+        bail!("tlc not on PATH; machine-hopcroft requires the TLC CLI");
+    }
+
+    let workers = resolve_tlc_workers(args.workers)?;
+    println!(
+        "machine-hopcroft ({:?}, {:?}): {} machine(s), {} composition(s)",
+        args.profile,
+        args.observation,
+        selection.machines.len(),
+        selection.compositions.len()
+    );
+
+    let artifact_dir = args
+        .artifact_dir
+        .as_deref()
+        .map(|path| {
+            let resolved = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                root.join(path)
+            };
+            fs::create_dir_all(&resolved)
+                .with_context(|| format!("create artifact dir {}", resolved.display()))?;
+            Ok::<PathBuf, anyhow::Error>(resolved)
+        })
+        .transpose()?;
+
+    let mut items = Vec::new();
+    for machine in &selection.machines {
+        let dir = machine_dir(&root, &machine.slug);
+        let artifact_subdir = artifact_dir.as_deref().map(|base| base.join(&machine.slug));
+        items.push(run_hopcroft_for_target(
+            &root,
+            HopcroftTarget {
+                kind: "machine",
+                display_name: machine.schema.machine.as_str(),
+                slug: &machine.slug,
+                dir: &dir,
+                machine_schema: Some(&machine.schema),
+            },
+            args.profile,
+            workers,
+            args.observation,
+            args.audit_map,
+            args.reuse_existing_dump,
+            artifact_subdir.as_deref(),
+        )?);
+    }
+
+    for composition in &selection.compositions {
+        let dir = composition_dir(&root, &composition.slug);
+        let artifact_subdir = artifact_dir
+            .as_deref()
+            .map(|base| base.join(&composition.slug));
+        items.push(run_hopcroft_for_target(
+            &root,
+            HopcroftTarget {
+                kind: "composition",
+                display_name: composition.schema.name.as_str(),
+                slug: &composition.slug,
+                dir: &dir,
+                machine_schema: None,
+            },
+            args.profile,
+            workers,
+            args.observation,
+            args.audit_map,
+            args.reuse_existing_dump,
+            artifact_subdir.as_deref(),
+        )?);
+    }
+
+    if let Some(artifact_dir) = artifact_dir {
+        let summary_path = artifact_dir.join("summary.json");
+        let root_summary = HopcroftRunSummary {
+            observation: args.observation,
+            profile: verify_profile_name(args.profile).into(),
+            items,
+        };
+        fs::write(
+            &summary_path,
+            serde_json::to_vec_pretty(&root_summary).context("serialize hopcroft summary")?,
+        )
+        .with_context(|| format!("write {}", summary_path.display()))?;
+        println!("wrote {}", summary_path.display());
+    }
+
+    Ok(())
+}
+
+pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
+    let registry = CanonicalRegistry::load();
+    registry.validate()?;
+
+    let selection = registry.select(&args)?;
+    let root = repo_root()?;
+    println!(
+        "machine-check-drift: checking {} machine(s), {} composition(s)",
+        selection.machines.len(),
+        selection.compositions.len()
+    );
+    let mut mismatches = collect_drift_mismatches(&root, &selection)?;
+    mismatches.extend(collect_coverage_anchor_mismatches(&root, &selection));
+    mismatches.extend(collect_machine_inventory_mismatches(&root)?);
+    mismatches.extend(collect_production_machine_owner_relation_mismatches(&root)?);
+    mismatches.extend(collect_generated_kernel_boundary_mismatches(&root)?);
+    mismatches.extend(collect_authority_language_mismatches(&root)?);
+    mismatches.extend(collect_stale_cfg_mismatches(&root)?);
+    mismatches.extend(collect_peer_response_terminal_projection_mismatches(&root)?);
+    mismatches.extend(collect_direct_flow_reducer_transition_mismatches(&root)?);
+    mismatches.extend(collect_mob_runtime_catalog_command_gate_mismatches(&root)?);
+
+    if !mismatches.is_empty() {
+        bail!(
+            "machine authority drift detected:\n{}",
+            mismatches
+                .into_iter()
+                .map(|item| format!("- {item}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    println!("machine authority artifacts are up to date");
+    Ok(())
+}
+
+pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()> {
+    let registry = CanonicalRegistry::load();
+    prune_stale_generated_kernel_modules(root, &registry)?;
+    write_generated(
+        &generated_kernel_mod_path(root),
+        &render_generated_kernel_mod(&registry.machines),
+    )?;
+
+    for machine in &selection.machines {
+        remove_legacy_authority_path(&machine_authority_path(root, &machine.slug))?;
+        let machine_model = render_machine_semantic_model(&machine.schema)
+            .with_context(|| format!("render machine semantic model for `{}`", machine.slug))?;
+        write_generated(&machine_model_path(root, &machine.slug), &machine_model)?;
+        write_generated(
+            &machine_ci_path(root, &machine.slug),
+            &render_machine_ci_cfg(&machine.schema, false),
+        )?;
+        write_generated(
+            &machine_deep_path(root, &machine.slug),
+            &render_machine_ci_cfg(&machine.schema, true),
+        )?;
+        write_generated(
+            &machine_contract_path(root, &machine.slug),
+            &render_machine_contract_markdown(&machine.schema, &machine.coverage),
+        )?;
+        println!(
+            "generated {}",
+            machine_model_path(root, &machine.slug).display()
+        );
+
+        let mapping_path = machine_mapping_path(root, &machine.slug);
+        let existing = fs::read_to_string(&mapping_path).ok();
+        let merged = merge_mapping_document(
+            existing.as_deref(),
+            machine.schema.machine.as_str(),
+            &render_machine_mapping_coverage(&machine.schema, &machine.coverage),
+        );
+        write_generated(&mapping_path, &merged)?;
+        println!("updated {}", mapping_path.display());
+
+        let generated_slug = generated_kernel_module_slug(&machine.schema.machine);
+        write_generated(
+            &generated_kernel_module_path(root, &generated_slug),
+            &render_machine_kernel_module(&machine.schema)?,
+        )?;
+        println!(
+            "generated {}",
+            generated_kernel_module_path(root, &generated_slug).display()
+        );
+    }
+
+    for compat in compat_generated_kernel_schemas() {
+        let generated_slug = generated_kernel_module_slug(&compat.machine);
+        write_generated(
+            &mob_generated_machine_module_path(root, &generated_slug),
+            &render_machine_kernel_module(&compat)?,
+        )?;
+        println!(
+            "generated {}",
+            mob_generated_machine_module_path(root, &generated_slug).display()
+        );
+    }
+
+    for composition in &selection.compositions {
+        remove_legacy_authority_path(&composition_authority_path(root, &composition.slug))?;
+        let composition_model = render_composition_semantic_model(&composition.schema)
+            .with_context(|| {
+                format!(
+                    "render composition semantic model for `{}`",
+                    composition.slug
+                )
+            })?;
+        write_generated(
+            &composition_model_path(root, &composition.slug),
+            &composition_model,
+        )?;
+        write_generated(
+            &composition_ci_path(root, &composition.slug),
+            &render_composition_ci_cfg(&composition.schema, false),
+        )?;
+        write_generated(
+            &composition_deep_path(root, &composition.slug),
+            &render_composition_ci_cfg(&composition.schema, true),
+        )?;
+        for witness in &composition.schema.witnesses {
+            write_generated(
+                &composition_witness_path(root, &composition.slug, witness.name.as_str()),
+                &render_composition_witness_cfg(&composition.schema, witness),
+            )?;
+        }
+        write_generated(
+            &composition_contract_path(root, &composition.slug),
+            &render_composition_contract_markdown(&composition.schema, &composition.coverage),
+        )?;
+        println!(
+            "generated {}",
+            composition_model_path(root, &composition.slug).display()
+        );
+
+        let mapping_path = composition_mapping_path(root, &composition.slug);
+        let existing = fs::read_to_string(&mapping_path).ok();
+        let merged = merge_mapping_document(
+            existing.as_deref(),
+            composition.schema.name.as_str(),
+            &render_composition_mapping_coverage(&composition.schema, &composition.coverage),
+        );
+        write_generated(&mapping_path, &merged)?;
+        println!("updated {}", mapping_path.display());
+
+        if let Some(driver_code) = render_composition_driver(&composition.schema) {
+            let driver_path = composition_driver_path(root, &composition.schema)?;
+            write_generated(&driver_path, &driver_code)?;
+            println!("generated {}", driver_path.display());
+        }
+    }
+
+    Ok(())
+}
+
+fn machine_verify_at_root(
+    root: &Path,
+    selection: &Selection,
+    run_tlc: bool,
+    run_cargo_tests: bool,
+    profile: VerifyProfile,
+    workers: usize,
+    skip_tlc_compositions: &BTreeSet<String>,
+) -> Result<()> {
+    ensure_no_drift(root, selection)?;
+
+    for machine in &selection.machines {
+        println!("machine: {}", machine.schema.machine);
+        if run_tlc {
+            let coverage = maybe_run_tlc_in_dir(
+                &machine_dir(root, &machine.slug),
+                &machine.slug,
+                profile,
+                workers,
+            )?;
+            if matches!(profile, VerifyProfile::Deep)
+                && let Some(coverage) = coverage
+            {
+                ensure_machine_transition_coverage(&machine.schema, &coverage)?;
+            }
+        }
+    }
+
+    for composition in &selection.compositions {
+        println!("composition: {}", composition.schema.name);
+        if run_tlc {
+            if skip_tlc_compositions.contains(&composition.slug) {
+                ensure_composition_ci_structural_invariants(
+                    root,
+                    &composition.slug,
+                    &composition.schema,
+                )?;
+                println!(
+                    "skipping full TLC for broad composition {} after drift and ci.cfg structural-invariant validation",
+                    composition.schema.name
+                );
+                continue;
+            }
+            let main_coverage = maybe_run_tlc_in_dir(
+                &composition_dir(root, &composition.slug),
+                &composition.slug,
+                profile,
+                workers,
+            )?;
+            // Structural requirements (expected routes / scheduler rules /
+            // states / transitions) are enforced in EVERY verify profile via the
+            // structural invariants emitted into the composition `ci.cfg`
+            // INVARIANTS block (see render_composition_ci_cfg) — that is the
+            // promotion (#188) that makes the standard CI gate fail closed on a
+            // structurally under-specified composition.
+            //
+            // The per-witness `.cfg` TLC model-checks are TEMPORAL/liveness
+            // checks: they assert that a scripted input sequence drives the
+            // composition through the expected routes. They REQUIRE the Deep
+            // profile's witness-script driving machinery — an un-driven witness
+            // run stutters and vacuously violates its temporal property. Those
+            // (and the coverage-aggregation audit they feed, which also needs
+            // Deep's `-coverage 1` instrumentation) therefore stay Deep-gated.
+            if matches!(profile, VerifyProfile::Deep) {
+                let mut aggregated_coverage = main_coverage.unwrap_or_default();
+                let mut witness_covered_routes = BTreeSet::new();
+                let mut witness_covered_scheduler_rules = BTreeSet::new();
+                for witness in &composition.schema.witnesses {
+                    let witness_coverage = maybe_run_tlc_in_dir_with_config(
+                        &composition_dir(root, &composition.slug),
+                        &composition.slug,
+                        &composition_witness_cfg_name(&witness.name),
+                        profile,
+                        workers,
+                    )?;
+                    merge_tlc_coverage(&mut aggregated_coverage, witness_coverage.as_ref());
+                    witness_covered_routes.extend(
+                        witness
+                            .expected_routes
+                            .iter()
+                            .map(|r| r.as_str().to_owned()),
+                    );
+                    witness_covered_scheduler_rules.extend(
+                        witness
+                            .expected_scheduler_rules
+                            .iter()
+                            .map(composition_scheduler_coverage_operator_name),
+                    );
+                }
+                ensure_composition_coverage(
+                    &composition.schema,
+                    &aggregated_coverage,
+                    &witness_covered_routes,
+                    &witness_covered_scheduler_rules,
+                )?;
+            }
+        }
+    }
+
+    if run_cargo_tests {
+        run_generated_kernel_tests(root)?;
+        for machine in &selection.machines {
+            run_machine_owner_tests(root, machine)?;
+        }
+    } else {
+        println!("skipping Cargo-backed machine kernel/owner tests");
+    }
+
+    Ok(())
+}
+
+fn ensure_composition_ci_structural_invariants(
+    root: &Path,
+    slug: &str,
+    schema: &CompositionSchema,
+) -> Result<()> {
+    let expected = schema
+        .invariants
+        .iter()
+        .filter(|invariant| invariant.kind.is_structural())
+        .map(|invariant| invariant.name.as_str())
+        .collect::<Vec<_>>();
+    if expected.is_empty() {
+        return Ok(());
+    }
+
+    let path = composition_ci_path(root, slug);
+    let cfg = fs::read_to_string(&path)
+        .with_context(|| format!("read composition ci.cfg {}", path.display()))?;
+    let missing = expected
+        .into_iter()
+        .filter(|name| !cfg.lines().any(|line| line.trim() == *name))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "composition {} is skipped for full TLC but its ci.cfg omits structural invariants:\n{}",
+        schema.name,
+        missing
+            .into_iter()
+            .map(|name| format!("- {name}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+fn ensure_no_drift(root: &Path, selection: &Selection) -> Result<()> {
+    let mut mismatches = collect_drift_mismatches(root, selection)?;
+    mismatches.extend(collect_coverage_anchor_mismatches(root, selection));
+    mismatches.extend(collect_machine_inventory_mismatches(root)?);
+    mismatches.extend(collect_production_machine_owner_relation_mismatches(root)?);
+    mismatches.extend(collect_generated_kernel_boundary_mismatches(root)?);
+    mismatches.extend(collect_authority_language_mismatches(root)?);
+    mismatches.extend(collect_stale_cfg_mismatches(root)?);
+    mismatches.extend(collect_peer_response_terminal_projection_mismatches(root)?);
+    mismatches.extend(collect_direct_flow_reducer_transition_mismatches(root)?);
+    mismatches.extend(collect_mob_runtime_catalog_command_gate_mismatches(root)?);
+
+    if !mismatches.is_empty() {
+        bail!(
+            "machine authority drift detected:\n{}",
+            mismatches
+                .into_iter()
+                .map(|item| format!("- {item}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    Ok(())
+}
+
+pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Vec<String>> {
+    let mut mismatches = Vec::new();
+    let registry = CanonicalRegistry::load();
+    let kernel_export_schemas = generated_kernel_export_schemas(&registry);
+
+    for machine in &selection.machines {
+        collect_legacy_authority_mismatch(
+            &machine_authority_path(root, &machine.slug),
+            &mut mismatches,
+        );
+        let machine_model = render_machine_semantic_model(&machine.schema)
+            .with_context(|| format!("render machine semantic model for `{}`", machine.slug))?;
+        compare_generated(
+            &machine_model_path(root, &machine.slug),
+            &machine_model,
+            &mut mismatches,
+        )?;
+        compare_generated(
+            &machine_ci_path(root, &machine.slug),
+            &render_machine_ci_cfg(&machine.schema, false),
+            &mut mismatches,
+        )?;
+        compare_generated(
+            &machine_deep_path(root, &machine.slug),
+            &render_machine_ci_cfg(&machine.schema, true),
+            &mut mismatches,
+        )?;
+        compare_generated(
+            &machine_contract_path(root, &machine.slug),
+            &render_machine_contract_markdown(&machine.schema, &machine.coverage),
+            &mut mismatches,
+        )?;
+
+        let mapping_path = machine_mapping_path(root, &machine.slug);
+        let mapping_expected = expected_mapping_document(
+            &mapping_path,
+            machine.schema.machine.as_str(),
+            &render_machine_mapping_coverage(&machine.schema, &machine.coverage),
+        )?;
+        compare_generated(&mapping_path, &mapping_expected, &mut mismatches)?;
+        let generated_slug = generated_kernel_module_slug(&machine.schema.machine);
+        compare_generated(
+            &generated_kernel_module_path(root, &generated_slug),
+            &render_machine_kernel_module(&machine.schema)?,
+            &mut mismatches,
+        )?;
+    }
+
+    compare_generated(
+        &generated_kernel_mod_path(root),
+        &render_generated_kernel_mod(&kernel_export_schemas),
+        &mut mismatches,
+    )?;
+    for compat in compat_generated_kernel_schemas() {
+        let generated_slug = generated_kernel_module_slug(&compat.machine);
+        compare_generated(
+            &mob_generated_machine_module_path(root, &generated_slug),
+            &render_machine_kernel_module(&compat)?,
+            &mut mismatches,
+        )?;
+    }
+
+    for composition in &selection.compositions {
+        collect_legacy_authority_mismatch(
+            &composition_authority_path(root, &composition.slug),
+            &mut mismatches,
+        );
+        let composition_model = render_composition_semantic_model(&composition.schema)
+            .with_context(|| {
+                format!(
+                    "render composition semantic model for `{}`",
+                    composition.slug
+                )
+            })?;
+        compare_generated(
+            &composition_model_path(root, &composition.slug),
+            &composition_model,
+            &mut mismatches,
+        )?;
+        compare_generated(
+            &composition_ci_path(root, &composition.slug),
+            &render_composition_ci_cfg(&composition.schema, false),
+            &mut mismatches,
+        )?;
+        compare_generated(
+            &composition_deep_path(root, &composition.slug),
+            &render_composition_ci_cfg(&composition.schema, true),
+            &mut mismatches,
+        )?;
+        for witness in &composition.schema.witnesses {
+            compare_generated(
+                &composition_witness_path(root, &composition.slug, witness.name.as_str()),
+                &render_composition_witness_cfg(&composition.schema, witness),
+                &mut mismatches,
+            )?;
+        }
+        compare_generated(
+            &composition_contract_path(root, &composition.slug),
+            &render_composition_contract_markdown(&composition.schema, &composition.coverage),
+            &mut mismatches,
+        )?;
+
+        let mapping_path = composition_mapping_path(root, &composition.slug);
+        let mapping_expected = expected_mapping_document(
+            &mapping_path,
+            composition.schema.name.as_str(),
+            &render_composition_mapping_coverage(&composition.schema, &composition.coverage),
+        )?;
+        compare_generated(&mapping_path, &mapping_expected, &mut mismatches)?;
+        if let Some(driver_code) = render_composition_driver(&composition.schema) {
+            compare_generated(
+                &composition_driver_path(root, &composition.schema)?,
+                &driver_code,
+                &mut mismatches,
+            )?;
+        }
+    }
+
+    Ok(mismatches)
+}
+
+/// Deliberately text-level tombstone gate: these are retired
+/// authority-language names banned from *documentation prose*
+/// (`docs/` + spec READMEs — see `authority_language_paths`), where the
+/// stale word itself is the violation regardless of context. This is not a
+/// Rust-source structure check; structural source-shape governance lives in
+/// the syn-AST gates in this file and `rmat_audit`/`effect_authority`.
+pub fn collect_authority_language_mismatches(root: &Path) -> Result<Vec<String>> {
+    let mut mismatches = Vec::new();
+    let banned = ["schema.yaml", "PureHandKernel", "PureHand"];
+
+    for path in authority_language_paths(root)? {
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("read authority-language file {}", path.display()))?;
+
+        for token in banned {
+            if contents.contains(token) {
+                mismatches.push(format!(
+                    "stale authority language `{token}` present in {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(mismatches)
+}
+
+/// Parse a whole Rust source file and structurally drop every `#[cfg(test)]`
+/// item (top-level, nested in `mod`, or impl member) so the production-only
+/// contract scanners never see test fixtures — and never fail to parse. The
+/// prior approach split the text at the first `#[cfg(test)]`, which truncates
+/// an inline `#[cfg(test)] fn` mid-file and yields unbalanced (unparseable)
+/// Rust. The full file is always balanced, so it always parses.
+fn parse_production_file(contents: &str) -> syn::Result<syn::File> {
+    let mut file = syn::parse_file(contents)?;
+    strip_cfg_test_items(&mut file.items);
+    Ok(file)
+}
+
+fn strip_cfg_test_items(items: &mut Vec<syn::Item>) {
+    items.retain(|item| !item_attrs(item).iter().any(attr_is_cfg_test));
+    for item in items.iter_mut() {
+        match item {
+            syn::Item::Mod(module) => {
+                if let Some((_, inner)) = module.content.as_mut() {
+                    strip_cfg_test_items(inner);
+                }
+            }
+            syn::Item::Impl(item_impl) => {
+                item_impl.items.retain(|impl_item| {
+                    let attrs = match impl_item {
+                        syn::ImplItem::Const(inner) => &inner.attrs,
+                        syn::ImplItem::Fn(inner) => &inner.attrs,
+                        syn::ImplItem::Type(inner) => &inner.attrs,
+                        syn::ImplItem::Macro(inner) => &inner.attrs,
+                        _ => return true,
+                    };
+                    !attrs.iter().any(attr_is_cfg_test)
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The attributes attached to a top-level item, for the variants that can carry
+/// a `#[cfg(test)]` gate. Variants that cannot are reported as having none.
+fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(inner) => &inner.attrs,
+        syn::Item::Enum(inner) => &inner.attrs,
+        syn::Item::ExternCrate(inner) => &inner.attrs,
+        syn::Item::Fn(inner) => &inner.attrs,
+        syn::Item::ForeignMod(inner) => &inner.attrs,
+        syn::Item::Impl(inner) => &inner.attrs,
+        syn::Item::Macro(inner) => &inner.attrs,
+        syn::Item::Mod(inner) => &inner.attrs,
+        syn::Item::Static(inner) => &inner.attrs,
+        syn::Item::Struct(inner) => &inner.attrs,
+        syn::Item::Trait(inner) => &inner.attrs,
+        syn::Item::TraitAlias(inner) => &inner.attrs,
+        syn::Item::Type(inner) => &inner.attrs,
+        syn::Item::Union(inner) => &inner.attrs,
+        syn::Item::Use(inner) => &inner.attrs,
+        _ => &[],
+    }
+}
+
+/// `true` for a `#[cfg(test)]` attribute.
+fn attr_is_cfg_test(attr: &syn::Attribute) -> bool {
+    if !attr.path().is_ident("cfg") {
+        return false;
+    }
+    let mut is_test = false;
+    let _ = attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("test") {
+            is_test = true;
+        }
+        Ok(())
+    });
+    is_test
+}
+
+pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Result<Vec<String>> {
+    let mut mismatches = Vec::new();
+    let boundary_files = [
+        "crates/meerkat-runtime/src/accept.rs",
+        "crates/meerkat-runtime/src/input.rs",
+        "crates/meerkat-runtime/src/runtime_loop.rs",
+    ];
+
+    for rel in boundary_files {
+        let path = root.join(rel);
+        if !path.exists() {
+            continue;
+        }
+        let contents = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "read peer-response terminal boundary file {}",
+                path.display()
+            )
+        })?;
+        // AST node kinds, not file text: the banned terminal-projection
+        // *construction* (enum variant path), the handwritten render string
+        // *literal*, and the context-key *call* are detected structurally, so
+        // a token rename that keeps the banned relationship still fails and a
+        // doc/comment mention does not false-positive. We parse the whole
+        // (always balanced) file and drop `#[cfg(test)]` items structurally so
+        // test fixtures don't trip the production contract — a textual prefix
+        // split at `#[cfg(test)]` truncates inline test helpers mid-file and
+        // breaks the parse.
+        let parsed = parse_production_file(&contents)
+            .with_context(|| format!("parse peer-response terminal boundary file {rel}"))?;
+        let mut visitor = PeerResponseTerminalProjectionVisitor::new(rel);
+        visitor.visit_file(&parsed);
+        mismatches.extend(visitor.mismatches);
+    }
+
+    let core_projection_owner = root.join("crates/meerkat-core/src/handles.rs");
+    if core_projection_owner.exists() {
+        let rel = "crates/meerkat-core/src/handles.rs";
+        let contents = fs::read_to_string(&core_projection_owner).with_context(|| {
+            format!(
+                "read peer-response terminal core projection owner {}",
+                core_projection_owner.display()
+            )
+        })?;
+        collect_peer_response_terminal_core_fact_mismatches(rel, &contents, &mut mismatches)?;
+    }
+
+    let shell_boundary_files = [
+        "crates/meerkat-contracts/src/wire/runtime.rs",
+        "crates/meerkat-rest/src/lib.rs",
+        "crates/meerkat-rpc/src/handlers/event.rs",
+        "crates/meerkat-rpc/src/session_runtime.rs",
+    ];
+
+    for rel in shell_boundary_files {
+        let path = root.join(rel);
+        if !path.exists() {
+            continue;
+        }
+        let contents = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "read peer-response terminal shell boundary file {}",
+                path.display()
+            )
+        })?;
+        let parsed = parse_production_file(&contents)
+            .with_context(|| format!("parse peer-response terminal shell boundary file {rel}"))?;
+        let mut visitor = PeerResponseTerminalShellVisitor::new(rel);
+        visitor.visit_file(&parsed);
+        mismatches.extend(visitor.mismatches);
+    }
+
+    Ok(mismatches)
+}
+
+/// Functions whose `peer_name` argument projects a typed terminal identity from
+/// the inert presentation string instead of transporting the typed route /
+/// display / correlation facts the core already owns.
+const PEER_NAME_PROJECTION_CALLS: &[(&str, &str)] = &[
+    (
+        "PeerResponseTerminalRouteIdentity::parse",
+        "terminal route identity projected from peer_name",
+    ),
+    (
+        "PeerResponseTerminalDisplayIdentity::parse",
+        "terminal display identity projected from peer_name",
+    ),
+    (
+        "peer_response_terminal_input",
+        "terminal input projected from peer_name",
+    ),
+];
+
+/// AST visitor for the production runtime boundary files. Flags the typed
+/// terminal-projection construction, the handwritten terminal render string
+/// literal, and the handwritten terminal context-key call.
+struct PeerResponseTerminalProjectionVisitor<'a> {
+    rel: &'a str,
+    mismatches: Vec<String>,
+}
+
+impl<'a> PeerResponseTerminalProjectionVisitor<'a> {
+    fn new(rel: &'a str) -> Self {
+        Self {
+            rel,
+            mismatches: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, span: proc_macro2::Span, reason: &str, token: &str) {
+        let rel = self.rel;
+        let line = span.start().line;
+        self.mismatches.push(format!(
+            "{rel}:{line}: {reason} `{token}` must route through typed core peer-response terminal facts"
+        ));
+    }
+}
+
+impl<'ast> Visit<'ast> for PeerResponseTerminalProjectionVisitor<'_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && path_tail_ident(&path.path).as_deref() == Some("peer_response_terminal_context_key")
+        {
+            self.push(
+                node.span(),
+                "handwritten terminal context key projection",
+                "peer_response_terminal_context_key(",
+            );
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        if path_tail_pair_is(node, "PeerConversationProjection", "ResponseTerminal") {
+            self.push(
+                node.span(),
+                "direct terminal projection construction",
+                "PeerConversationProjection::ResponseTerminal",
+            );
+        }
+        syn::visit::visit_path(self, node);
+    }
+
+    fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
+        if node
+            .value()
+            .contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
+        {
+            self.push(
+                node.span(),
+                "handwritten terminal render text",
+                "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]",
+            );
+        }
+        syn::visit::visit_lit_str(self, node);
+    }
+}
+
+/// AST visitor for the shell boundary files. Flags a `peer_name: PeerName`
+/// identity-bus field declaration and any call that projects a typed terminal
+/// identity from a `peer_name` argument.
+struct PeerResponseTerminalShellVisitor<'a> {
+    rel: &'a str,
+    mismatches: Vec<String>,
+}
+
+impl<'a> PeerResponseTerminalShellVisitor<'a> {
+    fn new(rel: &'a str) -> Self {
+        Self {
+            rel,
+            mismatches: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, span: proc_macro2::Span, reason: &str, token: &str) {
+        let rel = self.rel;
+        let line = span.start().line;
+        self.mismatches.push(format!(
+            "{rel}:{line}: {reason} `{token}` must transport typed route/display/correlation facts"
+        ));
+    }
+
+    fn check_fields(&mut self, fields: &syn::Fields) {
+        // Only a `pub` struct field is the terminal shell identity bus the rule
+        // bans. Enum-variant `peer_name` carriers (e.g. the RMAT-exempt
+        // WirePersistedInput projection) are a different, allowed shape, so we
+        // do not descend into enum variants and we require `pub` here — this
+        // preserves the prior `pub peer_name: PeerName` text-scan contract.
+        for field in fields {
+            let is_pub = matches!(field.vis, syn::Visibility::Public(_));
+            let is_peer_name = field
+                .ident
+                .as_ref()
+                .is_some_and(|ident| ident == "peer_name");
+            if is_pub && is_peer_name && type_is_named(&field.ty, "PeerName") {
+                // Token mirrors the prior text-scan contract (`pub peer_name:
+                // PeerName`); the `pub` is what makes this the terminal shell
+                // identity bus the rule bans (enum-variant carriers are exempt),
+                // so it belongs in the reported token.
+                self.push(
+                    field.span(),
+                    "terminal shell peer_name identity bus",
+                    "pub peer_name: PeerName",
+                );
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for PeerResponseTerminalShellVisitor<'_> {
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        self.check_fields(&node.fields);
+        syn::visit::visit_item_struct(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            for (banned_callee, reason) in PEER_NAME_PROJECTION_CALLS {
+                // Match on the path *tail* so a fully-qualified callee
+                // (`meerkat_runtime::peer_response_terminal_input`,
+                // `crate::..::PeerResponseTerminalRouteIdentity::parse`) is
+                // recognized regardless of import/qualification style.
+                if path_tail_matches(&path.path, banned_callee)
+                    && call_args_reference_peer_name(&node.args)
+                {
+                    self.push(node.span(), reason, banned_callee);
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+/// `true` when any call argument reads `peer_name` (by value or by reference).
+fn call_args_reference_peer_name(
+    args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+) -> bool {
+    args.iter().any(expr_references_peer_name)
+}
+
+fn expr_references_peer_name(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Reference(reference) => expr_references_peer_name(&reference.expr),
+        syn::Expr::Path(path) => path_tail_ident(&path.path).as_deref() == Some("peer_name"),
+        syn::Expr::Field(field) => {
+            expr_references_peer_name(&field.base)
+                || matches!(
+                    &field.member,
+                    syn::Member::Named(ident) if ident == "peer_name"
+                )
+        }
+        // Peel the common wrapping forms so a projection fed `peer_name` through
+        // a conversion chain (`peer_name.as_str().to_string()`,
+        // `(&peer_name).clone()`, `peer_name.into()`) is still recognized — the
+        // prior text-scan matched `peer_name` anywhere in the call argument.
+        syn::Expr::MethodCall(call) => expr_references_peer_name(&call.receiver),
+        syn::Expr::Paren(inner) => expr_references_peer_name(&inner.expr),
+        syn::Expr::Group(inner) => expr_references_peer_name(&inner.expr),
+        syn::Expr::Cast(cast) => expr_references_peer_name(&cast.expr),
+        syn::Expr::Try(inner) => expr_references_peer_name(&inner.expr),
+        syn::Expr::Await(inner) => expr_references_peer_name(&inner.base),
+        _ => false,
+    }
+}
+
+/// The last segment ident of a path, e.g. `a::b::peer_name` -> `peer_name`.
+fn path_tail_ident(path: &syn::Path) -> Option<String> {
+    path.segments.last().map(|seg| seg.ident.to_string())
+}
+
+/// `true` when the path's last two segments are exactly `outer::inner`
+/// (e.g. `crate::foo::PeerConversationProjection::ResponseTerminal`).
+fn path_tail_pair_is(path: &syn::Path, outer: &str, inner: &str) -> bool {
+    let len = path.segments.len();
+    if len < 2 {
+        return false;
+    }
+    path.segments[len - 2].ident == outer && path.segments[len - 1].ident == inner
+}
+
+/// `true` when the path's trailing segments equal the `::`-joined `expected`
+/// callee (e.g. `expected = "PeerResponseTerminalRouteIdentity::parse"` matches
+/// `crate::a::PeerResponseTerminalRouteIdentity::parse`, and
+/// `expected = "peer_response_terminal_input"` matches
+/// `meerkat_runtime::peer_response_terminal_input`).
+fn path_tail_matches(path: &syn::Path, expected: &str) -> bool {
+    let expected_segments = expected.split("::").collect::<Vec<_>>();
+    if path.segments.len() < expected_segments.len() {
+        return false;
+    }
+    let skip = path.segments.len() - expected_segments.len();
+    path.segments
+        .iter()
+        .skip(skip)
+        .zip(expected_segments.iter())
+        .all(|(seg, want)| seg.ident == *want)
+}
+
+fn collect_peer_response_terminal_core_fact_mismatches(
+    rel: &str,
+    source: &str,
+    mismatches: &mut Vec<String>,
+) -> Result<()> {
+    let parsed = parse_production_file(source)
+        .with_context(|| format!("parse peer-response terminal core fact owner {rel}"))?;
+
+    let Some(source_struct) = find_struct_item(&parsed, "PeerResponseTerminalSource") else {
+        mismatches.push(format!(
+            "{rel}: PeerResponseTerminalSource is missing; terminal peer responses must remain distinct typed facts"
+        ));
+        return Ok(());
+    };
+    require_struct_field_type(
+        rel,
+        source_struct,
+        "transport_identity",
+        "Option<PeerResponseTerminalTransportIdentity>",
+        |ty| type_is_option_of_named(ty, "PeerResponseTerminalTransportIdentity"),
+        mismatches,
+    );
+    require_struct_field_type(
+        rel,
+        source_struct,
+        "route_identity",
+        "PeerResponseTerminalRouteIdentity",
+        |ty| type_is_named(ty, "PeerResponseTerminalRouteIdentity"),
+        mismatches,
+    );
+    require_struct_field_type(
+        rel,
+        source_struct,
+        "display_identity",
+        "PeerResponseTerminalDisplayIdentity",
+        |ty| type_is_named(ty, "PeerResponseTerminalDisplayIdentity"),
+        mismatches,
+    );
+
+    let Some(fact_struct) = find_struct_item(&parsed, "PeerResponseTerminalFact") else {
+        mismatches.push(format!(
+            "{rel}: PeerResponseTerminalFact is missing; terminal peer responses must remain distinct typed facts"
+        ));
+        return Ok(());
+    };
+    require_struct_field_type(
+        rel,
+        fact_struct,
+        "source",
+        "PeerResponseTerminalSource",
+        |ty| type_is_named(ty, "PeerResponseTerminalSource"),
+        mismatches,
+    );
+    require_struct_field_type(
+        rel,
+        fact_struct,
+        "correlation_id",
+        "PeerResponseTerminalCorrelationId",
+        |ty| type_is_named(ty, "PeerResponseTerminalCorrelationId"),
+        mismatches,
+    );
+
+    let Some(context_key_fn) = find_fn_item(&parsed, "peer_response_terminal_context_key") else {
+        mismatches.push(format!(
+            "{rel}: peer_response_terminal_context_key is missing; terminal context keys must be built from typed route/correlation facts"
+        ));
+        return Ok(());
+    };
+    require_context_key_signature(rel, context_key_fn, mismatches);
+
+    Ok(())
+}
+
+fn find_struct_item<'a>(parsed: &'a syn::File, name: &str) -> Option<&'a syn::ItemStruct> {
+    parsed.items.iter().find_map(|item| match item {
+        syn::Item::Struct(item_struct) if item_struct.ident == name => Some(item_struct),
+        _ => None,
+    })
+}
+
+fn find_fn_item<'a>(parsed: &'a syn::File, name: &str) -> Option<&'a syn::ItemFn> {
+    parsed.items.iter().find_map(|item| match item {
+        syn::Item::Fn(item_fn) if item_fn.sig.ident == name => Some(item_fn),
+        _ => None,
+    })
+}
+
+fn require_struct_field_type(
+    rel: &str,
+    item_struct: &syn::ItemStruct,
+    field_name: &str,
+    expected: &str,
+    matches_expected: impl Fn(&syn::Type) -> bool,
+    mismatches: &mut Vec<String>,
+) {
+    let struct_name = item_struct.ident.to_string();
+    let Some(field) = named_struct_field(item_struct, field_name) else {
+        mismatches.push(format!(
+            "{rel}: {struct_name}.{field_name} is missing; terminal peer-response facts must fail closed on typed identities"
+        ));
+        return;
+    };
+
+    if !matches_expected(&field.ty) {
+        mismatches.push(format!(
+            "{rel}:{}: {struct_name}.{field_name} must use {expected}, found `{}`; terminal peer-response facts must not fall back to a string identity bus",
+            field.ident
+                .as_ref()
+                .map(|ident| ident.span().start().line)
+                .unwrap_or(1),
+            rust_type_tokens(&field.ty)
+        ));
+    }
+}
+
+fn named_struct_field<'a>(
+    item_struct: &'a syn::ItemStruct,
+    field_name: &str,
+) -> Option<&'a syn::Field> {
+    let syn::Fields::Named(fields) = &item_struct.fields else {
+        return None;
+    };
+    fields.named.iter().find(|field| {
+        field
+            .ident
+            .as_ref()
+            .is_some_and(|ident| ident == field_name)
+    })
+}
+
+fn require_context_key_signature(rel: &str, item_fn: &syn::ItemFn, mismatches: &mut Vec<String>) {
+    let typed_inputs = item_fn
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::FnArg::Typed(pat_type) => Some(pat_type),
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect::<Vec<_>>();
+
+    if typed_inputs.len() != 2 {
+        mismatches.push(format!(
+            "{rel}:{}: peer_response_terminal_context_key must take typed route/correlation facts, found {} parameter(s)",
+            item_fn.sig.ident.span().start().line,
+            typed_inputs.len()
+        ));
+        return;
+    }
+
+    if !type_is_ref_to_named(&typed_inputs[0].ty, "PeerResponseTerminalRouteIdentity") {
+        mismatches.push(format!(
+            "{rel}:{}: peer_response_terminal_context_key route_identity parameter must use &PeerResponseTerminalRouteIdentity, found `{}`",
+            typed_inputs[0].pat.span().start().line,
+            rust_type_tokens(&typed_inputs[0].ty)
+        ));
+    }
+    if !type_is_named(&typed_inputs[1].ty, "PeerResponseTerminalCorrelationId") {
+        mismatches.push(format!(
+            "{rel}:{}: peer_response_terminal_context_key correlation_id parameter must use PeerResponseTerminalCorrelationId, found `{}`",
+            typed_inputs[1].pat.span().start().line,
+            rust_type_tokens(&typed_inputs[1].ty)
+        ));
+    }
+}
+
+fn type_is_ref_to_named(ty: &syn::Type, expected: &str) -> bool {
+    matches!(ty, syn::Type::Reference(reference) if type_is_named(&reference.elem, expected))
+}
+
+fn type_is_option_of_named(ty: &syn::Type, expected_inner: &str) -> bool {
+    let syn::Type::Path(type_path) = ty else {
+        return false;
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return false;
+    };
+    if segment.ident != "Option" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return false;
+    };
+    let mut args = args.args.iter();
+    let Some(syn::GenericArgument::Type(inner)) = args.next() else {
+        return false;
+    };
+    args.next().is_none() && type_is_named(inner, expected_inner)
+}
+
+fn type_is_named(ty: &syn::Type, expected: &str) -> bool {
+    let syn::Type::Path(type_path) = ty else {
+        return false;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == expected && segment.arguments.is_empty())
+}
+
+fn rust_type_tokens(ty: &syn::Type) -> String {
+    ty.to_token_stream()
+        .to_string()
+        .replace(" :: ", "::")
+        .replace(" < ", "<")
+        .replace(" >", ">")
+        .replace(" , ", ", ")
+}
+
+pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<Vec<String>> {
+    let mut mismatches = Vec::new();
+    let forbidden_modules = ["flow_run", "flow_frame", "loop_iteration"];
+    let forbidden_flow_projection_fields = [
+        "phase",
+        "step_status",
+        "output_recorded",
+        "step_condition_results",
+        "target_counts",
+        "target_success_counts",
+        "target_terminal_failure_counts",
+        "target_retry_counts",
+        "failure_count",
+        "consecutive_failure_count",
+        "ready_frames",
+        "ready_frame_membership",
+        "pending_body_frame_loops",
+        "pending_body_frame_loop_membership",
+        "active_node_count",
+        "active_frame_count",
+        "last_granted_frame",
+        "last_granted_loop",
+        "max_active_nodes",
+        "max_active_frames",
+        "max_frame_depth",
+    ];
+    let forbidden_frame_projection_fields = [
+        "phase",
+        "last_admitted_node",
+        "node_status",
+        "ready_queue",
+        "output_recorded",
+        "node_condition_results",
+    ];
+    // Forbidden projection CAS-writer *method names* — resolved structurally
+    // (method-call / UFCS callee idents in the AST), never as line-text
+    // substrings, so comments/strings cannot false-positive and a call split
+    // across lines is still caught.
+    let forbidden_projection_cas_writes = [
+        "cas_flow_state",
+        "cas_run_snapshot",
+        "cas_frame_state",
+        "cas_complete_step_and_record_output",
+        "cas_loop_state",
+        "cas_grant_node_slot",
+        "cas_start_loop",
+        "cas_grant_body_frame_start",
+        "cas_complete_body_frame",
+        "cas_loop_request_body_frame",
+        "cas_complete_loop",
+    ];
+
+    for path in production_rust_source_paths(root)? {
+        let rel = relative_slash_path(root, &path)?;
+        // Whole-file test fixtures (`.../tests.rs`) are out of scope for this
+        // production gate (path-name membership, not a source scan). Inline
+        // `#[cfg(test)]` items are dropped structurally by
+        // `parse_production_file` before the walk, which also closes the old
+        // line-counting hole where code *after* a closed inline test module
+        // was treated as test-only.
+        if rel.ends_with("/tests.rs") {
+            continue;
+        }
+        let contents = fs::read_to_string(&path).with_context(|| {
+            format!("read flow reducer transition candidate {}", path.display())
+        })?;
+
+        // The transition-call, reducer-`Input`-construction,
+        // projection-field-write, and CAS store-write detections are
+        // AST-derived: the visitor matches the banned *semantic shape* (a
+        // call whose callee path resolves to `module::transition`, an
+        // enum-variant path under `module::Input`, a place-expression
+        // assignment / mutating method call into `.flow_state.<field>` /
+        // `.kernel_state.<field>`, a method/UFCS call whose callee ident is a
+        // forbidden `cas_*` projection writer) rather than a substring of the
+        // raw line. A token rename that keeps the banned relationship still
+        // fails, a banned token in a comment/string no longer
+        // false-positives, and a write split across lines is still caught.
+        // Import aliases (`use module as alias`, `use module::{...}`, glob)
+        // are resolved structurally from the `use` AST. `#[cfg(test)]` items
+        // are dropped structurally before the walk, mirroring the
+        // peer-response-terminal AST visitors.
+        if let Ok(parsed) = parse_production_file(&contents) {
+            let aliases = collect_flow_reducer_use_aliases(&parsed, forbidden_modules);
+            let mut visitor = FlowReducerTransitionVisitor::new(
+                &aliases,
+                &forbidden_flow_projection_fields,
+                &forbidden_frame_projection_fields,
+                &forbidden_projection_cas_writes,
+            );
+            visitor.visit_file(&parsed);
+            for hit in visitor.hits {
+                let allowed = match &hit.kind {
+                    FlowReducerHitKind::Transition { module }
+                    | FlowReducerHitKind::Input { module } => {
+                        flow_reducer_direct_use_is_structurally_allowed(&rel, module, &hit)
+                    }
+                    FlowReducerHitKind::ProjectionWrite => false,
+                    FlowReducerHitKind::CasStoreWrite => {
+                        flow_reducer_projection_commit_is_structurally_allowed(&rel, &hit)
+                    }
+                };
+                if allowed {
+                    continue;
+                }
+                mismatches.push(format!("{}: {rel}:{}", hit.message, hit.line));
+            }
+        }
+    }
+
+    Ok(mismatches)
+}
+
+/// Resolved import aliases for the forbidden flow-reducer modules in one file.
+///
+/// Built structurally from the `use` AST (not a line text-scan) so a banned
+/// reducer reached through `use module as alias`, `use module::transition as x`,
+/// `use module::{Input as Y}`, or `use module::*` is recognized regardless of
+/// formatting or how the import is wrapped.
+struct FlowReducerUseAliases {
+    /// alias path-head segment -> canonical module (e.g. `fr` -> `flow_run`,
+    /// and each `module` -> itself so unaliased `module::transition` resolves).
+    module_aliases: BTreeMap<String, String>,
+    /// bare imported `transition` (possibly renamed) -> canonical module.
+    transition_aliases: BTreeMap<String, String>,
+    /// bare imported `Input` (possibly renamed) -> canonical module.
+    input_aliases: BTreeMap<String, String>,
+}
+
+fn collect_flow_reducer_use_aliases(
+    file: &syn::File,
+    forbidden_modules: [&str; 3],
+) -> FlowReducerUseAliases {
+    let mut module_aliases = BTreeMap::new();
+    let mut transition_aliases = BTreeMap::new();
+    let mut input_aliases = BTreeMap::new();
+    for module in forbidden_modules {
+        module_aliases.insert(module.to_string(), module.to_string());
+    }
+    let mut visitor = FlowReducerUseVisitor {
+        forbidden_modules,
+        module_aliases: &mut module_aliases,
+        transition_aliases: &mut transition_aliases,
+        input_aliases: &mut input_aliases,
+    };
+    visitor.visit_file(file);
+    FlowReducerUseAliases {
+        module_aliases,
+        transition_aliases,
+        input_aliases,
+    }
+}
+
+struct FlowReducerUseVisitor<'a> {
+    forbidden_modules: [&'a str; 3],
+    module_aliases: &'a mut BTreeMap<String, String>,
+    transition_aliases: &'a mut BTreeMap<String, String>,
+    input_aliases: &'a mut BTreeMap<String, String>,
+}
+
+impl FlowReducerUseVisitor<'_> {
+    /// Walk a `use` tree, tracking the trailing path segment of the module
+    /// currently in scope. When a forbidden module segment is reached, descend
+    /// to classify the imported leaf (`transition` / `Input` / glob / rename /
+    /// `as` on the module itself).
+    fn walk_tree(&mut self, tree: &syn::UseTree, parent_segment: Option<&str>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                let segment = path.ident.to_string();
+                self.walk_tree(&path.tree, Some(&segment));
+            }
+            syn::UseTree::Name(name) => {
+                // `use a::b::flow_run;` — `flow_run` brings the module into
+                // scope under its own name, or as the leaf of a forbidden
+                // module path. Either way `module::...` keeps resolving.
+                let ident = name.ident.to_string();
+                if let Some(module) = self.forbidden_module_for(&ident) {
+                    self.module_aliases.insert(ident, module);
+                } else if let Some(module) =
+                    parent_segment.and_then(|p| self.forbidden_module_for(p))
+                {
+                    // `use module::transition;` / `use module::Input;`.
+                    self.classify_leaf(&ident, None, &module);
+                }
+            }
+            syn::UseTree::Rename(rename) => {
+                let ident = rename.ident.to_string();
+                let alias = rename.rename.to_string();
+                if let Some(module) = self.forbidden_module_for(&ident) {
+                    // `use a::b::flow_run as fr;`
+                    self.module_aliases.insert(alias, module);
+                } else if let Some(module) =
+                    parent_segment.and_then(|p| self.forbidden_module_for(p))
+                {
+                    // `use module::transition as run_transition;`
+                    self.classify_leaf(&ident, Some(&alias), &module);
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                if let Some(module) = parent_segment.and_then(|p| self.forbidden_module_for(p)) {
+                    // `use module::*;` brings both `transition` and `Input`
+                    // into scope under their canonical names.
+                    self.transition_aliases
+                        .insert("transition".to_string(), module.clone());
+                    self.input_aliases.insert("Input".to_string(), module);
+                }
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.walk_tree(item, parent_segment);
+                }
+            }
+        }
+    }
+
+    fn forbidden_module_for(&self, ident: &str) -> Option<String> {
+        self.forbidden_modules
+            .iter()
+            .find(|module| **module == ident)
+            .map(|module| module.to_string())
+    }
+
+    fn classify_leaf(&mut self, leaf: &str, alias: Option<&str>, module: &str) {
+        match leaf {
+            "transition" => {
+                let name = alias.unwrap_or("transition").to_string();
+                self.transition_aliases.insert(name, module.to_string());
+            }
+            "Input" => {
+                let name = alias.unwrap_or("Input").to_string();
+                self.input_aliases.insert(name, module.to_string());
+            }
+            _ => {}
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for FlowReducerUseVisitor<'_> {
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        self.walk_tree(&node.tree, None);
+        syn::visit::visit_item_use(self, node);
+    }
+}
+
+/// What kind of banned flow-reducer relationship a visitor hit represents.
+enum FlowReducerHitKind {
+    Transition {
+        module: String,
+    },
+    Input {
+        module: String,
+    },
+    ProjectionWrite,
+    /// A CAS store-write call (`.cas_flow_state(..)` and friends) — detected
+    /// structurally as a method call / UFCS call whose callee name is one of
+    /// the forbidden projection CAS writers, not as a line-text substring.
+    CasStoreWrite,
+}
+
+/// One AST-detected banned flow-reducer use, carrying the already-rendered
+/// message prefix (line/path appended by the caller so the report shape
+/// matches the prior text scanner exactly) plus the structural allow-list
+/// context for the hit kind.
+struct FlowReducerHit {
+    line: usize,
+    kind: FlowReducerHitKind,
+    message: String,
+    /// Structural context for the CAS-write allow decision (K22(c)): the
+    /// allow-list keys off AST facts captured at the hit (enclosing function,
+    /// signature types, preceding callees, call-argument idents, enclosing
+    /// match-arm patterns) instead of line-text windows.
+    cas_allow: Option<CasWriteAllowContext>,
+    /// Structural context for the direct Transition/Input allow decision in
+    /// the `run.rs` reducer-owned wrappers — same AST-fact discipline as
+    /// `cas_allow`, never line-text windows.
+    direct_allow: Option<DirectUseAllowContext>,
+}
+
+/// AST-derived context for one direct reducer Transition/Input hit, used by
+/// `flow_reducer_direct_use_is_structurally_allowed`. Every field is
+/// resolved structurally (syn visitors) — never as raw-line substrings or
+/// compacted-signature text — so comments/strings cannot false-allow and a
+/// signature or `authority.require(..)` call split across lines is still
+/// classified correctly.
+#[derive(Default, Clone)]
+struct DirectUseAllowContext {
+    /// Name of the enclosing production function, if any.
+    enclosing_fn: Option<String>,
+    /// Rendered `MobMachineFlowAuthorityKind::<Variant>` tail-pairs passed to
+    /// an `authority.require(..)` call earlier (in source order) in the
+    /// enclosing function body.
+    preceding_authority_require_kinds: BTreeSet<String>,
+    /// Path-segment idents of the enclosing `impl` block's self type.
+    enclosing_impl_type_idents: BTreeSet<String>,
+    /// Path segments of the enclosing function's structural return type
+    /// (`-> flow_run::Input` yields `["flow_run", "Input"]`).
+    fn_return_type_segments: Vec<String>,
+}
+
+/// AST-derived context for one forbidden `cas_*` projection-write hit, used
+/// by `flow_reducer_projection_commit_is_structurally_allowed`. Every field
+/// is resolved structurally (syn visitors) — never as raw-line substrings —
+/// so comments/strings cannot false-positive and calls split across lines
+/// are still classified correctly.
+#[derive(Default, Clone)]
+struct CasWriteAllowContext {
+    /// Callee name of the CAS write (e.g. `cas_flow_state`).
+    cas_method: String,
+    /// Name of the enclosing production function, if any.
+    enclosing_fn: Option<String>,
+    /// Path-segment idents appearing in the enclosing function signature.
+    signature_type_idents: BTreeSet<String>,
+    /// Callee idents (method calls / call-path tails) visited earlier in the
+    /// enclosing function body, in source order, before this CAS write.
+    preceding_callee_idents: BTreeSet<String>,
+    /// Path-segment idents of expression paths visited earlier in the
+    /// enclosing function body before this CAS write (catches
+    /// `MobMachineFlowRunCommand::Variant` command sources).
+    preceding_path_idents: BTreeSet<String>,
+    /// Idents (path segments + named field members) inside this CAS call's
+    /// argument expressions.
+    call_arg_idents: BTreeSet<String>,
+    /// Rendered `Path::Segments` of every enclosing `match`-arm pattern.
+    enclosing_match_arm_patterns: Vec<String>,
+    /// Whole-function fact: the enclosing function commits prepared DSL
+    /// inputs via `commit_prepared_dsl_input(prepared)`.
+    fn_commits_prepared_inputs: bool,
+    /// Whole-function fact: the enclosing function prepares machine inputs
+    /// via `prepare_dsl_inputs(plan.machine_inputs(), ..)`.
+    fn_prepares_machine_inputs: bool,
+}
+
+/// Per-function tracking state for the flow-reducer visitor: facts needed by
+/// the structural CAS allow-list, accumulated in source order while walking
+/// the function body.
+#[derive(Default)]
+struct FlowReducerFnContext {
+    name: String,
+    signature_type_idents: BTreeSet<String>,
+    callee_idents: BTreeSet<String>,
+    path_idents: BTreeSet<String>,
+    commits_prepared_inputs: bool,
+    prepares_machine_inputs: bool,
+    /// `MobMachineFlowAuthorityKind::<Variant>` tail-pairs passed to an
+    /// `authority.require(..)` call seen so far (in source order) in this
+    /// function body — structural input to the direct-use allow-list.
+    authority_require_kinds: BTreeSet<String>,
+    /// Path segments of this function's structural return type, if any.
+    return_type_segments: Vec<String>,
+    /// Indices into `hits` for CAS hits inside this function; whole-function
+    /// facts are backfilled when the function walk completes.
+    cas_hit_indices: Vec<usize>,
+}
+
+/// Collect every path-segment ident under a syntax node.
+struct PathIdentCollector<'a> {
+    idents: &'a mut BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for PathIdentCollector<'_> {
+    fn visit_path_segment(&mut self, node: &'ast syn::PathSegment) {
+        self.idents.insert(node.ident.to_string());
+        syn::visit::visit_path_segment(self, node);
+    }
+}
+
+/// Collect path-segment idents and named field-member idents inside an
+/// expression (used for CAS call arguments, so `outcome.next_state` and a
+/// bare `next_state` binding both resolve to `next_state`).
+struct ExprIdentCollector<'a> {
+    idents: &'a mut BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for ExprIdentCollector<'_> {
+    fn visit_path_segment(&mut self, node: &'ast syn::PathSegment) {
+        self.idents.insert(node.ident.to_string());
+        syn::visit::visit_path_segment(self, node);
+    }
+
+    fn visit_member(&mut self, node: &'ast syn::Member) {
+        if let syn::Member::Named(ident) = node {
+            self.idents.insert(ident.to_string());
+        }
+        syn::visit::visit_member(self, node);
+    }
+}
+
+/// Collect rendered paths from a match-arm pattern
+/// (`FlowFrameLoopStorePlan::RunStateOnly { .. }` -> "FlowFrameLoopStorePlan::RunStateOnly").
+struct PatternPathCollector<'a> {
+    paths: &'a mut Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for PatternPathCollector<'_> {
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        let rendered = node
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        self.paths.push(rendered);
+        syn::visit::visit_path(self, node);
+    }
+}
+
+/// True when an expression contains a `plan.machine_inputs()` method call.
+struct MachineInputsOnPlanFinder {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for MachineInputsOnPlanFinder {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "machine_inputs"
+            && matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("plan"))
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// AST visitor matching the banned flow-reducer shapes: a transition call, a
+/// reducer `Input` enum-variant construction, and a direct projection-field
+/// write. Detection is structural so a token rename that keeps the banned
+/// relationship still fails.
+struct FlowReducerTransitionVisitor<'a> {
+    aliases: &'a FlowReducerUseAliases,
+    flow_fields: &'a [&'a str],
+    frame_fields: &'a [&'a str],
+    cas_write_methods: &'a [&'a str],
+    hits: Vec<FlowReducerHit>,
+    /// Enclosing-function context stack (innermost last) for the structural
+    /// CAS allow-list.
+    fn_stack: Vec<FlowReducerFnContext>,
+    /// Enclosing `match`-arm pattern paths (innermost last).
+    arm_patterns: Vec<String>,
+    /// Path-segment idents of enclosing `impl` self types (innermost last)
+    /// for the structural direct-use allow-list.
+    impl_type_stack: Vec<BTreeSet<String>>,
+}
+
+impl<'a> FlowReducerTransitionVisitor<'a> {
+    fn new(
+        aliases: &'a FlowReducerUseAliases,
+        flow_fields: &'a [&'a str],
+        frame_fields: &'a [&'a str],
+        cas_write_methods: &'a [&'a str],
+    ) -> Self {
+        Self {
+            aliases,
+            flow_fields,
+            frame_fields,
+            cas_write_methods,
+            hits: Vec::new(),
+            fn_stack: Vec::new(),
+            arm_patterns: Vec::new(),
+            impl_type_stack: Vec::new(),
+        }
+    }
+
+    fn enter_fn(&mut self, sig: &syn::Signature) {
+        let mut signature_type_idents = BTreeSet::new();
+        PathIdentCollector {
+            idents: &mut signature_type_idents,
+        }
+        .visit_signature(sig);
+        let return_type_segments = match &sig.output {
+            syn::ReturnType::Type(_, ty) => structural_type_path_segments(ty),
+            syn::ReturnType::Default => Vec::new(),
+        };
+        self.fn_stack.push(FlowReducerFnContext {
+            name: sig.ident.to_string(),
+            signature_type_idents,
+            return_type_segments,
+            ..FlowReducerFnContext::default()
+        });
+    }
+
+    fn exit_fn(&mut self) {
+        if let Some(context) = self.fn_stack.pop() {
+            for index in context.cas_hit_indices {
+                if let Some(allow) = self
+                    .hits
+                    .get_mut(index)
+                    .and_then(|hit| hit.cas_allow.as_mut())
+                {
+                    allow.fn_commits_prepared_inputs = context.commits_prepared_inputs;
+                    allow.fn_prepares_machine_inputs = context.prepares_machine_inputs;
+                }
+            }
+        }
+    }
+
+    /// Record whole-function preparation/commit facts and the source-ordered
+    /// callee set for a call with the given callee ident and arguments.
+    fn record_callee<'e>(
+        &mut self,
+        callee: &str,
+        args: impl Iterator<Item = &'e syn::Expr> + Clone,
+    ) {
+        let Some(context) = self.fn_stack.last_mut() else {
+            return;
+        };
+        context.callee_idents.insert(callee.to_string());
+        if callee == "commit_prepared_dsl_input"
+            && args
+                .clone()
+                .any(|arg| matches!(arg, syn::Expr::Path(path) if path.path.is_ident("prepared")))
+        {
+            context.commits_prepared_inputs = true;
+        }
+        if callee == "prepare_dsl_inputs" {
+            let mut finder = MachineInputsOnPlanFinder { found: false };
+            for arg in args {
+                finder.visit_expr(arg);
+            }
+            if finder.found {
+                context.prepares_machine_inputs = true;
+            }
+        }
+    }
+
+    /// Build the structural allow context for one CAS hit from the current
+    /// visitor position.
+    fn cas_allow_context<'e>(
+        &self,
+        method: &str,
+        args: impl Iterator<Item = &'e syn::Expr>,
+    ) -> CasWriteAllowContext {
+        let mut call_arg_idents = BTreeSet::new();
+        for arg in args {
+            ExprIdentCollector {
+                idents: &mut call_arg_idents,
+            }
+            .visit_expr(arg);
+        }
+        let fn_context = self.fn_stack.last();
+        CasWriteAllowContext {
+            cas_method: method.to_string(),
+            enclosing_fn: fn_context.map(|context| context.name.clone()),
+            signature_type_idents: fn_context
+                .map(|context| context.signature_type_idents.clone())
+                .unwrap_or_default(),
+            preceding_callee_idents: fn_context
+                .map(|context| context.callee_idents.clone())
+                .unwrap_or_default(),
+            preceding_path_idents: fn_context
+                .map(|context| context.path_idents.clone())
+                .unwrap_or_default(),
+            call_arg_idents,
+            enclosing_match_arm_patterns: self.arm_patterns.clone(),
+            fn_commits_prepared_inputs: false,
+            fn_prepares_machine_inputs: false,
+        }
+    }
+
+    /// Build the structural allow context for one direct Transition/Input
+    /// hit from the current visitor position.
+    fn direct_use_allow_context(&self) -> DirectUseAllowContext {
+        let fn_context = self.fn_stack.last();
+        DirectUseAllowContext {
+            enclosing_fn: fn_context.map(|context| context.name.clone()),
+            preceding_authority_require_kinds: fn_context
+                .map(|context| context.authority_require_kinds.clone())
+                .unwrap_or_default(),
+            enclosing_impl_type_idents: self.impl_type_stack.last().cloned().unwrap_or_default(),
+            fn_return_type_segments: fn_context
+                .map(|context| context.return_type_segments.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Classify a callee path as a reducer `transition` call.
+    ///
+    /// Two shapes resolve: a module-qualified call `alias::transition(...)`
+    /// (head segment is a forbidden module / module-alias and the tail is
+    /// `transition`), and a bare imported transition alias `frame_transition(...)`.
+    fn transition_call_for(&self, path: &syn::Path) -> Option<(String, String)> {
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if segments.len() >= 2 && segments[segments.len() - 1] == "transition" {
+            let head = &segments[0];
+            if let Some(module) = self.aliases.module_aliases.get(head) {
+                return Some((module.clone(), format!("{head}::transition(")));
+            }
+        }
+        if segments.len() == 1
+            && let Some(module) = self.aliases.transition_aliases.get(&segments[0])
+        {
+            return Some((module.clone(), segments[0].clone()));
+        }
+        None
+    }
+
+    /// Classify a path as a reducer `Input` enum-variant construction.
+    ///
+    /// Resolves `alias::Input::Variant` (module-qualified) and `FrameInput::Variant`
+    /// / `Input::Variant` (bare imported input alias).
+    fn input_path_for(&self, path: &syn::Path) -> Option<(String, String)> {
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        // module-qualified: `..::module::Input::Variant`
+        for (idx, segment) in segments.iter().enumerate() {
+            if segment == "Input"
+                && idx >= 1
+                && idx + 1 < segments.len()
+                && let Some(module) = self.aliases.module_aliases.get(&segments[idx - 1])
+            {
+                return Some((module.clone(), format!("{}::Input::", segments[idx - 1])));
+            }
+        }
+        // bare imported input alias: `<alias>::Variant`
+        if segments.len() >= 2
+            && let Some(module) = self.aliases.input_aliases.get(&segments[0])
+        {
+            return Some((module.clone(), segments[0].clone()));
+        }
+        None
+    }
+
+    fn push_transition(&mut self, span: proc_macro2::Span, module: String, display: String) {
+        let direct_allow = Some(self.direct_use_allow_context());
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::Transition { module },
+            message: format!(
+                "direct live-flow reducer transition `{display}` is not MobMachine-command gated"
+            ),
+            cas_allow: None,
+            direct_allow,
+        });
+    }
+
+    fn push_transition_alias(&mut self, span: proc_macro2::Span, module: String, alias: String) {
+        let direct_allow = Some(self.direct_use_allow_context());
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::Transition { module },
+            message: format!(
+                "direct live-flow reducer transition alias `{alias}` is not MobMachine-command gated"
+            ),
+            cas_allow: None,
+            direct_allow,
+        });
+    }
+
+    fn push_input(&mut self, span: proc_macro2::Span, module: String, alias: String) {
+        let direct_allow = Some(self.direct_use_allow_context());
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::Input { module },
+            message: format!(
+                "direct live-flow reducer input alias `{alias}` is not MobMachine-command gated"
+            ),
+            cas_allow: None,
+            direct_allow,
+        });
+    }
+
+    /// Record a reducer `Input` enum-variant construction from a path
+    /// reference. Transition *calls* are detected at the call site
+    /// (`visit_expr_call`) to carry the `alias::transition(` token shape; bare
+    /// transition-alias references that are not calls are not reducer
+    /// transitions, so they are intentionally not reported here.
+    fn record_input_path(&mut self, path: &syn::Path) {
+        if let Some((module, alias)) = self.input_path_for(path) {
+            self.push_input(path.span(), module, alias);
+        }
+    }
+
+    /// The forbidden projection field touched by a place expression, if any.
+    /// Matches `<recv>.flow_state.<field>` and `<recv>.kernel_state.<field>`
+    /// across the AST (so a multi-line place expression is still caught).
+    fn projection_field_token(&self, expr: &syn::Expr) -> Option<String> {
+        let syn::Expr::Field(outer) = expr else {
+            return None;
+        };
+        let syn::Member::Named(field_ident) = &outer.member else {
+            return None;
+        };
+        let field = field_ident.to_string();
+        let syn::Expr::Field(base) = outer.base.as_ref() else {
+            return None;
+        };
+        let syn::Member::Named(base_ident) = &base.member else {
+            return None;
+        };
+        let base_name = base_ident.to_string();
+        if base_name == "flow_state" && self.flow_fields.contains(&field.as_str()) {
+            return Some(format!(".flow_state.{field}"));
+        }
+        if base_name == "kernel_state" && self.frame_fields.contains(&field.as_str()) {
+            return Some(format!(".kernel_state.{field}"));
+        }
+        None
+    }
+
+    fn push_projection_write(&mut self, span: proc_macro2::Span, token: String) {
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::ProjectionWrite,
+            message: format!(
+                "direct live-flow projection mutation `{token}` is not MobMachine-command gated"
+            ),
+            cas_allow: None,
+            direct_allow: None,
+        });
+    }
+
+    fn push_cas_store_write(
+        &mut self,
+        span: proc_macro2::Span,
+        method: &str,
+        cas_allow: CasWriteAllowContext,
+    ) {
+        // Keep the `.method(` token shape so the report matches the prior
+        // text scanner exactly.
+        let token = format!(".{method}(");
+        let hit_index = self.hits.len();
+        self.hits.push(FlowReducerHit {
+            line: span.start().line,
+            kind: FlowReducerHitKind::CasStoreWrite,
+            message: format!(
+                "direct live-flow projection mutation `{token}` is not MobMachine-command gated"
+            ),
+            cas_allow: Some(cas_allow),
+            direct_allow: None,
+        });
+        if let Some(context) = self.fn_stack.last_mut() {
+            context.cas_hit_indices.push(hit_index);
+        }
+    }
+
+    /// `true` for a method that mutates the receiver in place (the set the
+    /// prior `projection_field_is_directly_written` text scanner recognized).
+    fn is_mutating_method(name: &str) -> bool {
+        matches!(name, "insert" | "remove" | "clear" | "push" | "retain")
+    }
+}
+
+impl<'ast> Visit<'ast> for FlowReducerTransitionVisitor<'_> {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.enter_fn(&node.sig);
+        syn::visit::visit_item_fn(self, node);
+        self.exit_fn();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.enter_fn(&node.sig);
+        syn::visit::visit_impl_item_fn(self, node);
+        self.exit_fn();
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let mut idents = BTreeSet::new();
+        PathIdentCollector {
+            idents: &mut idents,
+        }
+        .visit_type(node.self_ty.as_ref());
+        self.impl_type_stack.push(idents);
+        syn::visit::visit_item_impl(self, node);
+        self.impl_type_stack.pop();
+    }
+
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        let depth = self.arm_patterns.len();
+        let mut paths = Vec::new();
+        PatternPathCollector { paths: &mut paths }.visit_pat(&node.pat);
+        self.arm_patterns.extend(paths);
+        syn::visit::visit_arm(self, node);
+        self.arm_patterns.truncate(depth);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            if let Some(last) = path.path.segments.last() {
+                self.record_callee(&last.ident.to_string(), node.args.iter());
+            }
+            if let Some((module, display)) = self.transition_call_for(&path.path) {
+                if display.ends_with("::transition(") {
+                    self.push_transition(node.span(), module, display);
+                } else {
+                    self.push_transition_alias(node.span(), module, display);
+                }
+            }
+            // UFCS form of a CAS store write (`Store::cas_flow_state(&store, ..)`)
+            // is the same banned semantic shape as the method-call form.
+            if let Some(last) = path.path.segments.last() {
+                let name = last.ident.to_string();
+                if self.cas_write_methods.contains(&name.as_str()) {
+                    let cas_allow = self.cas_allow_context(&name, node.args.iter());
+                    self.push_cas_store_write(last.ident.span(), &name, cas_allow);
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        self.record_input_path(&node.path);
+        if let Some(context) = self.fn_stack.last_mut() {
+            for segment in &node.path.segments {
+                context.path_idents.insert(segment.ident.to_string());
+            }
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        if let Some(token) = self.projection_field_token(&node.left) {
+            self.push_projection_write(node.span(), token);
+        }
+        syn::visit::visit_expr_assign(self, node);
+    }
+
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        // Compound assignment (`+=` / `-=`) parses as a binary op whose left is
+        // the place expression; the prior text scanner banned these too.
+        if matches!(node.op, syn::BinOp::AddAssign(_) | syn::BinOp::SubAssign(_))
+            && let Some(token) = self.projection_field_token(&node.left)
+        {
+            self.push_projection_write(node.span(), token);
+        }
+        syn::visit::visit_expr_binary(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if Self::is_mutating_method(&node.method.to_string())
+            && let Some(token) = self.projection_field_token(&node.receiver)
+        {
+            self.push_projection_write(node.span(), token);
+        }
+        let method = node.method.to_string();
+        self.record_callee(&method, node.args.iter());
+        // `authority.require(MobMachineFlowAuthorityKind::..)` is the
+        // structural authority fact the direct-use allow-list keys on:
+        // resolve the kind from the argument path AST, never from line text.
+        if method == "require"
+            && matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("authority"))
+            && let Some(context) = self.fn_stack.last_mut()
+        {
+            for arg in &node.args {
+                collect_flow_authority_kind_pairs(arg, &mut context.authority_require_kinds);
+            }
+        }
+        if self.cas_write_methods.contains(&method.as_str()) {
+            let cas_allow = self.cas_allow_context(&method, node.args.iter());
+            self.push_cas_store_write(node.method.span(), &method, cas_allow);
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// Collect rendered `MobMachineFlowAuthorityKind::<Variant>` tail-pairs from
+/// every path inside the expression subtree.
+fn collect_flow_authority_kind_pairs(expr: &syn::Expr, kinds: &mut BTreeSet<String>) {
+    struct KindPairCollector<'a> {
+        kinds: &'a mut BTreeSet<String>,
+    }
+    impl<'ast> Visit<'ast> for KindPairCollector<'_> {
+        fn visit_path(&mut self, node: &'ast syn::Path) {
+            let segments: Vec<String> = node.segments.iter().map(|s| s.ident.to_string()).collect();
+            for window in segments.windows(2) {
+                if window[0] == "MobMachineFlowAuthorityKind" {
+                    self.kinds
+                        .insert(format!("MobMachineFlowAuthorityKind::{}", window[1]));
+                }
+            }
+            syn::visit::visit_path(self, node);
+        }
+    }
+    KindPairCollector { kinds }.visit_expr(expr);
+}
+
+/// Path segments of a structural type, unwrapping references/parens/groups
+/// (`-> &flow_run::Input` yields `["flow_run", "Input"]`).
+fn structural_type_path_segments(ty: &syn::Type) -> Vec<String> {
+    match ty {
+        syn::Type::Path(path) => path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+        syn::Type::Reference(reference) => structural_type_path_segments(&reference.elem),
+        syn::Type::Paren(paren) => structural_type_path_segments(&paren.elem),
+        syn::Type::Group(group) => structural_type_path_segments(&group.elem),
+        _ => Vec::new(),
+    }
+}
+
+pub fn collect_mob_runtime_catalog_command_gate_mismatches(root: &Path) -> Result<Vec<String>> {
+    let actor_path = root.join("crates/meerkat-mob/src/runtime/actor.rs");
+    if !actor_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let contents = fs::read_to_string(&actor_path)
+        .with_context(|| format!("read Mob runtime actor {}", actor_path.display()))?;
+    let rel = relative_slash_path(root, &actor_path)?;
+    let parsed = parse_production_file(&contents)
+        .map_err(|error| anyhow!("parse Mob runtime actor {}: {error}", actor_path.display()))?;
+    let critical_inputs = [
+        MobCatalogCommandGateSpec {
+            input: "RunFlow",
+            scope: MobCatalogCommandGateScope::Function("handle_run_flow"),
+        },
+        MobCatalogCommandGateSpec {
+            input: "CancelFlow",
+            scope: MobCatalogCommandGateScope::Function("handle_cancel_flow"),
+        },
+        MobCatalogCommandGateSpec {
+            input: "SetSpawnPolicy",
+            scope: MobCatalogCommandGateScope::CommandArm("SetSpawnPolicy"),
+        },
+        MobCatalogCommandGateSpec {
+            input: "ForceCancel",
+            scope: MobCatalogCommandGateScope::Function("handle_force_cancel"),
+        },
+    ];
+    let mut mismatches = Vec::new();
+
+    for spec in critical_inputs {
+        if !mob_catalog_command_gate_is_fail_closed(&parsed, spec) {
+            mismatches.push(format!(
+                "MobCommand::{} is catalog-classified but does not fail-close on MobMachineInput::{} in {}",
+                spec.input, spec.input, rel
+            ));
+        }
+    }
+
+    Ok(mismatches)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MobCatalogCommandGateSpec {
+    input: &'static str,
+    scope: MobCatalogCommandGateScope,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MobCatalogCommandGateScope {
+    Function(&'static str),
+    CommandArm(&'static str),
+}
+
+/// MobMachine admission seams whose successful, propagated result proves the
+/// shell consulted machine authority before mutating shell state.
+const MOB_CATALOG_GATE_METHODS: [&str; 5] = [
+    "probe_mob_machine_input",
+    "apply_dsl_input",
+    "prepare_dsl_input",
+    "apply_command_admission",
+    "prepare_command_admission",
+];
+
+/// AST-level fail-closed audit for one catalog-classified Mob command.
+///
+/// The prior implementation located the scope by compacted-text needle +
+/// brace counting and classified fail-closed handling by joining a ±N line
+/// window into a token string (`compact.contains("apply_dsl_input(")` &&
+/// `compact.contains('?')`). That recognized banned/required *relationships*
+/// only as substrings: a `?` anywhere in the window (e.g. inside an
+/// unrelated call or a string literal) satisfied the gate, and a rename or
+/// reformat could silently change what the window saw.
+///
+/// This version resolves the scope structurally (named fn item / `match` arm
+/// whose pattern is `MobCommand::<variant>`) and classifies the gate on AST
+/// shape: a gate-seam call (one of [`MOB_CATALOG_GATE_METHODS`]) that
+/// *carries the input variant* must have its `Result` propagated — wrapped
+/// in `?` (`syn::Expr::Try`) or mapped through `.map_err(..)` — or be the
+/// probe seam, which is fail-closed by construction. A discarded result
+/// (`let _ = self.apply_dsl_input(..)`) has neither ancestor and fails.
+fn mob_catalog_command_gate_is_fail_closed(
+    file: &syn::File,
+    spec: MobCatalogCommandGateSpec,
+) -> bool {
+    match spec.scope {
+        MobCatalogCommandGateScope::Function(name) => {
+            let Some(block) = find_named_fn_block(file, name) else {
+                return false;
+            };
+            let mut analyzer = MobCatalogGateAnalyzer::for_block(spec.input, block);
+            analyzer.visit_block(block);
+            analyzer.gated
+        }
+        MobCatalogCommandGateScope::CommandArm(variant) => {
+            let mut finder = MobCommandArmFinder {
+                variant,
+                input: spec.input,
+                gated: false,
+            };
+            finder.visit_file(file);
+            finder.gated
+        }
+    }
+}
+
+/// Locate the body block of a named production `fn` (free or impl member).
+fn find_named_fn_block<'a>(file: &'a syn::File, name: &str) -> Option<&'a syn::Block> {
+    struct FnFinder<'a, 'n> {
+        name: &'n str,
+        block: Option<&'a syn::Block>,
+    }
+    impl<'a> Visit<'a> for FnFinder<'a, '_> {
+        fn visit_item_fn(&mut self, node: &'a syn::ItemFn) {
+            if node.sig.ident == self.name {
+                self.block = Some(&node.block);
+            }
+            syn::visit::visit_item_fn(self, node);
+        }
+        fn visit_impl_item_fn(&mut self, node: &'a syn::ImplItemFn) {
+            if node.sig.ident == self.name {
+                self.block = Some(&node.block);
+            }
+            syn::visit::visit_impl_item_fn(self, node);
+        }
+    }
+    let mut finder = FnFinder { name, block: None };
+    finder.visit_file(file);
+    finder.block
+}
+
+/// Find every `match` arm whose pattern is `MobCommand::<variant>` and run
+/// the gate analyzer over the arm body. Any gated arm satisfies the audit.
+struct MobCommandArmFinder<'n> {
+    variant: &'n str,
+    input: &'n str,
+    gated: bool,
+}
+
+impl<'a> Visit<'a> for MobCommandArmFinder<'_> {
+    fn visit_arm(&mut self, node: &'a syn::Arm) {
+        if pat_is_mob_command_variant(&node.pat, self.variant) {
+            let mut analyzer = MobCatalogGateAnalyzer::for_expr(self.input, &node.body);
+            analyzer.visit_expr(&node.body);
+            if analyzer.gated {
+                self.gated = true;
+            }
+        }
+        syn::visit::visit_arm(self, node);
+    }
+}
+
+fn pat_is_mob_command_variant(pat: &syn::Pat, variant: &str) -> bool {
+    let path = match pat {
+        syn::Pat::Struct(pat) => &pat.path,
+        syn::Pat::TupleStruct(pat) => &pat.path,
+        syn::Pat::Path(pat) => &pat.path,
+        _ => return false,
+    };
+    path_ends_with(path, &["MobCommand", variant])
+}
+
+fn path_ends_with(path: &syn::Path, suffix: &[&str]) -> bool {
+    let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    segments.len() >= suffix.len()
+        && segments[segments.len() - suffix.len()..]
+            .iter()
+            .zip(suffix)
+            .all(|(seg, want)| seg == want)
+}
+
+/// Scope analyzer: `gated` flips true when a gate-seam call carrying the
+/// input variant sits under a `?` or `.map_err(..)` ancestor (or is the
+/// probe seam). Built in two passes: first collect idents that a macro
+/// assertion in the same scope structurally binds to the input variant
+/// (e.g. `debug_assert!(matches!(run_flow, ..MobMachineInput::RunFlow {..}))`
+/// — macro interiors have no typed AST, so their parsed token stream is the
+/// structural truth available), then classify gate calls.
+struct MobCatalogGateAnalyzer<'n> {
+    input: &'n str,
+    asserted_idents: BTreeSet<String>,
+    gated: bool,
+}
+
+impl<'n> MobCatalogGateAnalyzer<'n> {
+    fn for_block(input: &'n str, block: &syn::Block) -> Self {
+        let mut collector = MacroAssertedIdentCollector {
+            input,
+            idents: BTreeSet::new(),
+        };
+        collector.visit_block(block);
+        Self {
+            input,
+            asserted_idents: collector.idents,
+            gated: false,
+        }
+    }
+
+    fn for_expr(input: &'n str, expr: &syn::Expr) -> Self {
+        let mut collector = MacroAssertedIdentCollector {
+            input,
+            idents: BTreeSet::new(),
+        };
+        collector.visit_expr(expr);
+        Self {
+            input,
+            asserted_idents: collector.idents,
+            gated: false,
+        }
+    }
+
+    /// `true` when `expr`'s subtree contains a gate-seam call whose
+    /// arguments carry the input variant.
+    fn subtree_has_input_carrying_gate_call(&self, expr: &syn::Expr) -> bool {
+        let mut finder = GateCallFinder {
+            input: self.input,
+            asserted_idents: &self.asserted_idents,
+            found: false,
+        };
+        finder.visit_expr(expr);
+        finder.found
+    }
+}
+
+impl<'a> Visit<'a> for MobCatalogGateAnalyzer<'_> {
+    fn visit_expr_try(&mut self, node: &'a syn::ExprTry) {
+        if self.subtree_has_input_carrying_gate_call(&node.expr) {
+            self.gated = true;
+        }
+        syn::visit::visit_expr_try(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'a syn::ExprMethodCall) {
+        let method = node.method.to_string();
+        if method == "map_err" && self.subtree_has_input_carrying_gate_call(&node.receiver) {
+            self.gated = true;
+        }
+        if method == "probe_mob_machine_input"
+            && node
+                .args
+                .iter()
+                .any(|arg| expr_carries_mob_machine_input(arg, self.input, &self.asserted_idents))
+        {
+            self.gated = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// Collect idents bound to the input variant by a macro assertion in scope.
+struct MacroAssertedIdentCollector<'n> {
+    input: &'n str,
+    idents: BTreeSet<String>,
+}
+
+impl<'a> Visit<'a> for MacroAssertedIdentCollector<'_> {
+    fn visit_macro(&mut self, node: &'a syn::Macro) {
+        let compact: String = node
+            .tokens
+            .to_string()
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        if compact.contains(&format!("MobMachineInput::{}", self.input)) {
+            collect_token_idents(node.tokens.clone(), &mut self.idents);
+        }
+        syn::visit::visit_macro(self, node);
+    }
+}
+
+fn collect_token_idents(tokens: proc_macro2::TokenStream, idents: &mut BTreeSet<String>) {
+    for token in tokens {
+        match token {
+            proc_macro2::TokenTree::Ident(ident) => {
+                idents.insert(ident.to_string());
+            }
+            proc_macro2::TokenTree::Group(group) => collect_token_idents(group.stream(), idents),
+            _ => {}
+        }
+    }
+}
+
+/// Subtree search for a gate-seam call whose arguments carry the input.
+struct GateCallFinder<'n> {
+    input: &'n str,
+    asserted_idents: &'n BTreeSet<String>,
+    found: bool,
+}
+
+impl GateCallFinder<'_> {
+    fn args_carry_input<'e>(&self, mut args: impl Iterator<Item = &'e syn::Expr>) -> bool {
+        args.any(|arg| expr_carries_mob_machine_input(arg, self.input, self.asserted_idents))
+    }
+}
+
+impl<'a> Visit<'a> for GateCallFinder<'_> {
+    fn visit_expr_method_call(&mut self, node: &'a syn::ExprMethodCall) {
+        if MOB_CATALOG_GATE_METHODS.contains(&node.method.to_string().as_str())
+            && self.args_carry_input(node.args.iter())
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'a syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && let Some(last) = path.path.segments.last()
+            && MOB_CATALOG_GATE_METHODS.contains(&last.ident.to_string().as_str())
+            && self.args_carry_input(node.args.iter())
+        {
+            self.found = true;
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+}
+
+/// `true` when the expression subtree carries `MobMachineInput::<input>` —
+/// either as a direct enum-variant construction/path, or as an ident the
+/// scope structurally asserted to be that variant.
+fn expr_carries_mob_machine_input(
+    expr: &syn::Expr,
+    input: &str,
+    asserted_idents: &BTreeSet<String>,
+) -> bool {
+    struct InputCarrierFinder<'n> {
+        input: &'n str,
+        asserted_idents: &'n BTreeSet<String>,
+        found: bool,
+    }
+    impl<'a> Visit<'a> for InputCarrierFinder<'_> {
+        fn visit_expr_struct(&mut self, node: &'a syn::ExprStruct) {
+            if path_ends_with(&node.path, &["MobMachineInput", self.input]) {
+                self.found = true;
+            }
+            syn::visit::visit_expr_struct(self, node);
+        }
+        fn visit_expr_path(&mut self, node: &'a syn::ExprPath) {
+            if path_ends_with(&node.path, &["MobMachineInput", self.input]) {
+                self.found = true;
+            }
+            if node.path.segments.len() == 1
+                && let Some(segment) = node.path.segments.first()
+                && self.asserted_idents.contains(&segment.ident.to_string())
+            {
+                self.found = true;
+            }
+            syn::visit::visit_expr_path(self, node);
+        }
+    }
+    let mut finder = InputCarrierFinder {
+        input,
+        asserted_idents,
+        found: false,
+    };
+    finder.visit_expr(expr);
+    finder.found
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowReducerFamily {
+    FlowRun,
+    FlowFrame,
+    LoopIteration,
+}
+
+impl FlowReducerFamily {
+    fn from_module(module: &str) -> Option<Self> {
+        match module {
+            "flow_run" => Some(Self::FlowRun),
+            "flow_frame" => Some(Self::FlowFrame),
+            "loop_iteration" => Some(Self::LoopIteration),
+            _ => None,
+        }
+    }
+
+    fn module(self) -> &'static str {
+        match self {
+            Self::FlowRun => "flow_run",
+            Self::FlowFrame => "flow_frame",
+            Self::LoopIteration => "loop_iteration",
+        }
+    }
+
+    fn apply_function(self) -> &'static str {
+        match self {
+            Self::FlowRun => "apply_mob_machine_flow_run_command",
+            Self::FlowFrame => "apply_mob_machine_flow_frame_command",
+            Self::LoopIteration => "apply_mob_machine_loop_iteration_command",
+        }
+    }
+
+    fn command_type(self) -> &'static str {
+        match self {
+            Self::FlowRun => "MobMachineFlowRunCommand",
+            Self::FlowFrame => "MobMachineFlowFrameCommand",
+            Self::LoopIteration => "MobMachineLoopIterationCommand",
+        }
+    }
+
+    fn authority_kind(self) -> &'static str {
+        match self {
+            Self::FlowRun => "MobMachineFlowAuthorityKind::FlowRun",
+            Self::FlowFrame => "MobMachineFlowAuthorityKind::FlowFrame",
+            Self::LoopIteration => "MobMachineFlowAuthorityKind::LoopIteration",
+        }
+    }
+}
+
+/// Structural allow-list for direct reducer use in the `run.rs` reducer-owned
+/// wrappers (K22(b) shape).
+///
+/// The prior implementation located the enclosing function by scanning raw
+/// lines backwards for a compacted `fn`-prefixed line, re-derived the
+/// function name from that single line's text, and classified the allowance
+/// with `token.contains(..)` / `line.contains("authority.require(..")`
+/// windows — so a comment or string literal containing the require text
+/// could false-allow, and a signature wrapped across lines broke the name
+/// and return-type derivation.
+///
+/// This version keys entirely off the AST-derived [`DirectUseAllowContext`]
+/// captured at the hit: the enclosing function name, the structural
+/// `authority.require(MobMachineFlowAuthorityKind::..)` facts seen earlier
+/// in that body, the enclosing `impl` self type, and the structural return
+/// type. Two shapes are allowed, both only in `crates/meerkat-mob/src/run.rs`:
+///
+/// 1. the reducer-owned apply wrapper — a `transition` use inside the
+///    family's `apply_mob_machine_<family>_command` function after that
+///    body structurally required the family's flow authority; and
+/// 2. the typed command adapter — a reducer `Input` construction inside
+///    `into_input` on the family's command type, returning `<module>::Input`.
+fn flow_reducer_direct_use_is_structurally_allowed(
+    path: &str,
+    module: &str,
+    hit: &FlowReducerHit,
+) -> bool {
+    if path != "crates/meerkat-mob/src/run.rs" {
+        return false;
+    }
+    let Some(family) = FlowReducerFamily::from_module(module) else {
+        return false;
+    };
+    let Some(context) = hit.direct_allow.as_ref() else {
+        return false;
+    };
+
+    match &hit.kind {
+        FlowReducerHitKind::Transition { .. } => {
+            context.enclosing_fn.as_deref() == Some(family.apply_function())
+                && context
+                    .preceding_authority_require_kinds
+                    .contains(family.authority_kind())
+        }
+        FlowReducerHitKind::Input { .. } => {
+            context.enclosing_fn.as_deref() == Some("into_input")
+                && context
+                    .enclosing_impl_type_idents
+                    .contains(family.command_type())
+                && context
+                    .fn_return_type_segments
+                    .windows(2)
+                    .any(|window| window[0] == family.module() && window[1] == "Input")
+        }
+        FlowReducerHitKind::ProjectionWrite | FlowReducerHitKind::CasStoreWrite => false,
+    }
+}
+
+fn flow_reducer_projection_commit_is_structurally_allowed(
+    path: &str,
+    hit: &FlowReducerHit,
+) -> bool {
+    // K22(c): the allow decision keys off the AST-derived `CasWriteAllowContext`
+    // captured at the hit (same structural resolution as the denial leg), not
+    // line-text windows. Comments/strings cannot false-allow and calls split
+    // across lines are still classified correctly.
+    let Some(context) = hit.cas_allow.as_ref() else {
+        return false;
+    };
+    // True when an enclosing match-arm pattern destructures the named
+    // `FlowFrameLoopStorePlan` variant.
+    let arm_matches = |variant: &str| {
+        context.enclosing_match_arm_patterns.iter().any(|pattern| {
+            let mut segments = pattern.rsplit("::");
+            segments.next() == Some(variant) && segments.next() == Some("FlowFrameLoopStorePlan")
+        })
+    };
+    match path {
+        "crates/meerkat-mob/src/runtime/flow.rs" => {
+            let has_authority_setup = context
+                .preceding_callee_idents
+                .contains("project_machine_input")
+                && context
+                    .preceding_callee_idents
+                    .contains("from_accepted_mob_machine_input");
+            let has_typed_authority_args = context
+                .signature_type_idents
+                .contains("MobMachineFlowRunCommand")
+                && context
+                    .signature_type_idents
+                    .contains("MobMachineFlowAuthorityToken");
+            let has_typed_authority_token_and_command_source = context
+                .signature_type_idents
+                .contains("MobMachineFlowAuthorityToken")
+                && (context
+                    .signature_type_idents
+                    .contains("MobMachineFlowRunCommand")
+                    || context
+                        .preceding_path_idents
+                        .contains("MobMachineFlowRunCommand"));
+            context
+                .preceding_callee_idents
+                .contains("apply_mob_machine_flow_run_command")
+                && (has_authority_setup
+                    || has_typed_authority_args
+                    || has_typed_authority_token_and_command_source)
+                && context.call_arg_idents.contains("next_state")
+        }
+        "crates/meerkat-mob/src/runtime/actor.rs" => {
+            if context.enclosing_fn.as_deref() != Some("commit_flow_frame_store_plan_in_actor") {
+                return false;
+            }
+            if !context.fn_prepares_machine_inputs || !context.fn_commits_prepared_inputs {
+                return false;
+            }
+            match context.cas_method.as_str() {
+                "cas_flow_state" => {
+                    context.call_arg_idents.contains("next_run_state")
+                        && arm_matches("RunStateOnly")
+                }
+                "cas_frame_state" => {
+                    (context.call_arg_idents.contains("next_frame")
+                        && (arm_matches("FrameState") || arm_matches("SealFrame")))
+                        || (context.call_arg_idents.contains("initial_frame")
+                            && arm_matches("InsertFrame"))
+                }
+                "cas_complete_step_and_record_output" => arm_matches("CompleteStepAndRecordOutput"),
+                "cas_grant_node_slot" => arm_matches("GrantNodeSlot"),
+                "cas_start_loop" => arm_matches("StartLoop"),
+                "cas_grant_body_frame_start" => arm_matches("GrantBodyFrameStart"),
+                "cas_complete_body_frame" => arm_matches("CompleteBodyFrame"),
+                "cas_loop_request_body_frame" => arm_matches("LoopRequestBodyFrame"),
+                "cas_complete_loop" => arm_matches("CompleteLoop"),
+                _ => false,
+            }
+        }
+        "crates/meerkat-mob/src/runtime/flow_frame_engine.rs" => false,
+        _ => false,
+    }
+}
+
+pub fn collect_generated_kernel_boundary_mismatches(root: &Path) -> Result<Vec<String>> {
+    let registry = CanonicalRegistry::load();
+    let mut mismatches = Vec::new();
+    let expected_generated = expected_generated_kernel_modules(&registry);
+
+    for retired in retired_generated_source_paths() {
+        let retired_path = root.join(retired);
+        if retired_path.exists() {
+            mismatches.push(format!(
+                "retired generated-source/bridge path must be removed {retired}"
+            ));
+        }
+    }
+
+    let generated_mod = generated_kernel_mod_path(root);
+    let generated_dir = generated_mod
+        .parent()
+        .context("generated kernel mod parent")?;
+    if generated_dir.exists() {
+        for entry in fs::read_dir(generated_dir)
+            .with_context(|| format!("read {}", generated_dir.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!("scan generated kernel dir {}", generated_dir.display())
+            })?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if !expected_generated.contains(stem) {
+                mismatches.push(format!(
+                    "stale generated kernel module must be removed {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(mismatches)
+}
+
+pub fn collect_production_machine_owner_relation_mismatches(root: &Path) -> Result<Vec<String>> {
+    let registry = CanonicalRegistry::load();
+    let relations = canonical_machine_production_owner_relations();
+    collect_production_machine_owner_relation_mismatches_for_schemas(
+        root,
+        &registry.machines,
+        &relations,
+    )
+}
+
+pub fn collect_production_machine_owner_relation_mismatches_for_schemas(
+    root: &Path,
+    schemas: &[MachineSchema],
+    relations: &[MachineProductionOwnerRelation],
+) -> Result<Vec<String>> {
+    let mut mismatches = Vec::new();
+    let schemas_by_machine = schemas
+        .iter()
+        .map(|schema| (schema.machine.as_str(), schema))
+        .collect::<BTreeMap<_, _>>();
+    let mut relations_by_machine: BTreeMap<&str, Vec<&MachineProductionOwnerRelation>> =
+        BTreeMap::new();
+
+    for relation in relations {
+        relations_by_machine
+            .entry(relation.machine.as_str())
+            .or_default()
+            .push(relation);
+
+        if !schemas_by_machine.contains_key(relation.machine.as_str()) {
+            mismatches.push(format!(
+                "production owner schema relation references untracked machine {}",
+                relation.machine
+            ));
+            continue;
+        }
+
+        if relation.rust.crate_name == "self" || relation.rust.crate_name.trim().is_empty() {
+            mismatches.push(format!(
+                "production owner schema relation for {} must name a production crate, found `{}`",
+                relation.machine, relation.rust.crate_name
+            ));
+        }
+        if relation.rust.module.trim().is_empty() {
+            mismatches.push(format!(
+                "production owner schema relation for {} must name a Rust module",
+                relation.machine
+            ));
+        }
+
+        let owner_path = owner_module_file(root, &relation.rust.crate_name, &relation.rust.module)?;
+        let rel_owner_path = relative_slash_path(root, &owner_path)?;
+        if is_catalog_dsl_path(&rel_owner_path) {
+            mismatches.push(format!(
+                "production owner schema relation for {} points at catalog DSL instead of production owner: {}",
+                relation.machine, rel_owner_path
+            ));
+        }
+        if !owner_path.exists() {
+            mismatches.push(format!(
+                "production owner schema relation for {} points at missing owner module {}",
+                relation.machine,
+                owner_path.display()
+            ));
+        }
+
+        let generated_slug = generated_kernel_module_slug(&relation.machine);
+        let generated_kernel = generated_kernel_module_path(root, &generated_slug);
+        if !generated_kernel.exists() {
+            mismatches.push(format!(
+                "production owner schema relation for {} has no generated kernel module {}",
+                relation.machine,
+                generated_kernel.display()
+            ));
+        }
+    }
+
+    for schema in schemas {
+        let relation_count = relations_by_machine
+            .get(schema.machine.as_str())
+            .map_or(0, Vec::len);
+        match relation_count {
+            0 => mismatches.push(format!(
+                "missing production owner schema relation for {}",
+                schema.machine
+            )),
+            1 => {}
+            count => mismatches.push(format!(
+                "duplicate production owner schema relations for {} ({count} entries)",
+                schema.machine
+            )),
+        }
+    }
+
+    Ok(mismatches)
+}
+
+fn retired_generated_source_paths() -> &'static [&'static str] {
+    &[
+        "crates/meerkat-machine-kernels/src/compat_generated.rs",
+        "crates/meerkat-machine-kernels/src/generated/flow_run.rs",
+        "crates/meerkat-machine-kernels/src/generated/flow_frame.rs",
+        "crates/meerkat-machine-kernels/src/generated/loop_iteration.rs",
+        "crates/meerkat-mob/src/generated/flow_run.rs",
+        "crates/meerkat-mob/src/generated/flow_frame.rs",
+        "crates/meerkat-mob/src/generated/loop_iteration.rs",
+        "crates/meerkat-mob/src/generated/flow_frame_loop_driver.rs",
+        "crates/meerkat-mob/src/runtime/flow_run_kernel.rs",
+        "crates/meerkat-mob/src/runtime/flow_frame_kernel.rs",
+        "crates/meerkat-mob/src/runtime/loop_iteration_authority.rs",
+    ]
+}
+
+/// Validate every selected coverage anchor against both the on-disk code
+/// location it names and the canonical schema element it claims to realize.
+///
+/// Two fail-closed checks run per anchor:
+///
+/// 1. **Symbol resolution** — the anchor's `symbol` path must exist on disk.
+/// 2. **Schema-target resolution** — the anchor's typed `target` must name a
+///    real schema element. A [`CoverageSchemaTarget::Machine`] must name a
+///    machine in the canonical machine-id set; a [`CoverageSchemaTarget::Route`]
+///    must name a route declared by the owning composition. An anchor that
+///    names a machine/route absent from the schema is a generated-artifact
+///    drift and pushes a mismatch (it never silently passes).
+///
+/// Machine targets resolve against the full canonical machine set rather than
+/// the current selection, so a composition anchor that references a machine
+/// bound elsewhere (e.g. `MeerkatMachine`) still resolves under a narrowed
+/// `--composition` selection.
+pub fn collect_coverage_anchor_mismatches(root: &Path, selection: &Selection) -> Vec<String> {
+    let mut mismatches = Vec::new();
+
+    let canonical_machine_names = canonical_machine_schemas()
+        .iter()
+        .map(|schema| schema.machine.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+
+    for machine in &selection.machines {
+        for anchor in &machine.coverage.code_anchors {
+            let path = root.join(anchor.symbol.as_str());
+            if !path.exists() {
+                mismatches.push(format!(
+                    "missing machine coverage anchor {} for {}",
+                    path.display(),
+                    machine.schema.machine
+                ));
+            }
+            // Machine coverage manifests own no routes; every anchor must
+            // target a canonical machine.
+            match &anchor.target {
+                CoverageSchemaTarget::Machine(machine_id) => {
+                    if !canonical_machine_names.contains(machine_id.as_str()) {
+                        mismatches.push(format!(
+                            "machine coverage anchor `{}` for {} targets unknown machine `{}`",
+                            anchor.id, machine.schema.machine, machine_id
+                        ));
+                    }
+                }
+                CoverageSchemaTarget::Route(route_id) => {
+                    mismatches.push(format!(
+                        "machine coverage anchor `{}` for {} targets route `{}` but a machine coverage manifest declares no routes",
+                        anchor.id, machine.schema.machine, route_id
+                    ));
+                }
+            }
+        }
+    }
+
+    for composition in &selection.compositions {
+        let route_names = composition
+            .schema
+            .routes
+            .iter()
+            .map(|route| route.name.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+
+        for anchor in &composition.coverage.code_anchors {
+            let path = root.join(anchor.symbol.as_str());
+            if !path.exists() {
+                mismatches.push(format!(
+                    "missing composition coverage anchor {} for {}",
+                    path.display(),
+                    composition.schema.name
+                ));
+            }
+            match &anchor.target {
+                CoverageSchemaTarget::Route(route_id) => {
+                    if !route_names.contains(route_id.as_str()) {
+                        mismatches.push(format!(
+                            "composition coverage anchor `{}` for {} targets undeclared route `{}`",
+                            anchor.id, composition.schema.name, route_id
+                        ));
+                    }
+                }
+                CoverageSchemaTarget::Machine(machine_id) => {
+                    if !canonical_machine_names.contains(machine_id.as_str()) {
+                        mismatches.push(format!(
+                            "composition coverage anchor `{}` for {} targets unknown machine `{}`",
+                            anchor.id, composition.schema.name, machine_id
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    mismatches
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MachineOwnerInventoryRow {
+    machine: String,
+    final_mode: String,
+    owner_crate: String,
+}
+
+pub fn collect_machine_inventory_mismatches(root: &Path) -> Result<Vec<String>> {
+    let registry = CanonicalRegistry::load();
+
+    // The doc-based owner/mode inventories were in docs/architecture/0.5/ which
+    // has been removed (the machine schema catalog is the sole source of truth).
+    // Skip those cross-reference checks when the docs don't exist.
+    let impl_plan_path = root.join("docs/architecture/0.5/meerkat_0_5_implementation_plan.md");
+    let strategy_path =
+        root.join("docs/architecture/0.5/meerkat_machine_formalization_strategy.md");
+    let owner_inventory = if impl_plan_path.exists() {
+        parse_owner_inventory(&fs::read_to_string(&impl_plan_path)?)?
+    } else {
+        BTreeMap::new()
+    };
+    let final_mode_inventory = if strategy_path.exists() {
+        parse_final_mode_inventory(&fs::read_to_string(&strategy_path)?)?
+    } else {
+        BTreeMap::new()
+    };
+
+    let mut mismatches = Vec::new();
+    let registry_names: BTreeSet<String> = registry
+        .machines
+        .iter()
+        .map(|machine| machine.machine.as_str().to_owned())
+        .collect();
+
+    // Only cross-reference against doc inventories when the docs exist.
+    if !owner_inventory.is_empty() {
+        let owner_names: BTreeSet<String> = owner_inventory.keys().cloned().collect();
+        for machine in registry_names.difference(&owner_names) {
+            mismatches.push(format!(
+                "canonical machine {machine} missing from implementation plan owner map"
+            ));
+        }
+        for machine in owner_names.difference(&registry_names) {
+            mismatches.push(format!(
+                "untracked machine {machine} present in implementation plan owner map"
+            ));
+        }
+    }
+    if !final_mode_inventory.is_empty() {
+        let final_mode_names: BTreeSet<String> = final_mode_inventory.keys().cloned().collect();
+        for machine in registry_names.difference(&final_mode_names) {
+            mismatches.push(format!(
+                "canonical machine {machine} missing from formalization strategy final mode table"
+            ));
+        }
+        for machine in final_mode_names.difference(&registry_names) {
+            mismatches.push(format!(
+                "untracked machine {machine} present in formalization strategy final mode table"
+            ));
+        }
+    }
+
+    let specs_machine_root = root.join("specs/machines");
+    let actual_machine_dirs = canonical_machine_dirs(&specs_machine_root)?;
+    let expected_machine_dirs: BTreeSet<String> = registry
+        .machines
+        .iter()
+        .map(|machine| machine_slug(&machine.machine))
+        .collect();
+    for slug in expected_machine_dirs.difference(&actual_machine_dirs) {
+        mismatches.push(format!(
+            "missing canonical machine artifact directory {}",
+            specs_machine_root.join(slug).display()
+        ));
+    }
+    for slug in actual_machine_dirs.difference(&expected_machine_dirs) {
+        mismatches.push(format!(
+            "untracked canonical machine directory {}",
+            specs_machine_root.join(slug).display()
+        ));
+    }
+
+    let specs_composition_root = root.join("specs/compositions");
+    let actual_composition_dirs = canonical_machine_dirs(&specs_composition_root)?;
+    let expected_composition_dirs: BTreeSet<String> = registry
+        .compositions
+        .iter()
+        .map(|c| composition_slug(&c.name))
+        .collect();
+    for slug in expected_composition_dirs.difference(&actual_composition_dirs) {
+        mismatches.push(format!(
+            "missing canonical composition artifact directory {}",
+            specs_composition_root.join(slug).display()
+        ));
+    }
+    for slug in actual_composition_dirs.difference(&expected_composition_dirs) {
+        mismatches.push(format!(
+            "untracked canonical composition directory {}",
+            specs_composition_root.join(slug).display()
+        ));
+    }
+
+    for machine in &registry.machines {
+        let Some(owner_row) = owner_inventory.get(machine.machine.as_str()) else {
+            continue;
+        };
+        let Some(required_final_mode) = final_mode_inventory.get(machine.machine.as_str()) else {
+            continue;
+        };
+        if owner_row.owner_crate != machine.rust.crate_name {
+            mismatches.push(format!(
+                "owner inventory mismatch for {}: docs say {}, registry says {}",
+                machine.machine, owner_row.owner_crate, machine.rust.crate_name
+            ));
+        }
+        if owner_row.final_mode != *required_final_mode {
+            mismatches.push(format!(
+                "final mode inventory mismatch for {}: owner map says {}, final mode table says {}",
+                machine.machine, owner_row.final_mode, required_final_mode
+            ));
+        }
+        if required_final_mode != "SchemaKernel" {
+            mismatches.push(format!(
+                "invalid final mode {} for {}: canonical 0.5 machine inventories must converge on SchemaKernel",
+                required_final_mode, machine.machine
+            ));
+        }
+
+        let slug = machine_slug(&machine.machine);
+        let generated_slug = generated_kernel_module_slug(&machine.machine);
+        for artifact_path in [
+            machine_contract_path(root, &slug),
+            machine_model_path(root, &slug),
+            machine_ci_path(root, &slug),
+            machine_deep_path(root, &slug),
+            machine_mapping_path(root, &slug),
+            generated_kernel_module_path(root, &generated_slug),
+        ] {
+            if !artifact_path.exists() {
+                mismatches.push(format!(
+                    "missing canonical machine artifact {}",
+                    artifact_path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(mismatches)
+}
+
+fn canonical_machine_dirs(root: &Path) -> Result<BTreeSet<String>> {
+    let mut dirs = BTreeSet::new();
+    if !root.exists() {
+        return Ok(dirs);
+    }
+
+    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let entry = entry.with_context(|| format!("iterate {}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read file type {}", path.display()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        dirs.insert(name.to_owned());
+    }
+
+    Ok(dirs)
+}
+
+fn parse_owner_inventory(contents: &str) -> Result<BTreeMap<String, MachineOwnerInventoryRow>> {
+    let mut rows = BTreeMap::new();
+    for row in parse_markdown_table_rows(contents, "## Canonical Machine Owner Map")? {
+        if row.len() < 3 {
+            bail!("owner map row must contain machine, final mode, and owner crate");
+        }
+        let entry = MachineOwnerInventoryRow {
+            machine: row[0].clone(),
+            final_mode: row[1].clone(),
+            owner_crate: row[2].clone(),
+        };
+        if rows.insert(entry.machine.clone(), entry).is_some() {
+            bail!("duplicate machine in canonical owner map");
+        }
+    }
+    Ok(rows)
+}
+
+fn parse_final_mode_inventory(contents: &str) -> Result<BTreeMap<String, String>> {
+    let mut rows = BTreeMap::new();
+    for row in parse_markdown_table_rows(contents, "## Final 0.5 Machine Modes")? {
+        if row.len() < 2 {
+            bail!("final mode row must contain machine and required final mode");
+        }
+        if rows.insert(row[0].clone(), row[1].clone()).is_some() {
+            bail!("duplicate machine in final mode inventory");
+        }
+    }
+    Ok(rows)
+}
+
+fn parse_markdown_table_rows(contents: &str, heading: &str) -> Result<Vec<Vec<String>>> {
+    let mut in_section = false;
+    let mut rows = Vec::new();
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+
+        if !in_section {
+            if trimmed == heading {
+                in_section = true;
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("## ") && !rows.is_empty() {
+            break;
+        }
+        if !trimmed.starts_with('|') {
+            if !rows.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        let columns: Vec<String> = trimmed
+            .trim_matches('|')
+            .split('|')
+            .map(|column| column.trim().replace('`', ""))
+            .collect();
+        if columns.is_empty() {
+            continue;
+        }
+        if columns[0] == "Machine" {
+            continue;
+        }
+        if columns.iter().all(|column| {
+            !column.is_empty() && column.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
+        }) {
+            continue;
+        }
+        rows.push(columns);
+    }
+
+    if rows.is_empty() {
+        bail!("failed to parse markdown table under {heading}");
+    }
+
+    Ok(rows)
+}
+
+fn authority_language_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+
+    collect_text_paths(&root.join("docs"), &mut paths)?;
+
+    for path in [
+        root.join("specs/machines/README.md"),
+        root.join("specs/compositions/README.md"),
+    ] {
+        if path.exists() {
+            paths.push(path);
+        }
+    }
+
+    Ok(paths)
+}
+
+pub fn owner_module_dir(root: &Path, crate_name: &str, module: &str) -> PathBuf {
+    let mut path = root.join("crates").join(crate_name).join("src");
+    let mut segments = module.split("::").peekable();
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_none() {
+            break;
+        }
+        path.push(segment);
+    }
+    path
+}
+
+pub fn owner_module_file(root: &Path, crate_name: &str, module: &str) -> Result<PathBuf> {
+    let mut path = owner_module_dir(root, crate_name, module);
+    let leaf = module
+        .rsplit("::")
+        .next()
+        .ok_or_else(|| anyhow!("Rust module path always has a leaf segment"))?;
+    path.push(format!("{leaf}.rs"));
+    Ok(path)
+}
+
+fn collect_text_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("iterate {}", dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read file type {}", path.display()))?;
+
+        if file_type.is_dir() {
+            collect_text_paths(&path, paths)?;
+            continue;
+        }
+
+        let is_text = matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("md" | "mdx" | "yaml" | "yml" | "txt")
+        );
+        if is_text {
+            paths.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn production_rust_source_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    // Workspace crates live under crates/; older fixture roots may still
+    // place them directly under the root.
+    let crates_dir = root.join("crates");
+    let scan_root = if crates_dir.is_dir() {
+        crates_dir
+    } else {
+        root.to_path_buf()
+    };
+    for entry in
+        fs::read_dir(&scan_root).with_context(|| format!("read {}", scan_root.display()))?
+    {
+        let entry = entry.with_context(|| format!("iterate {}", scan_root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read file type {}", path.display()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name == "meerkat" || name.starts_with("meerkat-") {
+            collect_rust_source_paths(&path.join("src"), &mut paths)?;
+        }
+    }
+    Ok(paths)
+}
+
+fn collect_rust_source_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("iterate {}", dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read file type {}", path.display()))?;
+
+        if file_type.is_dir() {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if should_skip_rust_scan_dir(name) {
+                continue;
+            }
+            collect_rust_source_paths(&path, paths)?;
+            continue;
+        }
+
+        if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            paths.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn should_skip_rust_scan_dir(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
+            name,
+            "target"
+                | "bazel-bin"
+                | "bazel-meerkat"
+                | "bazel-out"
+                | "bazel-testlogs"
+                | "node_modules"
+        )
+}
+
+fn relative_slash_path(root: &Path, path: &Path) -> Result<String> {
+    Ok(path
+        .strip_prefix(root)
+        .with_context(|| format!("strip {} from {}", root.display(), path.display()))?
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+fn is_catalog_dsl_path(path: &str) -> bool {
+    path.starts_with("crates/meerkat-machine-schema/src/catalog/dsl/")
+}
+
+pub struct CanonicalRegistry {
+    machines: Vec<MachineSchema>,
+    compositions: Vec<CompositionSchema>,
+    machine_coverages: Vec<MachineCoverageManifest>,
+    composition_coverages: Vec<CompositionCoverageManifest>,
+}
+
+impl CanonicalRegistry {
+    pub fn load() -> Self {
+        Self {
+            machines: canonical_machine_schemas(),
+            compositions: canonical_composition_schemas(),
+            machine_coverages: canonical_machine_coverage_manifests(),
+            composition_coverages: canonical_composition_coverage_manifests(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let by_name = self.machine_map();
+        self.validate_coverages()?;
+
+        for machine in &self.machines {
+            machine
+                .validate()
+                .with_context(|| format!("validate machine {}", machine.machine))?;
+        }
+
+        for composition in &self.compositions {
+            composition
+                .validate()
+                .with_context(|| format!("validate composition {}", composition.name))?;
+
+            for instance in &composition.machines {
+                if !by_name.contains_key(instance.machine_name.as_str()) {
+                    bail!("unknown machine in composition: {}", instance.machine_name);
+                }
+            }
+
+            let machine_refs = self.machines.iter().collect::<Vec<_>>();
+            composition
+                .validate_against(&machine_refs)
+                .with_context(|| format!("cross-validate composition {}", composition.name))?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_coverages(&self) -> Result<()> {
+        let machine_names = self
+            .machines
+            .iter()
+            .map(|schema| schema.machine.as_str())
+            .collect::<BTreeSet<_>>();
+
+        for schema in &self.machines {
+            let manifest = self
+                .machine_coverages
+                .iter()
+                .find(|item| item.machine == schema.machine)
+                .ok_or_else(|| {
+                    anyhow!("missing machine coverage manifest for {}", schema.machine)
+                })?;
+            if manifest.code_anchors.is_empty() {
+                bail!(
+                    "machine coverage manifest {} has no code anchors",
+                    manifest.machine
+                );
+            }
+            if manifest.scenarios.is_empty() {
+                bail!(
+                    "machine coverage manifest {} has no scenarios",
+                    manifest.machine
+                );
+            }
+            validate_machine_semantic_coverage(schema, manifest)?;
+        }
+
+        for manifest in &self.machine_coverages {
+            if !machine_names.contains(manifest.machine.as_str()) {
+                bail!(
+                    "machine coverage manifest {} does not match a canonical machine",
+                    manifest.machine
+                );
+            }
+        }
+
+        let composition_names = self
+            .compositions
+            .iter()
+            .map(|schema| schema.name.as_str())
+            .collect::<BTreeSet<_>>();
+
+        for schema in &self.compositions {
+            let manifest = self
+                .composition_coverages
+                .iter()
+                .find(|item| item.composition == schema.name)
+                .ok_or_else(|| {
+                    anyhow!("missing composition coverage manifest for {}", schema.name)
+                })?;
+            if manifest.code_anchors.is_empty() {
+                bail!(
+                    "composition coverage manifest {} has no code anchors",
+                    manifest.composition
+                );
+            }
+            if manifest.scenarios.is_empty() {
+                bail!(
+                    "composition coverage manifest {} has no scenarios",
+                    manifest.composition
+                );
+            }
+            validate_composition_semantic_coverage(schema, manifest)?;
+        }
+
+        for manifest in &self.composition_coverages {
+            if !composition_names.contains(manifest.composition.as_str()) {
+                bail!(
+                    "composition coverage manifest {} does not match a canonical composition",
+                    manifest.composition
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn machine_map(&self) -> BTreeMap<&str, &MachineSchema> {
+        self.machines
+            .iter()
+            .map(|schema| (schema.machine.as_str(), schema))
+            .collect()
+    }
+
+    pub fn select(&self, args: &SelectionArgs) -> Result<Selection> {
+        if !args.all && args.machines.is_empty() && args.compositions.is_empty() {
+            bail!("select --all or provide at least one --machine/--composition");
+        }
+
+        let machine_entries = self
+            .machines
+            .iter()
+            .map(|schema| {
+                let coverage = self
+                    .machine_coverages
+                    .iter()
+                    .find(|item| item.machine == schema.machine)
+                    .ok_or_else(|| {
+                        anyhow!("missing validated machine coverage for {}", schema.machine)
+                    })?
+                    .clone();
+                Ok(MachineEntry {
+                    slug: machine_slug(&schema.machine),
+                    schema: schema.clone(),
+                    coverage,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let composition_entries = self
+            .compositions
+            .iter()
+            .map(|schema| {
+                let coverage = self
+                    .composition_coverages
+                    .iter()
+                    .find(|item| item.composition == schema.name)
+                    .ok_or_else(|| {
+                        anyhow!("missing validated composition coverage for {}", schema.name)
+                    })?
+                    .clone();
+                Ok(CompositionEntry {
+                    slug: composition_slug(&schema.name),
+                    schema: schema.clone(),
+                    coverage,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let machines = if args.all {
+            machine_entries
+        } else {
+            select_machines(&machine_entries, &args.machines)?
+        };
+
+        let compositions = if args.all {
+            composition_entries
+        } else {
+            select_compositions(&composition_entries, &args.compositions)?
+        };
+
+        Ok(Selection {
+            machines,
+            compositions,
+        })
+    }
+}
+
+fn validate_machine_semantic_coverage(
+    schema: &MachineSchema,
+    manifest: &MachineCoverageManifest,
+) -> Result<()> {
+    let anchor_ids = manifest
+        .code_anchors
+        .iter()
+        .map(|anchor| anchor.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let scenario_ids = manifest
+        .scenarios
+        .iter()
+        .map(|scenario| scenario.id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    // Typed claim resolution (fail-closed): every anchor/scenario claim must
+    // name a real schema element of the matching kind. A machine coverage
+    // manifest declares no routes or scheduler rules, so claims of those
+    // kinds are structurally mismatched.
+    let owner = format!("machine {}", schema.machine);
+    let transition_names = schema
+        .transitions
+        .iter()
+        .map(|transition| transition.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let effect_names = schema
+        .effects
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let invariant_names = schema
+        .invariants
+        .iter()
+        .map(|invariant| invariant.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for (claimant_kind, claimant_id, claims) in manifest
+        .code_anchors
+        .iter()
+        .map(|anchor| ("code anchor", anchor.id.as_str(), &anchor.claims))
+        .chain(
+            manifest
+                .scenarios
+                .iter()
+                .map(|scenario| ("scenario", scenario.id.as_str(), &scenario.claims)),
+        )
+    {
+        validate_claims_against(
+            &owner,
+            claimant_kind,
+            claimant_id,
+            claims,
+            Some(&transition_names),
+            Some(&effect_names),
+            &invariant_names,
+            None,
+            None,
+        )?;
+    }
+
+    validate_semantic_entries(
+        &format!("machine {}", schema.machine),
+        "transition",
+        &schema
+            .transitions
+            .iter()
+            .map(|transition| transition.name.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        &manifest.transition_coverage,
+        &anchor_ids,
+        &scenario_ids,
+    )?;
+    validate_semantic_entries(
+        &format!("machine {}", schema.machine),
+        "effect",
+        &schema
+            .effects
+            .variants
+            .iter()
+            .map(|variant| variant.name.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        &manifest.effect_coverage,
+        &anchor_ids,
+        &scenario_ids,
+    )?;
+    validate_semantic_entries(
+        &format!("machine {}", schema.machine),
+        "invariant",
+        &schema
+            .invariants
+            .iter()
+            .map(|invariant| invariant.name.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        &manifest.invariant_coverage,
+        &anchor_ids,
+        &scenario_ids,
+    )?;
+
+    Ok(())
+}
+
+fn validate_composition_semantic_coverage(
+    schema: &CompositionSchema,
+    manifest: &CompositionCoverageManifest,
+) -> Result<()> {
+    let anchor_ids = manifest
+        .code_anchors
+        .iter()
+        .map(|anchor| anchor.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let scenario_ids = manifest
+        .scenarios
+        .iter()
+        .map(|scenario| scenario.id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    // Typed claim resolution (fail-closed): every anchor/scenario claim must
+    // name a real schema element of the matching kind. A composition
+    // coverage manifest declares no machine transitions or effects, so
+    // claims of those kinds are structurally mismatched.
+    let owner = format!("composition {}", schema.name);
+    let route_names = schema
+        .routes
+        .iter()
+        .map(|route| route.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let scheduler_rule_names = schema
+        .scheduler_rules
+        .iter()
+        .map(scheduler_rule_coverage_name)
+        .collect::<Vec<_>>();
+    let scheduler_rule_names = scheduler_rule_names
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let invariant_names = schema
+        .invariants
+        .iter()
+        .map(|invariant| invariant.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for (claimant_kind, claimant_id, claims) in manifest
+        .code_anchors
+        .iter()
+        .map(|anchor| ("code anchor", anchor.id.as_str(), &anchor.claims))
+        .chain(
+            manifest
+                .scenarios
+                .iter()
+                .map(|scenario| ("scenario", scenario.id.as_str(), &scenario.claims)),
+        )
+    {
+        validate_claims_against(
+            &owner,
+            claimant_kind,
+            claimant_id,
+            claims,
+            None,
+            None,
+            &invariant_names,
+            Some(&route_names),
+            Some(&scheduler_rule_names),
+        )?;
+    }
+
+    validate_semantic_entries(
+        &format!("composition {}", schema.name),
+        "route",
+        &schema
+            .routes
+            .iter()
+            .map(|route| route.name.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        &manifest.route_coverage,
+        &anchor_ids,
+        &scenario_ids,
+    )?;
+    validate_semantic_entries(
+        &format!("composition {}", schema.name),
+        "scheduler rule",
+        &schema
+            .scheduler_rules
+            .iter()
+            .map(scheduler_rule_coverage_name)
+            .collect::<Vec<_>>(),
+        &manifest.scheduler_rule_coverage,
+        &anchor_ids,
+        &scenario_ids,
+    )?;
+    validate_semantic_entries(
+        &format!("composition {}", schema.name),
+        "invariant",
+        &schema
+            .invariants
+            .iter()
+            .map(|invariant| invariant.name.clone())
+            .collect::<Vec<_>>(),
+        &manifest.invariant_coverage,
+        &anchor_ids,
+        &scenario_ids,
+    )?;
+
+    Ok(())
+}
+
+fn validate_semantic_entries(
+    owner: &str,
+    item_kind: &str,
+    expected_names: &[String],
+    entries: &[SemanticCoverageEntry],
+    anchor_ids: &BTreeSet<&str>,
+    scenario_ids: &BTreeSet<&str>,
+) -> Result<()> {
+    let expected = expected_names
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let seen = entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<BTreeSet<_>>();
+
+    for name in &expected {
+        if !seen.contains(name) {
+            bail!("{owner} missing semantic coverage entry for {item_kind} `{name}`");
+        }
+    }
+
+    for entry in entries {
+        if !expected.contains(entry.name.as_str()) {
+            bail!(
+                "{owner} semantic coverage entry `{}` does not match a declared {item_kind}",
+                entry.name
+            );
+        }
+        // Empty anchor/scenario id lists are permitted: under the
+        // full-containment matching rule an element nothing fully describes
+        // is honestly UNCLAIMED rather than mis-attributed to whichever
+        // anchor coincidentally shares a token. Wrong claims (unknown ids,
+        // tautological everything-maps-to-everything) remain rejected below.
+        if anchor_ids.len() > 1
+            && scenario_ids.len() > 1
+            && entry.anchor_ids.len() == anchor_ids.len()
+            && entry.scenario_ids.len() == scenario_ids.len()
+        {
+            bail!(
+                "{owner} semantic coverage entry `{}` maps to every code anchor and every scenario; coverage must be semantic, not tautological",
+                entry.name
+            );
+        }
+
+        for anchor_id in &entry.anchor_ids {
+            if !anchor_ids.contains(anchor_id.as_str()) {
+                bail!(
+                    "{owner} semantic coverage entry `{}` references unknown code anchor `{anchor_id}`",
+                    entry.name
+                );
+            }
+        }
+
+        for scenario_id in &entry.scenario_ids {
+            if !scenario_ids.contains(scenario_id.as_str()) {
+                bail!(
+                    "{owner} semantic coverage entry `{}` references unknown scenario `{scenario_id}`",
+                    entry.name
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve one claimant's typed claims against the owning schema's element
+/// name sets. `None` for a kind means the manifest type structurally owns no
+/// elements of that kind, so any claim of it is a mismatch.
+#[allow(clippy::too_many_arguments)]
+fn validate_claims_against(
+    owner: &str,
+    claimant_kind: &str,
+    claimant_id: &str,
+    claims: &CoverageClaims,
+    transitions: Option<&BTreeSet<&str>>,
+    effects: Option<&BTreeSet<&str>>,
+    invariants: &BTreeSet<&str>,
+    routes: Option<&BTreeSet<&str>>,
+    scheduler_rules: Option<&BTreeSet<&str>>,
+) -> Result<()> {
+    type KindRow<'a> = (&'a str, Vec<&'a str>, Option<&'a BTreeSet<&'a str>>);
+    let kinds: [KindRow<'_>; 5] = [
+        (
+            "transition",
+            claims.transitions.iter().map(|id| id.as_str()).collect(),
+            transitions,
+        ),
+        (
+            "effect",
+            claims.effects.iter().map(|id| id.as_str()).collect(),
+            effects,
+        ),
+        (
+            "invariant",
+            claims.invariants.iter().map(String::as_str).collect(),
+            Some(invariants),
+        ),
+        (
+            "route",
+            claims.routes.iter().map(|id| id.as_str()).collect(),
+            routes,
+        ),
+        (
+            "scheduler rule",
+            claims.scheduler_rules.iter().map(String::as_str).collect(),
+            scheduler_rules,
+        ),
+    ];
+    for (kind, claimed, declared) in kinds {
+        match declared {
+            None => {
+                if let Some(first) = claimed.first() {
+                    bail!(
+                        "{owner} {claimant_kind} `{claimant_id}` claims {kind} `{first}` but this manifest type declares no {kind}s"
+                    );
+                }
+            }
+            Some(declared) => {
+                for name in claimed {
+                    if !declared.contains(name) {
+                        bail!(
+                            "{owner} {claimant_kind} `{claimant_id}` claims nonexistent {kind} `{name}`"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub struct Selection {
+    pub machines: Vec<MachineEntry>,
+    pub compositions: Vec<CompositionEntry>,
+}
+
+#[derive(Clone)]
+pub struct MachineEntry {
+    pub slug: String,
+    pub schema: MachineSchema,
+    pub coverage: MachineCoverageManifest,
+}
+
+#[derive(Clone)]
+pub struct CompositionEntry {
+    pub slug: String,
+    pub schema: CompositionSchema,
+    pub coverage: CompositionCoverageManifest,
+}
+
+fn select_machines(entries: &[MachineEntry], requested: &[String]) -> Result<Vec<MachineEntry>> {
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    requested
+        .iter()
+        .map(|wanted| {
+            entries
+                .iter()
+                .find(|entry| {
+                    entry.schema.machine.as_str() == wanted.as_str()
+                        || entry.slug == *wanted
+                        || legacy_machine_slug(&entry.schema.machine) == Some(wanted.as_str())
+                        || entry.schema.machine.as_str().strip_suffix("Machine")
+                            == Some(wanted.as_str())
+                })
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown machine selection `{wanted}`"))
+        })
+        .collect()
+}
+
+fn select_compositions(
+    entries: &[CompositionEntry],
+    requested: &[String],
+) -> Result<Vec<CompositionEntry>> {
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    requested
+        .iter()
+        .map(|wanted| {
+            entries
+                .iter()
+                .find(|entry| {
+                    entry.schema.name.as_str() == wanted.as_str() || entry.slug == *wanted
+                })
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown composition selection `{wanted}`"))
+        })
+        .collect()
+}
+
+fn resolve_skip_tlc_compositions(
+    selection: &Selection,
+    requested: &[String],
+) -> Result<BTreeSet<String>> {
+    if requested.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    requested
+        .iter()
+        .map(|wanted| {
+            selection
+                .compositions
+                .iter()
+                .find(|entry| {
+                    entry.schema.name.as_str() == wanted.as_str() || entry.slug == *wanted
+                })
+                .map(|entry| entry.slug.clone())
+                .ok_or_else(|| anyhow!("unknown selected composition for TLC skip `{wanted}`"))
+        })
+        .collect()
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct TlcCoverageSummary {
+    counts_by_operator: BTreeMap<String, TlcCoverageCounts>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TlcCoverageCounts {
+    pub truth_hits: u64,
+    pub evaluations: u64,
+}
+
+pub fn merge_tlc_coverage(target: &mut TlcCoverageSummary, other: Option<&TlcCoverageSummary>) {
+    let Some(other) = other else {
+        return;
+    };
+
+    for (operator, counts) in &other.counts_by_operator {
+        target
+            .counts_by_operator
+            .entry(operator.clone())
+            .and_modify(|existing| {
+                existing.truth_hits = existing.truth_hits.max(counts.truth_hits);
+                existing.evaluations = existing.evaluations.max(counts.evaluations);
+            })
+            .or_insert(*counts);
+    }
+}
+
+fn maybe_run_tlc_in_dir(
+    dir: &Path,
+    slug: &str,
+    profile: VerifyProfile,
+    workers: usize,
+) -> Result<Option<TlcCoverageSummary>> {
+    let config_name = match profile {
+        VerifyProfile::Ci => "ci.cfg",
+        VerifyProfile::Deep => "deep.cfg",
+    };
+    maybe_run_tlc_in_dir_with_config(dir, slug, config_name, profile, workers)
+}
+
+fn maybe_run_tlc_in_dir_with_config(
+    dir: &Path,
+    slug: &str,
+    config_name: &str,
+    profile: VerifyProfile,
+    workers: usize,
+) -> Result<Option<TlcCoverageSummary>> {
+    let model = dir.join("model.tla");
+    let config = dir.join(config_name);
+
+    if !model.exists() || !config.exists() {
+        bail!(
+            "missing checked-in model/config for {slug} at {} / {}",
+            model.display(),
+            config.display()
+        );
+    }
+
+    if which::which("tlc").is_err() {
+        bail!("tlc not on PATH; machine-verify requires the TLC CLI");
+    }
+
+    let root = repo_root()?;
+    let metadir = verification_metadir(slug, profile)?;
+    fs::create_dir_all(&metadir)
+        .with_context(|| format!("create TLC metadir {}", metadir.display()))?;
+
+    let mut cmd = Command::new("tlc");
+    cmd.arg("-workers")
+        .arg(workers.to_string())
+        .args(match profile {
+            VerifyProfile::Ci => Vec::new(),
+            VerifyProfile::Deep => vec!["-coverage".to_string(), "1".to_string()],
+        })
+        .arg("-metadir")
+        .arg(&metadir)
+        .arg("-config")
+        .arg(&config)
+        .arg(&model)
+        .current_dir(&root)
+        .env("JAVA_TOOL_OPTIONS", merged_java_tool_options())
+        .env(
+            "JDK_JAVA_OPTIONS",
+            merged_jdk_java_options(&merged_java_tool_options()),
+        );
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("run tlc for {slug}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    print!("{stdout}");
+    eprint!("{stderr}");
+
+    let combined = format!("{stdout}\n{stderr}");
+
+    if let Err(err) = fs::remove_dir_all(&metadir) {
+        eprintln!(
+            "warning: failed to remove TLC metadir {}: {err:#}",
+            metadir.display()
+        );
+    }
+
+    if !tlc_run_succeeded(&output.status) {
+        bail!("tlc failed for {slug} ({config_name})");
+    }
+
+    let coverage = if matches!(profile, VerifyProfile::Deep) {
+        Some(parse_tlc_coverage(&combined))
+    } else {
+        None
+    };
+
+    Ok(coverage)
+}
+
+pub fn tlc_run_succeeded(status: &ExitStatus) -> bool {
+    status.success()
+}
+
+pub fn ensure_machine_transition_coverage(
+    schema: &MachineSchema,
+    coverage: &TlcCoverageSummary,
+) -> Result<()> {
+    let zero_hit = schema
+        .transitions
+        .iter()
+        .filter_map(|transition| {
+            let evaluations = coverage
+                .counts_by_operator
+                .get(transition.name.as_str())
+                .map(|counts| counts.evaluations)
+                .unwrap_or(0);
+            (evaluations == 0).then(|| transition.name.as_str().to_owned())
+        })
+        .collect::<Vec<_>>();
+
+    if zero_hit.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "deep TLC coverage for {} left zero-hit transitions:\n{}",
+        schema.machine,
+        zero_hit
+            .into_iter()
+            .map(|name| format!("- {name}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+pub fn ensure_composition_coverage(
+    schema: &CompositionSchema,
+    coverage: &TlcCoverageSummary,
+    witness_covered_routes: &BTreeSet<String>,
+    witness_covered_scheduler_rules: &BTreeSet<String>,
+) -> Result<()> {
+    let zero_hit_routes = schema
+        .routes
+        .iter()
+        .filter_map(|route| {
+            let operator = composition_route_coverage_operator_name(&route.name);
+            let evaluations = coverage
+                .counts_by_operator
+                .get(&operator)
+                .map(|counts| counts.evaluations)
+                .unwrap_or(0);
+            (evaluations == 0 && !witness_covered_routes.contains(route.name.as_str()))
+                .then(|| route.name.as_str().to_owned())
+        })
+        .collect::<Vec<_>>();
+
+    if !zero_hit_routes.is_empty() {
+        bail!(
+            "deep TLC coverage for composition {} left zero-hit routes:\n{}",
+            schema.name,
+            zero_hit_routes
+                .into_iter()
+                .map(|name| format!("- {name}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    let zero_hit_scheduler_rules = schema
+        .scheduler_rules
+        .iter()
+        .filter_map(|rule| {
+            let operator = composition_scheduler_coverage_operator_name(rule);
+            let evaluations = coverage
+                .counts_by_operator
+                .get(&operator)
+                .map(|counts| counts.evaluations)
+                .unwrap_or(0);
+            (evaluations == 0 && !witness_covered_scheduler_rules.contains(&operator))
+                .then(|| format!("{rule:?}"))
+        })
+        .collect::<Vec<_>>();
+
+    if zero_hit_scheduler_rules.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "deep TLC coverage for composition {} left zero-hit scheduler rules:\n{}",
+            schema.name,
+            zero_hit_scheduler_rules
+                .into_iter()
+                .map(|rule| format!("- {rule}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    }
+}
+
+pub fn parse_tlc_coverage(output: &str) -> TlcCoverageSummary {
+    let mut summary = TlcCoverageSummary::default();
+
+    for line in output.lines() {
+        if let Some((operator, counts)) = parse_tlc_coverage_line(line) {
+            summary
+                .counts_by_operator
+                .entry(operator)
+                .and_modify(|existing| {
+                    existing.truth_hits = existing.truth_hits.max(counts.truth_hits);
+                    existing.evaluations = existing.evaluations.max(counts.evaluations);
+                })
+                .or_insert(counts);
+        }
+    }
+
+    summary
+}
+
+pub fn parse_tlc_coverage_line(line: &str) -> Option<(String, TlcCoverageCounts)> {
+    let line = line.trim();
+    if !line.starts_with('<') {
+        return None;
+    }
+
+    let name_end = line.find(" line ")?;
+    let operator = line.get(1..name_end)?.trim().to_string();
+    let counts = line.split(">: ").nth(1)?;
+    let mut parts = counts.split(':');
+    let truth_hits = parts.next()?.trim().parse::<u64>().ok()?;
+    let evaluations = parts.next()?.trim().parse::<u64>().ok()?;
+    Some((
+        operator,
+        TlcCoverageCounts {
+            truth_hits,
+            evaluations,
+        },
+    ))
+}
+
+fn run_generated_kernel_tests(root: &Path) -> Result<()> {
+    let mut cmd = repo_cargo_command(root);
+    cmd.arg("test")
+        .arg("-p")
+        .arg("meerkat-machine-kernels")
+        .arg("--lib")
+        .arg("--")
+        .arg("--test-threads=1")
+        .current_dir(root);
+
+    let status = cmd.status().context("run generated machine kernel tests")?;
+    if !status.success() {
+        bail!("generated machine kernel tests failed");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OwnerTestSpec {
+    package: &'static str,
+    target: &'static str,
+    filter: &'static str,
+}
+
+fn owner_test_specs_for_machine(slug: &str) -> &'static [OwnerTestSpec] {
+    const MEERKAT: &[OwnerTestSpec] = &[
+        OwnerTestSpec {
+            package: "meerkat-integration-tests",
+            target: "session_turn_admission_kernel",
+            filter: "session_turn_admission_kernel_attached_state_reached",
+        },
+        OwnerTestSpec {
+            package: "meerkat-integration-tests",
+            target: "session_turn_admission_kernel",
+            filter: "session_turn_admission_kernel_interrupt_allowed_while_attached",
+        },
+        OwnerTestSpec {
+            package: "meerkat-integration-tests",
+            target: "session_tool_visibility_kernel",
+            filter: "session_tool_visibility_kernel_publishes_committed_set_from_attached",
+        },
+        OwnerTestSpec {
+            package: "meerkat-integration-tests",
+            target: "session_tool_visibility_kernel",
+            filter: "session_tool_visibility_kernel_stages_deferred_requests_without_touching_active_state",
+        },
+    ];
+    const MOB: &[OwnerTestSpec] = &[OwnerTestSpec {
+        package: "meerkat-mob",
+        target: "lib",
+        filter: "runtime::tests::test_cancel_fallback_uses_direct_pending_to_terminal_cas_attempts",
+    }];
+
+    match slug {
+        "meerkat_machine" => MEERKAT,
+        "mob_machine" => MOB,
+        _ => &[],
+    }
+}
+
+fn run_machine_owner_tests(root: &Path, machine: &MachineEntry) -> Result<()> {
+    for spec in owner_test_specs_for_machine(&machine.slug) {
+        println!(
+            "owner-test: {} -> {}::{}/{}",
+            machine.schema.machine, spec.package, spec.target, spec.filter
+        );
+        let mut cmd = repo_cargo_command(root);
+        cmd.arg("test").arg("-p").arg(spec.package).arg(spec.filter);
+        if spec.target == "lib" {
+            cmd.arg("--lib");
+        } else {
+            cmd.arg("--test").arg(spec.target);
+        }
+        cmd.arg("--")
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .current_dir(root);
+
+        let status = cmd.status().with_context(|| {
+            format!(
+                "run owner test {}::{}/{}",
+                spec.package, spec.target, spec.filter
+            )
+        })?;
+        if !status.success() {
+            bail!(
+                "owner test failed for {}: {}::{}/{}",
+                machine.schema.machine,
+                spec.package,
+                spec.target,
+                spec.filter
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn repo_cargo_command(root: &Path) -> Command {
+    Command::new(root.join("scripts/repo-cargo"))
+}
+
+fn verification_metadir(slug: &str, profile: VerifyProfile) -> Result<PathBuf> {
+    let epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let metadir = env::temp_dir().join("meerkat-machine-verify").join(format!(
+        "{slug}-{}-{}-{epoch_ms}",
+        verify_profile_name(profile),
+        std::process::id()
+    ));
+    if metadir.exists() {
+        fs::remove_dir_all(&metadir)
+            .with_context(|| format!("remove stale TLC metadir {}", metadir.display()))?;
+    }
+    Ok(metadir)
+}
+
+fn resolve_tlc_workers(explicit: Option<usize>) -> Result<usize> {
+    if let Some(workers) = explicit {
+        return Ok(workers.max(1));
+    }
+
+    if let Ok(value) = env::var("TLC_WORKERS") {
+        let parsed = value
+            .parse::<usize>()
+            .with_context(|| format!("parse TLC_WORKERS={value}"))?;
+        return Ok(parsed.max(1));
+    }
+
+    Ok(std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(1)
+        .max(1))
+}
+
+fn verify_profile_name(profile: VerifyProfile) -> &'static str {
+    match profile {
+        VerifyProfile::Ci => "ci",
+        VerifyProfile::Deep => "deep",
+    }
+}
+
+/// Launcher-level JVM options for the `tlc` child.
+///
+/// `JAVA_TOOL_OPTIONS` is read by the JVM once it exists, so its `-Xss` sizes
+/// only the threads the JVM creates (TLC workers). The main thread, where TLC
+/// parses the module and computes the initial states, is created by the
+/// `java` launcher from its own option sources: the command line and
+/// `JDK_JAVA_OPTIONS`. `tlc` is a `java -jar` wrapper, so the only way to give
+/// that thread the deep stack the generated initial predicate needs is
+/// `JDK_JAVA_OPTIONS`. Without it TLC reports a `StackOverflowError` while
+/// "Computing initial states" no matter how large `-Xss` in
+/// `JAVA_TOOL_OPTIONS` is.
+///
+/// The stack flag is taken from the merged `JAVA_TOOL_OPTIONS` so an explicit
+/// caller `-Xss` governs both layers; an existing `JDK_JAVA_OPTIONS` `-Xss`
+/// is preserved as-is.
+fn merged_jdk_java_options(java_tool_options: &str) -> String {
+    merge_jdk_java_options(
+        &env::var("JDK_JAVA_OPTIONS").unwrap_or_default(),
+        java_tool_options,
+    )
+}
+
+fn merge_jdk_java_options(existing: &str, java_tool_options: &str) -> String {
+    let mut flags = existing
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !flags.iter().any(|flag| flag.starts_with("-Xss")) {
+        let stack_size = java_tool_options
+            .split_whitespace()
+            .find(|flag| flag.starts_with("-Xss"))
+            .unwrap_or("-Xss256m");
+        flags.insert(0, stack_size.into());
+    }
+    flags.join(" ")
+}
+
+fn merged_java_tool_options() -> String {
+    let throughput_gc = "-XX:+UseParallelGC";
+    let stack_size = "-Xss256m";
+    let existing = env::var("JAVA_TOOL_OPTIONS").unwrap_or_default();
+    let mut flags = existing
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    if !flags.iter().any(|flag| flag == throughput_gc) {
+        flags.insert(0, throughput_gc.into());
+    }
+    if !flags.iter().any(|flag| flag.starts_with("-Xss")) {
+        flags.insert(0, stack_size.into());
+    }
+
+    flags.join(" ")
+}
+
+fn write_generated(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create output dir {}", parent.display()))?;
+    }
+    let contents = normalize_generated_contents(path, contents)?;
+    fs::write(path, contents).with_context(|| format!("write {}", path.display()))
+}
+
+fn compare_generated(path: &Path, expected: &str, mismatches: &mut Vec<String>) -> Result<()> {
+    let expected = normalize_generated_contents(path, expected)?;
+    match fs::read_to_string(path) {
+        Ok(actual) if actual == expected => Ok(()),
+        Ok(_) => {
+            mismatches.push(format!("stale generated artifact {}", path.display()));
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            mismatches.push(format!("missing generated artifact {}", path.display()));
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+fn normalize_generated_contents(path: &Path, contents: &str) -> Result<String> {
+    if path.extension().is_some_and(|ext| ext == "rs") {
+        rustfmt_source(contents)
+    } else {
+        Ok(contents.to_owned())
+    }
+}
+
+fn rustfmt_source(source: &str) -> Result<String> {
+    let rustfmt = std::env::var_os("RUSTFMT").unwrap_or_else(|| "rustfmt".into());
+    let mut child = Command::new(rustfmt)
+        .args(["--edition", "2024", "--emit", "stdout"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn rustfmt for machine codegen")?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("open rustfmt stdin for machine codegen")?;
+    let write_result = stdin.write_all(source.as_bytes());
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .context("wait for rustfmt during machine codegen")?;
+    if let Err(error) = write_result {
+        // A rustfmt that exits before reading (a rustup proxy without the
+        // component, a binary missing its libraries) surfaces here as a
+        // broken pipe; its own stderr is the only clue, so carry it.
+        bail!(
+            "write generated machine source to rustfmt: {error}; rustfmt exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if !output.status.success() {
+        bail!(
+            "rustfmt failed for generated machine code: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    String::from_utf8(output.stdout).context("decode rustfmt output as utf-8")
+}
+
+fn collect_legacy_authority_mismatch(path: &Path, mismatches: &mut Vec<String>) {
+    if path.exists() {
+        mismatches.push(format!(
+            "legacy parallel authority artifact must be removed {}",
+            path.display()
+        ));
+    }
+}
+
+fn remove_legacy_authority_path(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_file(path)
+            .with_context(|| format!("remove legacy authority artifact {}", path.display()))?;
+    }
+    if let Some(parent) = path.parent() {
+        remove_dir_if_empty(parent)?;
+    }
+    Ok(())
+}
+
+fn remove_dir_if_empty(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if fs::read_dir(path)
+        .with_context(|| format!("read {}", path.display()))?
+        .next()
+        .is_none()
+    {
+        fs::remove_dir(path).with_context(|| format!("remove empty dir {}", path.display()))?;
+    }
+    Ok(())
+}
+
+pub fn repo_root() -> Result<PathBuf> {
+    if let Some(root) = bazel_runfiles_workspace_root() {
+        return Ok(root);
+    }
+    if let Some(root) = std::env::var_os("MEERKAT_MACHINE_ROOT") {
+        return Ok(PathBuf::from(root));
+    }
+    if let Some(root) = std::env::var_os("MEERKAT_WORKSPACE_ROOT") {
+        return Ok(PathBuf::from(root));
+    }
+    if let Ok(root) = std::env::current_dir()
+        && root.join("Cargo.toml").is_file()
+    {
+        return Ok(root);
+    }
+
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("failed to resolve repo root from xtask manifest dir"))
+}
+
+fn bazel_runfiles_workspace_root() -> Option<PathBuf> {
+    let workspace = std::env::var("TEST_WORKSPACE").ok()?;
+    for base in [
+        std::env::var_os("TEST_SRCDIR"),
+        std::env::var_os("RUNFILES_DIR"),
+    ] {
+        let Some(base) = base else {
+            continue;
+        };
+        let candidate = PathBuf::from(base).join(&workspace);
+        if candidate.join("Cargo.toml").exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn machine_authority_path(root: &Path, slug: &str) -> PathBuf {
+    root.join("specs")
+        .join("machines")
+        .join(slug)
+        .join("generated")
+        .join("authority.tla")
+}
+
+fn composition_authority_path(root: &Path, slug: &str) -> PathBuf {
+    root.join("specs")
+        .join("compositions")
+        .join(slug)
+        .join("generated")
+        .join("authority.tla")
+}
+
+pub fn machine_model_path(root: &Path, slug: &str) -> PathBuf {
+    machine_dir(root, slug).join("model.tla")
+}
+
+pub fn machine_ci_path(root: &Path, slug: &str) -> PathBuf {
+    machine_dir(root, slug).join("ci.cfg")
+}
+
+pub fn machine_deep_path(root: &Path, slug: &str) -> PathBuf {
+    machine_dir(root, slug).join("deep.cfg")
+}
+
+pub fn machine_contract_path(root: &Path, slug: &str) -> PathBuf {
+    machine_dir(root, slug).join("contract.md")
+}
+
+fn machine_dir(root: &Path, slug: &str) -> PathBuf {
+    root.join("specs").join("machines").join(slug)
+}
+
+pub fn composition_model_path(root: &Path, slug: &str) -> PathBuf {
+    composition_dir(root, slug).join("model.tla")
+}
+
+pub fn composition_ci_path(root: &Path, slug: &str) -> PathBuf {
+    composition_dir(root, slug).join("ci.cfg")
+}
+
+pub fn composition_deep_path(root: &Path, slug: &str) -> PathBuf {
+    composition_dir(root, slug).join("deep.cfg")
+}
+
+pub fn composition_witness_path(root: &Path, slug: &str, witness: &str) -> PathBuf {
+    composition_dir(root, slug).join(composition_witness_cfg_name(witness))
+}
+
+pub fn composition_contract_path(root: &Path, slug: &str) -> PathBuf {
+    composition_dir(root, slug).join("contract.md")
+}
+
+fn composition_driver_path(root: &Path, schema: &CompositionSchema) -> Result<PathBuf> {
+    let driver = schema.driver.as_ref().ok_or_else(|| {
+        anyhow!(
+            "composition {} has no generated driver binding",
+            schema.name
+        )
+    })?;
+    Ok(root.join(&driver.rust.module_path))
+}
+
+fn composition_dir(root: &Path, slug: &str) -> PathBuf {
+    root.join("specs").join("compositions").join(slug)
+}
+
+pub fn machine_mapping_path(root: &Path, slug: &str) -> PathBuf {
+    root.join("specs")
+        .join("machines")
+        .join(slug)
+        .join("mapping.md")
+}
+
+fn generated_kernel_root(root: &Path) -> PathBuf {
+    root.join("crates")
+        .join("meerkat-machine-kernels")
+        .join("src")
+        .join("generated")
+}
+
+pub fn generated_kernel_module_path(root: &Path, slug: &str) -> PathBuf {
+    generated_kernel_root(root).join(format!("{slug}.rs"))
+}
+
+pub fn generated_kernel_mod_path(root: &Path) -> PathBuf {
+    generated_kernel_root(root).join("mod.rs")
+}
+
+pub fn composition_mapping_path(root: &Path, slug: &str) -> PathBuf {
+    root.join("specs")
+        .join("compositions")
+        .join(slug)
+        .join("mapping.md")
+}
+
+fn expected_mapping_document(path: &Path, title: &str, generated: &str) -> Result<String> {
+    let existing = fs::read_to_string(path).ok();
+    Ok(merge_mapping_document(
+        existing.as_deref(),
+        title,
+        generated,
+    ))
+}
+
+fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineSchema> {
+    registry.machines.clone()
+}
+
+fn compat_generated_kernel_schemas() -> Vec<MachineSchema> {
+    Vec::new()
+}
+
+fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<String> {
+    registry
+        .machines
+        .iter()
+        .map(|schema| generated_kernel_module_slug(&schema.machine))
+        .collect::<BTreeSet<_>>()
+}
+
+fn mob_generated_machine_module_path(root: &Path, slug: &str) -> PathBuf {
+    root.join(format!("crates/meerkat-mob/src/generated/{slug}.rs"))
+}
+
+fn prune_stale_generated_kernel_modules(root: &Path, registry: &CanonicalRegistry) -> Result<()> {
+    let generated_mod = generated_kernel_mod_path(root);
+    let generated_dir = generated_mod
+        .parent()
+        .context("generated kernel mod parent")?;
+    if !generated_dir.exists() {
+        return Ok(());
+    }
+
+    let expected = expected_generated_kernel_modules(registry);
+    for entry in
+        fs::read_dir(generated_dir).with_context(|| format!("read {}", generated_dir.display()))?
+    {
+        let entry = entry
+            .with_context(|| format!("scan generated kernel dir {}", generated_dir.display()))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if expected.contains(stem) {
+            continue;
+        }
+        fs::remove_file(&path)
+            .with_context(|| format!("remove stale generated kernel module {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+pub fn collect_stale_cfg_mismatches(root: &Path) -> Result<Vec<String>> {
+    let registry = CanonicalRegistry::load();
+    let mut mismatches = Vec::new();
+
+    let valid_machine_cfgs: BTreeSet<&str> = ["ci.cfg", "deep.cfg", "audit.cfg"]
+        .iter()
+        .copied()
+        .collect();
+    let specs_machine_root = root.join("specs/machines");
+    if specs_machine_root.exists() {
+        for machine in &registry.machines {
+            let slug = machine_slug(&machine.machine);
+            let machine_dir = specs_machine_root.join(&slug);
+            if !machine_dir.exists() {
+                continue;
+            }
+            for entry in fs::read_dir(&machine_dir)
+                .with_context(|| format!("read {}", machine_dir.display()))?
+            {
+                let entry = entry.with_context(|| format!("iterate {}", machine_dir.display()))?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("cfg") {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !valid_machine_cfgs.contains(name) {
+                    mismatches.push(format!("stale cfg {}", path.display()));
+                }
+            }
+        }
+    }
+
+    let specs_composition_root = root.join("specs/compositions");
+    if specs_composition_root.exists() {
+        for composition in &registry.compositions {
+            let slug = composition_slug(&composition.name);
+            let comp_dir = specs_composition_root.join(&slug);
+            if !comp_dir.exists() {
+                continue;
+            }
+            let mut valid_comp_cfgs: BTreeSet<String> = BTreeSet::new();
+            valid_comp_cfgs.insert("ci.cfg".into());
+            valid_comp_cfgs.insert("deep.cfg".into());
+            valid_comp_cfgs.insert("audit.cfg".into());
+            for witness in &composition.witnesses {
+                valid_comp_cfgs.insert(composition_witness_cfg_name(&witness.name));
+            }
+            for entry in
+                fs::read_dir(&comp_dir).with_context(|| format!("read {}", comp_dir.display()))?
+            {
+                let entry = entry.with_context(|| format!("iterate {}", comp_dir.display()))?;
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("cfg") {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !valid_comp_cfgs.contains(name) {
+                    mismatches.push(format!("stale cfg {}", path.display()));
+                }
+            }
+        }
+    }
+
+    Ok(mismatches)
+}
+
+#[derive(Debug)]
+struct HopcroftTarget<'a> {
+    kind: &'static str,
+    display_name: &'a str,
+    slug: &'a str,
+    dir: &'a Path,
+    machine_schema: Option<&'a MachineSchema>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftRunSummary {
+    observation: HopcroftObservation,
+    profile: String,
+    items: Vec<HopcroftSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftSummary {
+    kind: String,
+    name: String,
+    slug: String,
+    observation: HopcroftObservation,
+    reachable_states: usize,
+    edge_count: usize,
+    quotient_states: usize,
+    reduction_states: usize,
+    reduction_percent: f64,
+    initial_blocks: Vec<usize>,
+    mixed_phase_blocks: Vec<HopcroftBlockSummary>,
+    mixed_phase_pairs: Vec<HopcroftPhasePairSummary>,
+    field_audit: Option<HopcroftFieldAuditSummary>,
+    largest_mixed_phase_block_field_projection: Option<HopcroftBlockFieldProjectionSummary>,
+    largest_blocks: Vec<HopcroftBlockSummary>,
+    tlc: TlcGraphStats,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftBlockSummary {
+    block: usize,
+    size: usize,
+    phases: BTreeMap<String, usize>,
+    representative_state_id: String,
+    representative_phase: Option<String>,
+    outgoing: BTreeMap<String, Vec<usize>>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftPhasePairSummary {
+    left_phase: String,
+    right_phase: String,
+    blocks: Vec<usize>,
+    total_block_members: usize,
+    field_difference_counts: Vec<HopcroftFieldDifferenceCount>,
+    schema_input_counts: HopcroftSchemaInputCounts,
+    schema_input_rows: Vec<HopcroftSchemaInputRow>,
+    sample_block_witnesses: Vec<HopcroftStatePairWitness>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftFieldAuditSummary {
+    field_count: usize,
+    fields: Vec<HopcroftFieldImpactSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftFieldImpactSummary {
+    field: String,
+    only_quotient_states: usize,
+    only_reduction_states: usize,
+    only_reduction_percent: f64,
+    all_except_quotient_states: usize,
+    all_except_reduction_states: usize,
+    all_except_reduction_percent: f64,
+    all_except_collapsed_states: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftBlockFieldProjectionSummary {
+    block: usize,
+    size: usize,
+    phases: BTreeMap<String, usize>,
+    field_count: usize,
+    distinct_tuples: usize,
+    phase_overlay_tuple_count: usize,
+    max_phases_per_tuple: usize,
+    fields: Vec<HopcroftBlockFieldProjectionFieldSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftBlockFieldProjectionFieldSummary {
+    field: String,
+    distinct_values: usize,
+    largest_bucket_size: usize,
+    largest_bucket_percent: f64,
+    omitted_value_count: usize,
+    top_values: Vec<HopcroftBlockFieldValueSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftBlockFieldValueSummary {
+    value: String,
+    count: usize,
+    phases: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftFieldDifferenceCount {
+    field: String,
+    differing_blocks: usize,
+    equal_blocks: usize,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct HopcroftSchemaInputCounts {
+    same_surface: usize,
+    different_surface: usize,
+    left_only: usize,
+    right_only: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum HopcroftSchemaInputClassification {
+    SameSurface,
+    DifferentSurface,
+    LeftOnly,
+    RightOnly,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftSchemaInputRow {
+    input_variant: String,
+    classification: HopcroftSchemaInputClassification,
+    left: Vec<HopcroftSchemaTransitionSummary>,
+    right: Vec<HopcroftSchemaTransitionSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftSchemaTransitionSummary {
+    transition: String,
+    to_phase: String,
+    binding_names: Vec<String>,
+    guard_names: Vec<String>,
+    update_count: usize,
+    effect_variants: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftStatePairWitness {
+    block: usize,
+    left_state_id: String,
+    right_state_id: String,
+    shared_input_witnesses: BTreeMap<String, Vec<String>>,
+    differing_fields: BTreeMap<String, HopcroftFieldPairValues>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftFieldPairValues {
+    left_value: String,
+    right_value: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct TlcGraphStats {
+    generated_states: Option<u64>,
+    distinct_states: Option<u64>,
+    depth: Option<u64>,
+}
+
+#[derive(Debug)]
+struct TlcDotGraph {
+    states: Vec<TlcDotState>,
+    edges: Vec<TlcDotEdge>,
+    outgoing: Vec<Vec<usize>>,
+    initial_states: Vec<usize>,
+}
+
+#[derive(Debug)]
+struct TlcDotState {
+    id: String,
+    phase: Option<String>,
+    snapshot_fields: BTreeMap<String, String>,
+    is_initial: bool,
+}
+
+#[derive(Debug)]
+struct TlcDotEdge {
+    to: usize,
+    label: String,
+}
+
+#[derive(Debug)]
+struct TlcDotDump {
+    dot: String,
+    tlc_output: String,
+}
+
+#[derive(Debug)]
+struct HopcroftQuotient {
+    partition_by_state: Vec<usize>,
+    blocks: Vec<Vec<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HopcroftObservationSpec {
+    Builtin(HopcroftObservation),
+    Fields(BTreeSet<String>),
+    AllExceptFields(BTreeSet<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HopcroftStateSignature {
+    observation: String,
+    outgoing: Vec<(String, Vec<usize>)>,
+}
+
+#[derive(Debug, Default)]
+struct HopcroftPhasePairAccumulator {
+    blocks: BTreeSet<usize>,
+    total_block_members: usize,
+    witness_pairs: Vec<HopcroftWitnessPair>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HopcroftWitnessPair {
+    block: usize,
+    left_state_idx: usize,
+    right_state_idx: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_hopcroft_for_target(
+    root: &Path,
+    target: HopcroftTarget<'_>,
+    profile: VerifyProfile,
+    workers: usize,
+    observation: HopcroftObservation,
+    audit_map: bool,
+    reuse_existing_dump: bool,
+    artifact_dir: Option<&Path>,
+) -> Result<HopcroftSummary> {
+    let artifact_dir = artifact_dir.map(|path| {
+        fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+        Ok::<&Path, anyhow::Error>(path)
+    });
+    let artifact_dir = artifact_dir.transpose()?;
+
+    let dump = dump_tlc_dot_for_target(
+        root,
+        &target,
+        profile,
+        workers,
+        artifact_dir,
+        reuse_existing_dump,
+    )?;
+    let graph = parse_tlc_dot_graph(&dump.dot)
+        .with_context(|| format!("parse TLC DOT dump for {}", target.display_name))?;
+    let quotient = hopcroft_partition_refinement(&graph, observation);
+    let summary = summarize_hopcroft_target(
+        target,
+        observation,
+        audit_map,
+        &graph,
+        &quotient,
+        &dump.tlc_output,
+    );
+
+    print_hopcroft_summary(&summary);
+
+    if let Some(artifact_dir) = artifact_dir {
+        let summary_path = artifact_dir.join("summary.json");
+        fs::write(
+            &summary_path,
+            serde_json::to_vec_pretty(&summary).context("serialize hopcroft item summary")?,
+        )
+        .with_context(|| format!("write {}", summary_path.display()))?;
+        println!("  wrote {}", summary_path.display());
+    }
+
+    Ok(summary)
+}
+
+fn dump_tlc_dot_for_target(
+    root: &Path,
+    target: &HopcroftTarget<'_>,
+    profile: VerifyProfile,
+    workers: usize,
+    artifact_dir: Option<&Path>,
+    reuse_existing_dump: bool,
+) -> Result<TlcDotDump> {
+    let config_name = match profile {
+        VerifyProfile::Ci => "ci.cfg",
+        VerifyProfile::Deep => "deep.cfg",
+    };
+    let model = target.dir.join("model.tla");
+    let config = target.dir.join(config_name);
+    if !model.exists() || !config.exists() {
+        bail!(
+            "missing checked-in model/config for {} at {} / {}",
+            target.display_name,
+            model.display(),
+            config.display()
+        );
+    }
+
+    let metadir = verification_metadir(&format!("{}-hopcroft", target.slug), profile)?;
+    fs::create_dir_all(&metadir)
+        .with_context(|| format!("create TLC metadir {}", metadir.display()))?;
+
+    let owned_artifact_dir = artifact_dir.is_none().then(|| {
+        env::temp_dir()
+            .join("meerkat-machine-hopcroft")
+            .join(format!(
+                "{}-{}-{}",
+                target.slug,
+                verify_profile_name(profile),
+                std::process::id()
+            ))
+    });
+    let artifact_dir = match artifact_dir {
+        Some(path) => path,
+        None => owned_artifact_dir
+            .as_deref()
+            .context("expected temp hopcroft artifact dir to be created")?,
+    };
+    fs::create_dir_all(artifact_dir)
+        .with_context(|| format!("create artifact dir {}", artifact_dir.display()))?;
+
+    let dump_path = artifact_dir.join("graph.dot");
+    let log_path = artifact_dir.join("tlc.log");
+
+    if reuse_existing_dump {
+        let dot = fs::read_to_string(&dump_path).with_context(|| {
+            format!(
+                "read existing TLC DOT dump for {} from {}",
+                target.display_name,
+                dump_path.display()
+            )
+        })?;
+        let tlc_output = fs::read_to_string(&log_path).unwrap_or_default();
+        return Ok(TlcDotDump { dot, tlc_output });
+    }
+
+    let mut cmd = Command::new("tlc");
+    cmd.arg("-workers")
+        .arg(workers.to_string())
+        .arg("-dump")
+        // Plain DOT already carries the state labels we parse for observation
+        // and field-audit work. Adding `snapshot` causes the Meerkat export to
+        // stall after writing a partial graph on the truthful 59k-state model.
+        .arg("dot,actionlabels")
+        .arg(&dump_path)
+        .arg("-metadir")
+        .arg(&metadir)
+        .arg("-config")
+        .arg(&config)
+        .arg(&model)
+        .current_dir(root)
+        .env("JAVA_TOOL_OPTIONS", merged_java_tool_options())
+        .env(
+            "JDK_JAVA_OPTIONS",
+            merged_jdk_java_options(&merged_java_tool_options()),
+        );
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("run tlc hopcroft dump for {}", target.display_name))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    fs::write(&log_path, &combined).with_context(|| format!("write {}", log_path.display()))?;
+
+    if let Err(err) = fs::remove_dir_all(&metadir) {
+        eprintln!(
+            "warning: failed to remove TLC metadir {}: {err:#}",
+            metadir.display()
+        );
+    }
+
+    if !tlc_run_succeeded(&output.status) {
+        bail!("tlc hopcroft dump failed for {}", target.display_name);
+    }
+
+    let dot = fs::read_to_string(&dump_path)
+        .with_context(|| format!("read TLC DOT dump {}", dump_path.display()))?;
+
+    if owned_artifact_dir.is_some()
+        && let Err(err) = fs::remove_dir_all(artifact_dir)
+    {
+        eprintln!(
+            "warning: failed to clean hopcroft temp artifacts {}: {err:#}",
+            artifact_dir.display()
+        );
+    }
+
+    Ok(TlcDotDump {
+        dot,
+        tlc_output: combined,
+    })
+}
+
+fn parse_tlc_dot_graph(contents: &str) -> Result<TlcDotGraph> {
+    let mut nodes = BTreeMap::<String, TlcDotState>::new();
+    let mut edges = Vec::<(String, String, String)>::new();
+
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty()
+            || line == "{"
+            || line == "}"
+            || line.starts_with("strict digraph")
+            || line.starts_with("subgraph")
+            || line.starts_with("nodesep=")
+            || line.starts_with("color=")
+            || line.starts_with("{rank")
+        {
+            continue;
+        }
+
+        if let Some((from, to, label)) = parse_tlc_dot_edge_line(line)? {
+            edges.push((from, to, label));
+            continue;
+        }
+
+        if let Some(state) = parse_tlc_dot_node_line(line)? {
+            nodes.insert(state.id.clone(), state);
+        }
+    }
+
+    if nodes.is_empty() {
+        bail!("no TLC graph nodes found in DOT dump");
+    }
+
+    let mut states = nodes.into_values().collect::<Vec<_>>();
+    states.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let id_to_index = states
+        .iter()
+        .enumerate()
+        .map(|(idx, state)| (state.id.clone(), idx))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut parsed_edges = Vec::new();
+    let mut outgoing = vec![Vec::new(); states.len()];
+    for (from, to, label) in edges {
+        let Some(&from_idx) = id_to_index.get(&from) else {
+            bail!("DOT edge references unknown source node {from}");
+        };
+        let Some(&to_idx) = id_to_index.get(&to) else {
+            bail!("DOT edge references unknown target node {to}");
+        };
+        outgoing[from_idx].push(parsed_edges.len());
+        parsed_edges.push(TlcDotEdge { to: to_idx, label });
+    }
+
+    let initial_states = states
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, state)| state.is_initial.then_some(idx))
+        .collect::<Vec<_>>();
+
+    Ok(TlcDotGraph {
+        states,
+        edges: parsed_edges,
+        outgoing,
+        initial_states,
+    })
+}
+
+fn parse_tlc_dot_node_line(line: &str) -> Result<Option<TlcDotState>> {
+    let Some(bracket_start) = line.find('[') else {
+        return Ok(None);
+    };
+    let Some(bracket_end) = line.rfind(']') else {
+        return Ok(None);
+    };
+
+    let id = line[..bracket_start]
+        .trim()
+        .trim_end_matches(';')
+        .to_owned();
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let attrs = &line[(bracket_start + 1)..bracket_end];
+    let label = parse_tlc_dot_attribute(attrs, "label").unwrap_or_default();
+    let snapshot_fields = parse_snapshot_fields(&label);
+    let phase = snapshot_fields.get("phase").map(|value| {
+        value
+            .strip_prefix('"')
+            .and_then(|trimmed| trimmed.strip_suffix('"'))
+            .unwrap_or(value)
+            .to_owned()
+    });
+    let is_initial = attrs.contains("style = filled") || attrs.contains("style=filled");
+
+    Ok(Some(TlcDotState {
+        id,
+        phase,
+        snapshot_fields,
+        is_initial,
+    }))
+}
+
+fn parse_tlc_dot_edge_line(line: &str) -> Result<Option<(String, String, String)>> {
+    let Some(arrow) = line.find("->") else {
+        return Ok(None);
+    };
+    let Some(bracket_start) = line.find('[') else {
+        return Ok(None);
+    };
+    if arrow > bracket_start {
+        return Ok(None);
+    }
+    let Some(bracket_end) = line.rfind(']') else {
+        return Ok(None);
+    };
+
+    let from = line[..arrow].trim().trim_end_matches(';').to_owned();
+    let to = line[(arrow + 2)..bracket_start]
+        .trim()
+        .trim_end_matches(';')
+        .to_owned();
+    let attrs = &line[(bracket_start + 1)..bracket_end];
+    let label = parse_tlc_dot_attribute(attrs, "label").unwrap_or_else(|| "<unlabeled>".into());
+    Ok(Some((from, to, label)))
+}
+
+fn parse_tlc_dot_attribute(attrs: &str, name: &str) -> Option<String> {
+    let mut search_from = 0;
+    while let Some(relative) = attrs[search_from..].find(name) {
+        let start = search_from + relative;
+        let mut cursor = start + name.len();
+        while matches!(attrs.as_bytes().get(cursor), Some(b' ' | b'\t')) {
+            cursor += 1;
+        }
+        if attrs.as_bytes().get(cursor).copied() != Some(b'=') {
+            search_from = start + name.len();
+            continue;
+        }
+        cursor += 1;
+        while matches!(attrs.as_bytes().get(cursor), Some(b' ' | b'\t')) {
+            cursor += 1;
+        }
+        if attrs.as_bytes().get(cursor).copied() != Some(b'"') {
+            return None;
+        }
+        return parse_tlc_dot_quoted_string(&attrs[cursor..]).map(|(value, _)| value);
+    }
+    None
+}
+
+fn parse_tlc_dot_quoted_string(input: &str) -> Option<(String, usize)> {
+    if !input.starts_with('"') {
+        return None;
+    }
+
+    let mut out = String::new();
+    let mut escaped = false;
+    for (offset, ch) in input[1..].char_indices() {
+        if escaped {
+            match ch {
+                'n' | 'l' => out.push('\n'),
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                other => out.push(other),
+            }
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Some((out, offset + 2)),
+            other => out.push(other),
+        }
+    }
+
+    None
+}
+
+fn parse_snapshot_fields(label: &str) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    for line in label.lines() {
+        let line = line.trim_start();
+        let line = line
+            .strip_prefix("/\\ ")
+            .or_else(|| line.strip_prefix("/\\"))
+            .unwrap_or(line);
+        if let Some((field, value)) = line.split_once(" = ") {
+            fields.insert(field.trim().to_owned(), value.trim().to_owned());
+        }
+    }
+    fields
+}
+
+fn hopcroft_partition_refinement(
+    graph: &TlcDotGraph,
+    observation: HopcroftObservation,
+) -> HopcroftQuotient {
+    hopcroft_partition_refinement_with_spec(graph, &HopcroftObservationSpec::Builtin(observation))
+}
+
+fn hopcroft_partition_refinement_with_spec(
+    graph: &TlcDotGraph,
+    observation: &HopcroftObservationSpec,
+) -> HopcroftQuotient {
+    let mut partition = seed_hopcroft_partition_with_spec(graph, observation);
+
+    loop {
+        let signatures = graph
+            .states
+            .iter()
+            .enumerate()
+            .map(|(state_idx, state)| {
+                let mut by_label = BTreeMap::<String, BTreeSet<usize>>::new();
+                for &edge_idx in &graph.outgoing[state_idx] {
+                    let edge = &graph.edges[edge_idx];
+                    by_label
+                        .entry(edge.label.clone())
+                        .or_default()
+                        .insert(partition[edge.to]);
+                }
+
+                HopcroftStateSignature {
+                    observation: hopcroft_observation_key_with_spec(state, observation),
+                    outgoing: by_label
+                        .into_iter()
+                        .map(|(label, targets)| (label, targets.into_iter().collect()))
+                        .collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut groups = BTreeMap::<HopcroftStateSignature, Vec<usize>>::new();
+        for (state_idx, signature) in signatures.into_iter().enumerate() {
+            groups.entry(signature).or_default().push(state_idx);
+        }
+
+        let mut blocks = groups.into_values().collect::<Vec<_>>();
+        blocks.sort_by_key(|members| members.first().copied().unwrap_or(usize::MAX));
+
+        let mut next_partition = vec![0; graph.states.len()];
+        for (block_id, members) in blocks.iter().enumerate() {
+            for &state_idx in members {
+                next_partition[state_idx] = block_id;
+            }
+        }
+
+        if next_partition == partition {
+            return HopcroftQuotient {
+                partition_by_state: next_partition,
+                blocks,
+            };
+        }
+
+        partition = next_partition;
+    }
+}
+
+fn seed_hopcroft_partition_with_spec(
+    graph: &TlcDotGraph,
+    observation: &HopcroftObservationSpec,
+) -> Vec<usize> {
+    let mut groups = BTreeMap::<String, Vec<usize>>::new();
+    for (state_idx, state) in graph.states.iter().enumerate() {
+        groups
+            .entry(hopcroft_observation_key_with_spec(state, observation))
+            .or_default()
+            .push(state_idx);
+    }
+
+    let mut blocks = groups.into_values().collect::<Vec<_>>();
+    blocks.sort_by_key(|members| members.first().copied().unwrap_or(usize::MAX));
+
+    let mut partition = vec![0; graph.states.len()];
+    for (block_id, members) in blocks.iter().enumerate() {
+        for &state_idx in members {
+            partition[state_idx] = block_id;
+        }
+    }
+    partition
+}
+
+fn hopcroft_observation_key_with_spec(
+    state: &TlcDotState,
+    observation: &HopcroftObservationSpec,
+) -> String {
+    match observation {
+        HopcroftObservationSpec::Builtin(HopcroftObservation::None) => String::new(),
+        HopcroftObservationSpec::Builtin(HopcroftObservation::Phase) => {
+            state.phase.clone().unwrap_or_else(|| "<unknown>".into())
+        }
+        HopcroftObservationSpec::Builtin(HopcroftObservation::Full) => state
+            .snapshot_fields
+            .iter()
+            .filter(|(field, _)| field.as_str() != "model_step_count")
+            .map(|(field, value)| format!("{field} = {value}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        HopcroftObservationSpec::Fields(fields) => state
+            .snapshot_fields
+            .iter()
+            .filter(|(field, _)| fields.contains(*field) && is_extended_state_field(field))
+            .map(|(field, value)| format!("{field} = {value}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        HopcroftObservationSpec::AllExceptFields(excluded) => state
+            .snapshot_fields
+            .iter()
+            .filter(|(field, _)| {
+                is_extended_state_field(field) && !excluded.contains((*field).as_str())
+            })
+            .map(|(field, value)| format!("{field} = {value}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+fn is_extended_state_field(field: &str) -> bool {
+    field != "phase" && field != "model_step_count"
+}
+
+fn summarize_hopcroft_target(
+    target: HopcroftTarget<'_>,
+    observation: HopcroftObservation,
+    audit_map: bool,
+    graph: &TlcDotGraph,
+    quotient: &HopcroftQuotient,
+    tlc_output: &str,
+) -> HopcroftSummary {
+    let mixed_phase_blocks = quotient
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(block_id, members)| {
+            let summary = summarize_hopcroft_block(block_id, members, graph, quotient);
+            (summary.phases.len() > 1).then_some(summary)
+        })
+        .collect::<Vec<_>>();
+
+    let mut largest_blocks = quotient
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(block_id, members)| summarize_hopcroft_block(block_id, members, graph, quotient))
+        .collect::<Vec<_>>();
+    largest_blocks.sort_by(|left, right| {
+        right
+            .size
+            .cmp(&left.size)
+            .then_with(|| left.block.cmp(&right.block))
+    });
+    largest_blocks.truncate(10);
+
+    let initial_blocks = graph
+        .initial_states
+        .iter()
+        .map(|state_idx| quotient.partition_by_state[*state_idx])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let reduction_states = graph.states.len().saturating_sub(quotient.blocks.len());
+    let reduction_percent = if graph.states.is_empty() {
+        0.0
+    } else {
+        ((reduction_states as f64) / (graph.states.len() as f64)) * 100.0
+    };
+    let mixed_phase_pairs =
+        summarize_hopcroft_phase_pairs(graph, quotient, target.machine_schema, audit_map);
+    let field_audit = if audit_map {
+        summarize_hopcroft_field_audit(graph)
+    } else {
+        None
+    };
+    let largest_mixed_phase_block_field_projection =
+        summarize_largest_mixed_phase_block_field_projection(graph, quotient, &mixed_phase_blocks);
+
+    HopcroftSummary {
+        kind: target.kind.into(),
+        name: target.display_name.into(),
+        slug: target.slug.into(),
+        observation,
+        reachable_states: graph.states.len(),
+        edge_count: graph.edges.len(),
+        quotient_states: quotient.blocks.len(),
+        reduction_states,
+        reduction_percent,
+        initial_blocks,
+        mixed_phase_blocks,
+        mixed_phase_pairs,
+        field_audit,
+        largest_mixed_phase_block_field_projection,
+        largest_blocks,
+        tlc: parse_tlc_graph_stats(tlc_output),
+    }
+}
+
+fn summarize_hopcroft_phase_pairs(
+    graph: &TlcDotGraph,
+    quotient: &HopcroftQuotient,
+    machine_schema: Option<&MachineSchema>,
+    audit_map: bool,
+) -> Vec<HopcroftPhasePairSummary> {
+    let mut pairs = BTreeMap::<(String, String), HopcroftPhasePairAccumulator>::new();
+
+    for (block_id, members) in quotient.blocks.iter().enumerate() {
+        let mut representatives = BTreeMap::<String, usize>::new();
+        for &state_idx in members {
+            if let Some(phase) = graph.states[state_idx].phase.clone() {
+                representatives.entry(phase).or_insert(state_idx);
+            }
+        }
+
+        let phases = representatives.keys().cloned().collect::<Vec<_>>();
+        for (idx, left) in phases.iter().enumerate() {
+            for right in phases.iter().skip(idx + 1) {
+                let Some(&left_state_idx) = representatives.get(left) else {
+                    continue;
+                };
+                let Some(&right_state_idx) = representatives.get(right) else {
+                    continue;
+                };
+                let key = (left.clone(), right.clone());
+                let entry = pairs.entry(key).or_default();
+                entry.blocks.insert(block_id);
+                entry.total_block_members += members.len();
+                if audit_map {
+                    entry.witness_pairs.push(HopcroftWitnessPair {
+                        block: block_id,
+                        left_state_idx,
+                        right_state_idx,
+                    });
+                }
+            }
+        }
+    }
+
+    let transition_input_variants = machine_schema.map(transition_input_variant_map);
+    let mut summaries = pairs
+        .into_iter()
+        .map(|((left_phase, right_phase), pair)| {
+            let witness_pairs = pair.witness_pairs;
+            let (field_difference_counts, sample_block_witnesses) = if audit_map {
+                (
+                    summarize_phase_pair_field_differences(graph, &witness_pairs),
+                    summarize_phase_pair_sample_witnesses(
+                        graph,
+                        &witness_pairs,
+                        transition_input_variants.as_ref(),
+                    ),
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            let schema_input_rows = if audit_map {
+                machine_schema
+                    .map(|schema| schema_input_rows_for_pair(schema, &left_phase, &right_phase))
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let schema_input_counts = summarize_schema_input_counts(&schema_input_rows);
+
+            HopcroftPhasePairSummary {
+                left_phase,
+                right_phase,
+                blocks: pair.blocks.into_iter().collect(),
+                total_block_members: pair.total_block_members,
+                field_difference_counts,
+                schema_input_counts,
+                schema_input_rows,
+                sample_block_witnesses,
+            }
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| {
+        right
+            .total_block_members
+            .cmp(&left.total_block_members)
+            .then_with(|| left.left_phase.cmp(&right.left_phase))
+            .then_with(|| left.right_phase.cmp(&right.right_phase))
+    });
+    summaries
+}
+
+fn summarize_hopcroft_field_audit(graph: &TlcDotGraph) -> Option<HopcroftFieldAuditSummary> {
+    let fields = graph_field_names(graph);
+    if fields.is_empty() {
+        return None;
+    }
+
+    let mut summaries = Vec::new();
+    for field in fields {
+        let only_spec = HopcroftObservationSpec::Fields(BTreeSet::from([field.clone()]));
+        let only_quotient = hopcroft_partition_refinement_with_spec(graph, &only_spec);
+        let only_reduction_states = graph
+            .states
+            .len()
+            .saturating_sub(only_quotient.blocks.len());
+        let only_reduction_percent = reduction_percent(only_reduction_states, graph.states.len());
+
+        let all_except_spec =
+            HopcroftObservationSpec::AllExceptFields(BTreeSet::from([field.clone()]));
+        let all_except_quotient = hopcroft_partition_refinement_with_spec(graph, &all_except_spec);
+        let all_except_reduction_states = graph
+            .states
+            .len()
+            .saturating_sub(all_except_quotient.blocks.len());
+        let all_except_reduction_percent =
+            reduction_percent(all_except_reduction_states, graph.states.len());
+
+        summaries.push(HopcroftFieldImpactSummary {
+            all_except_collapsed_states: all_except_reduction_states,
+            field,
+            only_quotient_states: only_quotient.blocks.len(),
+            only_reduction_states,
+            only_reduction_percent,
+            all_except_quotient_states: all_except_quotient.blocks.len(),
+            all_except_reduction_states,
+            all_except_reduction_percent,
+        });
+    }
+
+    summaries.sort_by(|left, right| {
+        right
+            .all_except_collapsed_states
+            .cmp(&left.all_except_collapsed_states)
+            .then_with(|| right.only_quotient_states.cmp(&left.only_quotient_states))
+            .then_with(|| left.field.cmp(&right.field))
+    });
+
+    Some(HopcroftFieldAuditSummary {
+        field_count: summaries.len(),
+        fields: summaries,
+    })
+}
+
+fn summarize_largest_mixed_phase_block_field_projection(
+    graph: &TlcDotGraph,
+    quotient: &HopcroftQuotient,
+    mixed_phase_blocks: &[HopcroftBlockSummary],
+) -> Option<HopcroftBlockFieldProjectionSummary> {
+    let largest = mixed_phase_blocks.iter().max_by(|left, right| {
+        left.size
+            .cmp(&right.size)
+            .then_with(|| right.block.cmp(&left.block))
+    })?;
+    let members = quotient.blocks.get(largest.block)?;
+    let fields = members
+        .iter()
+        .flat_map(|state_idx| graph.states[*state_idx].snapshot_fields.keys().cloned())
+        .filter(|field| is_extended_state_field(field))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let tuple_phase_map = members
+        .iter()
+        .map(|state_idx| {
+            let state = &graph.states[*state_idx];
+            let tuple = fields
+                .iter()
+                .map(|field| snapshot_field_value(state, field))
+                .collect::<Vec<_>>();
+            let phase = state.phase.clone().unwrap_or_else(|| "<missing>".into());
+            (tuple, phase)
+        })
+        .fold(
+            BTreeMap::<Vec<String>, BTreeSet<String>>::new(),
+            |mut acc, (tuple, phase)| {
+                acc.entry(tuple).or_default().insert(phase);
+                acc
+            },
+        );
+    let distinct_tuples = tuple_phase_map.len();
+    let phase_overlay_tuple_count = tuple_phase_map
+        .values()
+        .filter(|phases| phases.len() > 1)
+        .count();
+    let max_phases_per_tuple = tuple_phase_map
+        .values()
+        .map(BTreeSet::len)
+        .max()
+        .unwrap_or_default();
+
+    let mut summaries = Vec::new();
+    for field in &fields {
+        let mut buckets = BTreeMap::<String, (usize, BTreeMap<String, usize>)>::new();
+        for &state_idx in members {
+            let state = &graph.states[state_idx];
+            let value = snapshot_field_value(state, field);
+            let entry = buckets.entry(value).or_default();
+            entry.0 += 1;
+            if let Some(phase) = &state.phase {
+                *entry.1.entry(phase.clone()).or_default() += 1;
+            }
+        }
+
+        let distinct_values = buckets.len();
+        let largest_bucket_size = buckets
+            .values()
+            .map(|(count, _)| *count)
+            .max()
+            .unwrap_or_default();
+        let mut top_values = buckets
+            .into_iter()
+            .map(|(value, (count, phases))| HopcroftBlockFieldValueSummary {
+                value,
+                count,
+                phases,
+            })
+            .collect::<Vec<_>>();
+        top_values.sort_by(|left, right| {
+            right
+                .count
+                .cmp(&left.count)
+                .then_with(|| left.value.cmp(&right.value))
+        });
+        let omitted_value_count = distinct_values.saturating_sub(top_values.len().min(8));
+        top_values.truncate(8);
+
+        summaries.push(HopcroftBlockFieldProjectionFieldSummary {
+            field: field.clone(),
+            distinct_values,
+            largest_bucket_size,
+            largest_bucket_percent: reduction_percent(largest_bucket_size, members.len()),
+            omitted_value_count,
+            top_values,
+        });
+    }
+
+    summaries.sort_by(|left, right| {
+        right
+            .distinct_values
+            .cmp(&left.distinct_values)
+            .then_with(|| {
+                left.largest_bucket_percent
+                    .partial_cmp(&right.largest_bucket_percent)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.field.cmp(&right.field))
+    });
+
+    Some(HopcroftBlockFieldProjectionSummary {
+        block: largest.block,
+        size: largest.size,
+        phases: largest.phases.clone(),
+        field_count: fields.len(),
+        distinct_tuples,
+        phase_overlay_tuple_count,
+        max_phases_per_tuple,
+        fields: summaries,
+    })
+}
+
+fn graph_field_names(graph: &TlcDotGraph) -> Vec<String> {
+    graph
+        .states
+        .iter()
+        .flat_map(|state| state.snapshot_fields.keys().cloned())
+        .filter(|field| is_extended_state_field(field))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn snapshot_field_value(state: &TlcDotState, field: &str) -> String {
+    state
+        .snapshot_fields
+        .get(field)
+        .cloned()
+        .unwrap_or_else(|| "<missing>".into())
+}
+
+fn reduction_percent(reduction_states: usize, reachable_states: usize) -> f64 {
+    if reachable_states == 0 {
+        0.0
+    } else {
+        ((reduction_states as f64) / (reachable_states as f64)) * 100.0
+    }
+}
+
+fn summarize_phase_pair_field_differences(
+    graph: &TlcDotGraph,
+    witness_pairs: &[HopcroftWitnessPair],
+) -> Vec<HopcroftFieldDifferenceCount> {
+    let mut counts = BTreeMap::<String, (usize, usize)>::new();
+
+    for witness in witness_pairs {
+        let left = &graph.states[witness.left_state_idx];
+        let right = &graph.states[witness.right_state_idx];
+        let fields = left
+            .snapshot_fields
+            .keys()
+            .chain(right.snapshot_fields.keys())
+            .filter(|field| is_extended_state_field(field))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        for field in fields {
+            let left_value = left
+                .snapshot_fields
+                .get(&field)
+                .map(String::as_str)
+                .unwrap_or("<missing>");
+            let right_value = right
+                .snapshot_fields
+                .get(&field)
+                .map(String::as_str)
+                .unwrap_or("<missing>");
+            let entry = counts.entry(field).or_insert((0, 0));
+            if left_value == right_value {
+                entry.1 += 1;
+            } else {
+                entry.0 += 1;
+            }
+        }
+    }
+
+    let mut summaries = counts
+        .into_iter()
+        .map(
+            |(field, (differing_blocks, equal_blocks))| HopcroftFieldDifferenceCount {
+                field,
+                differing_blocks,
+                equal_blocks,
+            },
+        )
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| {
+        right
+            .differing_blocks
+            .cmp(&left.differing_blocks)
+            .then_with(|| right.equal_blocks.cmp(&left.equal_blocks))
+            .then_with(|| left.field.cmp(&right.field))
+    });
+    summaries
+}
+
+fn summarize_phase_pair_sample_witnesses(
+    graph: &TlcDotGraph,
+    witness_pairs: &[HopcroftWitnessPair],
+    transition_input_variants: Option<&BTreeMap<String, String>>,
+) -> Vec<HopcroftStatePairWitness> {
+    witness_pairs
+        .iter()
+        .take(4)
+        .map(|witness| {
+            let left = &graph.states[witness.left_state_idx];
+            let right = &graph.states[witness.right_state_idx];
+            let differing_fields = left
+                .snapshot_fields
+                .keys()
+                .chain(right.snapshot_fields.keys())
+                .filter(|field| is_extended_state_field(field))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .filter_map(|field| {
+                    let left_value = left
+                        .snapshot_fields
+                        .get(&field)
+                        .cloned()
+                        .unwrap_or_else(|| "<missing>".into());
+                    let right_value = right
+                        .snapshot_fields
+                        .get(&field)
+                        .cloned()
+                        .unwrap_or_else(|| "<missing>".into());
+                    (left_value != right_value).then_some((
+                        field,
+                        HopcroftFieldPairValues {
+                            left_value,
+                            right_value,
+                        },
+                    ))
+                })
+                .collect::<BTreeMap<_, _>>();
+
+            HopcroftStatePairWitness {
+                block: witness.block,
+                left_state_id: left.id.clone(),
+                right_state_id: right.id.clone(),
+                shared_input_witnesses: transition_input_variants
+                    .map(|index| {
+                        shared_input_witnesses_for_state(graph, witness.left_state_idx, index)
+                    })
+                    .unwrap_or_default(),
+                differing_fields,
+            }
+        })
+        .collect()
+}
+
+fn shared_input_witnesses_for_state(
+    graph: &TlcDotGraph,
+    state_idx: usize,
+    transition_input_variants: &BTreeMap<String, String>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut inputs = BTreeMap::<String, BTreeSet<String>>::new();
+    for &edge_idx in &graph.outgoing[state_idx] {
+        let edge = &graph.edges[edge_idx];
+        let Some(input_variant) = transition_input_variants.get(&edge.label) else {
+            continue;
+        };
+        inputs
+            .entry(input_variant.clone())
+            .or_default()
+            .insert(edge.label.clone());
+    }
+
+    inputs
+        .into_iter()
+        .map(|(input_variant, transitions)| (input_variant, transitions.into_iter().collect()))
+        .collect()
+}
+
+fn transition_input_variant_map(schema: &MachineSchema) -> BTreeMap<String, String> {
+    schema
+        .transitions
+        .iter()
+        .filter(|transition| transition.on.kind() == TriggerKind::Input)
+        .map(|transition| {
+            (
+                transition.name.as_str().to_owned(),
+                transition.on.variant_str().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn schema_input_rows_for_pair(
+    schema: &MachineSchema,
+    left_phase: &str,
+    right_phase: &str,
+) -> Vec<HopcroftSchemaInputRow> {
+    let mut rows = Vec::new();
+
+    for input_variant in &schema.inputs.variants {
+        let left = schema_transition_summaries_for_phase_input(
+            schema,
+            left_phase,
+            input_variant.name.as_str(),
+        );
+        let right = schema_transition_summaries_for_phase_input(
+            schema,
+            right_phase,
+            input_variant.name.as_str(),
+        );
+        if left.is_empty() && right.is_empty() {
+            continue;
+        }
+
+        rows.push(HopcroftSchemaInputRow {
+            input_variant: input_variant.name.as_str().to_owned(),
+            classification: classify_schema_input_row(&left, &right),
+            left,
+            right,
+        });
+    }
+
+    rows
+}
+
+fn schema_transition_summaries_for_phase_input(
+    schema: &MachineSchema,
+    phase: &str,
+    input_variant: &str,
+) -> Vec<HopcroftSchemaTransitionSummary> {
+    let mut summaries = schema
+        .transitions
+        .iter()
+        .filter(|transition| {
+            transition.on.kind() == TriggerKind::Input
+                && transition.on.variant_str() == input_variant
+                && transition.from.iter().any(|from| from.as_str() == phase)
+        })
+        .map(|transition| HopcroftSchemaTransitionSummary {
+            transition: transition.name.as_str().to_owned(),
+            to_phase: transition.to.as_str().to_owned(),
+            binding_names: transition
+                .on
+                .bindings()
+                .iter()
+                .map(|b| b.as_str().to_owned())
+                .collect(),
+            guard_names: transition
+                .guards
+                .iter()
+                .map(|guard| guard.name.as_str().to_owned())
+                .collect(),
+            update_count: transition.updates.len(),
+            effect_variants: transition
+                .emit
+                .iter()
+                .map(|effect| effect.variant.as_str().to_owned())
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+
+    summaries.sort_by(|left, right| left.transition.cmp(&right.transition));
+    summaries
+}
+
+fn classify_schema_input_row(
+    left: &[HopcroftSchemaTransitionSummary],
+    right: &[HopcroftSchemaTransitionSummary],
+) -> HopcroftSchemaInputClassification {
+    if left.is_empty() && !right.is_empty() {
+        return HopcroftSchemaInputClassification::RightOnly;
+    }
+    if !left.is_empty() && right.is_empty() {
+        return HopcroftSchemaInputClassification::LeftOnly;
+    }
+
+    let left_surface = left
+        .iter()
+        .map(|summary| {
+            (
+                summary.to_phase.clone(),
+                summary.binding_names.clone(),
+                summary.guard_names.clone(),
+                summary.update_count,
+                summary.effect_variants.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let right_surface = right
+        .iter()
+        .map(|summary| {
+            (
+                summary.to_phase.clone(),
+                summary.binding_names.clone(),
+                summary.guard_names.clone(),
+                summary.update_count,
+                summary.effect_variants.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+
+    if left_surface == right_surface {
+        HopcroftSchemaInputClassification::SameSurface
+    } else {
+        HopcroftSchemaInputClassification::DifferentSurface
+    }
+}
+
+fn summarize_schema_input_counts(rows: &[HopcroftSchemaInputRow]) -> HopcroftSchemaInputCounts {
+    let mut counts = HopcroftSchemaInputCounts::default();
+    for row in rows {
+        match row.classification {
+            HopcroftSchemaInputClassification::SameSurface => counts.same_surface += 1,
+            HopcroftSchemaInputClassification::DifferentSurface => counts.different_surface += 1,
+            HopcroftSchemaInputClassification::LeftOnly => counts.left_only += 1,
+            HopcroftSchemaInputClassification::RightOnly => counts.right_only += 1,
+        }
+    }
+    counts
+}
+
+fn summarize_hopcroft_block(
+    block_id: usize,
+    members: &[usize],
+    graph: &TlcDotGraph,
+    quotient: &HopcroftQuotient,
+) -> HopcroftBlockSummary {
+    let phases = members
+        .iter()
+        .filter_map(|state_idx| graph.states[*state_idx].phase.clone())
+        .fold(BTreeMap::<String, usize>::new(), |mut acc, phase| {
+            *acc.entry(phase).or_default() += 1;
+            acc
+        });
+
+    let representative = members.first().copied().unwrap_or(0);
+    let outgoing = graph.outgoing[representative]
+        .iter()
+        .fold(
+            BTreeMap::<String, BTreeSet<usize>>::new(),
+            |mut acc, edge_idx| {
+                let edge = &graph.edges[*edge_idx];
+                acc.entry(edge.label.clone())
+                    .or_default()
+                    .insert(quotient.partition_by_state[edge.to]);
+                acc
+            },
+        )
+        .into_iter()
+        .map(|(label, targets)| (label, targets.into_iter().collect()))
+        .collect::<BTreeMap<_, _>>();
+
+    HopcroftBlockSummary {
+        block: block_id,
+        size: members.len(),
+        phases,
+        representative_state_id: graph.states[representative].id.clone(),
+        representative_phase: graph.states[representative].phase.clone(),
+        outgoing,
+    }
+}
+
+fn parse_tlc_graph_stats(output: &str) -> TlcGraphStats {
+    let mut stats = TlcGraphStats::default();
+
+    for line in output.lines() {
+        let line = line.trim();
+        if line.contains("states generated") && line.contains("distinct states found") {
+            let fragments = line.split(',').collect::<Vec<_>>();
+            if let Some(generated) = fragments
+                .first()
+                .and_then(|fragment| fragment.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                stats.generated_states = Some(generated);
+            }
+            if let Some(distinct) = fragments
+                .get(1)
+                .and_then(|fragment| fragment.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                stats.distinct_states = Some(distinct);
+            }
+        }
+
+        if let Some(prefix) = line.strip_prefix("The depth of the complete state graph search is ")
+        {
+            let depth = prefix.trim_end_matches('.').trim();
+            if let Ok(parsed) = depth.parse::<u64>() {
+                stats.depth = Some(parsed);
+            }
+        }
+    }
+
+    stats
+}
+
+fn print_hopcroft_summary(summary: &HopcroftSummary) {
+    println!("{}: {}", summary.kind, summary.name);
+    println!(
+        "  reachable={} edges={} quotient={} reduced={} ({:.1}%)",
+        summary.reachable_states,
+        summary.edge_count,
+        summary.quotient_states,
+        summary.reduction_states,
+        summary.reduction_percent
+    );
+    if let Some(generated) = summary.tlc.generated_states {
+        println!(
+            "  tlc generated={} distinct={:?} depth={:?}",
+            generated, summary.tlc.distinct_states, summary.tlc.depth
+        );
+    }
+    if summary.mixed_phase_blocks.is_empty() {
+        println!("  phase-mixed blocks: none");
+    } else {
+        println!("  phase-mixed blocks:");
+        for block in summary.mixed_phase_blocks.iter().take(8) {
+            println!(
+                "    - block {} size {} phases {:?}",
+                block.block, block.size, block.phases
+            );
+        }
+        println!("  mixed-phase pairs:");
+        for pair in summary.mixed_phase_pairs.iter().take(8) {
+            println!(
+                "    - {} <-> {} across blocks {:?} ({} states, schema same={} diff={} left={} right={})",
+                pair.left_phase,
+                pair.right_phase,
+                pair.blocks,
+                pair.total_block_members,
+                pair.schema_input_counts.same_surface,
+                pair.schema_input_counts.different_surface,
+                pair.schema_input_counts.left_only,
+                pair.schema_input_counts.right_only
+            );
+        }
+    }
+    if let Some(field_audit) = &summary.field_audit {
+        println!("  field audit:");
+        for field in field_audit.fields.iter().take(8) {
+            println!(
+                "    - {}: only={} | all_except={} (collapse_without={} / {:.1}%)",
+                field.field,
+                field.only_quotient_states,
+                field.all_except_quotient_states,
+                field.all_except_collapsed_states,
+                field.all_except_reduction_percent
+            );
+        }
+    }
+    if let Some(block_projection) = &summary.largest_mixed_phase_block_field_projection {
+        println!(
+            "  largest mixed-block field projection: block {} size {} tuples={} phase_overlay={} max_phases_per_tuple={} fields={}",
+            block_projection.block,
+            block_projection.size,
+            block_projection.distinct_tuples,
+            block_projection.phase_overlay_tuple_count,
+            block_projection.max_phases_per_tuple,
+            block_projection.field_count
+        );
+        for field in block_projection.fields.iter().take(8) {
+            let top_values = field
+                .top_values
+                .iter()
+                .take(3)
+                .map(|value| {
+                    format!(
+                        "{} ({})",
+                        summarize_snapshot_value_for_cli(&value.value),
+                        value.count
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "    - {}: distinct={} largest_bucket={} ({:.1}%) top=[{}{}]",
+                field.field,
+                field.distinct_values,
+                field.largest_bucket_size,
+                field.largest_bucket_percent,
+                top_values,
+                if field.omitted_value_count == 0 {
+                    String::new()
+                } else {
+                    format!(", +{} more", field.omitted_value_count)
+                }
+            );
+        }
+    }
+    println!("  largest blocks:");
+    for block in summary.largest_blocks.iter().take(5) {
+        println!(
+            "    - block {} size {} phase {:?}",
+            block.block, block.size, block.representative_phase
+        );
+    }
+}
+
+fn summarize_snapshot_value_for_cli(value: &str) -> String {
+    let compact = value.replace('\n', " ");
+    const LIMIT: usize = 40;
+    if compact.chars().count() > LIMIT {
+        let truncated = compact.chars().take(LIMIT - 1).collect::<String>();
+        format!("{truncated}…")
+    } else {
+        compact
+    }
+}
+
+fn generated_kernel_module_slug(machine_name: impl AsRef<str>) -> String {
+    let machine_name = machine_name.as_ref();
+    match machine_name {
+        "MeerkatMachine" => "meerkat".into(),
+        "MobMachine" => "mob".into(),
+        _ => to_snake_case(machine_name.strip_suffix("Machine").unwrap_or(machine_name)),
+    }
+}
+
+pub fn machine_slug(machine_name: impl AsRef<str>) -> String {
+    let machine_name = machine_name.as_ref();
+    match machine_name {
+        "MeerkatMachine" => return "meerkat_machine".into(),
+        "MobMachine" => return "mob_machine".into(),
+        _ => {}
+    }
+    let trimmed = machine_name.strip_suffix("Machine").unwrap_or(machine_name);
+    to_snake_case(trimmed)
+}
+
+fn legacy_machine_slug(machine_name: impl AsRef<str>) -> Option<&'static str> {
+    match machine_name.as_ref() {
+        "MeerkatMachine" => Some("meerkat"),
+        "MobMachine" => Some("mob"),
+        _ => None,
+    }
+}
+
+pub fn composition_slug(name: impl AsRef<str>) -> String {
+    to_snake_case(name.as_ref())
+}
+
+pub fn to_snake_case(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_is_sep = true;
+
+    for ch in value.chars() {
+        if ch == '_' || ch == '-' || ch == ' ' {
+            if !previous_is_sep {
+                out.push('_');
+                previous_is_sep = true;
+            }
+            continue;
+        }
+
+        if ch.is_ascii_uppercase() {
+            if !out.is_empty() && !previous_is_sep {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            previous_is_sep = false;
+        } else {
+            out.push(ch.to_ascii_lowercase());
+            previous_is_sep = false;
+        }
+    }
+
+    out.trim_matches('_').to_owned()
+}
+
+#[cfg(test)]
+#[path = "machines_tests.rs"]
+mod tests;

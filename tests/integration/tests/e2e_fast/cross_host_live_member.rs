@@ -12,7 +12,7 @@
 //! registry is process memory), post-rebind `MemberLiveChannelStatus`
 //! reports no active channel, and a fresh open succeeds. That row needs a
 //! REAL process restart and lives with the e2e-system daemon lifecycle
-//! lane (`meerkat-cli/tests/system_mob_host_daemon.rs` family), not here.
+//! lane (`crates/meerkat-cli/tests/system_mob_host_daemon.rs` family), not here.
 
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

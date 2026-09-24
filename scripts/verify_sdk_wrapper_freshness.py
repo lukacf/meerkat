@@ -15,7 +15,7 @@ def main() -> int:
 
     root = pathlib.Path(sys.argv[1])
 
-    catalog_path = root / "meerkat-contracts" / "src" / "rpc_catalog.rs"
+    catalog_path = root / "crates" / "meerkat-contracts" / "src" / "rpc_catalog.rs"
     ts_root = root / "sdks" / "typescript" / "src"
     py_root = root / "sdks" / "python" / "meerkat"
 

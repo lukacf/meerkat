@@ -1,0 +1,537 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+rust_library(
+    name = "meerkat_machine_codegen",
+    aliases = aliases(package_name = "meerkat-machine-codegen"),
+    crate_name = "meerkat_machine_codegen",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-codegen",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_machine_codegen_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-machine-codegen"),
+    crate_name = "meerkat_machine_codegen",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//crates/meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-codegen",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "meerkat_machine_codegen_unit_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "meerkat_machine_codegen",
+    crate_root = "src/lib.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-codegen",
+    },
+    tags = [
+        "fast",
+        "unit",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "artifacts_semantic_model_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "artifacts_semantic_model",
+    crate_root = "tests/artifacts_semantic_model.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ] + [
+        "//crates/meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//crates/meerkat-machine-kernels:src/generated/mob.rs",
+    ],
+    srcs = [
+        "tests/artifacts_semantic_model.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "artifacts_semantic_model",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-codegen",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_codegen_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "named_type_binding_respected_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "named_type_binding_respected",
+    crate_root = "tests/named_type_binding_respected.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ] + [
+        "//crates/meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//crates/meerkat-machine-kernels:src/generated/mob.rs",
+    ],
+    srcs = [
+        "tests/named_type_binding_respected.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "named_type_binding_respected",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-codegen",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_codegen_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "render_contracts_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "render_contracts",
+    crate_root = "tests/render_contracts.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ] + [
+        "//crates/meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//crates/meerkat-machine-kernels:src/generated/mob.rs",
+    ],
+    srcs = [
+        "tests/render_contracts.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "render_contracts",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-codegen",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+        "//crates/meerkat-mob:package_runfiles",
+        "//crates/meerkat-runtime:package_runfiles",
+        "//crates/meerkat-schedule:package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_codegen_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "routed_effect_module_shape_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "routed_effect_module_shape",
+    crate_root = "tests/routed_effect_module_shape.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ] + [
+        "//crates/meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//crates/meerkat-machine-kernels:src/generated/mob.rs",
+    ],
+    srcs = [
+        "tests/routed_effect_module_shape.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "routed_effect_module_shape",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-codegen",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        "//crates/meerkat-runtime:package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_codegen_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "runtime_alphabet_parity_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "runtime_alphabet_parity",
+    crate_root = "tests/runtime_alphabet_parity.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ] + [
+        "//crates/meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//crates/meerkat-machine-kernels:src/generated/mob.rs",
+    ],
+    srcs = [
+        "tests/runtime_alphabet_parity.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "runtime_alphabet_parity",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-codegen",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+        "//crates/meerkat-mob:package_runfiles",
+        "//crates/meerkat-runtime:package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_codegen_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_schedule_agent_factory_build",
+        "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "runtime_schema_parity_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "runtime_schema_parity",
+    crate_root = "tests/runtime_schema_parity.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ] + [
+        "//crates/meerkat-machine-kernels:src/generated/meerkat.rs",
+        "//crates/meerkat-machine-kernels:src/generated/mob.rs",
+    ],
+    srcs = [
+        "tests/runtime_schema_parity.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "runtime_schema_parity",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-codegen",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [
+        ":package_runfiles",
+        "//:workspace_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+        "WORKSPACE_ROOT": ".",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-schedule:meerkat_schedule_machine_schema_exports_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_codegen_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_workgraph_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-codegen",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+test_suite(
+    name = "fast_tests",
+    tests = [
+        ":artifacts_semantic_model_test",
+        ":meerkat_machine_codegen_unit_test",
+        ":named_type_binding_respected_test",
+        ":render_contracts_test",
+        ":routed_effect_module_shape_test",
+        ":runtime_alphabet_parity_test",
+        ":runtime_schema_parity_test",
+    ],
+)

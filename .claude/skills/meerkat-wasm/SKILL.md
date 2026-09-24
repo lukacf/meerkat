@@ -160,7 +160,7 @@ the config. It cannot install the binding required by a custom composition.
 
 Notes:
 
-- WASM synthesizes its api-key binding section under the reserved `global` realm (`GLOBAL_REALM_SLUG`) in `meerkat-web-runtime/src/lib.rs`. A session built without an explicit `authBinding` uses `global` as its explicit head; this is a degenerate single-realm chain with no filesystem doc or parent edges. Do not synthesize under any other slug.
+- WASM synthesizes its api-key binding section under the reserved `global` realm (`GLOBAL_REALM_SLUG`) in `crates/meerkat-web-runtime/src/lib.rs`. A session built without an explicit `authBinding` uses `global` as its explicit head; this is a degenerate single-realm chain with no filesystem doc or parent edges. Do not synthesize under any other slug.
 - `authBinding` is structural and supported on `runtime.createSession({...})`, `mob.spawnHelper(...)`, and `mob.forkHelper(...)`. Plain `mob.spawn([...])` specs do not currently carry an auth binding.
 - `mob.spawnHelper(...)` and `mob.forkHelper(...)` options require `resultLabel` and `maxTextBytes` (wire `result_label` / `max_text_bytes`); the helper result carries required `output`, `tokens_used`, `agent_identity`, `member_ref`, `bounded_result`, `session_id`, `usage`, `turns`, and `tool_calls`, plus optional `retirement_error`.
 - `RuntimeConfig` uses `anthropicApiKey` / `anthropicBaseUrl`, `openaiApiKey` / `openaiBaseUrl`, and `geminiApiKey` / `geminiBaseUrl`. Raw WASM uses `anthropic_api_key` / `anthropic_base_url`, `openai_api_key` / `openai_base_url`, and `gemini_api_key` / `gemini_base_url`. Generic `apiKey` / `baseUrl` compatibility fields are deleted at both runtime and session boundaries; per-session credentials are not accepted.
@@ -215,8 +215,8 @@ Excluded: shell tools, filesystem-mutating builtins such as `apply_patch`, files
 
 For detailed API surface and architecture, load: `references/api_surface.md`.
 
-- `meerkat-web-runtime/src/lib.rs` — wasm_bindgen exports (bootstrap, sessions, mob, subscriptions, comms)
+- `crates/meerkat-web-runtime/src/lib.rs` — wasm_bindgen exports (bootstrap, sessions, mob, subscriptions, comms)
 - `sdks/web/src/runtime.ts` — `MeerkatRuntime` class (TypeScript wrapper entry point)
 - `sdks/web/proxy/index.mjs` — Node.js provider proxy
-- `meerkat/src/factory.rs` — `build_agent()` with overrides, `AgentFactory::minimal()`
-- `meerkat/src/service_factory.rs` — `FactoryAgentBuilder` with default injection
+- `crates/meerkat/src/factory.rs` — `build_agent()` with overrides, `AgentFactory::minimal()`
+- `crates/meerkat/src/service_factory.rs` — `FactoryAgentBuilder` with default injection

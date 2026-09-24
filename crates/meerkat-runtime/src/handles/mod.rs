@@ -1,0 +1,617 @@
+//! Runtime-side impls of the cross-crate DSL handle traits defined in
+//! `meerkat_core::handles`.
+//!
+//! Each handle holds an `Arc<std::sync::Mutex<mm_dsl::MeerkatMachineAuthority>>`
+//! that points at the **session's real DSL authority** — the same instance
+//! stored on [`crate::meerkat_machine::RuntimeSessionEntry::dsl_authority`].
+//! All 5 handles for a given session share the same `Arc`, so transitions
+//! fired through any handle land on the session's canonical DSL state.
+//!
+//! Sync `std::sync::Mutex` is used (not tokio's async lock) because the
+//! [`meerkat_core::handles`] trait methods are sync. Shell code that already
+//! mutates the session DSL authority under the `sessions` tokio lock takes the
+//! same inner sync lock via [`HandleDslAuthority::apply_input`] /
+//! [`HandleDslAuthority::apply_signal`]; locks are held briefly across a
+//! single DSL transition, so contention is not a concern.
+//!
+//! Phase 5F/0 is a pure addition commit: these handles are constructed by
+//! [`crate::meerkat_machine::MeerkatMachine::prepare_bindings`] and populated
+//! on [`meerkat_core::SessionRuntimeBindings`], but no existing callsites
+//! dispatch through them yet. Phases 5F/1-5 flip callsites to the new handles.
+
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+
+use crate::meerkat_machine::dsl as mm_dsl;
+use crate::meerkat_machine_types::MeerkatMachineFieldlessRuntimeInternalInput;
+use meerkat_core::handles::DslTransitionError;
+
+/// Bridge the generated kernel's `MeerkatMachineTransitionError` into a
+/// typed [`DslTransitionError`]. Keeps the `kind` field accurate so
+/// callers that distinguish guard rejection from out-of-scope input
+/// (e.g., realtime dispatchers firing idempotently) never need to
+/// substring-match the rendered message.
+fn map_kernel_error(
+    err: mm_dsl::MeerkatMachineTransitionError,
+    context: &'static str,
+) -> DslTransitionError {
+    let reason = err.to_string();
+    match err {
+        mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. } => {
+            DslTransitionError::guard_rejected(context, reason)
+        }
+        mm_dsl::MeerkatMachineTransitionError::NoMatchingTransition { .. } => {
+            DslTransitionError::no_matching(context, reason)
+        }
+        mm_dsl::MeerkatMachineTransitionError::RecoveredStateInvariantRejected { .. } => {
+            DslTransitionError::recovered_state_invariant_rejected(context, reason)
+        }
+    }
+}
+
+mod auth_lease;
+mod comms_drain;
+mod external_tool_surface;
+mod interaction_stream;
+mod mcp_server_lifecycle;
+mod model_routing;
+#[cfg(not(target_arch = "wasm32"))]
+mod oauth_flow;
+mod peer_comms;
+mod peer_interaction;
+mod session_admission;
+mod session_claim;
+mod session_context;
+mod turn_state;
+
+pub use auth_lease::RuntimeAuthLeaseHandle;
+pub use comms_drain::RuntimeCommsDrainHandle;
+pub use external_tool_surface::RuntimeExternalToolSurfaceHandle;
+pub use interaction_stream::RuntimeInteractionStreamHandle;
+pub use mcp_server_lifecycle::RuntimeMcpServerLifecycleHandle;
+pub use model_routing::RuntimeModelRoutingHandle;
+#[cfg(not(target_arch = "wasm32"))]
+pub use oauth_flow::RuntimeOAuthFlowHandle;
+pub use peer_comms::RuntimePeerCommsHandle;
+pub use peer_interaction::RuntimePeerInteractionHandle;
+pub use session_admission::RuntimeSessionAdmissionHandle;
+pub use session_claim::RuntimeSessionClaimRegistry;
+pub use session_context::RuntimeSessionContextHandle;
+pub use turn_state::RuntimeTurnStateHandle;
+
+/// Shared handle over a session's real `MeerkatMachineAuthority`.
+///
+/// Constructed from the session's
+/// [`crate::meerkat_machine::RuntimeSessionEntry::dsl_authority`] `Arc`; cloned
+/// into each of the 5 handle impls so all routes mutate the same underlying
+/// authority.
+///
+/// A standalone ephemeral constructor ([`HandleDslAuthority::ephemeral`]) is
+/// also provided for tests and minimal hosts that explicitly need
+/// machine-owned semantics without a durable session authority. Ephemeral
+/// authorities do not synchronize with any other state; transitions land on a
+/// private initial DSL state only.
+pub struct HandleDslAuthority {
+    inner: Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>,
+    teardown_gate: Arc<HandleTeardownGate>,
+    durability_health: Option<crate::meerkat_machine::DurabilityHealthHandle>,
+}
+
+/// Mechanical validity witness for a prepared session-owned handle bundle.
+///
+/// The generated MeerkatMachine remains the semantic lifecycle authority. This
+/// gate only records whether the runtime owner has torn down the handle bundle
+/// that was minted for one session epoch, so detached async holders fail closed
+/// instead of applying through a stale `Arc<HandleDslAuthority>`.
+pub(crate) struct HandleTeardownGate {
+    closed: AtomicBool,
+}
+
+impl HandleTeardownGate {
+    pub(crate) fn open() -> Arc<Self> {
+        Arc::new(Self {
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        !self.is_closed()
+    }
+
+    fn ensure_open(&self, context: &'static str) -> Result<(), DslTransitionError> {
+        if self.is_closed() {
+            Err(DslTransitionError::no_matching(
+                context,
+                "session-owned runtime handle authority is closed by teardown",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl HandleDslAuthority {
+    /// Wrap an existing shared DSL authority. The returned handle and the
+    /// caller's `Arc` both point at the same underlying authority instance.
+    pub fn from_shared(inner: Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>) -> Self {
+        Self {
+            inner,
+            teardown_gate: HandleTeardownGate::open(),
+            durability_health: None,
+        }
+    }
+
+    /// Wrap an existing shared DSL authority with a runtime-owned teardown gate.
+    #[cfg(test)]
+    pub(crate) fn from_shared_with_teardown_gate(
+        inner: Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>,
+        teardown_gate: Arc<HandleTeardownGate>,
+    ) -> Self {
+        Self {
+            inner,
+            teardown_gate,
+            durability_health: None,
+        }
+    }
+
+    /// Wrap a session-owned authority with both of its mechanical fail-closed
+    /// gates. Persistent runtime bindings carry the exact durability-health
+    /// handle shared by their runtime entry and driver; storeless bindings
+    /// carry `None`.
+    pub(crate) fn from_shared_with_runtime_gates(
+        inner: Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>,
+        teardown_gate: Arc<HandleTeardownGate>,
+        durability_health: Option<crate::meerkat_machine::DurabilityHealthHandle>,
+    ) -> Self {
+        Self {
+            inner,
+            teardown_gate,
+            durability_health,
+        }
+    }
+
+    /// Construct a handle with its own ephemeral DSL authority at the
+    /// generated initial state.
+    ///
+    /// Legacy callers without access to a session-owned authority use this for
+    /// compile-time correctness of `SessionRuntimeBindings`. Transitions fired
+    /// through a handle backed by this authority are not visible to any other
+    /// session state.
+    pub fn ephemeral() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::new())),
+            teardown_gate: HandleTeardownGate::open(),
+            durability_health: None,
+        }
+    }
+
+    fn ensure_durability_ready(&self, context: &'static str) -> Result<(), DslTransitionError> {
+        match self.durability_health.as_ref() {
+            Some(health) => health.require_ready().map_err(|required| {
+                DslTransitionError::guard_rejected(context, required.to_string())
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// Apply a DSL input under the shared authority's mutex.
+    ///
+    /// This is the shared authority entrypoint used by every intra-machine
+    /// handle in `crates/meerkat-runtime/src/handles/*`. Handles target the
+    /// meerkat DSL directly — there is no route to resolve, so a
+    /// `CompositionDispatcher` (the cross-machine seam closed by
+    /// wave-c C-6c) is not applicable here. Routed inputs delivered by
+    /// the `meerkat_mob_seam` dispatcher enter through
+    /// [`crate::meerkat_machine::composition::MeerkatConsumerSurface::apply_routed_input`],
+    /// not through this method.
+    pub fn apply_input(
+        &self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<(), DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable
+        // (shared authority entrypoint; routed-effect delivery goes through
+        // `MeerkatConsumerSurface`, not through this `apply_input`).
+        self.apply_input_with_effects(input, context).map(|_| ())
+    }
+
+    /// Apply a DSL input and return the emitted effects.
+    ///
+    /// Handles that need to react to effect emission (e.g.,
+    /// [`crate::handles::RuntimePeerInteractionHandle`] consuming
+    /// `PeerInteractionCleanup` to drop shell-side channel projections)
+    /// use this variant so the effect is observed under the same lock as
+    /// the state update — the "terminal transition → effect → cleanup"
+    /// chain is causal, not lexically adjacent.
+    pub fn apply_input_with_effects(
+        &self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, DslTransitionError> {
+        self.apply_input_with_transition(input, context)
+            .map(|transition| transition.into_effects())
+    }
+
+    pub fn apply_input_with_transition(
+        &self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<mm_dsl::MeerkatMachineTransition, DslTransitionError> {
+        MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
+            .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
+        self.ensure_durability_ready(context)?;
+        self.teardown_gate.ensure_open(context)?;
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)?;
+        self.teardown_gate.ensure_open(context)?;
+        mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
+            .map_err(|err| map_kernel_error(err, context))
+    }
+
+    /// Apply a DSL input, run `sample` on the emitted effects *while still
+    /// holding the authority mutex*, and return the closure's result.
+    ///
+    /// The closure is the observer-sample seam: it runs inside the same
+    /// critical section that committed the transition, so any observer
+    /// slot the caller reads is totally ordered with respect to a
+    /// concurrent `with_state_lock`-based installer. The caller fires the
+    /// sampled observer AFTER this method returns (i.e., after the
+    /// mutex has been released), which matters because observer
+    /// callbacks typically re-enter the same authority via another
+    /// handle method (e.g. `projection_advance_observed`) and the mutex
+    /// is non-reentrant.
+    ///
+    /// Invariant closed by this method: a handle-local observer slot
+    /// installed under `with_state_lock` sees no fires from transitions
+    /// whose critical sections committed before its install — because
+    /// the fire path samples the slot inside the same DSL-lock that
+    /// committed the transition, and an installer running after the
+    /// sample is ordered strictly after this transition's commit. The
+    /// original post-lock-release observer read in the prior
+    /// implementation allowed an install to interleave between commit
+    /// and observer-read, so a just-installed observer saw a fire whose
+    /// effect the installer's baseline had already captured — the race
+    /// PR #286 attempted to close by construction.
+    ///
+    /// Lock order matches [`Self::apply_input_with_effects`] (DSL
+    /// first); the closure may acquire handle-local locks it already
+    /// nests inside the DSL lock elsewhere (e.g., the `observer:
+    /// RwLock<Option<Weak<...>>>` slot) without deadlock.
+    pub fn apply_input_with_effects_and_sample<S>(
+        &self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &'static str,
+        sample: impl FnOnce(&[mm_dsl::MeerkatMachineEffect]) -> S,
+    ) -> Result<S, DslTransitionError> {
+        MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
+            .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
+        self.ensure_durability_ready(context)?;
+        self.teardown_gate.ensure_open(context)?;
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)?;
+        self.teardown_gate.ensure_open(context)?;
+        let effects = mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
+            .map(|transition| transition.into_effects())
+            .map_err(|err| map_kernel_error(err, context))?;
+        Ok(sample(&effects))
+    }
+
+    /// Preview an input against an isolated copy of the exact current
+    /// generated authority and return the parent snapshot it was accepted
+    /// against. The canonical authority is never mutated by this operation.
+    pub(crate) fn preview_input(
+        &self,
+        input: &mm_dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<mm_dsl::MeerkatMachineAuthoritySnapshot, DslTransitionError> {
+        MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(input)
+            .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
+        self.ensure_durability_ready(context)?;
+        self.teardown_gate.ensure_open(context)?;
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)?;
+        self.teardown_gate.ensure_open(context)?;
+        let expected = guard.snapshot();
+        let mut preview = mm_dsl::MeerkatMachineAuthority::new();
+        preview.restore_snapshot(expected.clone());
+        mm_dsl::MeerkatMachineMutator::apply(&mut preview, input.clone())
+            .map_err(|error| map_kernel_error(error, context))?;
+        Ok(expected)
+    }
+
+    /// Commit a previously previewed input only while its exact generated
+    /// parent state remains current, then sample the committed state under the
+    /// same authority lock.
+    pub(crate) fn apply_previewed_input_and_sample_state<S>(
+        &self,
+        expected: &mm_dsl::MeerkatMachineAuthoritySnapshot,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &'static str,
+        sample: impl FnOnce(&mm_dsl::MeerkatMachineState) -> S,
+    ) -> Result<S, DslTransitionError> {
+        MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(&input)
+            .map_err(|reason| DslTransitionError::no_matching(context, reason))?;
+        self.ensure_durability_ready(context)?;
+        self.teardown_gate.ensure_open(context)?;
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)?;
+        self.teardown_gate.ensure_open(context)?;
+        if guard.snapshot().state() != expected.state() {
+            return Err(DslTransitionError::guard_rejected(
+                context,
+                "generated model-routing authority changed after sticky-fallback staging",
+            ));
+        }
+        mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
+            .map_err(|error| map_kernel_error(error, context))?;
+        Ok(sample(guard.state()))
+    }
+
+    /// Apply a DSL signal under the shared authority's mutex.
+    pub fn apply_signal(
+        &self,
+        signal: mm_dsl::MeerkatMachineSignal,
+        context: &'static str,
+    ) -> Result<(), DslTransitionError> {
+        self.apply_signal_with_effects(signal, context).map(|_| ())
+    }
+
+    /// Apply a DSL signal and return emitted effects.
+    pub fn apply_signal_with_effects(
+        &self,
+        signal: mm_dsl::MeerkatMachineSignal,
+        context: &'static str,
+    ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, DslTransitionError> {
+        self.ensure_durability_ready(context)?;
+        self.teardown_gate.ensure_open(context)?;
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)?;
+        self.teardown_gate.ensure_open(context)?;
+        guard
+            .apply_signal(signal)
+            .map(|transition| transition.into_effects())
+            .map_err(|err| map_kernel_error(err, context))
+    }
+
+    /// Apply a DSL signal and sample state under the same authority mutex.
+    pub fn apply_signal_and_sample<S>(
+        &self,
+        signal: mm_dsl::MeerkatMachineSignal,
+        context: &'static str,
+        sample: impl FnOnce(&mm_dsl::MeerkatMachineState) -> S,
+    ) -> Result<S, DslTransitionError> {
+        self.ensure_durability_ready(context)?;
+        self.teardown_gate.ensure_open(context)?;
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)?;
+        self.teardown_gate.ensure_open(context)?;
+        guard
+            .apply_signal(signal)
+            .map_err(|err| map_kernel_error(err, context))?;
+        Ok(sample(guard.state()))
+    }
+
+    /// Clone the current DSL state under the shared authority's mutex.
+    pub fn snapshot_state(&self) -> mm_dsl::MeerkatMachineState {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.state().clone()
+    }
+
+    /// Verify that a resultful cross-store handoff still belongs to the exact
+    /// live session/runtime epoch that minted it.
+    ///
+    /// The teardown gate is checked on both sides of the authority lock so an
+    /// old cloned handle cannot authorize new durable work after unregister or
+    /// epoch rotation. The generated binding fields are the semantic identity
+    /// authority; this method only samples them without mutating machine state.
+    ///
+    /// The refusal is typed because its caller routes on the cause: an epoch
+    /// that rotated under a live session is recoverable by re-deriving it,
+    /// while a placement rotation or a torn-down epoch must fail closed.
+    pub(crate) fn current_runtime_binding(
+        &self,
+        expected_session_id: &mm_dsl::SessionId,
+        expected_runtime_epoch_id: &mm_dsl::RuntimeEpochId,
+        context: &'static str,
+    ) -> Result<
+        (
+            mm_dsl::AgentRuntimeId,
+            Option<mm_dsl::FenceToken>,
+            Option<mm_dsl::Generation>,
+        ),
+        RuntimeBindingSampleRefusal,
+    > {
+        self.ensure_durability_ready(context)
+            .map_err(RuntimeBindingSampleRefusal::authority_unavailable)?;
+        self.teardown_gate
+            .ensure_open(context)
+            .map_err(RuntimeBindingSampleRefusal::authority_unavailable)?;
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_durability_ready(context)
+            .map_err(RuntimeBindingSampleRefusal::authority_unavailable)?;
+        self.teardown_gate
+            .ensure_open(context)
+            .map_err(RuntimeBindingSampleRefusal::authority_unavailable)?;
+        let state = guard.state();
+        if state.session_id.as_ref() != Some(expected_session_id) {
+            return Err(RuntimeBindingSampleRefusal::SessionChanged {
+                expected: expected_session_id.clone(),
+                current: state.session_id.clone(),
+            });
+        }
+        if state.active_runtime_epoch_id.as_ref() != Some(expected_runtime_epoch_id) {
+            return Err(RuntimeBindingSampleRefusal::EpochChanged {
+                expected: expected_runtime_epoch_id.clone(),
+                current: state.active_runtime_epoch_id.clone(),
+            });
+        }
+        let runtime_id = state
+            .active_runtime_id
+            .clone()
+            .ok_or(RuntimeBindingSampleRefusal::PlacementAbsent)?;
+        Ok((
+            runtime_id,
+            state.active_fence_token,
+            state.active_runtime_generation,
+        ))
+    }
+
+    /// Generated comms-trust freshness authority for peer-projection
+    /// handoffs. The generated `comms_trust_reconcile` protocol uses this
+    /// handle to fail closed when an obligation no longer matches the current
+    /// MeerkatMachine peer-projection epoch.
+    pub fn peer_projection_freshness_authority(
+        &self,
+    ) -> crate::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority {
+        crate::protocol_comms_trust_reconcile::PeerProjectionFreshnessAuthority::from_authority(
+            Arc::clone(&self.inner),
+        )
+    }
+
+    pub(crate) fn generated_authority_owner_token(&self) -> Arc<dyn std::any::Any + Send + Sync> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.generated_authority_owner_token()
+    }
+
+    /// Run `body` under the shared authority's mutex. The closure observes
+    /// the DSL state atomically with any side effects it performs on the
+    /// handle's external state (e.g. installing an observer before any
+    /// further `apply_input_with_effects` can run). Locking order must
+    /// match the order used by `apply_input_with_effects` (DSL first) so
+    /// callers can safely acquire additional locks inside the closure.
+    pub fn with_state_lock<R>(&self, body: impl FnOnce(&mm_dsl::MeerkatMachineState) -> R) -> R {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        body(guard.state())
+    }
+}
+
+impl std::fmt::Debug for HandleDslAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandleDslAuthority").finish_non_exhaustive()
+    }
+}
+
+/// Typed refusal from sampling a session's live runtime binding.
+#[derive(Debug, Clone)]
+pub(crate) enum RuntimeBindingSampleRefusal {
+    /// The handle's own gates refused before any state was read: the epoch was
+    /// torn down, or its durability authority is not ready.
+    AuthorityUnavailable(String),
+    /// The authority no longer holds the session this handle was minted for.
+    SessionChanged {
+        expected: mm_dsl::SessionId,
+        current: Option<mm_dsl::SessionId>,
+    },
+    /// The session's live runtime epoch is not the one this handle holds.
+    /// `current` is the value a caller may re-derive from.
+    EpochChanged {
+        expected: mm_dsl::RuntimeEpochId,
+        current: Option<mm_dsl::RuntimeEpochId>,
+    },
+    /// The session carries no authoritative runtime placement.
+    PlacementAbsent,
+}
+
+impl RuntimeBindingSampleRefusal {
+    fn authority_unavailable(error: impl std::fmt::Display) -> Self {
+        Self::AuthorityUnavailable(error.to_string())
+    }
+}
+
+impl std::fmt::Display for RuntimeBindingSampleRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AuthorityUnavailable(detail) => write!(f, "{detail}"),
+            Self::SessionChanged { expected, current } => write!(
+                f,
+                "session binding changed (expected {expected:?}, current {current:?})"
+            ),
+            Self::EpochChanged { expected, current } => write!(
+                f,
+                "runtime epoch changed (expected {expected:?}, current {current:?})"
+            ),
+            Self::PlacementAbsent => write!(
+                f,
+                "session has no authoritative runtime binding for compaction commit"
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn teardown_gate_rejects_stale_handle_input_before_mutation() {
+        let authority = Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::new()));
+        let gate = HandleTeardownGate::open();
+        let handle = HandleDslAuthority::from_shared_with_teardown_gate(
+            Arc::clone(&authority),
+            Arc::clone(&gate),
+        );
+        gate.close();
+
+        let err = handle
+            .apply_input(
+                mm_dsl::MeerkatMachineInput::RegisterSession {
+                    session_id: mm_dsl::SessionId::from("closed-session"),
+                    runtime_epoch_id: None,
+                },
+                "test::stale_handle",
+            )
+            .expect_err("closed handle must reject writes");
+
+        assert_eq!(
+            err.kind,
+            meerkat_core::handles::DslRejectionKind::NoMatchingTransition
+        );
+        assert!(err.reason.contains("closed by teardown"));
+        let state = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .clone();
+        assert_eq!(state.session_id, None);
+    }
+}

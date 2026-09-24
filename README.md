@@ -374,7 +374,7 @@ escape hatch, not the public facade construction path.
 
 ## Development
 
-Complete the [onboarding prerequisites](ONBOARDING.md#prerequisites), including
+Complete the [onboarding prerequisites](docs/internal/onboarding.md#prerequisites), including
 Node.js and `cargo-nextest`, before running contributor validation.
 `make install-build-deps` installs the pinned Rust toolchain and components,
 not every validation tool. The repository uses Make as its command surface:
@@ -419,7 +419,7 @@ make e2e-live
 make e2e-smoke
 ```
 
-New contributors should start with [ONBOARDING.md](ONBOARDING.md) and
+New contributors should start with [the onboarding guide](docs/internal/onboarding.md) and
 [AGENTS.md](AGENTS.md).
 
 ## Rust Features

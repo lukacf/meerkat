@@ -1,0 +1,484 @@
+#![allow(clippy::expect_used, clippy::panic)]
+
+//! Pinning tests for the public release-asset manifest contract.
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use tempfile::tempdir;
+
+fn workflow_yml_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.pop();
+    path.pop();
+    path.push(".github/workflows/release.yml");
+    path
+}
+
+fn manifest_script_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.pop();
+    path.pop();
+    path.push("scripts/release-build-asset-manifest");
+    path
+}
+
+fn asset_verifier_path() -> PathBuf {
+    let mut path = manifest_script_path();
+    path.set_file_name("verify-release-assets.py");
+    path
+}
+
+fn provenance_verifier_path() -> PathBuf {
+    let mut path = manifest_script_path();
+    path.set_file_name("verify-release-asset-provenance");
+    path
+}
+
+fn read_workflow(path: &Path) -> serde_yaml::Value {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    serde_yaml::from_str(&text)
+        .unwrap_or_else(|error| panic!("cannot parse {} as YAML: {error}", path.display()))
+}
+
+#[test]
+fn release_workflows_use_the_repository_pinned_rust_toolchain() {
+    let release_path = workflow_yml_path();
+    let release = std::fs::read_to_string(&release_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", release_path.display()));
+    assert!(
+        !release.contains("dtolnay/rust-toolchain@stable"),
+        "release jobs must not resolve a moving stable compiler"
+    );
+    let rust_jobs = [
+        "release_validate_cargo",
+        "release_semver_gate",
+        "build_binaries",
+        "build_binaries_windows_cross",
+        "build_web_sdk_package",
+        "publish_semver_baseline",
+        "publish_registries",
+    ];
+    assert_eq!(
+        release
+            .matches("uses: ./.github/actions/setup-rust-ci")
+            .count(),
+        rust_jobs.len(),
+        "all Rust-using release jobs, including the semver gate and Windows cross-build, must use the pinned setup action"
+    );
+    let workflow = read_workflow(&release_path);
+    for job in rust_jobs {
+        let steps = workflow["jobs"][job]["steps"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("release job {job} must contain steps"));
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|step| step["uses"].as_str() == Some("./.github/actions/setup-rust-ci"))
+                .count(),
+            1,
+            "release job {job} must use the pinned setup action exactly once"
+        );
+    }
+
+    let semver_path = release_path.with_file_name("release-semver-readiness.yml");
+    let semver = std::fs::read_to_string(&semver_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", semver_path.display()));
+    assert!(
+        !semver.contains("dtolnay/rust-toolchain@stable"),
+        "semver readiness must not resolve a moving stable compiler"
+    );
+    assert_eq!(
+        semver
+            .matches("uses: ./.github/actions/setup-rust-ci")
+            .count(),
+        1,
+        "semver readiness must use the pinned setup action"
+    );
+}
+
+fn workflow_step<'a>(
+    workflow: &'a serde_yaml::Value,
+    path: &Path,
+    job_name: &str,
+    step_name: &str,
+) -> &'a serde_yaml::Value {
+    workflow
+        .get("jobs")
+        .and_then(|jobs| jobs.get(job_name))
+        .and_then(|job| job.get("steps"))
+        .and_then(serde_yaml::Value::as_sequence)
+        .and_then(|steps| {
+            steps.iter().find(|step| {
+                step.get("name").and_then(serde_yaml::Value::as_str) == Some(step_name)
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "{} must define {job_name:?} step {step_name:?}",
+                path.display()
+            )
+        })
+}
+
+fn step_script<'a>(
+    workflow: &'a serde_yaml::Value,
+    path: &Path,
+    job_name: &str,
+    step_name: &str,
+) -> &'a str {
+    workflow_step(workflow, path, job_name, step_name)
+        .get("run")
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or_else(|| {
+            panic!(
+                "{} must define {job_name:?} step {step_name:?} with a run script",
+                path.display()
+            )
+        })
+}
+
+#[test]
+fn published_assets_are_manifest_authority_on_reruns() {
+    let path = workflow_yml_path();
+    let workflow = read_workflow(&path);
+
+    let early_download = step_script(
+        &workflow,
+        &path,
+        "publish_unix_release_and_homebrew",
+        "Download published macOS/Linux release assets",
+    );
+    for contract in [
+        "gh release download",
+        "--pattern '*.tar.gz'",
+        "scripts/release-build-asset-manifest published-release-artifacts",
+    ] {
+        assert!(
+            early_download.contains(contract),
+            "early release path must preserve `{contract}`; script:\n{early_download}"
+        );
+    }
+
+    let early_homebrew = workflow_step(
+        &workflow,
+        &path,
+        "publish_unix_release_and_homebrew",
+        "Update Homebrew tap from published macOS/Linux assets",
+    );
+    assert_eq!(
+        early_homebrew
+            .get("with")
+            .and_then(|inputs| inputs.get("checksums_path"))
+            .and_then(serde_yaml::Value::as_str),
+        Some("published-release-artifacts/checksums.sha256"),
+        "Homebrew must use checksums derived from live release assets"
+    );
+
+    let final_download = step_script(
+        &workflow,
+        &path,
+        "publish_github_release",
+        "Download published release archives",
+    );
+    for contract in [
+        "gh release download",
+        "--pattern '*.tar.gz'",
+        "--pattern '*.zip'",
+        "scripts/verify-release-assets.py prepare",
+        "--source-dir published-release-downloads",
+        "--output-dir published-release-artifacts",
+    ] {
+        assert!(
+            final_download.contains(contract),
+            "final release path must preserve `{contract}`; script:\n{final_download}"
+        );
+    }
+
+    let manifest_files = workflow_step(
+        &workflow,
+        &path,
+        "publish_github_release",
+        "Publish complete release manifest",
+    )
+    .get("with")
+    .and_then(|inputs| inputs.get("files"))
+    .and_then(serde_yaml::Value::as_str)
+    .expect("manifest publisher must declare files");
+    assert_eq!(
+        manifest_files.lines().collect::<Vec<_>>(),
+        [
+            "published-release-artifacts/checksums.sha256",
+            "published-release-artifacts/index.json",
+        ],
+        "the complete manifest must come from downloaded live assets"
+    );
+}
+
+fn run_manifest(root: &Path) -> Output {
+    let interpreter = std::env::var_os("PYTHON").unwrap_or_else(|| OsString::from("python3"));
+    Command::new(interpreter)
+        .arg(manifest_script_path())
+        .arg(root)
+        .arg("v0.7.28")
+        .output()
+        .expect("run release manifest Python")
+}
+
+#[test]
+fn release_asset_manifest_contract_stays_flat_and_collision_checked() {
+    let path = workflow_yml_path();
+    let workflow = read_workflow(&path);
+    let script = step_script(
+        &workflow,
+        &path,
+        "publish_github_release",
+        "Prepare and verify complete release asset set",
+    );
+    for contract in [
+        "scripts/verify-release-assets.py prepare",
+        "--source-dir release-artifacts",
+        "--output-dir prepared-release-artifacts",
+        "--release-tag \"${RELEASE_TAG}\"",
+    ] {
+        assert!(
+            script.contains(contract),
+            "release workflow must preserve `{contract}`; script:\n{script}"
+        );
+    }
+
+    let manifest_path = manifest_script_path();
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", manifest_path.display()));
+
+    for contract in [
+        "key=lambda path: (path.name, path.as_posix())",
+        "public_name = path.name",
+        "previous = artifacts_by_name.get(public_name)",
+        "duplicate release asset basename",
+        "f\"{sha256(path)}  {public_name}\\n\"",
+        "\"artifacts\": list(artifacts_by_name)",
+    ] {
+        assert!(
+            manifest.contains(contract),
+            "release manifest authority must preserve `{contract}`; script:\n{manifest}"
+        );
+    }
+
+    assert!(
+        !manifest.contains("p.as_posix().lstrip(\"./\")"),
+        "index.json must not expose workflow-artifact staging directories"
+    );
+    assert!(
+        !manifest.contains("xargs sha256sum"),
+        "checksums.sha256 must be rendered from public basenames, not staged paths"
+    );
+}
+
+#[test]
+fn release_archives_require_exact_tag_build_provenance_before_publication() {
+    let path = workflow_yml_path();
+    let workflow = read_workflow(&path);
+
+    for (job, step, directory) in [
+        (
+            "publish_unix_release_and_homebrew",
+            "Verify exact-tag macOS/Linux build provenance",
+            "release-artifacts",
+        ),
+        (
+            "publish_github_release",
+            "Verify exact-tag release build provenance",
+            "prepared-release-artifacts",
+        ),
+    ] {
+        let script = step_script(&workflow, &path, job, step);
+        assert!(
+            script.contains(&format!(
+                "scripts/verify-release-asset-provenance {directory}"
+            )),
+            "{job} must verify provenance for {directory}; script:\n{script}"
+        );
+    }
+
+    let verifier_path = provenance_verifier_path();
+    let verifier = std::fs::read_to_string(&verifier_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", verifier_path.display()));
+    for contract in [
+        "git rev-parse \"${release_tag}^{commit}\"",
+        "gh attestation verify",
+        "--repo \"${repository}\"",
+        "--source-digest \"${release_sha}\"",
+        "--signer-workflow \"${signer_workflow}\"",
+    ] {
+        assert!(
+            verifier.contains(contract),
+            "release provenance verifier must preserve `{contract}`; script:\n{verifier}"
+        );
+    }
+}
+
+fn expected_complete_archive_names(version: &str) -> Vec<String> {
+    let binaries = ["rkat", "rkat-mcp", "rkat-rest", "rkat-rpc"];
+    let targets = [
+        ("x86_64-unknown-linux-gnu", "tar.gz"),
+        ("aarch64-unknown-linux-gnu", "tar.gz"),
+        ("aarch64-apple-darwin", "tar.gz"),
+        ("x86_64-apple-darwin", "tar.gz"),
+        ("x86_64-pc-windows-msvc", "zip"),
+    ];
+    let mut names = Vec::new();
+    for binary in binaries {
+        for (target, extension) in targets {
+            names.push(format!("{binary}-{version}-{target}.{extension}"));
+        }
+    }
+    names.sort_unstable();
+    names
+}
+
+fn run_asset_verifier(source: &Path, output: &Path) -> Output {
+    let interpreter = std::env::var_os("PYTHON").unwrap_or_else(|| OsString::from("python3"));
+    Command::new(interpreter)
+        .arg(asset_verifier_path())
+        .arg("prepare")
+        .arg("--source-dir")
+        .arg(source)
+        .arg("--output-dir")
+        .arg(output)
+        .arg("--release-tag")
+        .arg("v0.8.31")
+        .output()
+        .expect("run complete release asset verifier")
+}
+
+#[test]
+fn complete_release_asset_inventory_is_four_binaries_by_five_targets() {
+    let temp = tempdir().expect("tempdir");
+    let source = temp.path().join("downloaded");
+    let output = temp.path().join("prepared");
+    std::fs::create_dir(&source).expect("create source");
+    let names = expected_complete_archive_names("0.8.31");
+    assert_eq!(names.len(), 20, "release contract must name 20 archives");
+    for (index, name) in names.iter().enumerate() {
+        let lane = source.join(format!("lane-{index}"));
+        std::fs::create_dir(&lane).expect("create staged lane");
+        std::fs::write(lane.join(name), format!("artifact-{index}")).expect("write archive");
+    }
+
+    let result = run_asset_verifier(&source, &output);
+    assert!(
+        result.status.success(),
+        "complete inventory must verify: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        std::fs::read_dir(&output).expect("read output").count(),
+        22,
+        "20 archives plus two manifests must be prepared"
+    );
+}
+
+#[test]
+fn complete_release_asset_inventory_rejects_one_missing_archive() {
+    let temp = tempdir().expect("tempdir");
+    let source = temp.path().join("downloaded");
+    let output = temp.path().join("prepared");
+    std::fs::create_dir(&source).expect("create source");
+    let mut names = expected_complete_archive_names("0.8.31");
+    let missing = names.pop().expect("nonempty release inventory");
+    for (index, name) in names.iter().enumerate() {
+        std::fs::write(source.join(name), format!("artifact-{index}")).expect("write archive");
+    }
+
+    let result = run_asset_verifier(&source, &output);
+    assert!(
+        !result.status.success(),
+        "a partial release must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("downloaded archive set mismatch") && stderr.contains(&missing),
+        "missing archive must be named: {stderr}"
+    );
+    assert!(
+        !output.exists(),
+        "a rejected inventory must not leave a successful-looking output directory"
+    );
+}
+
+#[test]
+fn nested_release_artifacts_render_flat_sorted_manifests() {
+    let temp = tempdir().expect("tempdir");
+    let rpc_dir = temp.path().join("meerkat-linux-buildbuddy");
+    let cli_dir = temp.path().join("meerkat-macos-buildbuddy");
+    std::fs::create_dir_all(&rpc_dir).expect("create rpc artifact directory");
+    std::fs::create_dir_all(&cli_dir).expect("create cli artifact directory");
+
+    let cli_name = "rkat-0.7.28-aarch64-apple-darwin.tar.gz";
+    let rpc_name = "rkat-rpc-0.7.28-x86_64-unknown-linux-gnu.zip";
+    std::fs::write(cli_dir.join(cli_name), b"alpha").expect("write cli archive");
+    std::fs::write(rpc_dir.join(rpc_name), b"beta").expect("write rpc archive");
+
+    let output = run_manifest(temp.path());
+    assert!(
+        output.status.success(),
+        "manifest script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let checksums = std::fs::read_to_string(temp.path().join("checksums.sha256"))
+        .expect("read checksum manifest");
+    assert_eq!(
+        checksums,
+        concat!(
+            "8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8  ",
+            "rkat-0.7.28-aarch64-apple-darwin.tar.gz\n",
+            "f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753  ",
+            "rkat-rpc-0.7.28-x86_64-unknown-linux-gnu.zip\n",
+        ),
+        "checksums must be sorted by flat public basename"
+    );
+
+    let index: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(temp.path().join("index.json")).expect("read release index"),
+    )
+    .expect("parse release index");
+    assert_eq!(index["version"], "0.7.28");
+    assert_eq!(index["tag"], "v0.7.28");
+    assert_eq!(index["checksums"], "checksums.sha256");
+    assert_eq!(
+        index["artifacts"],
+        serde_json::json!([cli_name, rpc_name]),
+        "index artifacts must be sorted flat public basenames"
+    );
+}
+
+#[test]
+fn duplicate_release_asset_basenames_fail_before_manifest_write() {
+    let temp = tempdir().expect("tempdir");
+    let duplicate_name = "rkat-0.7.28-aarch64-apple-darwin.tar.gz";
+    for directory in ["github-hosted", "buildbuddy"] {
+        let artifact_dir = temp.path().join(directory);
+        std::fs::create_dir_all(&artifact_dir).expect("create artifact directory");
+        std::fs::write(artifact_dir.join(duplicate_name), directory.as_bytes())
+            .expect("write duplicate archive");
+    }
+
+    let output = run_manifest(temp.path());
+    assert!(
+        !output.status.success(),
+        "duplicate public asset names must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("duplicate release asset basename") && stderr.contains(duplicate_name),
+        "duplicate failure must identify the public name: {stderr}"
+    );
+    assert!(
+        !temp.path().join("checksums.sha256").exists() && !temp.path().join("index.json").exists(),
+        "a duplicate set must not leave a successful-looking manifest"
+    );
+}

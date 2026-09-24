@@ -8,20 +8,20 @@ build:buildbuddy --remote_cache_compression
 build:buildbuddy-macos-rbe --config=buildbuddy
 build:buildbuddy-macos-rbe --remote_executor=grpcs://remote.buildbuddy.io
 build:buildbuddy-macos-rbe --remote_download_minimal
-build:buildbuddy-macos-rbe --platforms=//platforms:macos_arm64
-build:buildbuddy-macos-rbe --extra_execution_platforms=//platforms:macos_arm64
+build:buildbuddy-macos-rbe --platforms=//tools/bazel/platforms:macos_arm64
+build:buildbuddy-macos-rbe --extra_execution_platforms=//tools/bazel/platforms:macos_arm64
 build:buildbuddy-macos-rbe --remote_default_exec_properties=OSFamily=darwin
 build:buildbuddy-macos-rbe --remote_default_exec_properties=Arch=arm64
 build:buildbuddy-macos-rbe --remote_default_exec_properties=use-self-hosted-executors=true
-build:buildbuddy-macos-rbe --xcode_version_config=//platforms:rbe_xcodes
+build:buildbuddy-macos-rbe --xcode_version_config=//tools/bazel/platforms:rbe_xcodes
 build:buildbuddy-macos-rbe --nobuild_runfile_links
 build:buildbuddy-macos-rbe --symlink_prefix=/
 
 build:buildbuddy-macos-x86-rbe --config=buildbuddy
 build:buildbuddy-macos-x86-rbe --remote_executor=grpcs://remote.buildbuddy.io
 build:buildbuddy-macos-x86-rbe --remote_download_minimal
-build:buildbuddy-macos-x86-rbe --platforms=//platforms:macos_x86_64
-build:buildbuddy-macos-x86-rbe --extra_execution_platforms=//platforms:macos_x86_64
+build:buildbuddy-macos-x86-rbe --platforms=//tools/bazel/platforms:macos_x86_64
+build:buildbuddy-macos-x86-rbe --extra_execution_platforms=//tools/bazel/platforms:macos_x86_64
 build:buildbuddy-macos-x86-rbe --remote_default_exec_properties=OSFamily=darwin
 build:buildbuddy-macos-x86-rbe --remote_default_exec_properties=Arch=amd64
 build:buildbuddy-macos-x86-rbe --remote_default_exec_properties=use-self-hosted-executors=true
@@ -31,8 +31,8 @@ build:buildbuddy-macos-x86-rbe --symlink_prefix=/
 build:buildbuddy-linux-rbe --config=buildbuddy
 build:buildbuddy-linux-rbe --remote_executor=grpcs://remote.buildbuddy.io
 build:buildbuddy-linux-rbe --remote_download_minimal
-build:buildbuddy-linux-rbe --platforms=//platforms:linux_x86_64
-build:buildbuddy-linux-rbe --extra_execution_platforms=//platforms:linux_x86_64
+build:buildbuddy-linux-rbe --platforms=//tools/bazel/platforms:linux_x86_64
+build:buildbuddy-linux-rbe --extra_execution_platforms=//tools/bazel/platforms:linux_x86_64
 build:buildbuddy-linux-rbe --remote_default_exec_properties=OSFamily=linux
 build:buildbuddy-linux-rbe --remote_default_exec_properties=Arch=amd64
 build:buildbuddy-linux-rbe --remote_default_exec_properties=network=external
@@ -40,15 +40,15 @@ build:buildbuddy-linux-rbe --nobuild_runfile_links
 build:buildbuddy-linux-rbe --symlink_prefix=/
 
 build:buildbuddy-linux-gcp-ci-rbe --config=buildbuddy-linux-rbe
-build:buildbuddy-linux-gcp-ci-rbe --platforms=//platforms:linux_x86_64_gcp_ci
-build:buildbuddy-linux-gcp-ci-rbe --extra_execution_platforms=//platforms:linux_x86_64_gcp_ci
+build:buildbuddy-linux-gcp-ci-rbe --platforms=//tools/bazel/platforms:linux_x86_64_gcp_ci
+build:buildbuddy-linux-gcp-ci-rbe --extra_execution_platforms=//tools/bazel/platforms:linux_x86_64_gcp_ci
 build:buildbuddy-linux-gcp-ci-rbe --remote_default_exec_properties=Pool=meerkat-ci
 
 build:buildbuddy-linux-arm64-rbe --config=buildbuddy
 build:buildbuddy-linux-arm64-rbe --remote_executor=grpcs://remote.buildbuddy.io
 build:buildbuddy-linux-arm64-rbe --remote_download_minimal
-build:buildbuddy-linux-arm64-rbe --platforms=//platforms:linux_arm64
-build:buildbuddy-linux-arm64-rbe --extra_execution_platforms=//platforms:linux_arm64
+build:buildbuddy-linux-arm64-rbe --platforms=//tools/bazel/platforms:linux_arm64
+build:buildbuddy-linux-arm64-rbe --extra_execution_platforms=//tools/bazel/platforms:linux_arm64
 build:buildbuddy-linux-arm64-rbe --remote_default_exec_properties=OSFamily=linux
 build:buildbuddy-linux-arm64-rbe --remote_default_exec_properties=Arch=arm64
 build:buildbuddy-linux-arm64-rbe --nobuild_runfile_links
@@ -57,8 +57,8 @@ build:buildbuddy-linux-arm64-rbe --symlink_prefix=/
 build:buildbuddy-windows-rbe --config=buildbuddy
 build:buildbuddy-windows-rbe --remote_executor=grpcs://remote.buildbuddy.io
 build:buildbuddy-windows-rbe --remote_download_minimal
-build:buildbuddy-windows-rbe --platforms=//platforms:windows_x86_64
-build:buildbuddy-windows-rbe --extra_execution_platforms=//platforms:windows_x86_64
+build:buildbuddy-windows-rbe --platforms=//tools/bazel/platforms:windows_x86_64
+build:buildbuddy-windows-rbe --extra_execution_platforms=//tools/bazel/platforms:windows_x86_64
 build:buildbuddy-windows-rbe --remote_default_exec_properties=OSFamily=Windows
 build:buildbuddy-windows-rbe --remote_default_exec_properties=Arch=amd64
 build:buildbuddy-windows-rbe --remote_default_exec_properties=use-self-hosted-executors=true
@@ -69,7 +69,7 @@ build:buildbuddy-windows-rbe --symlink_prefix=/
 test:buildbuddy-macos-rbe-fast --config=buildbuddy-macos-rbe
 test:buildbuddy-macos-rbe-fast --test_tag_filters=fast
 
-build:gcp-linux --platforms=//platforms:linux_x86_64
-build:gcp-linux --extra_execution_platforms=//platforms:linux_x86_64
+build:gcp-linux --platforms=//tools/bazel/platforms:linux_x86_64
+build:gcp-linux --extra_execution_platforms=//tools/bazel/platforms:linux_x86_64
 build:gcp-linux --nobuild_runfile_links
 build:gcp-linux --symlink_prefix=/

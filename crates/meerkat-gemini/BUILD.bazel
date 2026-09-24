@@ -1,0 +1,307 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+rust_library(
+    name = "meerkat_gemini",
+    aliases = aliases(package_name = "meerkat-gemini"),
+    crate_name = "meerkat_gemini",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "adc",
+        "copilot",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-gemini",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-copilot:meerkat_copilot",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-models:meerkat_models",
+    ] + all_crate_deps(
+        package_name = "meerkat-gemini",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_gemini_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-gemini"),
+    crate_name = "meerkat_gemini",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "adc",
+        "copilot",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//crates/meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-gemini",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat:meerkat_auth_core_agent_factory_build",
+        "//crates/meerkat:meerkat_copilot_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_llm_core_agent_factory_build",
+        "//crates/meerkat:meerkat_models_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-gemini",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "meerkat_gemini_unit_test",
+    aliases = aliases(
+        package_name = "meerkat-gemini",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "meerkat_gemini",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "adc",
+        "copilot",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
+    },
+    tags = [
+        "fast",
+        "unit",
+    ],
+    size = "medium",
+    data = [
+        "//:repo_governance_files",
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-gemini",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-copilot:meerkat_copilot",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-models:meerkat_models",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-gemini",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "live_video_uri_smoke_test",
+    aliases = aliases(
+        package_name = "meerkat-gemini",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "live_video_uri_smoke",
+    crate_root = "tests/live_video_uri_smoke.rs",
+    crate_features = [
+        "adc",
+        "copilot",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/live_video_uri_smoke.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "live_video_uri_smoke",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
+    },
+    tags = [
+        "live",
+    ],
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-gemini",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-copilot:meerkat_copilot",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-gemini:meerkat_gemini",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-models:meerkat_models",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-gemini",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "oauth_resolve_test",
+    aliases = aliases(
+        package_name = "meerkat-gemini",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "oauth_resolve",
+    crate_root = "tests/oauth_resolve.rs",
+    crate_features = [
+        "adc",
+        "copilot",
+        "oauth",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/oauth_resolve.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "oauth_resolve",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-gemini",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-auth-core:meerkat_auth_core",
+        "//crates/meerkat-copilot:meerkat_copilot",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-gemini:meerkat_gemini",
+        "//crates/meerkat-llm-core:meerkat_llm_core",
+        "//crates/meerkat-models:meerkat_models",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "meerkat-gemini",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+test_suite(
+    name = "fast_tests",
+    tests = [
+        ":meerkat_gemini_unit_test",
+        ":oauth_resolve_test",
+    ],
+)

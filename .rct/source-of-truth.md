@@ -4,7 +4,7 @@ This RCT package governs the implementation of
 `docs/architecture/assistant-image-generation-substrate.md`.
 
 > Historical location: the path above is the original location. The April draft
-> ADR is [retained in the archive](../docs-internal/archive/public-docs-removed-2026-05-11/architecture/assistant-image-generation-substrate.md);
+> ADR is [retained in the archive](../docs/internal/archive/public-docs-removed-2026-05-11/architecture/assistant-image-generation-substrate.md);
 > it is not a current public API contract.
 
 The ADR is normative for product semantics. Meerkat architecture doctrine remains

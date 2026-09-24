@@ -1,0 +1,4 @@
+exports_files(
+    ["workspace_lints.bzl"],
+    visibility = ["//visibility:public"],
+)

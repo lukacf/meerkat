@@ -150,7 +150,7 @@ function normalizeProjection(path, text, version, parts) {
     normalized = text.split(version).join("@@MEERKAT_RELEASE_VERSION@@");
   }
   normalized = normalizeStructuredContractVersion(normalized, parts);
-  if (path === "meerkat-contracts/src/version.rs") {
+  if (path === "crates/meerkat-contracts/src/version.rs") {
     normalized = normalizeContractSource(normalized, parts);
   }
   return normalized;
@@ -162,7 +162,7 @@ function isProjectedPath(path) {
     path === "Cargo.lock" ||
     path === "README.md" ||
     path === ".claude/skills/meerkat-platform/SKILL.md" ||
-    path === "meerkat-contracts/src/version.rs" ||
+    path === "crates/meerkat-contracts/src/version.rs" ||
     path === "sdks/python/pyproject.toml" ||
     path === "sdks/typescript/package.json" ||
     path === "sdks/web/package.json" ||

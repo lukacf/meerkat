@@ -34,7 +34,7 @@ Common lanes:
 
 Examples:
   scripts/buildbuddy-dev build
-  scripts/buildbuddy-dev build //meerkat-cli:rkat
+  scripts/buildbuddy-dev build //crates/meerkat-cli:rkat
   scripts/buildbuddy-dev clippy
   scripts/buildbuddy-dev test
   scripts/buildbuddy-dev --dry-run e2e-fast

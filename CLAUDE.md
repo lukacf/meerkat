@@ -205,7 +205,7 @@ meerkat-mob-adaptive → Transitional re-export of the mob-owned adaptive module
 
 **Crate ownership:** `meerkat-core` owns foundational trait contracts. Feature crates own domain-specific contracts such as `DetachedJobStore`, `WorkGraphStore`, and `ScheduleStore`. `meerkat-store` owns `SessionStore` implementations. `meerkat-session` owns session orchestration (`EphemeralSessionService`, `PersistentSessionService`) and `EventStore`. `meerkat-memory` owns `HnswMemoryStore`. The facade (`meerkat`) wires features, re-exports, and provides `FactoryAgentBuilder`/`FactoryAgent`/`build_ephemeral_service`.
 
-**Machine authority rule:** For canonical machine-owned domains, semantic state mutation must flow through generated machine authority, not handwritten reducers. See `docs/reference/machine-authority.mdx` (canonical registry: `canonical_machine_schemas()` in `meerkat-machine-schema/src/catalog/mod.rs`).
+**Machine authority rule:** For canonical machine-owned domains, semantic state mutation must flow through generated machine authority, not handwritten reducers. See `docs/reference/machine-authority.mdx` (canonical registry: `canonical_machine_schemas()` in `crates/meerkat-machine-schema/src/catalog/mod.rs`).
 
 **Agent construction:** All surfaces use `AgentFactory::build_agent()` for centralized prompt assembly, provider resolution, tool dispatcher setup, comms wiring, and hook resolution. Zero `AgentBuilder::new()` calls in surface crates.
 
@@ -259,60 +259,60 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 
 ## Key Files
 
-- `meerkat-core/src/agent.rs` - Main agent execution loop
-- `meerkat-core/src/agent/compact.rs` - Compaction flow (wired into agent loop)
-- `meerkat-core/src/state.rs` - LoopState state machine
-- `meerkat-core/src/types.rs` - Core types (Message, Session, ToolCall, etc.)
-- `meerkat-core/src/service/mod.rs` - SessionService trait, SessionError
-- `meerkat-core/src/compact.rs` - Compactor trait, CompactionConfig, CompactionCurator (host-supplied summary producer; substitutes the compaction LLM call)
-- `meerkat-core/src/completion_feed.rs` - CompletionFeed trait, CompletionEntry, CompletionSeq
-- `meerkat-core/src/memory.rs` - MemoryStore trait (index/search + drop_scope/enumerate_scoped lifecycle APIs)
-- `meerkat-sqlite/src/{profile,ledger,fence,json_column,error}.rs` - Shared SQLite mechanics (named connection profiles, meerkat_schema ledger + pinned protocol, per-op fence guards)
-- `meerkat-core/src/storage_layout.rs` - StorageLayout path authority (+ realm-id-first dual-root resolution in runtime_bootstrap.rs)
-- `meerkat-core/src/storage_durability.rs` - DurabilityClass/DurabilityDeclaration vocabulary (fail-closed durable slots)
-- `meerkat-core/src/storage_diagnostics.rs` - StorageDiagnosis/StorageMigrator diagnose seam (doctor vocabulary)
-- `meerkat-store/src/doctor.rs` - Read-only disk diagnosis behind `rkat storage doctor`
-- `meerkat/src/storage_provider.rs` - RealmStorageProvider seam + DiskStorageProvider (facade composes PersistenceBundle)
-- `meerkat-core/src/tool_execution_policy.rs` - ToolExecutionPolicy (sealed resolved form of ops::ToolAccessPolicy) + ExecutionPolicyGatedDispatcher (list-preserving call-level gate; deny = ordinary access_denied tool error)
-- `meerkat-core/src/runtime_epoch.rs` - RuntimeEpochId, SessionRuntimeBindings, RuntimeBuildMode, EpochCursorState
-- `meerkat-anthropic/src/client.rs` - Anthropic streaming implementation (meerkat-client is a re-export shim)
-- `meerkat-session/src/ephemeral.rs` - EphemeralSessionService (in-memory session lifecycle)
-- `meerkat-session/src/compactor.rs` - DefaultCompactor implementation
-- `meerkat-session/src/event_store.rs` - EventStore trait
-- `meerkat-session/src/projector.rs` - SessionProjector (materializes .rkat/ files)
-- `meerkat-memory/src/simple.rs` - SimpleMemoryStore implementation
-- `meerkat-models/src/catalog.rs` - Curated model catalog data (single source of truth for defaults/allowlists; `canonical()` ModelCatalog)
-- `meerkat-models/src/capabilities/` - Per-provider model capability rows
-- `meerkat-core/src/model_profile/mod.rs` - Model profile vocabulary + ModelCatalog mechanics (capability projection, param schemas; zero provider data)
-- `meerkat-mcp/src/router.rs` - MCP tool routing
-- `meerkat-runtime/src/ops_lifecycle.rs` - RuntimeOpsLifecycleRegistry, PersistedOpsSnapshot, persistence channel
-- `meerkat-runtime/src/meerkat_machine/` - MeerkatMachine module (mod.rs, composition.rs, dispatch_*, dsl_*), prepare_bindings(), recover_or_create_ops_state()
-- `meerkat-cli/src/main.rs` - CLI entry point
-- `meerkat/src/factory.rs` - AgentFactory, DynAgent, AgentBuildConfig (consolidated agent construction)
-- `meerkat/src/service_factory.rs` - FactoryAgentBuilder, FactoryAgent, build_ephemeral_service
-- `meerkat-rpc/src/session_runtime.rs` - SessionRuntime (stateful agent manager)
-- `meerkat-rpc/src/router.rs` - JSON-RPC method dispatch
-- `meerkat-rpc/src/server.rs` - RPC server main loop
-- `meerkat-rpc/src/handlers/mcp.rs` - Live MCP controls (mcp/add, mcp/remove, mcp/reload)
-- `meerkat-core/src/tool_scope.rs` - Runtime tool visibility control
-- `meerkat-contracts/src/wire/supervisor_bridge.rs` - Supervisor bridge protocol types (BridgeCommand, BridgeReply, payloads)
-- `meerkat-mob/src/runtime/bridge.rs` - MobMemberRuntimeBridge trait (mob-owned protocol boundary)
-- `meerkat-mob/src/runtime/bridge_protocol.rs` - Re-exports of bridge protocol types from contracts
-- `meerkat-mob/src/runtime/local_bridge.rs` - LocalMobRuntimeBridge (in-process MeerkatMachine wrapper)
-- `meerkat-mob/src/runtime/supervisor_bridge.rs` - MobSupervisorBridge (comms transport for remote commands)
-- `meerkat-mob/src/storage.rs` - MobStorage bundle (SQLite persistent, in-memory)
-- `meerkat-mob/src/runtime/flow_frame_engine.rs` - Frame-based flow execution (repeat_until loops with MobMachine-owned feedback)
-- `meerkat-mob-mcp/src/agent_tools.rs` - Agent-facing delegation tools (delegate, mob_create, mob_spawn_member, mob_wire, mob_unwire, etc.)
-- `meerkat-mob/src/backend.rs` - MobBackendKind and RuntimeBinding (identity-first mob binding)
-- `meerkat-mob-pack/src/lib.rs` - Mobpack archive format, signing, trust
-- `meerkat-schedule/src/service.rs` - ScheduleService CRUD + occurrence planning
-- `meerkat-schedule/src/driver.rs` - ScheduleDriver tick loop + delivery
-- `meerkat-schedule/src/machines/` - Schedule and occurrence lifecycle machines (schedule_lifecycle.rs, occurrence_lifecycle.rs)
-- `meerkat-schedule/src/store.rs` - ScheduleStore trait + MemoryScheduleStore
-- `meerkat-schedule/src/tools.rs` - Agent-facing schedule tools
-- `meerkat-schedule/src/runnable.rs` - Host-runnable targets (ScheduleRunnableHost trait, HostRunnableRegistry, HostRunnableInvocation)
-- `meerkat/src/surface/schedule_host.rs` - Runtime-backed schedule delivery surface (SharedScheduleTargetAdapter::with_runnable_host wires host runnables)
-- `meerkat-web-runtime/src/lib.rs` - WASM browser deployment (wasm_bindgen exports)
+- `crates/meerkat-core/src/agent.rs` - Main agent execution loop
+- `crates/meerkat-core/src/agent/compact.rs` - Compaction flow (wired into agent loop)
+- `crates/meerkat-core/src/state.rs` - LoopState state machine
+- `crates/meerkat-core/src/types.rs` - Core types (Message, Session, ToolCall, etc.)
+- `crates/meerkat-core/src/service/mod.rs` - SessionService trait, SessionError
+- `crates/meerkat-core/src/compact.rs` - Compactor trait, CompactionConfig, CompactionCurator (host-supplied summary producer; substitutes the compaction LLM call)
+- `crates/meerkat-core/src/completion_feed.rs` - CompletionFeed trait, CompletionEntry, CompletionSeq
+- `crates/meerkat-core/src/memory.rs` - MemoryStore trait (index/search + drop_scope/enumerate_scoped lifecycle APIs)
+- `crates/meerkat-sqlite/src/{profile,ledger,fence,json_column,error}.rs` - Shared SQLite mechanics (named connection profiles, meerkat_schema ledger + pinned protocol, per-op fence guards)
+- `crates/meerkat-core/src/storage_layout.rs` - StorageLayout path authority (+ realm-id-first dual-root resolution in runtime_bootstrap.rs)
+- `crates/meerkat-core/src/storage_durability.rs` - DurabilityClass/DurabilityDeclaration vocabulary (fail-closed durable slots)
+- `crates/meerkat-core/src/storage_diagnostics.rs` - StorageDiagnosis/StorageMigrator diagnose seam (doctor vocabulary)
+- `crates/meerkat-store/src/doctor.rs` - Read-only disk diagnosis behind `rkat storage doctor`
+- `crates/meerkat/src/storage_provider.rs` - RealmStorageProvider seam + DiskStorageProvider (facade composes PersistenceBundle)
+- `crates/meerkat-core/src/tool_execution_policy.rs` - ToolExecutionPolicy (sealed resolved form of ops::ToolAccessPolicy) + ExecutionPolicyGatedDispatcher (list-preserving call-level gate; deny = ordinary access_denied tool error)
+- `crates/meerkat-core/src/runtime_epoch.rs` - RuntimeEpochId, SessionRuntimeBindings, RuntimeBuildMode, EpochCursorState
+- `crates/meerkat-anthropic/src/client.rs` - Anthropic streaming implementation (meerkat-client is a re-export shim)
+- `crates/meerkat-session/src/ephemeral.rs` - EphemeralSessionService (in-memory session lifecycle)
+- `crates/meerkat-session/src/compactor.rs` - DefaultCompactor implementation
+- `crates/meerkat-session/src/event_store.rs` - EventStore trait
+- `crates/meerkat-session/src/projector.rs` - SessionProjector (materializes .rkat/ files)
+- `crates/meerkat-memory/src/simple.rs` - SimpleMemoryStore implementation
+- `crates/meerkat-models/src/catalog.rs` - Curated model catalog data (single source of truth for defaults/allowlists; `canonical()` ModelCatalog)
+- `crates/meerkat-models/src/capabilities/` - Per-provider model capability rows
+- `crates/meerkat-core/src/model_profile/mod.rs` - Model profile vocabulary + ModelCatalog mechanics (capability projection, param schemas; zero provider data)
+- `crates/meerkat-mcp/src/router.rs` - MCP tool routing
+- `crates/meerkat-runtime/src/ops_lifecycle.rs` - RuntimeOpsLifecycleRegistry, PersistedOpsSnapshot, persistence channel
+- `crates/meerkat-runtime/src/meerkat_machine/` - MeerkatMachine module (mod.rs, composition.rs, dispatch_*, dsl_*), prepare_bindings(), recover_or_create_ops_state()
+- `crates/meerkat-cli/src/main.rs` - CLI entry point
+- `crates/meerkat/src/factory.rs` - AgentFactory, DynAgent, AgentBuildConfig (consolidated agent construction)
+- `crates/meerkat/src/service_factory.rs` - FactoryAgentBuilder, FactoryAgent, build_ephemeral_service
+- `crates/meerkat-rpc/src/session_runtime.rs` - SessionRuntime (stateful agent manager)
+- `crates/meerkat-rpc/src/router.rs` - JSON-RPC method dispatch
+- `crates/meerkat-rpc/src/server.rs` - RPC server main loop
+- `crates/meerkat-rpc/src/handlers/mcp.rs` - Live MCP controls (mcp/add, mcp/remove, mcp/reload)
+- `crates/meerkat-core/src/tool_scope.rs` - Runtime tool visibility control
+- `crates/meerkat-contracts/src/wire/supervisor_bridge.rs` - Supervisor bridge protocol types (BridgeCommand, BridgeReply, payloads)
+- `crates/meerkat-mob/src/runtime/bridge.rs` - MobMemberRuntimeBridge trait (mob-owned protocol boundary)
+- `crates/meerkat-mob/src/runtime/bridge_protocol.rs` - Re-exports of bridge protocol types from contracts
+- `crates/meerkat-mob/src/runtime/local_bridge.rs` - LocalMobRuntimeBridge (in-process MeerkatMachine wrapper)
+- `crates/meerkat-mob/src/runtime/supervisor_bridge.rs` - MobSupervisorBridge (comms transport for remote commands)
+- `crates/meerkat-mob/src/storage.rs` - MobStorage bundle (SQLite persistent, in-memory)
+- `crates/meerkat-mob/src/runtime/flow_frame_engine.rs` - Frame-based flow execution (repeat_until loops with MobMachine-owned feedback)
+- `crates/meerkat-mob-mcp/src/agent_tools.rs` - Agent-facing delegation tools (delegate, mob_create, mob_spawn_member, mob_wire, mob_unwire, etc.)
+- `crates/meerkat-mob/src/backend.rs` - MobBackendKind and RuntimeBinding (identity-first mob binding)
+- `crates/meerkat-mob-pack/src/lib.rs` - Mobpack archive format, signing, trust
+- `crates/meerkat-schedule/src/service.rs` - ScheduleService CRUD + occurrence planning
+- `crates/meerkat-schedule/src/driver.rs` - ScheduleDriver tick loop + delivery
+- `crates/meerkat-schedule/src/machines/` - Schedule and occurrence lifecycle machines (schedule_lifecycle.rs, occurrence_lifecycle.rs)
+- `crates/meerkat-schedule/src/store.rs` - ScheduleStore trait + MemoryScheduleStore
+- `crates/meerkat-schedule/src/tools.rs` - Agent-facing schedule tools
+- `crates/meerkat-schedule/src/runnable.rs` - Host-runnable targets (ScheduleRunnableHost trait, HostRunnableRegistry, HostRunnableInvocation)
+- `crates/meerkat/src/surface/schedule_host.rs` - Runtime-backed schedule delivery surface (SharedScheduleTargetAdapter::with_runnable_host wires host runnables)
+- `crates/meerkat-web-runtime/src/lib.rs` - WASM browser deployment (wasm_bindgen exports)
 - `sdks/web/src/runtime.ts` - @rkat/web MeerkatRuntime class (browser SDK entry point)
 - `sdks/web/src/mob.ts` - @rkat/web Mob class (mob lifecycle wrapper)
 - `sdks/web/src/session.ts` - @rkat/web Session class (direct session wrapper)
@@ -489,7 +489,7 @@ Six files must agree on the same version:
 | File | Field |
 |------|-------|
 | `Cargo.toml` (workspace root) | `workspace.package.version` — **source of truth** |
-| `meerkat-contracts/src/version.rs` | `ContractVersion::CURRENT` |
+| `crates/meerkat-contracts/src/version.rs` | `ContractVersion::CURRENT` |
 | `sdks/python/pyproject.toml` | `version` |
 | `sdks/typescript/package.json` | `version` |
 | `sdks/web/package.json` | `version` |

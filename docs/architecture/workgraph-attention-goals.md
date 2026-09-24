@@ -405,7 +405,7 @@ Reviewer attention:
 ```
 
 Current `meerkat-mob` support lowers `AgentIdentity` targets into durable
-owner-key attention targets. For ordinary turns, `meerkat/src/surface.rs`
+owner-key attention targets. For ordinary turns, `crates/meerkat/src/surface.rs`
 resolves those keys against the session's `mob_id` and `agent_identity` labels,
 selects the newest matching session generation deterministically, and
 revalidates the current attention projection before composing the turn overlay.

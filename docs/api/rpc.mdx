@@ -2704,7 +2704,7 @@ Inspect `params.event.payload.type` and (for text deltas)
 `source`, `seq`, and `timestamp_ms` belong to the envelope; optional `mob_id`
 is envelope metadata.
 
-Event types match the `AgentEvent` enum in `meerkat-core/src/event.rs`
+Event types match the `AgentEvent` enum in `crates/meerkat-core/src/event.rs`
 (`agent_event_type` assigns each variant its stable wire name) and its schema
 projection in `artifacts/schemas/events.json`. New variants must appear in
 both that enum and this table. The decodable vocabulary includes the

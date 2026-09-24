@@ -433,14 +433,14 @@ machine-codegen: xtask-build
 	$(XTASK_BIN) machine-codegen --all
 
 # Verify all machine/composition authority artifacts through the canonical
-# TLC lane (xtask/tests/machine_verify_all_tlc_test.sh). That script owns the
+# TLC lane (crates/xtask/tests/machine_verify_all_tlc_test.sh). That script owns the
 # documented over-budget composition skips (meerkat_mob_seam,
 # adaptive_mob_bundle full ci.cfg sweeps) plus the bounded adaptive witness
 # proof; a bare `machine-verify --all` runs the full mob-seam sweep, which
 # does not fit any local or CI budget.
 machine-verify: xtask-build
 	@echo "$(GREEN)Running machine-verify (canonical TLC lane)...$(NC)"
-	./xtask/tests/machine_verify_all_tlc_test.sh $(XTASK_BIN)
+	./crates/xtask/tests/machine_verify_all_tlc_test.sh $(XTASK_BIN)
 
 # The full, budget-unbounded sweep — includes the mob-seam composition
 # ci.cfg state space (hours). On-demand only; use the TLC cluster for it.

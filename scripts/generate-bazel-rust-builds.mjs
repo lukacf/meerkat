@@ -48,13 +48,24 @@ for (const pkg of allFeaturesMetadata.packages.filter((pkg) => pkg.source !== nu
   externalByName.get(pkg.name).push(pkg);
 }
 const packageDir = (pkg) => dirname(pkg.manifest_path);
+// Workspace crates live under crates/<name>; their key is the bare
+// directory name (== crate name) so the per-crate rules below stay stable.
+// Test crates keep their tests/... path as key.
+const CRATES_DIR = "crates";
 const packageKey = (pkg) => {
   const dir = relative(root, packageDir(pkg));
+  if (dir.startsWith(`${CRATES_DIR}/`)) return dir.slice(CRATES_DIR.length + 1);
   return dir.includes("/") || dir !== pkg.name ? dir : pkg.name;
 };
+const packageDirForKey = (key) => {
+  const pkg = byKeyRef.get(key);
+  return pkg ? relative(root, packageDir(pkg)) : key;
+};
+const byKeyRef = new Map();
 const packageLabel = (pkg) => `//${relative(root, packageDir(pkg))}:${crateName(pkg.name)}`;
 const crateName = (name) => name.replaceAll("-", "_");
 const byKey = new Map([...localPackages.values()].map((pkg) => [packageKey(pkg), pkg]));
+for (const [k, v] of byKey) byKeyRef.set(k, v);
 const q = (value) => JSON.stringify(value);
 const cargoPackageVersionEnv = (pkg) => `        "CARGO_PKG_VERSION": ${q(pkg.version)},`;
 const generatedAuthorityBridgeSymbolSuffix = "bazel_private_generated_authority_bridge";
@@ -294,7 +305,7 @@ function runtimeAgentFactoryTestSupportActualLabel(pkg) {
 }
 
 function runtimeAgentFactoryTestSupportFacadeLabel(pkg) {
-  return `//meerkat:${runtimeAgentFactoryTestSupportVariantNameFor(pkg)}`;
+  return `//crates/meerkat:${runtimeAgentFactoryTestSupportVariantNameFor(pkg)}`;
 }
 
 function rewriteRuntimeTestSupportDeps(deps, useAgentFactoryDeps) {
@@ -381,10 +392,10 @@ function rustTargetVisibility(key) {
   if (key === "meerkat-agent-build-authority") {
     return listExpr([
       "//:__pkg__",
-      "//meerkat-core:__pkg__",
-      "//meerkat-mob:__pkg__",
-      "//meerkat-session:__pkg__",
-      "//meerkat:__pkg__",
+      "//crates/meerkat-core:__pkg__",
+      "//crates/meerkat-mob:__pkg__",
+      "//crates/meerkat-session:__pkg__",
+      "//crates/meerkat:__pkg__",
     ]);
   }
   return `["//visibility:public"]`;
@@ -435,7 +446,7 @@ function reverseDependencyKeys(includeDev) {
 const localNormalReverseDependencyKeys = reverseDependencyKeys(false);
 const localAllReverseDependencyKeys = reverseDependencyKeys(true);
 const publicDownstreamFixtureKeys = new Set([
-  "test-fixtures/surface-build-fixtures",
+  "tests/fixtures/surface-build-fixtures",
 ]);
 
 const runtimeTestSupportPackageKeys = new Set();
@@ -452,7 +463,7 @@ const runtimeTestSupportPackageKeys = new Set();
 }
 
 function packageVisibilityLabel(key) {
-  return key === "." ? "//:__pkg__" : `//${key}:__pkg__`;
+  return key === "." ? "//:__pkg__" : `//${packageDirForKey(key)}:__pkg__`;
 }
 
 function shouldGenerateRuntimeTestSupportVariantForKey(key) {
@@ -535,7 +546,7 @@ function agentFactoryActualVariantLabel(pkg) {
 }
 
 function agentFactoryFacadeVariantAliasLabel(pkg) {
-  return `//meerkat:${agentFactoryVariantName(pkg)}`;
+  return `//crates/meerkat:${agentFactoryVariantName(pkg)}`;
 }
 
 const agentFactoryVariantPackages = [...localPackages.values()]
@@ -572,7 +583,7 @@ function shouldGenerateRuntimeAgentFactoryTestSupportVariantForKey(key) {
   return runtimeAgentFactoryTestSupportVariantPackages.some((pkg) => packageKey(pkg) === key);
 }
 
-const agentFactoryActualVariantVisibility = listExpr(["//meerkat:__pkg__"]);
+const agentFactoryActualVariantVisibility = listExpr(["//crates/meerkat:__pkg__"]);
 
 const agentFactoryFacadeVariantAliasVisibility = listExpr(
   [...new Set([
@@ -582,7 +593,7 @@ const agentFactoryFacadeVariantAliasVisibility = listExpr(
     ...agentFactoryTestConsumerKeys,
   ])]
     .filter((key) => key !== ".")
-    .map((key) => `//${key}:__pkg__`)
+    .map((key) => `//${packageDirForKey(key)}:__pkg__`)
     .sort(),
 );
 
@@ -680,10 +691,10 @@ const nativeE2eSystemTests = [
     cargoTestTarget: "system_shared_realm",
     name: "e2e_system_sqlite_shared_realm_rpc_rest_rpc_bazel_test",
     testName: "rpc_rest_rpc_default_sqlite_shared_realm_roundtrip",
-    data: ["//meerkat-rpc:rkat_rpc_bin", "//meerkat-rest:rkat_rest_bin"],
+    data: ["//crates/meerkat-rpc:rkat_rpc_bin", "//crates/meerkat-rest:rkat_rest_bin"],
     env: [
-      `        "RKAT_TEST_BIN_RKAT_RPC": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",`,
-      `        "RKAT_TEST_BIN_RKAT_REST": "$(rootpath //meerkat-rest:rkat_rest_bin)",`,
+      `        "RKAT_TEST_BIN_RKAT_RPC": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",`,
+      `        "RKAT_TEST_BIN_RKAT_REST": "$(rootpath //crates/meerkat-rest:rkat_rest_bin)",`,
     ],
   },
   {
@@ -691,10 +702,10 @@ const nativeE2eSystemTests = [
     cargoTestTarget: "system_shared_realm",
     name: "e2e_system_sqlite_shared_realm_cli_rpc_cli_bazel_test",
     testName: "cli_rpc_cli_default_sqlite_shared_realm_roundtrip",
-    data: ["//meerkat-cli:rkat", "//meerkat-rpc:rkat_rpc_bin"],
+    data: ["//crates/meerkat-cli:rkat", "//crates/meerkat-rpc:rkat_rpc_bin"],
     env: [
-      `        "RKAT_TEST_BIN_RKAT": "$(rootpath //meerkat-cli:rkat)",`,
-      `        "RKAT_TEST_BIN_RKAT_RPC": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",`,
+      `        "RKAT_TEST_BIN_RKAT": "$(rootpath //crates/meerkat-cli:rkat)",`,
+      `        "RKAT_TEST_BIN_RKAT_RPC": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",`,
     ],
   },
   {
@@ -702,10 +713,10 @@ const nativeE2eSystemTests = [
     cargoTestTarget: "system_shared_realm",
     name: "e2e_system_sqlite_shared_realm_cli_rest_cli_bazel_test",
     testName: "cli_rest_cli_default_sqlite_shared_realm_roundtrip",
-    data: ["//meerkat-cli:rkat", "//meerkat-rest:rkat_rest_bin"],
+    data: ["//crates/meerkat-cli:rkat", "//crates/meerkat-rest:rkat_rest_bin"],
     env: [
-      `        "RKAT_TEST_BIN_RKAT": "$(rootpath //meerkat-cli:rkat)",`,
-      `        "RKAT_TEST_BIN_RKAT_REST": "$(rootpath //meerkat-rest:rkat_rest_bin)",`,
+      `        "RKAT_TEST_BIN_RKAT": "$(rootpath //crates/meerkat-cli:rkat)",`,
+      `        "RKAT_TEST_BIN_RKAT_REST": "$(rootpath //crates/meerkat-rest:rkat_rest_bin)",`,
     ],
   },
 ];
@@ -782,7 +793,7 @@ function needsWorkspaceRunfiles(target) {
     "workspace_root",
     "rev-parse",
     ".github/",
-    "test-fixtures",
+    "tests/fixtures",
     "scan_for_manual_input_schema_literals",
     "meerkat-runtime/",
     "meerkat-machine-schema/",
@@ -806,7 +817,7 @@ function needsPackageRunfiles(target) {
     "SKILL.md",
     "AGENTS.md",
     "Cargo.toml",
-    "test-fixtures",
+    "tests/fixtures",
     ".github/",
     "scripts/",
     "docs/",
@@ -869,11 +880,11 @@ function workspaceDataLabels(target, source = targetScanSource(target)) {
   if (source.includes("tools/buildbuddy/")) {
     labels.add("//tools/buildbuddy:lane_scripts");
   }
-  if (source.includes("test-fixtures")) {
+  if (source.includes("tests/fixtures")) {
     labels.add("//:test_fixtures");
-    labels.add("//test-fixtures/machine-dsl-tests:package_runfiles");
-    labels.add("//test-fixtures/mcp-test-server:package_runfiles");
-    labels.add("//test-fixtures/surface-build-fixtures:package_runfiles");
+    labels.add("//tests/fixtures/machine-dsl-tests:package_runfiles");
+    labels.add("//tests/fixtures/mcp-test-server:package_runfiles");
+    labels.add("//tests/fixtures/surface-build-fixtures:package_runfiles");
   }
   if (target.name === "protocol_codegen_drift") {
     for (const label of packageRunfileLabels) labels.add(label);
@@ -939,11 +950,11 @@ function externalTestSourceLabel(path) {
   if (owner) {
     const ownerRoot = packageDir(owner);
     const source = relative(ownerRoot, path).replaceAll("\\", "/");
-    return `//${packageKey(owner)}:${source}`;
+    return `//${relative(root, ownerRoot).replaceAll("\\", "/")}:${source}`;
   }
 
   const workspacePath = relative(root, path).replaceAll("\\", "/");
-  if (workspacePath === "test-fixtures/live_smoke/support.rs") {
+  if (workspacePath === "tests/fixtures/live_smoke/support.rs") {
     return "//:live_smoke_support";
   }
   throw new Error(`test source ${workspacePath} is outside its Cargo package without a Bazel input owner`);
@@ -974,7 +985,7 @@ function registerExternalInput(owner, consumer, absolute) {
     externalTestSourcesByOwner.set(owner.id, entry);
   }
   entry.paths.add(relative(packageDir(owner), absolute).replaceAll("\\", "/"));
-  entry.visibility.add(`//${packageKey(consumer)}:__pkg__`);
+  entry.visibility.add(`//${packageDirForKey(packageKey(consumer))}:__pkg__`);
 }
 const includeMacroRe = /\binclude_(?:str|bytes)!\(\s*"([^"]+)"\s*\)|\binclude!\(\s*"([^"]+)"\s*\)/g;
 for (const consumer of localPackages.values()) {
@@ -1054,17 +1065,17 @@ function compileData(target, packageRoot, includeTests) {
         labels.add("//:meerkat_platform_skill_files");
       } else if (
         target.name === "runtime_schema_parity" &&
-        absolute.startsWith(`${root}/meerkat-machine-kernels/src/generated/`)
+        absolute.startsWith(`${root}/crates/meerkat-machine-kernels/src/generated/`)
       ) {
-        const rel = relative(resolve(root, "meerkat-machine-kernels"), absolute).replaceAll("\\", "/");
-        labels.add(`//meerkat-machine-kernels:${rel}`);
+        const rel = relative(resolve(root, "crates/meerkat-machine-kernels"), absolute).replaceAll("\\", "/");
+        labels.add(`//crates/meerkat-machine-kernels:${rel}`);
       } else {
         // Cross-package include: the owner exports the file (see the
         // externalTestSourcesByOwner pre-pass) and this target names it.
         const owner = localPackageOwningSource(absolute);
         if (owner) {
           const rel = relative(packageDir(owner), absolute).replaceAll("\\", "/");
-          labels.add(`//${packageKey(owner)}:${rel}`);
+          labels.add(`//${packageDirForKey(packageKey(owner))}:${rel}`);
         } else if (absolute.startsWith(`${root}/`)) {
           // Not a workspace member's file. If the root package owns it, the
           // root BUILD exports it; a file under some other BUILD has no owner
@@ -1083,7 +1094,7 @@ function compileData(target, packageRoot, includeTests) {
         }
       }
     }
-    if (source.includes("../../test-fixtures/live_smoke/support.rs")) {
+    if (source.includes("../../../tests/fixtures/live_smoke/support.rs")) {
       labels.add("//:live_smoke_support");
     }
   }
@@ -1235,8 +1246,8 @@ const LARGE_UNIT_TEST_PACKAGES = new Set([
   "xtask",
 ]);
 
-const WORKSPACE_LINTS_BZL = "workspace_lints.bzl";
-const WORKSPACE_LINTS_LOAD = `load("//:${WORKSPACE_LINTS_BZL}", "WORKSPACE_LINT_RUSTC_FLAGS")`;
+const WORKSPACE_LINTS_BZL = "tools/bazel/workspace_lints.bzl";
+const WORKSPACE_LINTS_LOAD = `load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")`;
 
 function writeWorkspaceLintsBzl() {
   const { flags, skipped } = workspaceLintRustcFlags();
@@ -1304,7 +1315,7 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     ``,
     `filegroup(`,
     `    name = "workspace_cargo_manifests",`,
-    `    srcs = glob(["Cargo.toml", "*/Cargo.toml", "*/*/Cargo.toml"], allow_empty = True),`,
+    `    srcs = glob(["Cargo.toml", "*/Cargo.toml", "*/*/Cargo.toml", "*/*/*/Cargo.toml"], allow_empty = True),`,
     `    visibility = ["//visibility:public"],`,
     `)`,
     ``,
@@ -1331,17 +1342,17 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     ``,
     `filegroup(`,
     `    name = "live_smoke_support",`,
-    `    srcs = ["test-fixtures/live_smoke/support.rs"],`,
+    `    srcs = ["tests/fixtures/live_smoke/support.rs"],`,
     `    visibility = ["//visibility:public"],`,
     `)`,
     ``,
     `filegroup(`,
     `    name = "test_fixtures",`,
     `    srcs = glob(`,
-    `        ["test-fixtures/**"],`,
+    `        ["tests/fixtures/**"],`,
     `        exclude = [`,
-    `            "test-fixtures/**/BUILD",`,
-    `            "test-fixtures/**/BUILD.bazel",`,
+    `            "tests/fixtures/**/BUILD",`,
+    `            "tests/fixtures/**/BUILD.bazel",`,
     `        ],`,
     `        allow_empty = True,`,
     `    ),`,
@@ -1445,19 +1456,19 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `        "@rust_std_wasm32_unknown_unknown_1_94_0//:rust_std",`,
     `        "@wasm_pack_darwin_arm64//:wasm-pack",`,
     `        "@wasm_pack_linux_x86_64//:wasm-pack",`,
-    `        "//meerkat-cli:cli_mobpack_live_smoke_test",`,
-    `        "//meerkat-cli:live_smoke_cli_test",`,
-    `        "//meerkat-cli:rkat",`,
-    `        "//meerkat-comms:e2e_test",`,
-    `        "//meerkat-mcp-server:rkat_mcp_bin",`,
-    `        "//meerkat-mob:smoke_mob_flow_runtime_test",`,
-    `        "//meerkat-mob:smoke_mob_generated_image_comms_test",`,
-    `        "//meerkat-mob:smoke_mob_idle_burn_test",`,
-    `        "//meerkat-mob:smoke_mob_turn_latency_test",`,
-    `        "//meerkat-mob:smoke_mob_resume_test",`,
-    `        "//meerkat-rest:rkat_rest_bin",`,
-    `        "//meerkat-rpc:live_smoke_rpc_test",`,
-    `        "//meerkat-rpc:rkat_rpc_bin",`,
+    `        "//crates/meerkat-cli:cli_mobpack_live_smoke_test",`,
+    `        "//crates/meerkat-cli:live_smoke_cli_test",`,
+    `        "//crates/meerkat-cli:rkat",`,
+    `        "//crates/meerkat-comms:e2e_test",`,
+    `        "//crates/meerkat-mcp-server:rkat_mcp_bin",`,
+    `        "//crates/meerkat-mob:smoke_mob_flow_runtime_test",`,
+    `        "//crates/meerkat-mob:smoke_mob_generated_image_comms_test",`,
+    `        "//crates/meerkat-mob:smoke_mob_idle_burn_test",`,
+    `        "//crates/meerkat-mob:smoke_mob_turn_latency_test",`,
+    `        "//crates/meerkat-mob:smoke_mob_resume_test",`,
+    `        "//crates/meerkat-rest:rkat_rest_bin",`,
+    `        "//crates/meerkat-rpc:live_smoke_rpc_test",`,
+    `        "//crates/meerkat-rpc:rkat_rpc_bin",`,
     `        "//tests/integration:e2e_artifacts_bin",`,
     `        "//tests/integration:e2e_smoke_lane_test",`,
     `        "//tests/integration:smoke_shared_realm_test",`,
@@ -1510,25 +1521,25 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `    "@rust_std_wasm32_unknown_unknown_1_94_0//:rust_std",`,
     `    "@wasm_pack_darwin_arm64//:wasm-pack",`,
     `    "@wasm_pack_linux_x86_64//:wasm-pack",`,
-    `    "//meerkat-cli:cli_mobpack_live_smoke_test",`,
-    `    "//meerkat-cli:live_smoke_cli_test",`,
-    `    "//meerkat-cli:rkat",`,
-    `    "//meerkat-cli:storage_migrate_test",`,
-    `    "//meerkat-cli:system_mob_host_daemon_test",`,
-    `    "//meerkat-comms:e2e_test",`,
-    `    "//meerkat:live_meerkat_regression_test",`,
-    `    "//meerkat:smoke_meerkat_sdk_test",`,
-    `    "//meerkat-mcp-server:live_mcp_matrix_test",`,
-    `    "//meerkat-mcp-server:rkat_mcp_bin",`,
-    `    "//meerkat-mob:smoke_mob_flow_runtime_test",`,
-    `    "//meerkat-mob:smoke_mob_generated_image_comms_test",`,
-    `    "//meerkat-mob:smoke_mob_idle_burn_test",`,
-    `    "//meerkat-mob:smoke_mob_turn_latency_test",`,
-    `    "//meerkat-mob:smoke_mob_resume_test",`,
-    `    "//meerkat-rest:rkat_rest_bin",`,
-    `    "//meerkat-rest:live_rest_matrix_test",`,
-    `    "//meerkat-rpc:live_smoke_rpc_test",`,
-    `    "//meerkat-rpc:rkat_rpc_bin",`,
+    `    "//crates/meerkat-cli:cli_mobpack_live_smoke_test",`,
+    `    "//crates/meerkat-cli:live_smoke_cli_test",`,
+    `    "//crates/meerkat-cli:rkat",`,
+    `    "//crates/meerkat-cli:storage_migrate_test",`,
+    `    "//crates/meerkat-cli:system_mob_host_daemon_test",`,
+    `    "//crates/meerkat-comms:e2e_test",`,
+    `    "//crates/meerkat:live_meerkat_regression_test",`,
+    `    "//crates/meerkat:smoke_meerkat_sdk_test",`,
+    `    "//crates/meerkat-mcp-server:live_mcp_matrix_test",`,
+    `    "//crates/meerkat-mcp-server:rkat_mcp_bin",`,
+    `    "//crates/meerkat-mob:smoke_mob_flow_runtime_test",`,
+    `    "//crates/meerkat-mob:smoke_mob_generated_image_comms_test",`,
+    `    "//crates/meerkat-mob:smoke_mob_idle_burn_test",`,
+    `    "//crates/meerkat-mob:smoke_mob_turn_latency_test",`,
+    `    "//crates/meerkat-mob:smoke_mob_resume_test",`,
+    `    "//crates/meerkat-rest:rkat_rest_bin",`,
+    `    "//crates/meerkat-rest:live_rest_matrix_test",`,
+    `    "//crates/meerkat-rpc:live_smoke_rpc_test",`,
+    `    "//crates/meerkat-rpc:rkat_rpc_bin",`,
     `    "//tests/integration:e2e_artifacts_bin",`,
     `    "//tests/integration:e2e_smoke_lane_test",`,
     `    "//tests/integration:smoke_shared_realm_test",`,
@@ -1626,9 +1637,9 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `    sh_test(`,
     `        name = "e2e_smoke_turbo_s_flow_%s" % name,`,
     `        srcs = ["scripts/buildbuddy-e2e-smoke-flow-runtime-shard-test"],`,
-    `        data = ["//meerkat-mob:smoke_mob_flow_runtime_test"],`,
+    `        data = ["//crates/meerkat-mob:smoke_mob_flow_runtime_test"],`,
     `        env = {`,
-    `            "FLOW_RUNTIME_TEST_BIN": "$(rootpath //meerkat-mob:smoke_mob_flow_runtime_test)",`,
+    `            "FLOW_RUNTIME_TEST_BIN": "$(rootpath //crates/meerkat-mob:smoke_mob_flow_runtime_test)",`,
     `            "FLOW_RUNTIME_TEST_NAME": test_name,`,
     `        },`,
     `        size = "enormous",`,
@@ -1763,12 +1774,12 @@ for (const pkg of localPackages.values()) {
     let targetDeps = deps;
     if (key === "meerkat-machine-codegen" && target.name === "runtime_schema_parity") {
       const scheduleMachineSchemaExports = shouldRewriteAgentFactoryDepsFor(key, isTest)
-        ? "//meerkat-schedule:meerkat_schedule_machine_schema_exports_agent_factory_build"
-        : "//meerkat-schedule:meerkat_schedule_machine_schema_exports";
+        ? "//crates/meerkat-schedule:meerkat_schedule_machine_schema_exports_agent_factory_build"
+        : "//crates/meerkat-schedule:meerkat_schedule_machine_schema_exports";
       targetDeps = deps
-        .filter((dep) => dep !== "//meerkat-schedule:meerkat_schedule")
-        .filter((dep) => dep !== "//meerkat-schedule:meerkat_schedule_agent_factory_build")
-        .filter((dep) => dep !== "//meerkat:meerkat_schedule_agent_factory_build")
+        .filter((dep) => dep !== "//crates/meerkat-schedule:meerkat_schedule")
+        .filter((dep) => dep !== "//crates/meerkat-schedule:meerkat_schedule_agent_factory_build")
+        .filter((dep) => dep !== "//crates/meerkat:meerkat_schedule_agent_factory_build")
         .concat(scheduleMachineSchemaExports)
         .sort();
     }
@@ -1864,7 +1875,7 @@ for (const pkg of localPackages.values()) {
         ...generatedAuthorityBridgeRustcEnv(key),
       ];
       if (rule === "rust_test" && key === "meerkat-rpc") {
-        rustcEnv.push(`        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",`);
+        rustcEnv.push(`        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",`);
       }
       attrs.splice(attrs.length - 1, 0, `    rustc_env = {\n${rustcEnv.join("\n")}\n    },`);
     }
@@ -1943,9 +1954,9 @@ for (const pkg of localPackages.values()) {
       if (key === "meerkat" && target.name === "agent_builder_policy_canary") {
         data.push(
           "//:workspace_runfiles",
-          "//meerkat-rest:package_runfiles",
-          "//meerkat-rpc:package_runfiles",
-          "//meerkat-runtime:package_runfiles",
+          "//crates/meerkat-rest:package_runfiles",
+          "//crates/meerkat-rpc:package_runfiles",
+          "//crates/meerkat-runtime:package_runfiles",
           "@rules_rust//rust/toolchain:current_cargo_files",
           "@rules_rust//rust/toolchain:current_rust_stdlib_files",
           "@rules_rust//rust/toolchain:current_rustc_files",
@@ -1969,16 +1980,16 @@ for (const pkg of localPackages.values()) {
         env.push(`        "WORKSPACE_ROOT": ".",`);
       }
       if (key === "meerkat-cli") {
-        data.push("//meerkat-cli:rkat");
-        env.push(`        "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",`);
+        data.push("//crates/meerkat-cli:rkat");
+        env.push(`        "CARGO_BIN_EXE_rkat": "$(rootpath //crates/meerkat-cli:rkat)",`);
       }
       if (key === "meerkat-rpc") {
-        data.push("//meerkat-rpc:rkat_rpc_bin");
-        env.push(`        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",`);
+        data.push("//crates/meerkat-rpc:rkat_rpc_bin");
+        env.push(`        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //crates/meerkat-rpc:rkat_rpc_bin)",`);
       }
       if (key === "meerkat-mcp-server") {
-        data.push("//meerkat-mcp-server:rkat_mcp_bin");
-        env.push(`        "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //meerkat-mcp-server:rkat_mcp_bin)",`);
+        data.push("//crates/meerkat-mcp-server:rkat_mcp_bin");
+        env.push(`        "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //crates/meerkat-mcp-server:rkat_mcp_bin)",`);
       }
       if (key === "xtask") {
         const rustfmt = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin";
@@ -2372,18 +2383,18 @@ for (const pkg of localPackages.values()) {
     edition = "2024",
     compile_data = ${scheduleMachineSchemaCompileDataExpr},
     srcs = glob(["src/**/*.rs"]),
-    visibility = ["//meerkat-machine-codegen:__pkg__"],
+    visibility = ["//crates/meerkat-machine-codegen:__pkg__"],
     proc_macro_deps = [
-        "//meerkat-machine-dsl:meerkat_machine_dsl",
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-capabilities:meerkat_capabilities",
         "${packageLabel(byName.get("meerkat-core"))}",
-        "//meerkat-machine-schema:meerkat_machine_schema",
-        "//meerkat-skills:meerkat_skills",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+        "//crates/meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
         normal = True,
@@ -2398,18 +2409,18 @@ for (const pkg of localPackages.values()) {
     edition = "2024",
     compile_data = ${scheduleMachineSchemaCompileDataExpr},
     srcs = glob(["src/**/*.rs"]),
-    visibility = ["//meerkat-machine-codegen:__pkg__"],
+    visibility = ["//crates/meerkat-machine-codegen:__pkg__"],
     proc_macro_deps = [
-        "//meerkat-machine-dsl:meerkat_machine_dsl",
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
         proc_macro = True,
     ),
     deps = [
-        "//meerkat:meerkat_capabilities_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_machine_schema_agent_factory_build",
-        "//meerkat:meerkat_skills_agent_factory_build",
+        "//crates/meerkat:meerkat_capabilities_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_skills_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-schedule",
         normal = True,

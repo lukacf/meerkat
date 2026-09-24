@@ -52,7 +52,7 @@ SCAN_PATHS=(
   ".claude/skills/meerkat-platform"
   "sdks"
   "CHANGELOG.md"
-  "meerkat/src"
+  "crates/meerkat/src"
   "meerkat-cli"
   "meerkat-core"
   "meerkat-comms"
@@ -60,7 +60,7 @@ SCAN_PATHS=(
   "meerkat-rpc"
   "meerkat-session"
   "meerkat-tools"
-  "meerkat-contracts/src/version.rs"
+  "crates/meerkat-contracts/src/version.rs"
 )
 
 is_allowed_file() {

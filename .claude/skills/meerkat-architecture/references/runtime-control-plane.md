@@ -12,7 +12,7 @@ All semantic state mutations route through the DSL authority via `dsl_apply(inpu
 
 Runtime-backed surfaces (CLI, REST, RPC, MCP) obtain `SessionRuntimeBindings` from `MeerkatMachine::prepare_bindings(session_id)` and pass them through `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`. Standalone paths (WASM, tests, embedded) use `RuntimeBuildMode::StandaloneEphemeral`.
 
-`SessionRuntimeBindings` (in `meerkat-core/src/runtime_epoch.rs`) is the
+`SessionRuntimeBindings` (in `crates/meerkat-core/src/runtime_epoch.rs`) is the
 epoch-local bundle. It carries identity, ops/completion state, the
 MeerkatMachine-owned tool visibility projection and handles, independently
 owned auth lease authority, and cross-owner coordinators. The
@@ -110,7 +110,7 @@ full contract in `docs/reference/machine-authority.mdx`):
   typed `InputRowVersionConflict` / `MachineLifecycleVersionConflict`).
 
 The public preparation seam is `recover_durable_tail(store, session_id)` in
-`meerkat-runtime/src/recovery.rs`. It loads opaque store-bound evidence,
+`crates/meerkat-runtime/src/recovery.rs`. It loads opaque store-bound evidence,
 derives and proves the exact candidate, and drives/consumes the generated
 classification internally. Callers supply only the `RuntimeStore` and stable
 `SessionId`, never documents, heads, classifications, receipts, or CAS tokens.
@@ -200,7 +200,7 @@ decide what is a barrier or when the barrier is satisfied.
 
 ## OpsLifecycleRegistry
 
-Trait in `meerkat-core/src/ops_lifecycle.rs`. Concrete impl `RuntimeOpsLifecycleRegistry` in `meerkat-runtime/src/ops_lifecycle.rs` is a thin projection/command surface over MeerkatMachine's ops state (`op_statuses`, `op_terminal_outcomes`, `op_peer_ready`, `op_progress_count`, `wait_active`, `wait_operation_ids`). DSL is the sole authority; the registry exposes:
+Trait in `crates/meerkat-core/src/ops_lifecycle.rs`. Concrete impl `RuntimeOpsLifecycleRegistry` in `crates/meerkat-runtime/src/ops_lifecycle.rs` is a thin projection/command surface over MeerkatMachine's ops state (`op_statuses`, `op_terminal_outcomes`, `op_peer_ready`, `op_progress_count`, `wait_active`, `wait_operation_ids`). DSL is the sole authority; the registry exposes:
 
 - Typed commands: `register_operation`, `provisioning_succeeded`/`failed`, `peer_ready`, `report_progress`, `complete_operation`, `fail_operation`, `abort_provisioning`, `cancel_operation`, `request_retire`, `mark_retired`, `terminate_owner`. Each routes to a DSL transition.
 - Typed read surface: `snapshot(id)`, `list_operations()`, `register_watcher(id)`.
@@ -317,17 +317,17 @@ entrypoints that bypass `scripts/repo-cargo`.
 
 ## Key files
 
-- `meerkat-runtime/src/meerkat_machine/mod.rs` — MeerkatMachine implementation
-- `meerkat-runtime/src/meerkat_machine/session_management.rs` — session registration, recovery
-- `meerkat-runtime/src/meerkat_machine/dispatch_*.rs` — dispatch paths per input family
-- `meerkat-runtime/src/driver/ephemeral.rs`, `driver/persistent.rs` — per-session drivers
-- `meerkat-runtime/src/ops_lifecycle.rs` — `RuntimeOpsLifecycleRegistry`
-- `meerkat-runtime/src/policy_table.rs` — `DefaultPolicyTable`
-- `meerkat-runtime/src/runtime_loop.rs` — completion-feed wake injection and runtime loop
-- `meerkat-runtime/src/recovery.rs` — store-bound durable-tail preparation, classification, authorization, and realization (`recover_durable_tail(store, session_id)`)
-- `meerkat-runtime/src/store/mod.rs` — `RuntimeStore` contract (fenced records, boundary receipts)
-- `meerkat-core/src/completion_feed.rs` — monotonic completion-feed contract
-- `meerkat-runtime/src/peer_handling_mode.rs` — handling_mode validation
-- `meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings`, `RuntimeBuildMode`
-- `meerkat-core/src/ops_lifecycle.rs` — `OpsLifecycleRegistry` trait
-- `meerkat-session/src/ephemeral.rs`, `persistent.rs` — session services
+- `crates/meerkat-runtime/src/meerkat_machine/mod.rs` — MeerkatMachine implementation
+- `crates/meerkat-runtime/src/meerkat_machine/session_management.rs` — session registration, recovery
+- `crates/meerkat-runtime/src/meerkat_machine/dispatch_*.rs` — dispatch paths per input family
+- `crates/meerkat-runtime/src/driver/ephemeral.rs`, `driver/persistent.rs` — per-session drivers
+- `crates/meerkat-runtime/src/ops_lifecycle.rs` — `RuntimeOpsLifecycleRegistry`
+- `crates/meerkat-runtime/src/policy_table.rs` — `DefaultPolicyTable`
+- `crates/meerkat-runtime/src/runtime_loop.rs` — completion-feed wake injection and runtime loop
+- `crates/meerkat-runtime/src/recovery.rs` — store-bound durable-tail preparation, classification, authorization, and realization (`recover_durable_tail(store, session_id)`)
+- `crates/meerkat-runtime/src/store/mod.rs` — `RuntimeStore` contract (fenced records, boundary receipts)
+- `crates/meerkat-core/src/completion_feed.rs` — monotonic completion-feed contract
+- `crates/meerkat-runtime/src/peer_handling_mode.rs` — handling_mode validation
+- `crates/meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings`, `RuntimeBuildMode`
+- `crates/meerkat-core/src/ops_lifecycle.rs` — `OpsLifecycleRegistry` trait
+- `crates/meerkat-session/src/ephemeral.rs`, `persistent.rs` — session services

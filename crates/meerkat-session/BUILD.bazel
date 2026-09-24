@@ -1,0 +1,607 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
+
+load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")
+
+
+
+filegroup(
+
+    name = "cargo_manifest",
+
+    srcs = ["Cargo.toml"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+filegroup(
+
+    name = "package_runfiles",
+
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+
+filegroup(
+
+    name = "build_file",
+
+    srcs = ["BUILD.bazel"],
+
+    visibility = ["//visibility:public"],
+
+)
+
+
+
+rust_library(
+    name = "meerkat_session",
+    aliases = aliases(package_name = "meerkat-session"),
+    crate_name = "meerkat_session",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "live",
+        "session-compaction",
+        "session-store",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/session-management/SKILL.md",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-session",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-models:meerkat_models",
+        "//crates/meerkat-runtime:meerkat_runtime",
+        "//crates/meerkat-skills:meerkat_skills",
+        "//crates/meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-session",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_session_with_runtime_test_support",
+    aliases = aliases(package_name = "meerkat-session"),
+    crate_name = "meerkat_session",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "live",
+        "session-compaction",
+        "session-store",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/session-management/SKILL.md",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//crates/meerkat:__pkg__",
+        "//crates/meerkat-cli:__pkg__",
+        "//crates/meerkat-mcp-server:__pkg__",
+        "//crates/meerkat-mob:__pkg__",
+        "//crates/meerkat-mob-mcp:__pkg__",
+        "//crates/meerkat-rpc:__pkg__",
+        "//crates/meerkat-session:__pkg__",
+        "//crates/meerkat-web-runtime:__pkg__",
+        "//tests/integration:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-session",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-models:meerkat_models",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+        "//crates/meerkat-skills:meerkat_skills",
+        "//crates/meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-session",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_session_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-session"),
+    crate_name = "meerkat_session",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "live",
+        "session-compaction",
+        "session-store",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/session-management/SKILL.md",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//crates/meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-session",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat:meerkat_capabilities_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_models_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build",
+        "//crates/meerkat:meerkat_skills_agent_factory_build",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-session",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_session_agent_factory_build_with_runtime_test_support",
+    aliases = aliases(package_name = "meerkat-session"),
+    crate_name = "meerkat_session",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "live",
+        "session-compaction",
+        "session-store",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/session-management/SKILL.md",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = [
+        "//crates/meerkat:__pkg__",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-session",
+        proc_macro = True,
+    ),
+    deps = [
+        "//crates/meerkat:meerkat_capabilities_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_models_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_skills_agent_factory_build",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-session",
+        normal = True,
+    ),
+)
+
+rust_test(
+    name = "meerkat_session_unit_test",
+    aliases = aliases(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "meerkat_session",
+    crate_root = "src/lib.rs",
+    crate_features = [
+        "live",
+        "session-compaction",
+        "session-store",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/session-management/SKILL.md",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+        "unit",
+    ],
+    size = "medium",
+    data = [
+        "//crates/meerkat-machine-schema:package_runfiles",
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-session",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-models:meerkat_models",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+        "//crates/meerkat-skills:meerkat_skills",
+        "//crates/meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "ephemeral_contract_test",
+    aliases = aliases(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "ephemeral_contract",
+    crate_root = "tests/ephemeral_contract.rs",
+    crate_features = [
+        "live",
+        "session-compaction",
+        "session-store",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/session-management/SKILL.md",
+    ],
+    srcs = [
+        "tests/ephemeral_contract.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "ephemeral_contract",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-session",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-models:meerkat_models",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+        "//crates/meerkat-session:meerkat_session_with_runtime_test_support",
+        "//crates/meerkat-skills:meerkat_skills",
+        "//crates/meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "persistence_compat_test",
+    aliases = aliases(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "persistence_compat",
+    crate_root = "tests/persistence_compat.rs",
+    crate_features = [
+        "live",
+        "session-compaction",
+        "session-store",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/session-management/SKILL.md",
+    ],
+    srcs = [
+        "tests/persistence_compat.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "persistence_compat",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-session",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-models:meerkat_models",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+        "//crates/meerkat-session:meerkat_session_with_runtime_test_support",
+        "//crates/meerkat-skills:meerkat_skills",
+        "//crates/meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "planned_identity_fork_test",
+    aliases = aliases(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "planned_identity_fork",
+    crate_root = "tests/planned_identity_fork.rs",
+    crate_features = [
+        "live",
+        "session-compaction",
+        "session-store",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/session-management/SKILL.md",
+    ],
+    srcs = [
+        "tests/planned_identity_fork.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "planned_identity_fork",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-session",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-models:meerkat_models",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+        "//crates/meerkat-session:meerkat_session_with_runtime_test_support",
+        "//crates/meerkat-skills:meerkat_skills",
+        "//crates/meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "regression_lifecycle_test",
+    aliases = aliases(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "regression_lifecycle",
+    crate_root = "tests/regression_lifecycle.rs",
+    crate_features = [
+        "live",
+        "session-compaction",
+        "session-store",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/session-management/SKILL.md",
+    ],
+    srcs = [
+        "tests/regression_lifecycle.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "regression_lifecycle",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-session",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-models:meerkat_models",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+        "//crates/meerkat-session:meerkat_session_with_runtime_test_support",
+        "//crates/meerkat-skills:meerkat_skills",
+        "//crates/meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "session_store_append_only_trybuild_test",
+    aliases = aliases(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "session_store_append_only_trybuild",
+    crate_root = "tests/session_store_append_only_trybuild.rs",
+    crate_features = [
+        "live",
+        "session-compaction",
+        "session-store",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "skills/session-management/SKILL.md",
+    ],
+    srcs = [
+        "tests/session_store_append_only_trybuild.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.8.41",
+        "CARGO_BIN_NAME": "session_store_append_only_trybuild",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-session",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "trybuild",
+    ],
+    data = [
+        "//crates/meerkat-core:package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-session",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-capabilities:meerkat_capabilities",
+        "//crates/meerkat-contracts:meerkat_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-models:meerkat_models",
+        "//crates/meerkat-runtime:meerkat_runtime_test_support",
+        "//crates/meerkat-session:meerkat_session_with_runtime_test_support",
+        "//crates/meerkat-skills:meerkat_skills",
+        "//crates/meerkat-store:meerkat_store",
+    ] + all_crate_deps(
+        package_name = "meerkat-session",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+test_suite(
+    name = "fast_tests",
+    tests = [
+        ":ephemeral_contract_test",
+        ":meerkat_session_unit_test",
+        ":persistence_compat_test",
+        ":planned_identity_fork_test",
+        ":regression_lifecycle_test",
+    ],
+)

@@ -26,7 +26,7 @@ Two version projections move together for a release:
 | Concept | Source of truth | Consumers |
 |---------|-----------------|-----------|
 | Package version | `workspace.package.version` in `Cargo.toml` | Rust crates, Python, TypeScript, Web SDK, docs |
-| Contract version | `ContractVersion::CURRENT` in `meerkat-contracts/src/version.rs` | Generated schemas and SDK contract constants |
+| Contract version | `ContractVersion::CURRENT` in `crates/meerkat-contracts/src/version.rs` | Generated schemas and SDK contract constants |
 
 Meerkat is pre-1.0. Patch releases may contain declared public API breaks, so
 downstream Rust users must exact-pin the crate family and read every intervening

@@ -276,7 +276,7 @@ class TestStdoutDispatcher:
         """End-to-end over the real `_StdoutDispatcher`, using the exact bare
         `structured_data()` wire shape `MobError::MemberReloadRequired`
         actually sends (`error.data` is the bare dict, no `code`/`details`
-        wrapper — see `meerkat-mob/src/error.rs`). Proves the dispatcher no
+        wrapper — see `crates/meerkat-mob/src/error.rs`). Proves the dispatcher no
         longer narrows a payload that happens to carry both `reason` and
         richer sibling fields (`retryable`, `required_action`, `kind`) down
         to a bare `reason` string."""

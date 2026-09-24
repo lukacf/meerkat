@@ -14,7 +14,7 @@ bazel_dep(name = "rules_rust", version = "0.70.0")
 single_version_override(
     module_name = "rules_rust",
     patch_strip = 1,
-    patches = ["//third-party/patches:rules_rust-portable-path-deps.patch"],
+    patches = ["//tools/third-party/patches:rules_rust-portable-path-deps.patch"],
 )
 bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "platforms", version = "1.1.0")
@@ -219,7 +219,7 @@ rust.toolchain(
 use_repo(rust, "rust_toolchains")
 register_toolchains("@rust_toolchains//:all")
 register_toolchains(
-    "//platforms:meerkat_windows_cc_toolchain_impl",
+    "//tools/bazel/platforms:meerkat_windows_cc_toolchain_impl",
     "@buildbuddy_toolchain//:ubuntu_cc_toolchain",
     "@buildbuddy_toolchain//:ubuntu_cc_toolchain_arm64",
 )

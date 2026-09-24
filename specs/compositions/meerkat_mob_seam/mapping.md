@@ -5,12 +5,12 @@ architecture.
 
 ## Primary code anchors
 
-- `meerkat-runtime/src/meerkat_machine/mod.rs` — Meerkat-side runtime/session
+- `crates/meerkat-runtime/src/meerkat_machine/mod.rs` — Meerkat-side runtime/session
   authority
-- `meerkat-mob/src/runtime/handle.rs` — Mob-side command submission and
+- `crates/meerkat-mob/src/runtime/handle.rs` — Mob-side command submission and
   projection surface
-- `meerkat-mob/src/runtime/actor.rs` — Mob-side lifecycle/work orchestration
-- `meerkat-mob/src/runtime/session_service.rs` — bridge-facing live session
+- `crates/meerkat-mob/src/runtime/actor.rs` — Mob-side lifecycle/work orchestration
+- `crates/meerkat-mob/src/runtime/session_service.rs` — bridge-facing live session
   integration
 
 ## What this composition replaces
@@ -37,8 +37,8 @@ This section is generated from the Rust composition catalog. Do not edit it by h
 - `meerkat_mob_seam`
 
 ### Code Anchors
-- `mob_meerkat_seam` (route `binding_request_reaches_meerkat`): `meerkat-mob/src/runtime/actor.rs` — MobMachine to MeerkatMachine seam realization for binding requests, work submission, cancellation, lifecycle notices, terminal outcomes, and peer ingress
-- `meerkat_runtime_entry` (machine `MeerkatMachine`): `meerkat-runtime/src/meerkat_machine/mod.rs` — MeerkatMachine command authority consuming runtime binding, admitted work, cancellation, lifecycle, terminal, and peer ingress seam traffic
+- `mob_meerkat_seam` (route `binding_request_reaches_meerkat`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine to MeerkatMachine seam realization for binding requests, work submission, cancellation, lifecycle notices, terminal outcomes, and peer ingress
+- `meerkat_runtime_entry` (machine `MeerkatMachine`): `crates/meerkat-runtime/src/meerkat_machine/mod.rs` — MeerkatMachine command authority consuming runtime binding, admitted work, cancellation, lifecycle, terminal, and peer ingress seam traffic
 
 ### Scenarios
 - `binding_round_trip` — mob runtime binding request becomes a Meerkat binding and feeds readiness back to Mob

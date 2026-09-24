@@ -15,6 +15,9 @@ from urllib.parse import quote
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 DOCS_JSON = DOCS / "docs.json"
+# Internal notes, audits and archives live under docs/internal; they are not
+# Mintlify pages and are exempt from the public navigation and suffix rules.
+INTERNAL_DOCS_DIR = "internal"
 
 FRONTMATTER_REQUIRED = {"title", "description", "icon"}
 FORBIDDEN_PUBLIC_SUFFIXES = {".html"}
@@ -211,6 +214,8 @@ def main() -> int:
 
     public_files = set(pages.values())
     for path in sorted(DOCS.rglob("*")):
+        if INTERNAL_DOCS_DIR in path.relative_to(DOCS).parts[:1]:
+            continue
         if path.suffix in FORBIDDEN_PUBLIC_SUFFIXES:
             errors.append(f"forbidden generated/internal file under public docs: {public_path(path)}")
             continue

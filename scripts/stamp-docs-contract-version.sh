@@ -113,6 +113,10 @@ for path in sorted(set(paths)):
     # MobKit package or protocol versions.
     if rel.startswith("docs/mobkit/"):
         continue
+    # docs/internal holds unpublished working notes, audits and archives that
+    # quote historical versions verbatim; they are not release projections.
+    if rel.startswith("docs/internal/"):
+        continue
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines(keepends=True)
     rewritten = []

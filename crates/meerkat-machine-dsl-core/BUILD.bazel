@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_machine_dsl_core",
-    aliases = aliases(package_name = "meerkat-machine-dsl-core"),
+    aliases = aliases(package_name = "crates/meerkat-machine-dsl-core"),
     crate_name = "meerkat_machine_dsl_core",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -62,18 +62,18 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-dsl-core",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-dsl-core",
+        package_name = "crates/meerkat-machine-dsl-core",
         proc_macro = True,
     ),
     deps = all_crate_deps(
-        package_name = "meerkat-machine-dsl-core",
+        package_name = "crates/meerkat-machine-dsl-core",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_machine_dsl_core_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-machine-dsl-core"),
+    aliases = aliases(package_name = "crates/meerkat-machine-dsl-core"),
     crate_name = "meerkat_machine_dsl_core",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -91,11 +91,11 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-dsl-core",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-dsl-core",
+        package_name = "crates/meerkat-machine-dsl-core",
         proc_macro = True,
     ),
     deps = all_crate_deps(
-        package_name = "meerkat-machine-dsl-core",
+        package_name = "crates/meerkat-machine-dsl-core",
         normal = True,
     ),
 )
@@ -103,7 +103,7 @@ rust_library(
 rust_test(
     name = "meerkat_machine_dsl_core_unit_test",
     aliases = aliases(
-        package_name = "meerkat-machine-dsl-core",
+        package_name = "crates/meerkat-machine-dsl-core",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -136,12 +136,12 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-dsl-core",
+        package_name = "crates/meerkat-machine-dsl-core",
         proc_macro = True,
         proc_macro_dev = True,
     ),
     deps = all_crate_deps(
-        package_name = "meerkat-machine-dsl-core",
+        package_name = "crates/meerkat-machine-dsl-core",
         normal = True,
         normal_dev = True,
     ),

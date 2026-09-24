@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_session",
-    aliases = aliases(package_name = "meerkat-session"),
+    aliases = aliases(package_name = "crates/meerkat-session"),
     crate_name = "meerkat_session",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -68,7 +68,7 @@ rust_library(
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         proc_macro = True,
     ),
     deps = [
@@ -80,14 +80,14 @@ rust_library(
         "//crates/meerkat-skills:meerkat_skills",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_session_with_runtime_test_support",
-    aliases = aliases(package_name = "meerkat-session"),
+    aliases = aliases(package_name = "crates/meerkat-session"),
     crate_name = "meerkat_session",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -119,7 +119,7 @@ rust_library(
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         proc_macro = True,
     ),
     deps = [
@@ -131,14 +131,14 @@ rust_library(
         "//crates/meerkat-skills:meerkat_skills",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_session_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-session"),
+    aliases = aliases(package_name = "crates/meerkat-session"),
     crate_name = "meerkat_session",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -162,7 +162,7 @@ rust_library(
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         proc_macro = True,
     ),
     deps = [
@@ -174,14 +174,14 @@ rust_library(
         "//crates/meerkat:meerkat_skills_agent_factory_build",
         "//crates/meerkat:meerkat_store_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_session_agent_factory_build_with_runtime_test_support",
-    aliases = aliases(package_name = "meerkat-session"),
+    aliases = aliases(package_name = "crates/meerkat-session"),
     crate_name = "meerkat_session",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -205,7 +205,7 @@ rust_library(
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         proc_macro = True,
     ),
     deps = [
@@ -217,7 +217,7 @@ rust_library(
         "//crates/meerkat:meerkat_skills_agent_factory_build",
         "//crates/meerkat:meerkat_store_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
     ),
 )
@@ -225,7 +225,7 @@ rust_library(
 rust_test(
     name = "meerkat_session_unit_test",
     aliases = aliases(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -265,7 +265,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -278,7 +278,7 @@ rust_test(
         "//crates/meerkat-skills:meerkat_skills",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
         normal_dev = True,
     ),
@@ -287,7 +287,7 @@ rust_test(
 rust_test(
     name = "ephemeral_contract_test",
     aliases = aliases(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -326,7 +326,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -340,7 +340,7 @@ rust_test(
         "//crates/meerkat-skills:meerkat_skills",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
         normal_dev = True,
     ),
@@ -349,7 +349,7 @@ rust_test(
 rust_test(
     name = "persistence_compat_test",
     aliases = aliases(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -388,7 +388,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -402,7 +402,7 @@ rust_test(
         "//crates/meerkat-skills:meerkat_skills",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
         normal_dev = True,
     ),
@@ -411,7 +411,7 @@ rust_test(
 rust_test(
     name = "planned_identity_fork_test",
     aliases = aliases(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -450,7 +450,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -464,7 +464,7 @@ rust_test(
         "//crates/meerkat-skills:meerkat_skills",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
         normal_dev = True,
     ),
@@ -473,7 +473,7 @@ rust_test(
 rust_test(
     name = "regression_lifecycle_test",
     aliases = aliases(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -512,7 +512,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -526,7 +526,7 @@ rust_test(
         "//crates/meerkat-skills:meerkat_skills",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
         normal_dev = True,
     ),
@@ -535,7 +535,7 @@ rust_test(
 rust_test(
     name = "session_store_append_only_trybuild_test",
     aliases = aliases(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -575,7 +575,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -589,7 +589,7 @@ rust_test(
         "//crates/meerkat-skills:meerkat_skills",
         "//crates/meerkat-store:meerkat_store",
     ] + all_crate_deps(
-        package_name = "meerkat-session",
+        package_name = "crates/meerkat-session",
         normal = True,
         normal_dev = True,
     ),

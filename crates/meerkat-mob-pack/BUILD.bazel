@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_mob_pack",
-    aliases = aliases(package_name = "meerkat-mob-pack"),
+    aliases = aliases(package_name = "crates/meerkat-mob-pack"),
     crate_name = "meerkat_mob_pack",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -62,21 +62,21 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-pack",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mob-pack",
+        package_name = "crates/meerkat-mob-pack",
         proc_macro = True,
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob",
         "//crates/meerkat:meerkat_contracts_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-mob-pack",
+        package_name = "crates/meerkat-mob-pack",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_mob_pack_with_runtime_test_support",
-    aliases = aliases(package_name = "meerkat-mob-pack"),
+    aliases = aliases(package_name = "crates/meerkat-mob-pack"),
     crate_name = "meerkat_mob_pack",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -96,14 +96,14 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob-pack",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mob-pack",
+        package_name = "crates/meerkat-mob-pack",
         proc_macro = True,
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
         "//crates/meerkat:meerkat_contracts_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-mob-pack",
+        package_name = "crates/meerkat-mob-pack",
         normal = True,
     ),
 )
@@ -111,7 +111,7 @@ rust_library(
 rust_test(
     name = "meerkat_mob_pack_unit_test",
     aliases = aliases(
-        package_name = "meerkat-mob-pack",
+        package_name = "crates/meerkat-mob-pack",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -144,7 +144,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mob-pack",
+        package_name = "crates/meerkat-mob-pack",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -152,7 +152,7 @@ rust_test(
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
         "//crates/meerkat:meerkat_contracts_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-mob-pack",
+        package_name = "crates/meerkat-mob-pack",
         normal = True,
         normal_dev = True,
     ),

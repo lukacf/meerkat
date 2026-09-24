@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_openai",
-    aliases = aliases(package_name = "meerkat-openai"),
+    aliases = aliases(package_name = "crates/meerkat-openai"),
     crate_name = "meerkat_openai",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -68,7 +68,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-openai",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         proc_macro = True,
     ),
     deps = [
@@ -79,14 +79,14 @@ rust_library(
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-models:meerkat_models",
     ] + all_crate_deps(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_openai_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-openai"),
+    aliases = aliases(package_name = "crates/meerkat-openai"),
     crate_name = "meerkat_openai",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -110,7 +110,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-openai",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         proc_macro = True,
     ),
     deps = [
@@ -121,7 +121,7 @@ rust_library(
         "//crates/meerkat:meerkat_llm_core_agent_factory_build",
         "//crates/meerkat:meerkat_models_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         normal = True,
     ),
 )
@@ -129,7 +129,7 @@ rust_library(
 rust_test(
     name = "meerkat_openai_unit_test",
     aliases = aliases(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -168,7 +168,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -181,7 +181,7 @@ rust_test(
         "//crates/meerkat-models:meerkat_models",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         normal = True,
         normal_dev = True,
     ),
@@ -190,7 +190,7 @@ rust_test(
 rust_test(
     name = "mock_realtime_ws_selftest_test",
     aliases = aliases(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -231,7 +231,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -245,7 +245,7 @@ rust_test(
         "//crates/meerkat-openai:meerkat_openai",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         normal = True,
         normal_dev = True,
     ),
@@ -254,7 +254,7 @@ rust_test(
 rust_test(
     name = "oauth_resolve_test",
     aliases = aliases(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -293,7 +293,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -307,7 +307,7 @@ rust_test(
         "//crates/meerkat-openai:meerkat_openai",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-openai",
+        package_name = "crates/meerkat-openai",
         normal = True,
         normal_dev = True,
     ),

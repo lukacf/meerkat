@@ -1789,10 +1789,10 @@ for (const pkg of localPackages.values()) {
         shouldRewriteAgentFactoryDepsFor(key, true),
       );
     }
-    const externalNormal = `all_crate_deps(\n        package_name = ${q(key)},\n        normal = True,\n    )`;
-    const externalNormalWithDev = `all_crate_deps(\n        package_name = ${q(key)},\n        normal = True,\n        normal_dev = True,\n    )`;
-    const externalProc = `all_crate_deps(\n        package_name = ${q(key)},\n        proc_macro = True,\n    )`;
-    const externalProcWithDev = `all_crate_deps(\n        package_name = ${q(key)},\n        proc_macro = True,\n        proc_macro_dev = True,\n    )`;
+    const externalNormal = `all_crate_deps(\n        package_name = ${q(packageDirForKey(key))},\n        normal = True,\n    )`;
+    const externalNormalWithDev = `all_crate_deps(\n        package_name = ${q(packageDirForKey(key))},\n        normal = True,\n        normal_dev = True,\n    )`;
+    const externalProc = `all_crate_deps(\n        package_name = ${q(packageDirForKey(key))},\n        proc_macro = True,\n    )`;
+    const externalProcWithDev = `all_crate_deps(\n        package_name = ${q(packageDirForKey(key))},\n        proc_macro = True,\n        proc_macro_dev = True,\n    )`;
 
     const depsWithOptionalExternal = [...new Set([...targetDeps, ...optionalExternal])].sort();
     const depsExpr = depsWithOptionalExternal.length
@@ -1802,8 +1802,8 @@ for (const pkg of localPackages.values()) {
       ? `${listExpr(procMacroDeps)} + ${isTest ? externalProcWithDev : externalProc}`
       : isTest ? externalProcWithDev : externalProc;
     const aliasesExpr = isTest
-      ? `aliases(\n        package_name = ${q(key)},\n        normal = True,\n        normal_dev = True,\n        proc_macro = True,\n        proc_macro_dev = True,\n    )`
-      : `aliases(package_name = ${q(key)})`;
+      ? `aliases(\n        package_name = ${q(packageDirForKey(key))},\n        normal = True,\n        normal_dev = True,\n        proc_macro = True,\n        proc_macro_dev = True,\n    )`
+      : `aliases(package_name = ${q(packageDirForKey(key))})`;
     const extraData = isTest ? workspaceDataLabels(target) : [];
     const usesTrybuild = targetSourceText.includes("trybuild::");
     const scansWorkspaceRustSources = targetSourceText.includes("walk_rust_sources(&root)");
@@ -2218,7 +2218,7 @@ for (const pkg of localPackages.values()) {
         : srcsExpr;
       const unitAttrs = [
         `    name = ${q(unitName)},`,
-        `    aliases = ${aliasesExpr.replace(`aliases(package_name = ${q(key)})`, `aliases(\n        package_name = ${q(key)},\n        normal = True,\n        normal_dev = True,\n        proc_macro = True,\n        proc_macro_dev = True,\n    )`)},`,
+        `    aliases = ${aliasesExpr.replace(`aliases(package_name = ${q(packageDirForKey(key))})`, `aliases(\n        package_name = ${q(packageDirForKey(key))},\n        normal = True,\n        normal_dev = True,\n        proc_macro = True,\n        proc_macro_dev = True,\n    )`)},`,
         `    crate_name = ${q(crateName(target.name))},`,
         `    crate_root = ${q(relative(dir, target.src_path))},`,
         `    crate_features = ${listExpr(crateFeaturesFor(key, pkg))},`,
@@ -2268,13 +2268,13 @@ for (const pkg of localPackages.values()) {
 
   const packageSurfaceSpecs = surfaceFeatureVariantSpecs.filter((spec) => spec.packageKey === key);
   if (packageSurfaceSpecs.length) {
-    const externalNormal = `all_crate_deps(\n        package_name = ${q(key)},\n        normal = True,\n    )`;
-    const externalProc = `all_crate_deps(\n        package_name = ${q(key)},\n        proc_macro = True,\n    )`;
+    const externalNormal = `all_crate_deps(\n        package_name = ${q(packageDirForKey(key))},\n        normal = True,\n    )`;
+    const externalProc = `all_crate_deps(\n        package_name = ${q(packageDirForKey(key))},\n        proc_macro = True,\n    )`;
     const procMacroDeps = localDeps(pkg, true);
     const procExpr = procMacroDeps.length
       ? `${listExpr(procMacroDeps)} + ${externalProc}`
       : externalProc;
-    const aliasesExpr = `aliases(package_name = ${q(key)})`;
+    const aliasesExpr = `aliases(package_name = ${q(packageDirForKey(key))})`;
     const packageBuildTargets = pkg.targets.filter((target) => {
       const rule = targetRule(target);
       return (rule === "rust_library" || rule === "rust_binary") &&
@@ -2376,7 +2376,7 @@ for (const pkg of localPackages.values()) {
     }`;
     rules.push(`rust_library(
     name = "meerkat_schedule_machine_schema_exports",
-    aliases = aliases(package_name = "meerkat-schedule"),
+    aliases = aliases(package_name = "crates/meerkat-schedule"),
     crate_name = "meerkat_schedule",
     crate_root = "src/lib.rs",
     crate_features = ${listExpr(crateFeaturesFor(key, pkg, ["machine-schema-exports"]))},
@@ -2387,7 +2387,7 @@ for (const pkg of localPackages.values()) {
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-schedule",
+        package_name = "crates/meerkat-schedule",
         proc_macro = True,
     ),
     deps = [
@@ -2396,13 +2396,13 @@ for (const pkg of localPackages.values()) {
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
-        package_name = "meerkat-schedule",
+        package_name = "crates/meerkat-schedule",
         normal = True,
     ),
 )`);
     rules.push(`rust_library(
     name = "meerkat_schedule_machine_schema_exports_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-schedule"),
+    aliases = aliases(package_name = "crates/meerkat-schedule"),
     crate_name = "meerkat_schedule",
     crate_root = "src/lib.rs",
     crate_features = ${listExpr(crateFeaturesFor(key, pkg, ["machine-schema-exports"]))},
@@ -2413,7 +2413,7 @@ for (const pkg of localPackages.values()) {
     proc_macro_deps = [
         "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
     ] + all_crate_deps(
-        package_name = "meerkat-schedule",
+        package_name = "crates/meerkat-schedule",
         proc_macro = True,
     ),
     deps = [
@@ -2422,7 +2422,7 @@ for (const pkg of localPackages.values()) {
         "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
         "//crates/meerkat:meerkat_skills_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-schedule",
+        package_name = "crates/meerkat-schedule",
         normal = True,
     ),
 )`);

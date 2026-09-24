@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_auth_core",
-    aliases = aliases(package_name = "meerkat-auth-core"),
+    aliases = aliases(package_name = "crates/meerkat-auth-core"),
     crate_name = "meerkat_auth_core",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -67,21 +67,21 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         proc_macro = True,
     ),
     deps = [
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-llm-core:meerkat_llm_core",
     ] + all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_auth_core_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-auth-core"),
+    aliases = aliases(package_name = "crates/meerkat-auth-core"),
     crate_name = "meerkat_auth_core",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -104,14 +104,14 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-auth-core",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         proc_macro = True,
     ),
     deps = [
         "//crates/meerkat:meerkat_core_agent_factory_build",
         "//crates/meerkat:meerkat_llm_core_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
     ),
 )
@@ -119,7 +119,7 @@ rust_library(
 rust_test(
     name = "meerkat_auth_core_unit_test",
     aliases = aliases(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -157,7 +157,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -166,7 +166,7 @@ rust_test(
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
     ),
@@ -175,7 +175,7 @@ rust_test(
 rust_test(
     name = "aws_sts_authorizer_test",
     aliases = aliases(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -214,7 +214,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -224,7 +224,7 @@ rust_test(
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
     ),
@@ -233,7 +233,7 @@ rust_test(
 rust_test(
     name = "azure_ad_authorizer_test",
     aliases = aliases(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -272,7 +272,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -282,7 +282,7 @@ rust_test(
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
     ),
@@ -291,7 +291,7 @@ rust_test(
 rust_test(
     name = "google_auth_authorizer_test",
     aliases = aliases(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -336,7 +336,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -346,7 +346,7 @@ rust_test(
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
     ),
@@ -355,7 +355,7 @@ rust_test(
 rust_test(
     name = "oauth_flow_test",
     aliases = aliases(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -394,7 +394,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -404,7 +404,7 @@ rust_test(
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
     ),
@@ -413,7 +413,7 @@ rust_test(
 rust_test(
     name = "refresh_coordinator_crossproc_test",
     aliases = aliases(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -454,7 +454,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -464,7 +464,7 @@ rust_test(
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
     ),
@@ -473,7 +473,7 @@ rust_test(
 rust_test(
     name = "refresh_coordinator_inproc_test",
     aliases = aliases(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -512,7 +512,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -522,7 +522,7 @@ rust_test(
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
     ),
@@ -531,7 +531,7 @@ rust_test(
 rust_test(
     name = "token_lifecycle_clear_test",
     aliases = aliases(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -570,7 +570,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -580,7 +580,7 @@ rust_test(
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
     ),
@@ -589,7 +589,7 @@ rust_test(
 rust_test(
     name = "token_store_contract_test",
     aliases = aliases(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -628,7 +628,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -638,7 +638,7 @@ rust_test(
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-runtime:meerkat_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-auth-core",
+        package_name = "crates/meerkat-auth-core",
         normal = True,
         normal_dev = True,
     ),

@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_providers",
-    aliases = aliases(package_name = "meerkat-providers"),
+    aliases = aliases(package_name = "crates/meerkat-providers"),
     crate_name = "meerkat_providers",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -69,21 +69,21 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-providers",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-providers",
+        package_name = "crates/meerkat-providers",
         proc_macro = True,
     ),
     deps = [
         "//crates/meerkat-auth-core:meerkat_auth_core",
         "//crates/meerkat-llm-core:meerkat_llm_core",
     ] + all_crate_deps(
-        package_name = "meerkat-providers",
+        package_name = "crates/meerkat-providers",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_providers_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-providers"),
+    aliases = aliases(package_name = "crates/meerkat-providers"),
     crate_name = "meerkat_providers",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -108,14 +108,14 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-providers",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-providers",
+        package_name = "crates/meerkat-providers",
         proc_macro = True,
     ),
     deps = [
         "//crates/meerkat:meerkat_auth_core_agent_factory_build",
         "//crates/meerkat:meerkat_llm_core_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-providers",
+        package_name = "crates/meerkat-providers",
         normal = True,
     ),
 )
@@ -123,7 +123,7 @@ rust_library(
 rust_test(
     name = "meerkat_providers_unit_test",
     aliases = aliases(
-        package_name = "meerkat-providers",
+        package_name = "crates/meerkat-providers",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -163,7 +163,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-providers",
+        package_name = "crates/meerkat-providers",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -171,7 +171,7 @@ rust_test(
         "//crates/meerkat-auth-core:meerkat_auth_core",
         "//crates/meerkat-llm-core:meerkat_llm_core",
     ] + all_crate_deps(
-        package_name = "meerkat-providers",
+        package_name = "crates/meerkat-providers",
         normal = True,
         normal_dev = True,
     ),

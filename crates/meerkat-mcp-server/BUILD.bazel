@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_mcp_server",
-    aliases = aliases(package_name = "meerkat-mcp-server"),
+    aliases = aliases(package_name = "crates/meerkat-mcp-server"),
     crate_name = "meerkat_mcp_server",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -67,7 +67,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
     ),
     deps = [
@@ -84,14 +84,14 @@ rust_library(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_mcp_server_with_runtime_test_support",
-    aliases = aliases(package_name = "meerkat-mcp-server"),
+    aliases = aliases(package_name = "crates/meerkat-mcp-server"),
     crate_name = "meerkat_mcp_server",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -114,7 +114,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
     ),
     deps = [
@@ -131,7 +131,7 @@ rust_library(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
     ),
 )
@@ -139,7 +139,7 @@ rust_library(
 rust_test(
     name = "meerkat_mcp_server_unit_test",
     aliases = aliases(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -181,7 +181,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -200,7 +200,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
     ),
@@ -208,7 +208,7 @@ rust_test(
 
 rust_binary(
     name = "rkat_mcp_bin",
-    aliases = aliases(package_name = "meerkat-mcp-server"),
+    aliases = aliases(package_name = "crates/meerkat-mcp-server"),
     crate_name = "rkat_mcp",
     crate_root = "src/main.rs",
     crate_features = [
@@ -230,7 +230,7 @@ rust_binary(
         "CARGO_MANIFEST_DIR": "crates/meerkat-mcp-server",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
     ),
     deps = [
@@ -249,7 +249,7 @@ rust_binary(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
     ),
 )
@@ -257,7 +257,7 @@ rust_binary(
 rust_test(
     name = "binary_fatal_error_display_test",
     aliases = aliases(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -300,7 +300,7 @@ rust_test(
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //crates/meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -320,7 +320,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
     ),
@@ -329,7 +329,7 @@ rust_test(
 rust_test(
     name = "binary_stdio_e2e_test",
     aliases = aliases(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -374,7 +374,7 @@ rust_test(
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //crates/meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -394,7 +394,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
     ),
@@ -403,7 +403,7 @@ rust_test(
 rust_test(
     name = "binary_tracing_stderr_test",
     aliases = aliases(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -448,7 +448,7 @@ rust_test(
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //crates/meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -468,7 +468,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
     ),
@@ -477,7 +477,7 @@ rust_test(
 rust_test(
     name = "live_mcp_matrix_test",
     aliases = aliases(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -524,7 +524,7 @@ rust_test(
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //crates/meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -544,7 +544,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
     ),
@@ -553,7 +553,7 @@ rust_test(
 rust_test(
     name = "mcp_binding_input_test",
     aliases = aliases(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -596,7 +596,7 @@ rust_test(
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //crates/meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -616,7 +616,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
     ),
@@ -625,7 +625,7 @@ rust_test(
 rust_test(
     name = "realm_config_ingress_test",
     aliases = aliases(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -668,7 +668,7 @@ rust_test(
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //crates/meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -688,7 +688,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
     ),
@@ -697,7 +697,7 @@ rust_test(
 rust_test(
     name = "runtime_backed_ingress_test",
     aliases = aliases(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -740,7 +740,7 @@ rust_test(
         "CARGO_BIN_EXE_rkat-mcp": "$(rootpath //crates/meerkat-mcp-server:rkat_mcp_bin)",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -760,7 +760,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
         normal_dev = True,
     ),
@@ -768,7 +768,7 @@ rust_test(
 
 rust_library(
     name = "meerkat_mcp_server_surface_min",
-    aliases = aliases(package_name = "meerkat-mcp-server"),
+    aliases = aliases(package_name = "crates/meerkat-mcp-server"),
     crate_name = "meerkat_mcp_server",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -789,7 +789,7 @@ rust_library(
         "surface",
     ],
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
     ),
     deps = [
@@ -803,14 +803,14 @@ rust_library(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
     ),
 )
 
 rust_binary(
     name = "rkat_mcp_surface_min_bin",
-    aliases = aliases(package_name = "meerkat-mcp-server"),
+    aliases = aliases(package_name = "crates/meerkat-mcp-server"),
     crate_name = "rkat_mcp",
     crate_root = "src/main.rs",
     crate_features = [],
@@ -832,7 +832,7 @@ rust_binary(
         "surface",
     ],
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
     ),
     deps = [
@@ -849,14 +849,14 @@ rust_binary(
         "//crates/meerkat:meerkat_tools_agent_factory_build",
         ":meerkat_mcp_server_surface_min",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_mcp_server_surface_comms",
-    aliases = aliases(package_name = "meerkat-mcp-server"),
+    aliases = aliases(package_name = "crates/meerkat-mcp-server"),
     crate_name = "meerkat_mcp_server",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -880,7 +880,7 @@ rust_library(
         "surface",
     ],
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
     ),
     deps = [
@@ -895,14 +895,14 @@ rust_library(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
     ),
 )
 
 rust_binary(
     name = "rkat_mcp_surface_comms_bin",
-    aliases = aliases(package_name = "meerkat-mcp-server"),
+    aliases = aliases(package_name = "crates/meerkat-mcp-server"),
     crate_name = "rkat_mcp",
     crate_root = "src/main.rs",
     crate_features = [
@@ -927,7 +927,7 @@ rust_binary(
         "surface",
     ],
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         proc_macro = True,
     ),
     deps = [
@@ -945,7 +945,7 @@ rust_binary(
         "//crates/meerkat:meerkat_tools_agent_factory_build",
         ":meerkat_mcp_server_surface_comms",
     ] + all_crate_deps(
-        package_name = "meerkat-mcp-server",
+        package_name = "crates/meerkat-mcp-server",
         normal = True,
     ),
 )

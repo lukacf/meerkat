@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_contracts",
-    aliases = aliases(package_name = "meerkat-contracts"),
+    aliases = aliases(package_name = "crates/meerkat-contracts"),
     crate_name = "meerkat_contracts",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -68,7 +68,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-contracts",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
     ),
     deps = [
@@ -77,14 +77,14 @@ rust_library(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_contracts_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-contracts"),
+    aliases = aliases(package_name = "crates/meerkat-contracts"),
     crate_name = "meerkat_contracts",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -108,7 +108,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-contracts",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
     ),
     deps = [
@@ -117,7 +117,7 @@ rust_library(
         "//crates/meerkat:meerkat_schedule_agent_factory_build",
         "//crates/meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
     ),
 )
@@ -125,7 +125,7 @@ rust_library(
 rust_test(
     name = "meerkat_contracts_unit_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -171,7 +171,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -181,7 +181,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),
@@ -189,7 +189,7 @@ rust_test(
 
 rust_binary(
     name = "emit_schemas_bin",
-    aliases = aliases(package_name = "meerkat-contracts"),
+    aliases = aliases(package_name = "crates/meerkat-contracts"),
     crate_name = "emit_schemas",
     crate_root = "src/bin/emit-schemas.rs",
     crate_features = [
@@ -212,7 +212,7 @@ rust_binary(
         "CARGO_MANIFEST_DIR": "crates/meerkat-contracts",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
     ),
     deps = [
@@ -222,7 +222,7 @@ rust_binary(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
     ),
 )
@@ -230,7 +230,7 @@ rust_binary(
 rust_test(
     name = "auth_binding_wire_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -271,7 +271,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -282,7 +282,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),
@@ -291,7 +291,7 @@ rust_test(
 rust_test(
     name = "image_generation_wire_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -330,7 +330,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -341,7 +341,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),
@@ -350,7 +350,7 @@ rust_test(
 rust_test(
     name = "jobs_wire_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -389,7 +389,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -400,7 +400,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),
@@ -409,7 +409,7 @@ rust_test(
 rust_test(
     name = "live_audio_format_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -447,7 +447,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -458,7 +458,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),
@@ -467,7 +467,7 @@ rust_test(
 rust_test(
     name = "live_barge_in_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -505,7 +505,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -516,7 +516,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),
@@ -525,7 +525,7 @@ rust_test(
 rust_test(
     name = "live_deadline_and_jitter_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -563,7 +563,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -574,7 +574,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),
@@ -583,7 +583,7 @@ rust_test(
 rust_test(
     name = "live_execution_identity_wire_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -621,7 +621,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -632,7 +632,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),
@@ -641,7 +641,7 @@ rust_test(
 rust_test(
     name = "mob_wire_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -680,7 +680,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -691,7 +691,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),
@@ -700,7 +700,7 @@ rust_test(
 rust_test(
     name = "regression_wire_types_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -741,7 +741,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -752,7 +752,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),
@@ -761,7 +761,7 @@ rust_test(
 rust_test(
     name = "runtime_turn_metadata_wire_override_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -800,7 +800,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -811,7 +811,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),
@@ -820,7 +820,7 @@ rust_test(
 rust_test(
     name = "session_accept_input_typed_round_trip_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -859,7 +859,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -870,7 +870,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),
@@ -879,7 +879,7 @@ rust_test(
 rust_test(
     name = "skill_ref_wire_no_legacy_test",
     aliases = aliases(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -918,7 +918,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -929,7 +929,7 @@ rust_test(
         "//crates/meerkat-schedule:meerkat_schedule",
         "//crates/meerkat-workgraph:meerkat_workgraph",
     ] + all_crate_deps(
-        package_name = "meerkat-contracts",
+        package_name = "crates/meerkat-contracts",
         normal = True,
         normal_dev = True,
     ),

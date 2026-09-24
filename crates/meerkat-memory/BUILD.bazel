@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_memory",
-    aliases = aliases(package_name = "meerkat-memory"),
+    aliases = aliases(package_name = "crates/meerkat-memory"),
     crate_name = "meerkat_memory",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -63,7 +63,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-memory",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-memory",
+        package_name = "crates/meerkat-memory",
         proc_macro = True,
     ),
     deps = [
@@ -73,14 +73,14 @@ rust_library(
         "//crates/meerkat-skills:meerkat_skills",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-memory",
+        package_name = "crates/meerkat-memory",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_memory_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-memory"),
+    aliases = aliases(package_name = "crates/meerkat-memory"),
     crate_name = "meerkat_memory",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -99,7 +99,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-memory",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-memory",
+        package_name = "crates/meerkat-memory",
         proc_macro = True,
     ),
     deps = [
@@ -109,7 +109,7 @@ rust_library(
         "//crates/meerkat:meerkat_skills_agent_factory_build",
         "//crates/meerkat:meerkat_sqlite_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-memory",
+        package_name = "crates/meerkat-memory",
         normal = True,
     ),
 )
@@ -117,7 +117,7 @@ rust_library(
 rust_test(
     name = "meerkat_memory_unit_test",
     aliases = aliases(
-        package_name = "meerkat-memory",
+        package_name = "crates/meerkat-memory",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -151,7 +151,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-memory",
+        package_name = "crates/meerkat-memory",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -162,7 +162,7 @@ rust_test(
         "//crates/meerkat-skills:meerkat_skills",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-memory",
+        package_name = "crates/meerkat-memory",
         normal = True,
         normal_dev = True,
     ),

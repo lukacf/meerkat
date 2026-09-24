@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_client",
-    aliases = aliases(package_name = "meerkat-client"),
+    aliases = aliases(package_name = "crates/meerkat-client"),
     crate_name = "meerkat_client",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -71,7 +71,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-client",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         proc_macro = True,
     ),
     deps = [
@@ -81,14 +81,14 @@ rust_library(
         "//crates/meerkat-llm-core:meerkat_llm_core",
         "//crates/meerkat-openai:meerkat_openai",
     ] + all_crate_deps(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_client_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-client"),
+    aliases = aliases(package_name = "crates/meerkat-client"),
     crate_name = "meerkat_client",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -115,7 +115,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-client",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         proc_macro = True,
     ),
     deps = [
@@ -125,7 +125,7 @@ rust_library(
         "//crates/meerkat:meerkat_llm_core_agent_factory_build",
         "//crates/meerkat:meerkat_openai_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         normal = True,
     ),
 )
@@ -133,7 +133,7 @@ rust_library(
 rust_test(
     name = "meerkat_client_unit_test",
     aliases = aliases(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -175,7 +175,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -187,7 +187,7 @@ rust_test(
         "//crates/meerkat-models:meerkat_models",
         "//crates/meerkat-openai:meerkat_openai",
     ] + all_crate_deps(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         normal = True,
         normal_dev = True,
     ),
@@ -196,7 +196,7 @@ rust_test(
 rust_test(
     name = "live_client_provider_matrix_test",
     aliases = aliases(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -239,7 +239,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -252,7 +252,7 @@ rust_test(
         "//crates/meerkat-models:meerkat_models",
         "//crates/meerkat-openai:meerkat_openai",
     ] + all_crate_deps(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         normal = True,
         normal_dev = True,
     ),
@@ -261,7 +261,7 @@ rust_test(
 rust_test(
     name = "rct_contracts_test",
     aliases = aliases(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -305,7 +305,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -318,7 +318,7 @@ rust_test(
         "//crates/meerkat-models:meerkat_models",
         "//crates/meerkat-openai:meerkat_openai",
     ] + all_crate_deps(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         normal = True,
         normal_dev = True,
     ),
@@ -327,7 +327,7 @@ rust_test(
 rust_test(
     name = "system_client_proxy_test",
     aliases = aliases(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -368,7 +368,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -381,7 +381,7 @@ rust_test(
         "//crates/meerkat-models:meerkat_models",
         "//crates/meerkat-openai:meerkat_openai",
     ] + all_crate_deps(
-        package_name = "meerkat-client",
+        package_name = "crates/meerkat-client",
         normal = True,
         normal_dev = True,
     ),

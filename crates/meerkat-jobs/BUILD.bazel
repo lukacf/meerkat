@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_jobs",
-    aliases = aliases(package_name = "meerkat-jobs"),
+    aliases = aliases(package_name = "crates/meerkat-jobs"),
     crate_name = "meerkat_jobs",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -62,7 +62,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
     ),
     deps = [
@@ -70,14 +70,14 @@ rust_library(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_jobs_agent_factory_build",
-    aliases = aliases(package_name = "meerkat-jobs"),
+    aliases = aliases(package_name = "crates/meerkat-jobs"),
     crate_name = "meerkat_jobs",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -95,7 +95,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
     ),
     deps = [
@@ -103,7 +103,7 @@ rust_library(
         "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
         "//crates/meerkat:meerkat_sqlite_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
     ),
 )
@@ -111,7 +111,7 @@ rust_library(
 rust_test(
     name = "meerkat_jobs_unit_test",
     aliases = aliases(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -144,7 +144,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -153,7 +153,7 @@ rust_test(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
     ),
@@ -162,7 +162,7 @@ rust_test(
 rust_test(
     name = "health_census_test",
     aliases = aliases(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -195,7 +195,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -205,7 +205,7 @@ rust_test(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
     ),
@@ -214,7 +214,7 @@ rust_test(
 rust_test(
     name = "machine_contract_test",
     aliases = aliases(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -247,7 +247,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -257,7 +257,7 @@ rust_test(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
     ),
@@ -266,7 +266,7 @@ rust_test(
 rust_test(
     name = "notification_outbox_test",
     aliases = aliases(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -299,7 +299,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -309,7 +309,7 @@ rust_test(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
     ),
@@ -318,7 +318,7 @@ rust_test(
 rust_test(
     name = "predicate_watch_test",
     aliases = aliases(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -351,7 +351,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -361,7 +361,7 @@ rust_test(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
     ),
@@ -370,7 +370,7 @@ rust_test(
 rust_test(
     name = "public_projection_test",
     aliases = aliases(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -403,7 +403,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -413,7 +413,7 @@ rust_test(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
     ),
@@ -422,7 +422,7 @@ rust_test(
 rust_test(
     name = "recovery_fencing_test",
     aliases = aliases(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -455,7 +455,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -465,7 +465,7 @@ rust_test(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
     ),
@@ -474,7 +474,7 @@ rust_test(
 rust_test(
     name = "sqlite_store_conformance_test",
     aliases = aliases(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -507,7 +507,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -517,7 +517,7 @@ rust_test(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
     ),
@@ -526,7 +526,7 @@ rust_test(
 rust_test(
     name = "store_contract_test",
     aliases = aliases(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -559,7 +559,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -569,7 +569,7 @@ rust_test(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
     ),
@@ -578,7 +578,7 @@ rust_test(
 rust_test(
     name = "subscriptions_test",
     aliases = aliases(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -611,7 +611,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -621,7 +621,7 @@ rust_test(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
     ),
@@ -630,7 +630,7 @@ rust_test(
 rust_test(
     name = "terminal_outbox_test",
     aliases = aliases(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -663,7 +663,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -673,7 +673,7 @@ rust_test(
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
         "//crates/meerkat-sqlite:meerkat_sqlite",
     ] + all_crate_deps(
-        package_name = "meerkat-jobs",
+        package_name = "crates/meerkat-jobs",
         normal = True,
         normal_dev = True,
     ),

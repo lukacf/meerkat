@@ -46,7 +46,7 @@ filegroup(
 
 rust_library(
     name = "meerkat_rest",
-    aliases = aliases(package_name = "meerkat-rest"),
+    aliases = aliases(package_name = "crates/meerkat-rest"),
     crate_name = "meerkat_rest",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -69,7 +69,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rest",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
     ),
     deps = [
@@ -87,14 +87,14 @@ rust_library(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_rest_with_runtime_test_support",
-    aliases = aliases(package_name = "meerkat-rest"),
+    aliases = aliases(package_name = "crates/meerkat-rest"),
     crate_name = "meerkat_rest",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -119,7 +119,7 @@ rust_library(
         "CARGO_MANIFEST_DIR": "./crates/meerkat-rest",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
     ),
     deps = [
@@ -137,7 +137,7 @@ rust_library(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
     ),
 )
@@ -145,7 +145,7 @@ rust_library(
 rust_test(
     name = "meerkat_rest_unit_test",
     aliases = aliases(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -189,7 +189,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -208,7 +208,7 @@ rust_test(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
     ),
@@ -216,7 +216,7 @@ rust_test(
 
 rust_binary(
     name = "rkat_rest_bin",
-    aliases = aliases(package_name = "meerkat-rest"),
+    aliases = aliases(package_name = "crates/meerkat-rest"),
     crate_name = "rkat_rest",
     crate_root = "src/main.rs",
     crate_features = [
@@ -240,7 +240,7 @@ rust_binary(
         "CARGO_MANIFEST_DIR": "crates/meerkat-rest",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
     ),
     deps = [
@@ -259,7 +259,7 @@ rust_binary(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
     ),
 )
@@ -267,7 +267,7 @@ rust_binary(
 rust_test(
     name = "binary_fatal_error_display_test",
     aliases = aliases(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -309,7 +309,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -329,7 +329,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
     ),
@@ -338,7 +338,7 @@ rust_test(
 rust_test(
     name = "binary_http_e2e_test",
     aliases = aliases(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -383,7 +383,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -403,7 +403,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
     ),
@@ -412,7 +412,7 @@ rust_test(
 rust_test(
     name = "live_continue_tmp_test",
     aliases = aliases(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -455,7 +455,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -475,7 +475,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
     ),
@@ -484,7 +484,7 @@ rust_test(
 rust_test(
     name = "live_rest_matrix_test",
     aliases = aliases(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -533,7 +533,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -553,7 +553,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
     ),
@@ -562,7 +562,7 @@ rust_test(
 rust_test(
     name = "live_rest_regression_test",
     aliases = aliases(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -605,7 +605,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -625,7 +625,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
     ),
@@ -634,7 +634,7 @@ rust_test(
 rust_test(
     name = "regression_persistent_test",
     aliases = aliases(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -676,7 +676,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -696,7 +696,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
     ),
@@ -705,7 +705,7 @@ rust_test(
 rust_test(
     name = "rest_auth_endpoints_test",
     aliases = aliases(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -747,7 +747,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -767,7 +767,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
     ),
@@ -776,7 +776,7 @@ rust_test(
 rust_test(
     name = "rest_catalog_regression_test",
     aliases = aliases(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -818,7 +818,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -838,7 +838,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
     ),
@@ -847,7 +847,7 @@ rust_test(
 rust_test(
     name = "runtime_backed_ingress_test",
     aliases = aliases(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -891,7 +891,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -911,7 +911,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
     ),
@@ -920,7 +920,7 @@ rust_test(
 rust_test(
     name = "system_rest_resume_test",
     aliases = aliases(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -963,7 +963,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -983,7 +983,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
     ),
@@ -992,7 +992,7 @@ rust_test(
 rust_test(
     name = "e2e_system_rest_resume_metadata_bazel_test",
     aliases = aliases(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
         proc_macro = True,
@@ -1043,7 +1043,7 @@ rust_test(
         "RUST_TEST_THREADS": "1",
     },
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
         proc_macro_dev = True,
     ),
@@ -1063,7 +1063,7 @@ rust_test(
         "//crates/meerkat:meerkat_tools_agent_factory_build_with_runtime_test_support",
         "//crates/meerkat:meerkat_with_runtime_test_support",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
         normal_dev = True,
     ),
@@ -1071,7 +1071,7 @@ rust_test(
 
 rust_library(
     name = "meerkat_rest_surface_min",
-    aliases = aliases(package_name = "meerkat-rest"),
+    aliases = aliases(package_name = "crates/meerkat-rest"),
     crate_name = "meerkat_rest",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -1092,7 +1092,7 @@ rust_library(
         "surface",
     ],
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
     ),
     deps = [
@@ -1106,14 +1106,14 @@ rust_library(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
     ),
 )
 
 rust_binary(
     name = "rkat_rest_surface_min_bin",
-    aliases = aliases(package_name = "meerkat-rest"),
+    aliases = aliases(package_name = "crates/meerkat-rest"),
     crate_name = "rkat_rest",
     crate_root = "src/main.rs",
     crate_features = [],
@@ -1135,7 +1135,7 @@ rust_binary(
         "surface",
     ],
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
     ),
     deps = [
@@ -1151,14 +1151,14 @@ rust_binary(
         "//crates/meerkat:meerkat_tools_agent_factory_build",
         ":meerkat_rest_surface_min",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
     ),
 )
 
 rust_library(
     name = "meerkat_rest_surface_comms",
-    aliases = aliases(package_name = "meerkat-rest"),
+    aliases = aliases(package_name = "crates/meerkat-rest"),
     crate_name = "meerkat_rest",
     crate_root = "src/lib.rs",
     crate_features = [
@@ -1182,7 +1182,7 @@ rust_library(
         "surface",
     ],
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
     ),
     deps = [
@@ -1197,14 +1197,14 @@ rust_library(
         "//crates/meerkat:meerkat_store_agent_factory_build",
         "//crates/meerkat:meerkat_tools_agent_factory_build",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
     ),
 )
 
 rust_binary(
     name = "rkat_rest_surface_comms_bin",
-    aliases = aliases(package_name = "meerkat-rest"),
+    aliases = aliases(package_name = "crates/meerkat-rest"),
     crate_name = "rkat_rest",
     crate_root = "src/main.rs",
     crate_features = [
@@ -1229,7 +1229,7 @@ rust_binary(
         "surface",
     ],
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         proc_macro = True,
     ),
     deps = [
@@ -1246,7 +1246,7 @@ rust_binary(
         "//crates/meerkat:meerkat_tools_agent_factory_build",
         ":meerkat_rest_surface_comms",
     ] + all_crate_deps(
-        package_name = "meerkat-rest",
+        package_name = "crates/meerkat-rest",
         normal = True,
     ),
 )

@@ -46,7 +46,7 @@ filegroup(
 
 rust_proc_macro(
     name = "meerkat_machine_dsl",
-    aliases = aliases(package_name = "meerkat-machine-dsl"),
+    aliases = aliases(package_name = "crates/meerkat-machine-dsl"),
     crate_name = "meerkat_machine_dsl",
     crate_root = "src/lib.rs",
     crate_features = [],
@@ -58,13 +58,13 @@ rust_proc_macro(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-machine-dsl",
+        package_name = "crates/meerkat-machine-dsl",
         proc_macro = True,
     ),
     deps = [
         "//crates/meerkat-machine-dsl-core:meerkat_machine_dsl_core",
     ] + all_crate_deps(
-        package_name = "meerkat-machine-dsl",
+        package_name = "crates/meerkat-machine-dsl",
         normal = True,
     ),
 )

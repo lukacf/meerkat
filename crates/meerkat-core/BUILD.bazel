@@ -1002,9 +1002,7 @@ rust_test(
         "fast",
     ],
     size = "medium",
-    data = [
-        "//crates/meerkat:package_runfiles",
-    ],
+    data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",

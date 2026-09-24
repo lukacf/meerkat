@@ -374,6 +374,14 @@ them.
 
 ### Fixed
 
+- `meerkat-session` test scaffolding: the same-length in-place corruption
+  test waited for nothing between the original append and the corrupting
+  rewrite, so on a filesystem with coarse timestamps (the BuildBuddy release
+  executors) both landed in the same `ctime` tick and the native fingerprint
+  was equal by construction; the test now observes the `ctime` clock advance
+  before corrupting. The fingerprint's documentation states the same-tick
+  limitation.
+
 - A push to `main` with no Rust-relevant change (a CHANGELOG-only merge)
   no longer fails CI: the classifier emits an empty main-unit matrix for
   such a plan instead of a placeholder shard, the `main-unit`, `wasm-check`

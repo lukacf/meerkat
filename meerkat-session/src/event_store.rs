@@ -1273,6 +1273,18 @@ const PENDING_REWRITE_HEAD_CAPACITY: usize = 256;
 #[cfg(not(target_arch = "wasm32"))]
 const EVENT_LOG_ANCHOR_SAMPLE_BYTES: usize = 64;
 
+/// Native identity of an event log file, used to decide whether a decoded
+/// prefix index can be reused without re-reading the rows it covers.
+///
+/// On Unix the identity includes the inode's change time (`ctime`), which the
+/// kernel updates on every write and on every `utimes` call, so an in-place
+/// rewrite that restores `mtime` still changes the fingerprint. The check is
+/// only as fine as the filesystem's timestamp granularity: a same-length
+/// in-place rewrite that lands in the same `ctime` tick as the previous write
+/// and restores `mtime` is indistinguishable from the original by this
+/// fingerprint alone. The anchor sample of the final indexed row (see
+/// [`EVENT_LOG_ANCHOR_SAMPLE_BYTES`]) covers that row on a fingerprint hit;
+/// earlier rows are re-inspected only when the fingerprint changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg(not(target_arch = "wasm32"))]
 struct EventLogFingerprint {
@@ -7531,6 +7543,30 @@ mod tests {
         Ok(())
     }
 
+    /// Waits until the filesystem's `ctime` clock has advanced past
+    /// `reference`, observed on a scratch file in `dir`. The in-place
+    /// corruption tests need the corrupting write to land in a later `ctime`
+    /// tick than the original append; on a filesystem with coarse timestamps
+    /// both can otherwise fall into the same tick and the native fingerprint
+    /// is equal by construction (seen on the BuildBuddy executors).
+    #[cfg(unix)]
+    async fn wait_for_ctime_tick_after(
+        dir: &Path,
+        reference: (i64, i64),
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::MetadataExt;
+        let scratch = dir.join("ctime-tick");
+        for _ in 0..20_000 {
+            tokio::fs::write(&scratch, b"tick").await?;
+            let metadata = tokio::fs::metadata(&scratch).await?;
+            if (metadata.ctime(), metadata.ctime_nsec()) > reference {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        Err("filesystem ctime clock did not advance past the reference".into())
+    }
+
     #[tokio::test]
     async fn file_event_store_same_length_prefix_corruption_with_restored_mtime_rebuilds()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7547,6 +7583,12 @@ mod tests {
         let before = FileEventStore::event_log_fingerprint(&path)
             .await?
             .expect("event log fingerprint");
+        #[cfg(unix)]
+        wait_for_ctime_tick_after(
+            temp.path(),
+            (before.ctime_seconds, before.ctime_nanoseconds),
+        )
+        .await?;
         let mut bytes = tokio::fs::read(&path).await?;
         let needle = b"\"schema_version\":2";
         let position = bytes

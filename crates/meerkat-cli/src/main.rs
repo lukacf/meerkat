@@ -18545,7 +18545,7 @@ mod tests {
 
     fn hooks_override_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../tests/fixtures/hooks/run_override.json")
+            .join("../../tests/fixtures/hooks/run_override.json")
     }
 
     fn fixture_skill_key(name: &str) -> meerkat_core::skills::SkillKey {

@@ -6442,7 +6442,7 @@ mod tests {
 
     fn hooks_override_fixture() -> HookRunOverrides {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../tests/fixtures/hooks/run_override.json");
+            .join("../../tests/fixtures/hooks/run_override.json");
         let payload = std::fs::read_to_string(path).expect("hook override fixture must exist");
         serde_json::from_str::<HookRunOverrides>(&payload)
             .expect("hook override fixture must deserialize")

@@ -13,8 +13,8 @@ extracts a job, splits it into steps, and evaluates each step's `if:` and the
 push, a package-recovery dispatch, an explicit historical-evidence dispatch).
 Reflowing a condition across lines, collapsing it onto one line, or rewriting
 an expression into an equivalent one all pass; gating a step off tag pushes,
-re-enabling the long measurement on tags, or relaxing the 30 minute SLO all
-fail and name the defect.
+re-enabling the long measurement on tags, relaxing the 30 minute publication
+SLO, or making the SDK packages wait on it all fail and name the defect.
 
 Only the Python standard library is used, so the doctor and its contract test
 run wherever `python3` does.
@@ -202,6 +202,10 @@ class EventContext:
         needs = re.fullmatch(r"needs\.[A-Za-z0-9_-]+\.result", path)
         if needs:
             return self.needs_result
+        # Earlier steps of the same job are evaluated on the happy path, the
+        # same assumption `needs_result` makes for upstream jobs.
+        if re.fullmatch(r"steps\.[A-Za-z0-9_-]+\.(?:outcome|conclusion)", path):
+            return self.needs_result
         raise UnsupportedExpression(
             f"context `{path}` is not modelled by the release doctor"
         )
@@ -229,6 +233,9 @@ def _equal(left: object, right: object) -> bool:
 
 FUNCTIONS: dict[str, Callable[[list[object]], object]] = {
     "always": lambda args: True,
+    "success": lambda args: True,
+    "failure": lambda args: False,
+    "cancelled": lambda args: False,
     "startsWith": lambda args: str(args[0]).lower().startswith(str(args[1]).lower()),
     "endsWith": lambda args: str(args[0]).lower().endswith(str(args[1]).lower()),
     "contains": lambda args: str(args[1]).lower() in str(args[0]).lower(),
@@ -447,22 +454,60 @@ def check_semver_evidence(text: str) -> list[str]:
     return violations
 
 
+READBACK_FLAG = "--readback-only"
+
+
+def _is_sdk_publish(step: Step) -> bool:
+    return step.name.startswith("Publish ") and step.name.endswith(" SDK")
+
+
 def check_registry_slo(text: str) -> list[str]:
-    """Tag releases verify every crate is public within the 30 minute SLO."""
+    """Tag releases read every crate back before the SDK packages publish, then
+    enforce the 30 minute crates.io publication SLO without blocking them."""
     block = job_block(text, REGISTRY_JOB)
     violations = _job_enabled(block, REGISTRY_JOB, TAG_PUSH)
     steps = job_steps(block)
 
-    verifier_steps = [step for step in steps if PUBLIC_VERIFIER in step.run]
-    if not verifier_steps:
+    verifier = [
+        (index, step) for index, step in enumerate(steps) if PUBLIC_VERIFIER in step.run
+    ]
+    readback = [(i, s) for i, s in verifier if READBACK_FLAG in s.run]
+    slo = [(i, s) for i, s in verifier if READBACK_FLAG not in s.run]
+    sdk_indexes = [i for i, s in enumerate(steps) if _is_sdk_publish(s)]
+
+    if not readback:
         violations.append(
-            f"job `{REGISTRY_JOB}` has no step that runs `{PUBLIC_VERIFIER}`"
+            f"job `{REGISTRY_JOB}` has no step that reads every crate back with "
+            f"`{PUBLIC_VERIFIER} {READBACK_FLAG}` before the SDK packages publish"
         )
-    for step in verifier_steps:
+    for index, step in readback:
+        if not step_runs(step, TAG_PUSH):
+            violations.append(f"step `{step.name}` does not run on {TAG_PUSH.label}")
+        if sdk_indexes and index > min(sdk_indexes):
+            violations.append(
+                f"step `{step.name}` runs after an SDK publish step; the SDK "
+                "packages must follow the crate readback"
+            )
+
+    if not slo:
+        violations.append(
+            f"job `{REGISTRY_JOB}` has no step that enforces the publication SLO "
+            f"with `{PUBLIC_VERIFIER} --slo-seconds`"
+        )
+    for index, step in slo:
         if not step_runs(step, TAG_PUSH):
             violations.append(f"step `{step.name}` does not run on {TAG_PUSH.label}")
             continue
+        if sdk_indexes and index < max(sdk_indexes):
+            violations.append(
+                f"step `{step.name}` runs before an SDK publish step; SDK "
+                "publication must not wait on the publication SLO"
+            )
         rendered = render(step.run, TAG_PUSH)
+        if "--window-started-at" not in rendered and "--tag-pushed-at" not in rendered:
+            violations.append(
+                f"step `{step.name}` gives `{PUBLIC_VERIFIER}` no SLO window start"
+            )
         match = re.search(r"--slo-seconds[\s=]+(\S+)", rendered)
         if not match:
             violations.append(
@@ -478,7 +523,7 @@ def check_registry_slo(text: str) -> list[str]:
         elif value != str(TAG_SLO_SECONDS):
             violations.append(
                 f"step `{step.name}` passes `--slo-seconds {value}` on {TAG_PUSH.label}; "
-                f"the tag-to-public SLO is {TAG_SLO_SECONDS} seconds"
+                f"the publication SLO is {TAG_SLO_SECONDS} seconds"
             )
     return violations
 

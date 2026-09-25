@@ -304,14 +304,15 @@ export interface ProviderTokenAccounting {
  *   [`TurnUsage::presented_tokens`]) instead, which is exactly what
  *   [`CumulativeUsage::add_turn`] does.
  * - Do not expect the per-call rows to reconcile with the cumulative account
- *   either. Intermediate tool-loop calls, the structured-output extraction
- *   call, and the compaction summary call are all charged to the cumulative
- *   account and publish no `turn_completed` row, so the rows cover a strict
- *   subset of the tokens.
+ *   unconditionally. Every committed agent-loop call publishes a
+ *   `turn_completed` row and every extraction request a `request_usage` row
+ *   on the extraction outcome event, but the compaction summary call and a
+ *   call whose turn fails after the provider answered are charged to the
+ *   cumulative account without a row.
  *
  * The worked example lives in `docs/reference/usage-accounting.mdx`. Its
  * numbers are pinned against the agent loop by
- * `turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`
+ * `turn_rows_cover_every_call_while_the_run_total_is_session_cumulative`
  * (`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's
  * arithmetic by `cumulative_usage_matches_documented_aggregation_example`.
  */
@@ -337,7 +338,7 @@ export type Usage = {
  * intentionally carries no [`crate::ProviderTokenAccounting`], because one
  * session may span providers and models and so cannot truthfully claim a
  * single per-call convention; per-model attribution is read from the per-call
- * `turn_completed` rows, which cover only the calls that closed a run.
+ * rows (`turn_completed.usage` and the extraction events' `request_usage`).
  */
 export type CumulativeUsage = Usage;
 
@@ -1125,6 +1126,7 @@ export type AgentEvent = {
   type: "run_completed";
   usage: CumulativeUsage;
 } | {
+  request_usage?: TurnUsage[];
   schema_warnings?: SchemaWarning[] | null;
   session_id: SessionId;
   structured_output: unknown;
@@ -1133,6 +1135,7 @@ export type AgentEvent = {
   attempts: number;
   last_output: string;
   reason: string;
+  request_usage?: TurnUsage[];
   session_id: SessionId;
   type: "extraction_failed";
 } | {

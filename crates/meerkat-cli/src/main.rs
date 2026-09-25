@@ -154,10 +154,11 @@ fn spawn_scoped_event_handler(
     mut scoped_event_rx: mpsc::Receiver<ScopedAgentEvent>,
     policy: stream_renderer::StreamRenderPolicy,
     verbose: bool,
+    run_totals: stream_renderer::RunTotalSource,
 ) -> tokio::task::JoinHandle<stream_renderer::StreamRenderSummary> {
     tokio::spawn(async move {
         let ansi = stream_renderer::stderr_is_tty();
-        let mut renderer = stream_renderer::StreamRenderer::new(ansi, policy, verbose);
+        let mut renderer = stream_renderer::StreamRenderer::new(ansi, policy, verbose, run_totals);
         while let Some(event) = scoped_event_rx.recv().await {
             renderer.render(&event);
         }
@@ -179,6 +180,7 @@ impl CliOutputPipeline {
         verbose: bool,
         stream_policy: Option<stream_renderer::StreamRenderPolicy>,
         primary_scope_path: Vec<StreamScopeFrame>,
+        run_totals: stream_renderer::RunTotalSource,
     ) -> anyhow::Result<Self> {
         let mut pipeline = Self {
             event_tx: None,
@@ -205,7 +207,9 @@ impl CliOutputPipeline {
 
             pipeline.event_tx = Some(primary_tx);
             pipeline.scoped_event_tx = Some(scoped_tx);
-            pipeline.stream_task = Some(spawn_scoped_event_handler(scoped_rx, policy, verbose));
+            pipeline.stream_task = Some(spawn_scoped_event_handler(
+                scoped_rx, policy, verbose, run_totals,
+            ));
         } else if verbose {
             let (tx, rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
             pipeline.event_tx = Some(tx);
@@ -650,6 +654,70 @@ where
             registration.epoch_id()
         )),
     }
+}
+
+/// Bound on waiting, at CLI exit, for a session's durable event projection
+/// (the realm event log and `.rkat/sessions/<id>/events.jsonl`) to drain.
+const CLI_EVENT_PROJECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wait until every event the session published is in its durable event log
+/// and the derived `.rkat/` files are synced.
+///
+/// The projection runs on its own task and can trail the session by a burst
+/// of streamed deltas. Returning from `main` before it drains cancels it, so
+/// the log would end mid-stream (no `run_completed`) while the process exits
+/// 0. Call this after the session service has shut down, which closes the
+/// projection's input. The log is derived state, so a projection that faulted
+/// or did not drain in time is reported and does not fail the run.
+#[cfg(feature = "session-store")]
+async fn await_cli_event_projection_drain(
+    service: &meerkat::PersistentSessionService<FactoryAgentBuilder>,
+    session_id: &SessionId,
+) {
+    match tokio::time::timeout(
+        CLI_EVENT_PROJECTION_DRAIN_TIMEOUT,
+        service.event_log_await_projection_drain(session_id),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            eprintln!("Warning: the event log of session {session_id} is incomplete: {error}");
+        }
+        Err(_elapsed) => eprintln!(
+            "Warning: the event log of session {session_id} did not finish writing within \
+             {CLI_EVENT_PROJECTION_DRAIN_TIMEOUT:?}; its tail may be missing"
+        ),
+    }
+}
+
+/// Where the stream renderer takes run totals from. A one-shot run prints its
+/// total from the run result after the stream ends; keep-alive runs after the
+/// first return no result, so the renderer folds them from the stream.
+fn cli_run_total_source(keep_alive: bool) -> stream_renderer::RunTotalSource {
+    if keep_alive {
+        stream_renderer::RunTotalSource::StreamRows
+    } else {
+        stream_renderer::RunTotalSource::HostRunResult
+    }
+}
+
+/// The run's own token total: `run_usage`, which charges every provider call
+/// of the run (tool-loop calls, extraction and its retries, compaction
+/// summaries). `run_completed.usage` is session-cumulative and precedes
+/// extraction, so it is not this total.
+fn cli_run_total_usage(result: &meerkat_core::types::RunResult) -> meerkat_core::types::Usage {
+    result.run_usage.clone().unwrap_or_else(|| {
+        let mut folded = meerkat_core::CumulativeUsage::default();
+        for request in &result.request_usage {
+            folded.add_turn(request);
+        }
+        folded.into_inner()
+    })
+}
+
+fn print_cli_run_total(result: &meerkat_core::types::RunResult) {
+    stream_renderer::print_run_total(&cli_run_total_usage(result));
 }
 
 #[cfg(any(feature = "session-store", test))]
@@ -11470,8 +11538,13 @@ async fn run_agent(
             .transpose()
             .map_err(|e| anyhow::anyhow!("Invalid --app-context JSON: {e}"))?;
 
-        let output_pipeline =
-            CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
+        let output_pipeline = CliOutputPipeline::new(
+            stream,
+            verbose,
+            stream_policy.clone(),
+            primary_scope_path,
+            cli_run_total_source(keep_alive),
+        )?;
 
         let mut build = SessionBuildOptions {
             model_fallback: None,
@@ -11720,13 +11793,16 @@ async fn run_agent(
         // In keep-alive mode, block until Ctrl+C after the initial turn completes.
         // The runtime adapter, comms drain, and detached wake will inject new turns
         // automatically. Without this, the process exits after the first turn.
+        let mut keep_alive_wait = Ok(());
         if keep_alive && matches!(&turn_result, Ok(CliRuntimeTurnResult::Completed(_))) {
             eprintln!(
                 "Keep-alive: initial turn complete, waiting for events (Ctrl+C or SIGTERM to exit)..."
             );
             // Block until SIGINT/SIGTERM. The runtime loop, comms drain, and
             // detached wake tasks continue running in background tokio tasks.
-            shutdown_signal::wait_for_shutdown_signal().await?;
+            // A failed wait still shuts the session down below before it is
+            // reported, so the event log is drained on this path too.
+            keep_alive_wait = shutdown_signal::wait_for_shutdown_signal().await;
             eprintln!("\nShutting down...");
         }
 
@@ -11759,11 +11835,13 @@ async fn run_agent(
                 if let Err(error) = service.try_shutdown().await {
                     accumulate_anyhow_error(&mut shutdown_error, error.into());
                 }
+                await_cli_event_projection_drain(&service, &session_id).await;
                 shutdown_mcp(&mcp_adapter).await;
                 shutdown_error.map_or(Ok(()), Err)
             },
         ))
         .await?;
+        keep_alive_wait?;
         if export_atif
             && let Err(error) = export_session_atif(&session_id.to_string(), None, scope).await
         {
@@ -11772,6 +11850,9 @@ async fn run_agent(
         // Output the result
         match result {
             CliRuntimeTurnResult::Completed(result) => {
+                if (stream || verbose) && !keep_alive {
+                    print_cli_run_total(&result);
+                }
                 let storage_fell_back = storage_scope.locator.realm != scope.locator.realm;
                 print_completed_run_result(
                     *result,
@@ -12185,6 +12266,7 @@ async fn resume_session_with_llm_override(
             vec![StreamScopeFrame::Primary {
                 session_id: session_id.to_string(),
             }],
+            cli_run_total_source(keep_alive),
         )?;
 
         // Wave-c C-12: lift runtime-side preload-skill names into typed
@@ -12434,11 +12516,13 @@ async fn resume_session_with_llm_override(
         }
         .await;
 
+        let mut keep_alive_wait = Ok(());
         if keep_alive && matches!(&turn_result, Ok(CliRuntimeTurnResult::Completed(_))) {
             eprintln!(
                 "Keep-alive: resume turn complete, waiting for events (Ctrl+C or SIGTERM to exit)..."
             );
-            shutdown_signal::wait_for_shutdown_signal().await?;
+            // Reported after the shutdown below, which drains the event log.
+            keep_alive_wait = shutdown_signal::wait_for_shutdown_signal().await;
             eprintln!("\nShutting down...");
         }
 
@@ -12471,12 +12555,15 @@ async fn resume_session_with_llm_override(
                 if let Err(error) = service.try_shutdown().await {
                     accumulate_anyhow_error(&mut shutdown_error, error.into());
                 }
+                log_stage("event_log_drain");
+                await_cli_event_projection_drain(&service, &session_id).await;
                 log_stage("shutdown_mcp");
                 shutdown_mcp(&mcp_adapter).await;
                 shutdown_error.map_or(Ok(()), Err)
             },
         ))
         .await?;
+        keep_alive_wait?;
         if export_atif
             && let Err(error) = export_session_atif(&session_id.to_string(), None, scope).await
         {
@@ -12486,6 +12573,9 @@ async fn resume_session_with_llm_override(
         log_stage("print_result");
         match result {
             CliRuntimeTurnResult::Completed(result) => {
+                if (stream || verbose) && !keep_alive {
+                    print_cli_run_total(&result);
+                }
                 print_completed_run_result(*result, &output, stream, scope, true).await?;
             }
             CliRuntimeTurnResult::CallbackPending(pending) => {
@@ -16476,7 +16566,12 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
             let activation_params = parse_run_flow_params(params)?;
             let (scoped_event_tx, stream_task) = if let Some(policy) = stream_policy {
                 let (tx, rx) = mpsc::channel::<ScopedAgentEvent>(200);
-                let task = spawn_scoped_event_handler(rx, policy, false);
+                let task = spawn_scoped_event_handler(
+                    rx,
+                    policy,
+                    false,
+                    stream_renderer::RunTotalSource::StreamRows,
+                );
                 (Some(tx), Some(task))
             } else {
                 (None, None)
@@ -20586,6 +20681,7 @@ default_model = "gemma"
             vec![StreamScopeFrame::Primary {
                 session_id: "test-session".to_string(),
             }],
+            stream_renderer::RunTotalSource::HostRunResult,
         )
         .expect("stream pipeline should build");
 
@@ -20600,8 +20696,14 @@ default_model = "gemma"
 
     #[tokio::test]
     async fn test_cli_output_pipeline_shutdown_handles_verbose_mode() {
-        let pipeline = CliOutputPipeline::new(false, true, None, Vec::new())
-            .expect("verbose pipeline should build");
+        let pipeline = CliOutputPipeline::new(
+            false,
+            true,
+            None,
+            Vec::new(),
+            stream_renderer::RunTotalSource::HostRunResult,
+        )
+        .expect("verbose pipeline should build");
 
         tokio::time::timeout(
             Duration::from_secs(2),
@@ -20622,6 +20724,7 @@ default_model = "gemma"
             vec![StreamScopeFrame::Primary {
                 session_id: session_id.to_string(),
             }],
+            stream_renderer::RunTotalSource::HostRunResult,
         )
         .expect("stream pipeline should build");
         let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
@@ -20698,6 +20801,7 @@ default_model = "gemma"
             vec![StreamScopeFrame::Primary {
                 session_id: "test-session".to_string(),
             }],
+            stream_renderer::RunTotalSource::HostRunResult,
         )
         .expect("stream pipeline should build");
 
@@ -20725,6 +20829,7 @@ default_model = "gemma"
             vec![StreamScopeFrame::Primary {
                 session_id: session_id.to_string(),
             }],
+            stream_renderer::RunTotalSource::HostRunResult,
         )
         .expect("stream pipeline should build");
         let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());

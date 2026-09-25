@@ -627,6 +627,13 @@ struct CallingLlmPrepared {
     typed_provider_params: Option<ProviderParamsOverride>,
 }
 
+/// Accounting of one tool-loop provider call, carried from the model
+/// response to the turn commit that publishes it.
+struct CallingLlmToolTurnAccounting {
+    stop_reason: crate::types::StopReason,
+    usage: Option<TurnUsage>,
+}
+
 /// The classified assistant response for one boundary.
 struct CallingLlmAssistantTurn {
     assistant_msg: BlockAssistantMessage,
@@ -5908,6 +5915,14 @@ where
             self.last_input_tokens = turn_usage.presented_tokens();
             self.session.record_turn_usage(turn_usage);
             self.run_request_usage.push(turn_usage.clone());
+            // Extraction publishes no `turn_completed`; its rows ride the
+            // extraction outcome event. Recorded here, where every answered
+            // request is charged, so an attempt that later fails validation,
+            // a hook, or the budget still publishes its row.
+            if in_extraction {
+                self.extraction_state
+                    .record_request_usage(turn_usage.clone());
+            }
         }
         if let Some(exceeded) = self.budget.observe().exceeded() {
             emit_phase_event!(self, ctx, budget_warning_event(exceeded));
@@ -6110,7 +6125,12 @@ where
         tool_defs: &Arc<[Arc<ToolDef>]>,
         assistant: CallingLlmAssistantTurn,
     ) -> Result<CallingLlmStep, AgentError> {
-        let assistant_msg = assistant.assistant_msg;
+        let CallingLlmAssistantTurn {
+            assistant_msg,
+            stop_reason,
+            usage,
+            ..
+        } = assistant;
         if in_extraction {
             let tool_call_names = assistant_msg
                 .tool_calls()
@@ -6203,8 +6223,13 @@ where
         let batch = self
             .collect_calling_llm_tool_outcomes(ctx, tool_defs, dispatch_results)
             .await?;
-        self.commit_calling_llm_tool_turn(ctx, assistant_msg, batch)
-            .await
+        self.commit_calling_llm_tool_turn(
+            ctx,
+            assistant_msg,
+            CallingLlmToolTurnAccounting { stop_reason, usage },
+            batch,
+        )
+        .await
     }
     /// Runs pre-tool hooks and visibility prechecks over the requested
     /// tool calls, admitting the executable subset.
@@ -6462,6 +6487,7 @@ where
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
         assistant_msg: BlockAssistantMessage,
+        accounting: CallingLlmToolTurnAccounting,
         batch: CallingLlmToolBatch,
     ) -> Result<CallingLlmStep, AgentError> {
         let CallingLlmToolBatch {
@@ -6586,6 +6612,13 @@ where
                 emit_phase_event!(self, ctx, AgentEvent::AssistantImageAppended { image });
             }
         }
+        // The tool-loop call's assistant message is committed (or staged
+        // with its callback batch), so its turn is complete. Publishing it
+        // pairs this request's `TurnStarted` and puts its accounting on the
+        // event stream, where a consumer sees every agent-loop provider call
+        // rather than only the one that closes the run.
+        let CallingLlmToolTurnAccounting { stop_reason, usage } = accounting;
+        emit_phase_event!(self, ctx, AgentEvent::TurnCompleted { stop_reason, usage });
 
         self.observe_cancel_after_boundary_request(ctx.run_id)?;
 

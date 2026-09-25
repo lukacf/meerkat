@@ -74,9 +74,10 @@ export interface ProviderTokenAccounting {
  *
  * Do not sum the cumulative value with anything - take the latest one - and do
  * not sum per-call `inputTokens` (that undercounts on cache-heavy Anthropic
- * sessions); sum `accounting.presentedTokens` instead. The per-call rows cover
- * only the calls that closed a run, so they do not reconcile with the cumulative
- * total.
+ * sessions); sum `accounting.presentedTokens` instead. Every committed
+ * agent-loop call publishes a `turn_completed` row; extraction requests,
+ * compaction summaries and turns that fail after the provider answered do not,
+ * so the rows need not reconcile with the cumulative total.
  */
 export interface Usage {
   readonly inputTokens: number;

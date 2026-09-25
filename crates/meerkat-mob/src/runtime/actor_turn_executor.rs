@@ -869,6 +869,7 @@ mod tests {
                 session_id,
                 structured_output: serde_json::json!({"answer": 42}),
                 schema_warnings: None,
+                request_usage: Vec::new(),
             })
             .await
             .expect("send extraction succeeded event");
@@ -911,6 +912,7 @@ mod tests {
                 last_output: "main answer".to_string(),
                 attempts: 2,
                 reason: "Invalid JSON".to_string(),
+                request_usage: Vec::new(),
             })
             .await
             .expect("send extraction failed event");

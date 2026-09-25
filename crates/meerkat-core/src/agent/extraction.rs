@@ -19,6 +19,10 @@ pub(crate) struct ExtractionState {
     primary_output: Option<String>,
     result: Option<Value>,
     schema_warnings: Option<Vec<SchemaWarning>>,
+    /// Measured provider requests of the current extraction phase, in order.
+    /// Published on the extraction outcome event, which is the only
+    /// per-call accounting extraction has on the event stream.
+    request_usage: Vec<crate::types::TurnUsage>,
 }
 
 impl ExtractionState {
@@ -26,6 +30,15 @@ impl ExtractionState {
         self.primary_output = None;
         self.result = None;
         self.schema_warnings = None;
+        self.request_usage.clear();
+    }
+
+    pub(super) fn record_request_usage(&mut self, usage: crate::types::TurnUsage) {
+        self.request_usage.push(usage);
+    }
+
+    pub(super) fn request_usage(&self) -> &[crate::types::TurnUsage] {
+        &self.request_usage
     }
 
     pub(super) fn set_primary_output(&mut self, output: String) {

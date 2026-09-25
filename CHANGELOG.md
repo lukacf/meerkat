@@ -59,6 +59,17 @@ them.
   matching how Gemini bills them. Output totals rise on Gemini thinking models,
   and `max_tokens` budgets now charge thinking, so a Gemini run can reach
   `budget_exhausted` earlier than before.
+- `meerkat_core::AgentEvent::ExtractionSucceeded` and
+  `AgentEvent::ExtractionFailed` gain the public field `request_usage:
+  Vec<TurnUsage>`, one usage row per answered structured-output extraction
+  request. Struct literals naming every field must add it; it is
+  serde-defaulted and skipped when empty, so the JSON shape is additive.
+- Behaviour: `turn_completed` is now published for every committed agent-loop
+  provider call, including tool-loop calls (`stop_reason: tool_use`), instead of
+  only the call that closes the run. It pairs with the call's `turn_started`.
+  Consumers that counted `turn_completed` as one per run, or treated it as the
+  end of a run, must read `run_completed` for that. Consumers summing
+  `turn_completed.usage` rows now see every agent-loop call.
 
 ### Added
 
@@ -84,8 +95,36 @@ them.
 - Chat Completions backends that report reasoning beside `completion_tokens`
   (xAI) are detected from the row's exact arithmetic (`total_tokens` equals
   prompt plus completion plus reasoning), and their output counts reasoning.
+- Extraction outcome events carry `request_usage`, one per-call usage row for
+  each extraction request (retries after a failed validation included), so
+  structured-output extraction is accounted on the event stream.
+- `meerkat_core::usage_summary` and `turn_usage_summary` format the one-line
+  token summaries `rkat run --verbose` prints.
 
 ### Fixed
+
+- `rkat run --export-atif` records every provider request of the run as an
+  ATIF step with its own metrics: each tool-call turn, the answering turn and
+  each structured-output extraction request. It used to keep only the final
+  agent step, because a tool-call turn published no completion and was
+  overwritten by the next turn. Event logs written by earlier releases now
+  export their tool-call turns too, as unmetered steps. Step metrics carry
+  `cache_creation_tokens` and `reasoning_tokens` in `extra`, steps name their
+  model, and `final_metrics` sums every step.
+- `rkat run` and `rkat run --resume` wait for the session event log to finish
+  writing before exiting, and the drained `.rkat/sessions/<id>/events.jsonl` is
+  synced to disk. A run that streamed many deltas could exit 0 with the log
+  (and the realm event store the ATIF export reads) ending mid `text_delta`,
+  with no `run_completed`. If the log cannot finish, `rkat` now says so on
+  stderr. A failed keep-alive signal wait no longer skips this shutdown.
+- `rkat run --verbose` and `--stream` print one token line per provider request,
+  the first request and each extraction request included, on the presented
+  input denominator with cached and reasoning counts, and the closing `total`
+  is the run's `run_usage`. It used to print a line only for the final turn and
+  a total that was the session-cumulative `run_completed.usage`, which excludes
+  extraction and, on a resumed session, includes earlier runs. In keep-alive
+  mode, whose later runs return no result, each run's total is folded from its
+  per-request lines.
 
 - The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)
   and 033 (the office demo) pass again and run in pull-request CI. A new

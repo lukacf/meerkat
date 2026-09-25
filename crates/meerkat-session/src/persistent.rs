@@ -635,6 +635,22 @@ async fn project_session_event_stream(
             break;
         }
     }
+    sync_projected_files(&projector, &session_id).await;
+}
+
+/// Sync a drained projection's derived files before its drain witness
+/// resolves, so a host that awaits the drain and then exits leaves a complete
+/// `.rkat/` log on disk. The derived view is not session authority: a sync
+/// failure degrades it exactly like a failed projection write does.
+async fn sync_projected_files(projector: &SessionProjector, session_id: &SessionId) {
+    if let Err(error) = projector.sync(session_id).await {
+        tracing::warn!(
+            session_id = %session_id,
+            degraded_projection = true,
+            error = %error,
+            "derived .rkat/ view could not be synced after its projection drained"
+        );
+    }
 }
 
 async fn flush_projected_events(
@@ -835,7 +851,8 @@ async fn project_create_time_events(
 
     if let Some(session_id) = session_id.as_ref()
         && projection_admitted
-        && let Err(error) = flush_projected_events(
+    {
+        if let Err(error) = flush_projected_events(
             &event_store,
             &projector,
             session_id,
@@ -844,12 +861,14 @@ async fn project_create_time_events(
             &projection_gates,
         )
         .await
-    {
-        tracing::error!(
-            session_id = %session_id,
-            error = %error,
-            "final create-time event projection flush failed: durable event append failed"
-        );
+        {
+            tracing::error!(
+                session_id = %session_id,
+                error = %error,
+                "final create-time event projection flush failed: durable event append failed"
+            );
+        }
+        sync_projected_files(&projector, session_id).await;
     }
 }
 

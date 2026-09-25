@@ -399,14 +399,15 @@ class Usage(TypedDict, total=False):
       [`TurnUsage::presented_tokens`]) instead, which is exactly what
       [`CumulativeUsage::add_turn`] does.
     - Do not expect the per-call rows to reconcile with the cumulative account
-      either. Intermediate tool-loop calls, the structured-output extraction
-      call, and the compaction summary call are all charged to the cumulative
-      account and publish no `turn_completed` row, so the rows cover a strict
-      subset of the tokens.
+      unconditionally. Every committed agent-loop call publishes a
+      `turn_completed` row and every extraction request a `request_usage` row
+      on the extraction outcome event, but the compaction summary call and a
+      call whose turn fails after the provider answered are charged to the
+      cumulative account without a row.
 
     The worked example lives in `docs/reference/usage-accounting.mdx`. Its
     numbers are pinned against the agent loop by
-    `turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`
+    `turn_rows_cover_every_call_while_the_run_total_is_session_cumulative`
     (`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's
     arithmetic by `cumulative_usage_matches_documented_aggregation_example`.
     """
@@ -430,7 +431,7 @@ class Usage(TypedDict, total=False):
 # intentionally carries no [`crate::ProviderTokenAccounting`], because one
 # session may span providers and models and so cannot truthfully claim a
 # single per-call convention; per-model attribution is read from the per-call
-# `turn_completed` rows, which cover only the calls that closed a run.
+# rows (`turn_completed.usage` and the extraction events' `request_usage`).
 CumulativeUsage = Usage
 
 
@@ -1468,6 +1469,7 @@ class AgentEventRunCompleted(TypedDict, total=False):
 class AgentEventExtractionSucceeded(TypedDict, total=False):
     """Structured-output extraction succeeded after a completed main run.
     """
+    request_usage: NotRequired[list[TurnUsage]]
     schema_warnings: NotRequired[Optional[list[SchemaWarning]]]
     session_id: Required[SessionId]
     structured_output: Required[Any]
@@ -1480,6 +1482,7 @@ class AgentEventExtractionFailed(TypedDict, total=False):
     attempts: Required[int]
     last_output: Required[str]
     reason: Required[str]
+    request_usage: NotRequired[list[TurnUsage]]
     session_id: Required[SessionId]
     type: Required[Literal['extraction_failed']]
 
@@ -1608,6 +1611,13 @@ class AgentEventToolResultReceived(TypedDict, total=False):
 
 class AgentEventTurnCompleted(TypedDict, total=False):
     """Turn completed.
+
+    Published once per committed agent-loop provider request: each
+    tool-loop call (`stop_reason: tool_use`) and the call that closes the
+    run, each after its assistant message is committed, so it pairs with
+    the [`AgentEvent::TurnStarted`] of the same request. Structured-output
+    extraction requests publish their accounting on the extraction outcome
+    event instead (`request_usage`).
 
     # Why `usage` is optional
 

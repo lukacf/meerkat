@@ -6,12 +6,12 @@
 //! two accounts a consumer can read off the event stream have different
 //! coverage:
 //!
-//! - `turn_completed` carries exactly one provider call, the assistant turn
-//!   that closed the run. Intermediate tool-loop calls emit no usage-bearing
-//!   event.
+//! - `turn_completed` carries exactly one provider call, and every committed
+//!   agent-loop call publishes one: each tool-loop call and the call that
+//!   closes the run.
 //! - `run_completed` carries the session-cumulative total over every provider
-//!   call recorded on the session, so it does not reconcile with the sum of the
-//!   turn rows and it keeps growing across runs of the same session.
+//!   call recorded on the session, so it keeps growing across runs of the same
+//!   session and must never be summed with the turn rows.
 //!
 //! If these numbers change, the documented example is wrong and must change
 //! with them (`scripts/test_usage_accounting_docs.py` requires both sides).
@@ -228,7 +228,7 @@ fn drain(rx: &mut mpsc::Receiver<AgentEvent>) -> ObservedRun {
     let mut run_totals = Vec::new();
     while let Ok(event) = rx.try_recv() {
         match event {
-            // A measured run publishes a row per closing call. An absent row
+            // A measured run publishes a row per committed call. An absent row
             // would be a different observation entirely, so this collector
             // refuses to flatten one into the measured sequence.
             AgentEvent::TurnCompleted {
@@ -248,7 +248,7 @@ fn drain(rx: &mut mpsc::Receiver<AgentEvent>) -> ObservedRun {
 }
 
 #[tokio::test]
-async fn turn_rows_cover_one_call_while_the_run_total_is_session_cumulative() {
+async fn turn_rows_cover_every_call_while_the_run_total_is_session_cumulative() {
     assert_eq!(
         documented_script()
             .iter()
@@ -276,26 +276,34 @@ async fn turn_rows_cover_one_call_while_the_run_total_is_session_cumulative() {
     let observed_first = drain(&mut rx);
 
     assert_eq!(
-        observed_first.turn_rows.len(),
-        1,
-        "a tool-using run publishes one turn row, not one per provider call"
+        observed_first
+            .turn_rows
+            .iter()
+            .map(TurnUsage::presented_tokens)
+            .collect::<Vec<_>>(),
+        vec![5000, 4300, 4420],
+        "a tool-using run publishes one turn row per provider call, in order"
     );
-    let first_row = &observed_first.turn_rows[0];
     assert_eq!(
-        first_row.accounting().provider,
-        Provider::Anthropic,
-        "the turn row attributes itself without a session-metadata join"
+        observed_first
+            .turn_rows
+            .iter()
+            .map(|row| row.output_tokens)
+            .collect::<Vec<_>>(),
+        vec![200, 150, 90]
     );
-    assert_eq!(first_row.accounting().model, DOCUMENTED_MODEL);
+    for row in &observed_first.turn_rows {
+        assert_eq!(
+            row.accounting().provider,
+            Provider::Anthropic,
+            "each turn row attributes itself without a session-metadata join"
+        );
+        assert_eq!(row.accounting().model, DOCUMENTED_MODEL);
+    }
+    let closing_row = &observed_first.turn_rows[2];
     assert_eq!(
-        first_row.presented_tokens(),
-        4420,
-        "the turn row is the call that closed the run"
-    );
-    assert_eq!(first_row.output_tokens, 90);
-    assert_eq!(
-        first_row.input_tokens, 120,
-        "the raw Anthropic counter on that call excludes cached input"
+        closing_row.input_tokens, 120,
+        "the raw Anthropic counter on the closing call excludes cached input"
     );
 
     assert_eq!(observed_first.run_totals.len(), 1);
@@ -312,10 +320,19 @@ async fn turn_rows_cover_one_call_while_the_run_total_is_session_cumulative() {
         first_total.provider_accounting.is_none(),
         "a possibly multi-model aggregate must not claim one per-call convention"
     );
+    let first_rows_input: u64 = observed_first
+        .turn_rows
+        .iter()
+        .map(TurnUsage::presented_tokens)
+        .sum();
     assert_eq!(
-        first_total.input_tokens - first_row.presented_tokens(),
-        9300,
-        "the input the turn rows of this run do not account for"
+        first_rows_input, first_total.input_tokens,
+        "on a fresh session the turn rows of a tool loop reconcile with the run total"
+    );
+    assert_eq!(
+        first.run_usage.as_ref().map(|usage| usage.total_tokens()),
+        Some(14_160),
+        "run_usage is the run's own delta"
     );
 
     // ---- Second run on the same session: one provider call. ---------------
@@ -341,6 +358,10 @@ async fn turn_rows_cover_one_call_while_the_run_total_is_session_cumulative() {
     assert_eq!(second_total.output_tokens, 500);
     assert_eq!(second_total.total_tokens(), 18_920);
     assert_eq!(second.usage.total_tokens(), 18_920);
+    let second_run_usage = second.run_usage.as_ref().expect("second run_usage");
+    assert_eq!(second_run_usage.input_tokens, 4700);
+    assert_eq!(second_run_usage.output_tokens, 60);
+    assert_eq!(second_run_usage.cache_read_tokens, Some(4500));
 
     // ---- Run-scoped views: every provider call, and only this run's. -------
     let first_run = first.run_usage.as_ref().expect("first run usage");
@@ -374,28 +395,24 @@ async fn turn_rows_cover_one_call_while_the_run_total_is_session_cumulative() {
     assert_eq!(second_total.cache_read_tokens, Some(12_800));
 
     // ---- The documented aggregations, right and wrong. --------------------
-    let attributed_input = first_row.presented_tokens() + second_row.presented_tokens();
-    let attributed_output = first_row.output_tokens + second_row.output_tokens;
-    assert_eq!(attributed_input, 9120);
-    assert_eq!(attributed_output, 150);
+    let all_rows = observed_first
+        .turn_rows
+        .iter()
+        .chain(observed_second.turn_rows.iter())
+        .collect::<Vec<_>>();
+    let attributed_input: u64 = all_rows.iter().map(|row| row.presented_tokens()).sum();
+    let attributed_output: u64 = all_rows.iter().map(|row| row.output_tokens).sum();
+    assert_eq!(attributed_input, 18_420);
+    assert_eq!(attributed_output, 500);
     assert_eq!(
         attributed_input + attributed_output,
-        9270,
-        "per-model attribution covers a strict subset of the session total"
-    );
-    assert!(
-        attributed_input + attributed_output < second_total.total_tokens(),
-        "the turn rows must never be presented as reconciling with the run total"
-    );
-    assert_eq!(
-        second_total.total_tokens() - (attributed_input + attributed_output),
-        9650,
-        "tokens the session total charges that no turn row attributes"
+        second_total.total_tokens(),
+        "with no extraction or compaction, the turn rows attribute the whole session total"
     );
 
-    let naive_raw_input = first_row.input_tokens + second_row.input_tokens;
+    let naive_raw_input: u64 = all_rows.iter().map(|row| row.input_tokens).sum();
     assert_eq!(
-        naive_raw_input, 320,
+        naive_raw_input, 1620,
         "summing raw per-call input_tokens is the documented undercount"
     );
 
@@ -453,4 +470,173 @@ fn legacy_session_totals_normalize_to_the_invariant_and_stay_monotone() {
     assert_eq!(delta.cache_read_tokens, Some(4000));
     assert_eq!(delta.cache_creation_tokens, Some(0));
     assert!(live.cache_read_tokens.unwrap() <= live.input_tokens);
+}
+
+/// A structured-output run: one tool call, the answer, then an extraction
+/// attempt that fails validation and a retry that passes.
+fn structured_output_script() -> Vec<DocumentedCall> {
+    vec![
+        DocumentedCall {
+            uncached_input: 1000,
+            cache_creation_input: 4000,
+            cache_read_input: 0,
+            output: 200,
+            requests_tool: true,
+        },
+        DocumentedCall {
+            uncached_input: 300,
+            cache_creation_input: 0,
+            cache_read_input: 4000,
+            output: 150,
+            requests_tool: false,
+        },
+        DocumentedCall {
+            uncached_input: 50,
+            cache_creation_input: 0,
+            cache_read_input: 4300,
+            output: 30,
+            requests_tool: false,
+        },
+        DocumentedCall {
+            uncached_input: 70,
+            cache_creation_input: 0,
+            cache_read_input: 4350,
+            output: 40,
+            requests_tool: false,
+        },
+    ]
+}
+
+/// Plays `structured_output_script`, answering the extraction calls with the
+/// given texts in order.
+struct StructuredOutputClient {
+    inner: ScriptedAnthropicClient,
+    extraction_texts: Vec<&'static str>,
+}
+
+#[async_trait]
+impl AgentLlmClient for StructuredOutputClient {
+    async fn stream_response(
+        &self,
+        messages: &[Message],
+        tools: &[Arc<ToolDef>],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    ) -> Result<LlmStreamResult, AgentError> {
+        let result = self
+            .inner
+            .stream_response(messages, tools, max_tokens, temperature, provider_params)
+            .await?;
+        let index = self.inner.calls_made() - 1;
+        // Calls 0 and 1 are the agentic loop; later calls are extraction.
+        let Some(text) = index
+            .checked_sub(2)
+            .and_then(|attempt| self.extraction_texts.get(attempt))
+        else {
+            return Ok(result);
+        };
+        let (_, stop_reason, usage) = result.into_parts();
+        Ok(LlmStreamResult::new(
+            vec![AssistantBlock::Text {
+                text: (*text).to_string(),
+                meta: None,
+            }],
+            stop_reason,
+            usage,
+        ))
+    }
+
+    fn provider(&self) -> Provider {
+        self.inner.provider()
+    }
+
+    fn model(&self) -> &'static str {
+        DOCUMENTED_MODEL
+    }
+}
+
+#[tokio::test]
+async fn every_request_of_a_structured_output_run_publishes_one_usage_row() {
+    let schema = meerkat_core::OutputSchema::new(serde_json::json!({
+        "type": "object",
+        "properties": { "answer": { "type": "string" } },
+        "required": ["answer"]
+    }))
+    .expect("valid schema");
+    let client = Arc::new(StructuredOutputClient {
+        inner: ScriptedAnthropicClient::new(structured_output_script()),
+        extraction_texts: vec![r#"{"wrong": 1}"#, r#"{"answer": "42"}"#],
+    });
+    let mut agent = AgentBuilder::new()
+        .with_turn_state_handle(Arc::new(
+            crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+        ))
+        .output_schema(schema)
+        .structured_output_retries(1)
+        .build_standalone(client.clone(), Arc::new(LookupTool), Arc::new(NoopStore))
+        .await;
+
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
+    let result = agent
+        .run_with_events("structured".to_string().into(), tx)
+        .await
+        .expect("structured output run should complete");
+    assert_eq!(
+        client.inner.calls_made(),
+        4,
+        "tool call, answer, two extraction attempts"
+    );
+    assert_eq!(
+        result.structured_output,
+        Some(serde_json::json!({"answer": "42"}))
+    );
+
+    let mut turn_rows = Vec::new();
+    let mut turn_stop_reasons = Vec::new();
+    let mut extraction_rows = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AgentEvent::TurnCompleted {
+                stop_reason,
+                usage: Some(usage),
+            } => {
+                turn_stop_reasons.push(stop_reason);
+                turn_rows.push(usage);
+            }
+            AgentEvent::ExtractionSucceeded { request_usage, .. } => {
+                extraction_rows = request_usage;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        turn_stop_reasons,
+        vec![StopReason::ToolUse, StopReason::EndTurn],
+        "the tool-loop call and the closing call each complete a turn; extraction does not"
+    );
+    assert_eq!(
+        extraction_rows
+            .iter()
+            .map(TurnUsage::presented_tokens)
+            .collect::<Vec<_>>(),
+        vec![4350, 4420],
+        "each extraction attempt, including the one that failed validation, publishes a row"
+    );
+
+    // Folding every published row the way the session does reproduces the
+    // run's own usage exactly: nothing the run was charged is missing from
+    // the event stream.
+    let mut folded = meerkat_core::CumulativeUsage::default();
+    for row in turn_rows.iter().chain(extraction_rows.iter()) {
+        folded.add_turn(row);
+    }
+    let run_usage = result.run_usage.expect("run_usage");
+    assert_eq!(folded.as_usage(), &run_usage);
+    assert_eq!(run_usage.input_tokens, 5000 + 4300 + 4350 + 4420);
+    assert_eq!(
+        result.request_usage.len(),
+        turn_rows.len() + extraction_rows.len(),
+        "the event rows and the result rows describe the same requests"
+    );
 }

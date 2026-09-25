@@ -11,7 +11,6 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
-
 #![allow(clippy::result_large_err)]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

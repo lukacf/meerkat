@@ -1873,9 +1873,11 @@ impl MobMcpState {
         mob_id: &MobId,
         identity: AgentIdentity,
     ) -> Result<(), MobError> {
+        // Retirement follows process-tree semantics: members this one
+        // spawned (e.g. its fork_off children) are retired with it.
         self.admitted_handle_for(mob_id, ControlScope::Retire)
             .await?
-            .retire(identity)
+            .retire_with_descendants(identity)
             .await
     }
 

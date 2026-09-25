@@ -1357,7 +1357,7 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 self.handle
-                    .retire(AgentIdentity::from(args.member_id))
+                    .retire_with_descendants(AgentIdentity::from(args.member_id))
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name).await;

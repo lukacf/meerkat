@@ -41364,6 +41364,12 @@ impl MobActor {
                         spec
                     }
                 };
+                // Ownership belongs to the identity, not the incarnation: a
+                // successor spec (which callers cannot author) keeps the
+                // spawner of the incarnation it replaces.
+                if replacement_spec.spawned_by.is_none() {
+                    replacement_spec.spawned_by = snapshot.spawned_by.clone();
+                }
         self.customize_spawn_spec(
             super::handle::SpawnSource::Respawn,
             None,

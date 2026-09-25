@@ -13099,7 +13099,7 @@ impl MobHandle {
     ) -> BoundedMemberRunError {
         match self
             .fork_child_cleanup_authority()
-            .retire(child.clone())
+            .retire_with_descendants(child.clone())
             .await
         {
             Ok(()) => operation,
@@ -13119,7 +13119,7 @@ impl MobHandle {
             );
         }
         authority
-            .retire(child.clone())
+            .retire_with_descendants(child.clone())
             .await
             .err()
             .map(|error| error.to_string())
@@ -14282,6 +14282,62 @@ impl MobHandle {
         })
     }
 
+    /// Members transitively spawned by `identity` (via durable spawned_by
+    /// provenance), deepest first.
+    pub async fn descendants_deepest_first(&self, identity: &AgentIdentity) -> Vec<AgentIdentity> {
+        let roster = self.roster().await;
+        let mut children: std::collections::BTreeMap<AgentIdentity, Vec<AgentIdentity>> =
+            std::collections::BTreeMap::new();
+        for entry in roster.list() {
+            if let Some(spawner) = entry.spawned_by.as_ref() {
+                children
+                    .entry(spawner.clone())
+                    .or_default()
+                    .push(entry.agent_identity.clone());
+            }
+        }
+        let mut ordered = Vec::new();
+        let mut visited = std::collections::BTreeSet::from([identity.clone()]);
+        fn visit(
+            node: &AgentIdentity,
+            children: &std::collections::BTreeMap<AgentIdentity, Vec<AgentIdentity>>,
+            visited: &mut std::collections::BTreeSet<AgentIdentity>,
+            ordered: &mut Vec<AgentIdentity>,
+        ) {
+            for child in children.get(node).into_iter().flatten() {
+                if visited.insert(child.clone()) {
+                    visit(child, children, visited, ordered);
+                    ordered.push(child.clone());
+                }
+            }
+        }
+        visit(identity, &children, &mut visited, &mut ordered);
+        ordered
+    }
+
+    /// Retire a member and every member it transitively spawned, deepest
+    /// first, each through the ordinary fenced retire path. Every retirement
+    /// is attempted; the first failure is returned after the rest ran.
+    pub async fn retire_with_descendants(&self, identity: AgentIdentity) -> Result<(), MobError> {
+        let mut first_error = None;
+        for descendant in self.descendants_deepest_first(&identity).await {
+            if let Err(error) = self.retire(descendant.clone()).await {
+                tracing::warn!(
+                    member = %descendant,
+                    ancestor = %identity,
+                    error = %error,
+                    "cascading retirement of a descendant failed"
+                );
+                first_error.get_or_insert(error);
+            }
+        }
+        let own = self.retire(identity).await;
+        match (own, first_error) {
+            (Err(error), _) | (Ok(()), Some(error)) => Err(error),
+            (Ok(()), None) => Ok(()),
+        }
+    }
+
     /// Resolve admission for observing or retiring one member.
     ///
     /// The caller supplies manage scope and the member it acts as (resolved
@@ -14294,12 +14350,31 @@ impl MobHandle {
         caller: Option<&AgentIdentity>,
         target: &AgentIdentity,
     ) -> Result<CurrentMobAdmission, MobError> {
+        // Ownership is transitive, like a process tree: the caller owns every
+        // member reachable by following spawned_by upward from the target.
         let caller_owns_member = match caller {
-            Some(caller) => self
-                .roster()
-                .await
-                .get_by_identity(target)
-                .is_some_and(|entry| entry.spawned_by.as_ref() == Some(caller)),
+            Some(caller) => {
+                let roster = self.roster().await;
+                let mut hops = roster.len();
+                let mut current = roster
+                    .get_by_identity(target)
+                    .and_then(|entry| entry.spawned_by.clone());
+                let mut owned = false;
+                while let Some(spawner) = current {
+                    if &spawner == caller {
+                        owned = true;
+                        break;
+                    }
+                    if hops == 0 {
+                        break;
+                    }
+                    hops -= 1;
+                    current = roster
+                        .get_by_identity(&spawner)
+                        .and_then(|entry| entry.spawned_by.clone());
+                }
+                owned
+            }
             None => false,
         };
         let effects = self

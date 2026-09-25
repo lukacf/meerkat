@@ -21557,6 +21557,167 @@ async fn forker_without_manage_scope_observes_and_retires_only_its_own_children(
     assert!(handle.get_member(&bystander).await.unwrap().is_some());
 }
 
+async fn caller_turn_fork_child(
+    handle: &MobHandle,
+    forker: &AgentIdentity,
+    child: &AgentIdentity,
+    max_run: Option<std::time::Duration>,
+) -> ForkChildRun {
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            forker,
+            bounded_fork_child_spec(child),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            max_run,
+        )
+        .await
+        .expect("caller-turn fork");
+    run
+}
+
+/// Ownership is durable per identity: both respawn forms keep the spawner,
+/// including a successor spec (MobKit's destructive reset uses it).
+#[tokio::test]
+async fn spawned_by_survives_respawn_and_successor_respawn() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let forker = AgentIdentity::from("respawn-forker");
+    spawn_bounded_fork_source(&handle, &forker).await;
+    let child = AgentIdentity::from("respawn-owned-child");
+    caller_turn_fork_child(&handle, &forker, &child, None)
+        .await
+        .outcome()
+        .await
+        .expect("child outcome");
+
+    handle
+        .respawn(child.clone(), None)
+        .await
+        .expect("plain respawn");
+    assert_eq!(
+        handle
+            .get_member(&child)
+            .await
+            .unwrap()
+            .expect("respawned")
+            .spawned_by,
+        Some(forker.clone()),
+        "respawn keeps the spawner"
+    );
+
+    let mut successor = SpawnMemberSpec::new("worker", child.clone());
+    successor.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .respawn_with_successor_spec(successor)
+        .await
+        .expect("successor respawn");
+    assert_eq!(
+        handle
+            .get_member(&child)
+            .await
+            .unwrap()
+            .expect("successor")
+            .spawned_by,
+        Some(forker),
+        "a successor spec keeps the spawner of the incarnation it replaces"
+    );
+}
+
+/// Process-tree semantics (lifecycle review): A forks C, C forks D. A owns D
+/// transitively, and autokilling C retires D too, deepest first.
+#[tokio::test]
+async fn ownership_is_transitive_and_autokill_cascades_to_grandchildren() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("tree-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    let c = AgentIdentity::from("tree-c");
+    caller_turn_fork_child(&handle, &a, &c, None)
+        .await
+        .outcome()
+        .await
+        .expect("c outcome");
+    let d = AgentIdentity::from("tree-d");
+    caller_turn_fork_child(&handle, &c, &d, None)
+        .await
+        .outcome()
+        .await
+        .expect("d outcome");
+
+    assert!(
+        matches!(
+            handle
+                .resolve_owned_member_admission(false, Some(&a), &d)
+                .await
+                .expect("admission"),
+            CurrentMobAdmission::Allowed
+        ),
+        "A transitively owns its grandchild D"
+    );
+    assert!(
+        matches!(
+            handle
+                .resolve_owned_member_admission(false, Some(&d), &a)
+                .await
+                .expect("admission"),
+            CurrentMobAdmission::Denied
+        ),
+        "ownership does not flow upward"
+    );
+    assert_eq!(
+        handle.descendants_deepest_first(&a).await,
+        vec![d.clone(), c.clone()]
+    );
+
+    handle
+        .retire_with_descendants(c.clone())
+        .await
+        .expect("cascading retirement");
+    assert!(handle.get_member(&c).await.unwrap().is_none());
+    assert!(
+        handle.get_member(&d).await.unwrap().is_none(),
+        "retiring C retires its descendant D"
+    );
+    assert!(handle.get_member(&a).await.unwrap().is_some());
+}
+
+/// Autokill of a child with its own running child retires both, deepest
+/// first (lifecycle review: C autokilled cascades to D).
+#[tokio::test]
+async fn autokill_retires_the_child_and_its_descendants() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let a = AgentIdentity::from("autokill-tree-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    service.set_start_turn_delay_ms(600_000);
+
+    let c = AgentIdentity::from("autokill-tree-c");
+    let c_run =
+        caller_turn_fork_child(&handle, &a, &c, Some(std::time::Duration::from_millis(500))).await;
+    // C forks D from its own running turn; D has no limit of its own.
+    let d = AgentIdentity::from("autokill-tree-d");
+    let _d_run = caller_turn_fork_child(&handle, &c, &d, None).await;
+    assert!(handle.get_member(&d).await.unwrap().is_some());
+
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(20), c_run.outcome())
+            .await
+            .expect("autokill resolves"),
+        Some(ForkChildRunOutcome::MaxRunElapsed {
+            retirement_error: None,
+            ..
+        })
+    ));
+    assert!(handle.get_member(&c).await.unwrap().is_none());
+    assert!(
+        handle.get_member(&d).await.unwrap().is_none(),
+        "autokilling C retires its running descendant D"
+    );
+    assert!(handle.get_member(&a).await.unwrap().is_some());
+}
+
 #[tokio::test]
 async fn test_visible_mob_operator_tools_emit_identity_native_member_payloads() {
     let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;

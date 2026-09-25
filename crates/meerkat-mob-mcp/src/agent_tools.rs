@@ -6081,6 +6081,23 @@ mod tests {
         ));
     }
 
+    /// Library embedders (MobKit's gateway builds MobMcpState::new) are
+    /// long-lived hosts: detached delivery is available unless a one-shot
+    /// surface declares otherwise.
+    #[test]
+    fn library_hosts_default_to_detached_completion_delivery() {
+        let state = MobMcpState::new_in_memory();
+        assert_eq!(
+            state.detached_completion_delivery(),
+            crate::DetachedCompletionDelivery::Available
+        );
+        state.set_detached_completion_delivery(crate::DetachedCompletionDelivery::Unavailable);
+        assert_eq!(
+            state.detached_completion_delivery(),
+            crate::DetachedCompletionDelivery::Unavailable
+        );
+    }
+
     /// A fork_off that fails before returning its handle must not leave a
     /// background job behind for the forker to wait on.
     #[tokio::test]

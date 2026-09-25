@@ -21803,6 +21803,95 @@ async fn ownership_is_transitive_and_autokill_cascades_to_grandchildren() {
     assert!(handle.get_member(&a).await.unwrap().is_some());
 }
 
+/// Plain `MobHandle::retire` cascades too (contracts review): every host
+/// retire path, MobKit's idle sweep included, uses it. A forks C, C forks D;
+/// retiring C alone retires D, and A keeps its seat.
+#[tokio::test]
+async fn plain_retire_cascades_to_the_members_descendants() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("plain-tree-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    let c = AgentIdentity::from("plain-tree-c");
+    caller_turn_fork_child(&handle, &a, &c, None)
+        .await
+        .outcome()
+        .await
+        .expect("c outcome");
+    let d = AgentIdentity::from("plain-tree-d");
+    caller_turn_fork_child(&handle, &c, &d, None)
+        .await
+        .outcome()
+        .await
+        .expect("d outcome");
+
+    handle.retire(c.clone()).await.expect("plain retire");
+    assert!(handle.get_member(&c).await.unwrap().is_none());
+    assert!(
+        handle.get_member(&d).await.unwrap().is_none(),
+        "plain retire of C retires its descendant D"
+    );
+    assert!(handle.get_member(&a).await.unwrap().is_some());
+    assert!(handle.descendants_deepest_first(&a).await.is_empty());
+}
+
+/// A member whose subtree is being retired can fork a new child meanwhile
+/// (lifecycle review). The cascade re-collects descendants until none remain,
+/// so that child is retired too instead of escaping unowned.
+#[tokio::test]
+async fn retire_cascade_catches_a_child_forked_while_the_subtree_retires() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("race-tree-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+    let c = AgentIdentity::from("race-tree-c");
+    caller_turn_fork_child(&handle, &a, &c, None)
+        .await
+        .outcome()
+        .await
+        .expect("c outcome");
+    let d = AgentIdentity::from("race-tree-d");
+    caller_turn_fork_child(&handle, &c, &d, None)
+        .await
+        .outcome()
+        .await
+        .expect("d outcome");
+
+    // Each retirement's archive is slow, so the cascade is still working on
+    // D when C forks E.
+    service.set_archive_delay_ms(1_500);
+    let retiring = {
+        let handle = handle.clone();
+        let c = c.clone();
+        tokio::spawn(async move { handle.retire(c).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        handle.get_member(&c).await.unwrap().is_some(),
+        "C is still seated while its descendants retire"
+    );
+    let e = AgentIdentity::from("race-tree-e");
+    caller_turn_fork_child(&handle, &c, &e, None)
+        .await
+        .outcome()
+        .await
+        .expect("e outcome");
+    tokio::time::timeout(std::time::Duration::from_secs(60), retiring)
+        .await
+        .expect("retirement finishes")
+        .expect("retire task")
+        .expect("plain retire");
+    service.set_archive_delay_ms(0);
+
+    for member in [&c, &d, &e] {
+        assert!(
+            handle.get_member(member).await.unwrap().is_none(),
+            "{member} was retired with C"
+        );
+    }
+    assert!(handle.get_member(&a).await.unwrap().is_some());
+}
+
 /// Autokill of a child with its own running child retires both, deepest
 /// first (lifecycle review: C autokilled cascades to D).
 #[tokio::test]

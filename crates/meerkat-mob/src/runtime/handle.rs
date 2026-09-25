@@ -6230,7 +6230,7 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::ListMembers(members))
             }
             MobMachineCommand::Retire { agent_identity } => {
-                self.retire_exact_incarnation(agent_identity).await?;
+                self.retire_member_tree(agent_identity).await?;
                 Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::Respawn {
@@ -9744,7 +9744,15 @@ impl MobHandle {
             .await
     }
 
-    /// Retire a member, archiving its session and removing trust.
+    /// Retire a member, archiving its session and removing trust, together
+    /// with every member it transitively spawned (its `spawned_by`
+    /// descendants, such as fork_off children), deepest first.
+    ///
+    /// Retirement follows process-tree semantics on every path: a member's
+    /// descendants never outlive it unowned. Each member goes through the
+    /// same exact-incarnation retire. Every retirement is attempted, and the
+    /// first failure is returned after the rest ran; retrying converges,
+    /// because a later retire still finds the remaining descendants.
     ///
     /// A successful return is the terminal lifecycle barrier for work owned by
     /// this mob incarnation. New member work has been fenced, any Mob-owned
@@ -14555,27 +14563,72 @@ impl MobHandle {
         ordered
     }
 
-    /// Retire a member and every member it transitively spawned, deepest
-    /// first, each through the ordinary fenced retire path. Every retirement
-    /// is attempted; the first failure is returned after the rest ran.
+    /// Retire a member and every member it transitively spawned. Identical
+    /// to [`Self::retire`], which cascades on every path; kept for callers
+    /// that name the cascade explicitly.
     pub async fn retire_with_descendants(&self, identity: AgentIdentity) -> Result<(), MobError> {
+        self.retire(identity).await
+    }
+
+    /// The core of every retire: the member's descendants deepest first, then
+    /// the member, each through the exact-incarnation retire.
+    ///
+    /// A member still running while its subtree is retired can spawn a child
+    /// no earlier collection saw, so descendants are re-collected until none
+    /// remain, before and again after the member's own retirement fences it.
+    async fn retire_member_tree(&self, identity: AgentIdentity) -> Result<(), MobError> {
         let mut first_error = None;
-        for descendant in self.descendants_deepest_first(&identity).await {
-            if let Err(error) = self.retire(descendant.clone()).await {
-                tracing::warn!(
-                    member = %descendant,
-                    ancestor = %identity,
-                    error = %error,
-                    "cascading retirement of a descendant failed"
-                );
-                first_error.get_or_insert(error);
-            }
+        let mut attempted = std::collections::BTreeSet::new();
+        self.retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
+            .await;
+        let own = self.retire_exact_incarnation(identity.clone()).await;
+        if own.is_ok() {
+            self.retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
+                .await;
         }
-        let own = self.retire(identity).await;
         match (own, first_error) {
             (Err(error), _) | (Ok(()), Some(error)) => Err(error),
             (Ok(()), None) => Ok(()),
         }
+    }
+
+    async fn retire_descendants_until_stable(
+        &self,
+        ancestor: &AgentIdentity,
+        attempted: &mut std::collections::BTreeSet<AgentIdentity>,
+        first_error: &mut Option<MobError>,
+    ) {
+        // Bounded: each pass retires every descendant seen so far, and only
+        // members alive during a pass can add more.
+        const MAX_CASCADE_PASSES: usize = 8;
+        for _ in 0..MAX_CASCADE_PASSES {
+            let pending: Vec<AgentIdentity> = self
+                .descendants_deepest_first(ancestor)
+                .await
+                .into_iter()
+                .filter(|descendant| !attempted.contains(descendant))
+                .collect();
+            if pending.is_empty() {
+                return;
+            }
+            for descendant in pending {
+                attempted.insert(descendant.clone());
+                if let Err(error) = self.retire_exact_incarnation(descendant.clone()).await {
+                    tracing::warn!(
+                        member = %descendant,
+                        ancestor = %ancestor,
+                        error = %error,
+                        "cascading retirement of a descendant failed"
+                    );
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        tracing::warn!(
+            ancestor = %ancestor,
+            passes = MAX_CASCADE_PASSES,
+            "cascading retirement stopped re-collecting descendants"
+        );
     }
 
     /// Resolve admission for observing or retiring one member.

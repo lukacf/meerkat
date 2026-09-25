@@ -362,7 +362,7 @@ async fn a_mobkit_style_host_recovers_and_relinks_councils_after_restore() {
     let council_store: std::sync::Arc<dyn meerkat_mob::store::TemporaryCouncilStore> =
         std::sync::Arc::new(
             meerkat_mob::store::SqliteTemporaryCouncilStore::open(
-                &meerkat_mob_mcp::MobMcpState::persistent_forked_participant_store_path(
+                meerkat_mob_mcp::MobMcpState::persistent_forked_participant_store_path(
                     &fixture.root.join("state"),
                 ),
             )

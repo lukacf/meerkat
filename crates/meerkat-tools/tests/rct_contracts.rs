@@ -162,6 +162,7 @@ fn test_rct_contracts_shell_defaults_contract() -> Result<(), Box<dyn std::error
         security_mode: meerkat_core::SecurityMode::Unrestricted,
         security_patterns: vec![],
         env_vars: std::collections::HashMap::new(),
+        max_output_chars: 40_000,
     };
     let json_str = serde_json::to_string(&tool)?;
     let json_val: serde_json::Value = serde_json::from_str(&json_str)?;

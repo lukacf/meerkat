@@ -314,7 +314,9 @@ impl BuiltinTool for MonitorStartTool {
                 .map(meerkat_core::ops::AsyncOpRef::detached)
                 .into_iter()
                 .collect(),
-            ToolOutput::Blocks(_) | ToolOutput::JsonWithEffects { .. } => Vec::new(),
+            ToolOutput::Blocks(_)
+            | ToolOutput::JsonWithEffects { .. }
+            | ToolOutput::JsonRenderedAsText { .. } => Vec::new(),
         }
     }
 }

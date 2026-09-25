@@ -43,6 +43,7 @@ fn create_sh_config(temp_dir: &TempDir) -> ShellConfig {
         security_mode: Default::default(), // Unrestricted for e2e tests
         security_patterns: vec![],
         env_vars: std::collections::HashMap::new(),
+        max_output_chars: 40_000,
     }
 }
 
@@ -487,11 +488,52 @@ fn test_shell_tool_schema() {
     assert!(schema["properties"]["command"].is_object());
     assert!(schema["properties"]["working_dir"].is_object());
     assert!(schema["properties"]["timeout_secs"].is_object());
-    assert!(schema["properties"]["background"].is_object());
+    // Without durable job stores the tool cannot run background jobs, so it
+    // does not offer the model that mode.
+    assert!(schema["properties"].get("background").is_none());
 
     // Verify 'command' is required
     let required = schema["required"].as_array().unwrap();
     assert!(required.contains(&json!("command")));
+}
+
+struct NoopShellJobDelivery;
+
+#[async_trait::async_trait]
+impl meerkat_tools::builtin::shell::ShellJobDeliveryProjector for NoopShellJobDelivery {
+    async fn project_job(&self, _job_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// E2E: With durable job stores bound, the schema offers `background`.
+#[test]
+fn test_shell_tool_schema_offers_background_with_durable_jobs() {
+    let temp_dir = TempDir::new().unwrap();
+    let config = create_sh_config(&temp_dir);
+    let session_id = SessionId::new();
+    let job_store: Arc<dyn meerkat_jobs::DetachedJobStore> = Arc::new(
+        meerkat_jobs::SqliteDetachedJobStore::open(temp_dir.path().join("jobs.db")).unwrap(),
+    );
+    let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(meerkat_store::FsBlobStore::new(
+        temp_dir.path().join("blobs"),
+    ));
+    let durable = meerkat_tools::builtin::shell::DurableShellJobRuntime::new(
+        "e2e-realm",
+        session_id.clone(),
+        job_store,
+        blob_store,
+        Arc::new(NoopShellJobDelivery),
+    )
+    .unwrap();
+    let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+    let job_manager = JobManager::new(config.clone())
+        .bind_canonical_async_ops(session_id, registry)
+        .with_durable_job_runtime(durable);
+    let tool = ShellTool::with_job_manager(config, Arc::new(job_manager));
+
+    let schema = tool.def().input_schema;
+    assert_eq!(schema["properties"]["background"]["type"], "boolean");
 }
 
 /// E2E: ShellToolSet provides all five tools
@@ -855,14 +897,14 @@ async fn integration_real_regression_non_utf8_output() {
     // The output may contain replacement characters, which is correct behavior
 }
 
-/// Regression: Long output should preserve the tail
+/// Regression: Long output keeps both its head and its tail
 ///
-/// When output exceeds buffer limits, truncation should keep the END of output,
-/// not the beginning, since the end usually contains the most important info
-/// (errors, final results).
+/// When output exceeds the cap, truncation keeps the start (the head of a
+/// diff or listing) and the end (errors, final results) around a marker that
+/// names the omitted lines.
 #[tokio::test]
 #[ignore = "lane:e2e-system"]
-async fn integration_real_regression_truncation_keeps_tail() {
+async fn integration_real_regression_truncation_keeps_head_and_tail() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -886,13 +928,19 @@ async fn integration_real_regression_truncation_keeps_tail() {
 
     let output: ShellOutput = serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
 
-    // The end marker should always be present (tail preserved)
     assert!(
-        output.stdout.contains("END_MARKER"),
-        "Output should contain END_MARKER (tail preserved)"
+        output.stdout.starts_with("START_MARKER\n"),
+        "Output should start with START_MARKER (head preserved)"
     );
-
-    // Note: Whether START_MARKER is present depends on truncation threshold
+    assert!(
+        output.stdout.ends_with("END_MARKER\n"),
+        "Output should end with END_MARKER (tail preserved)"
+    );
+    assert!(
+        output.stdout.contains(" of 10002 omitted ("),
+        "the marker names the omitted lines: {}",
+        output.stdout
+    );
 }
 
 /// Regression: Concurrent job spawning should produce unique IDs

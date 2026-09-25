@@ -40,10 +40,10 @@ use super::monitor_protocol::{
     MonitorAction, MonitorLineOutcome, MonitorOutputProtocol, MonitorProtocolDecoder,
     MonitorProtocolLimits,
 };
+use super::output::{CapturedStream, OutputCaps, capture_bytes_for_chars, read_stream_head_tail};
 use super::process_lifecycle::{OwnedProcessGroup, join_output_bounded, join_reader_bounded};
 use super::types::{BackgroundJob, JobId, JobStatus, JobSummary, JobSummaryStatus};
 
-const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_VISIBLE_ORIGIN_JOBS: usize = 10_000;
 const LEASE_SETTLEMENT_MARGIN: Duration = Duration::from_secs(60);
 #[cfg(not(test))]
@@ -879,6 +879,7 @@ impl JobManager {
             operation_id,
             redactions,
             resume_progress_cursor: 0,
+            output_caps: OutputCaps::from_max_output_chars(self.config.max_output_chars),
         };
         let task = match monitor {
             Some(monitor) => spawn_monitor_attempt_task(attempt, monitor),
@@ -1002,6 +1003,7 @@ impl JobManager {
                 operation_id,
                 redactions,
                 resume_progress_cursor,
+                output_caps: OutputCaps::from_max_output_chars(self.config.max_output_chars),
             },
             monitor,
         );
@@ -1281,6 +1283,8 @@ struct AttemptTask {
     /// Attempt-local resolved values that must never enter durable job state.
     redactions: Vec<String>,
     resume_progress_cursor: u64,
+    /// Caps on the stdout and stderr an ordinary shell attempt retains.
+    output_caps: OutputCaps,
 }
 
 enum MonitorStreamItem {
@@ -1309,6 +1313,7 @@ fn spawn_monitor_attempt_task(
             operation_id,
             redactions,
             resume_progress_cursor,
+            output_caps: _,
         } = task;
         let started = Instant::now();
         let (stdout_tx, mut stdout_rx) = tokio::sync::mpsc::channel(64);
@@ -2206,20 +2211,23 @@ fn spawn_attempt_task(task: AttemptTask) -> JoinHandle<()> {
             operation_id,
             redactions,
             resume_progress_cursor: _,
+            output_caps,
         } = task;
         let started = Instant::now();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        let stdout_side_bytes = capture_bytes_for_chars(output_caps.stdout_chars);
+        let stderr_side_bytes = capture_bytes_for_chars(output_caps.stderr_chars);
         let stdout_task = tokio::spawn(async move {
             match stdout {
-                Some(stream) => read_stream_with_limit(stream, DEFAULT_MAX_OUTPUT_BYTES).await,
-                None => Ok(Vec::new()),
+                Some(stream) => read_stream_head_tail(stream, stdout_side_bytes).await,
+                None => Ok(CapturedStream::default()),
             }
         });
         let stderr_task = tokio::spawn(async move {
             match stderr {
-                Some(stream) => read_stream_with_limit(stream, DEFAULT_MAX_OUTPUT_BYTES).await,
-                None => Ok(Vec::new()),
+                Some(stream) => read_stream_head_tail(stream, stderr_side_bytes).await,
+                None => Ok(CapturedStream::default()),
             }
         });
         enum WaitOutcome {
@@ -2332,14 +2340,8 @@ fn spawn_attempt_task(task: AttemptTask) -> JoinHandle<()> {
             join_output_bounded(stdout_task, "durable shell stdout"),
             join_output_bounded(stderr_task, "durable shell stderr")
         );
-        let stdout = redact_sensitive(
-            &truncate_output_tail(&stdout, DEFAULT_MAX_OUTPUT_BYTES),
-            &redactions,
-        );
-        let stderr = redact_sensitive(
-            &truncate_output_tail(&stderr, DEFAULT_MAX_OUTPUT_BYTES),
-            &redactions,
-        );
+        let stdout = redact_sensitive(&stdout.bounded_text(output_caps.stdout_chars), &redactions);
+        let stderr = redact_sensitive(&stderr.bounded_text(output_caps.stderr_chars), &redactions);
         let duration_secs = started.elapsed().as_secs_f64();
         let (view_status, terminal) = match wait_outcome {
             WaitOutcome::Completed(exit_code) => {
@@ -2938,7 +2940,7 @@ impl CompletionEnrichmentProvider for JobManager {
         };
         CompletionEnrichment::Found(CompletionEnrichmentData {
             job_id: job_id.to_string(),
-            detail: format!("{:?}", projection.view.status),
+            detail: projection.view.status.render_completion_detail(),
         })
     }
 }
@@ -3661,6 +3663,123 @@ mod durable_tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn shell_schema_offers_background_only_with_a_durable_binding() {
+        use crate::builtin::BuiltinTool;
+        use crate::builtin::shell::ShellTool;
+
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, _job_store, config) = durable_fixture(&temp, session_id.clone());
+        let bound = JobManager::new(config.clone())
+            .bind_canonical_async_ops(
+                session_id.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()),
+            )
+            .with_durable_job_runtime(runtime);
+        assert!(bound.exports_canonical_async_ops());
+        let schema = ShellTool::with_job_manager(config.clone(), Arc::new(bound))
+            .def()
+            .input_schema;
+        assert_eq!(schema["properties"]["background"]["type"], "boolean");
+
+        // An operation binding without durable stores cannot run background
+        // jobs, so the mode stays hidden.
+        let unbound = JobManager::new(config.clone())
+            .bind_canonical_async_ops(session_id, Arc::new(RuntimeOpsLifecycleRegistry::new()));
+        let schema = ShellTool::with_job_manager(config, Arc::new(unbound))
+            .def()
+            .input_schema;
+        assert!(schema["properties"].get("background").is_none());
+    }
+
+    #[tokio::test]
+    async fn background_output_keeps_head_and_tail_within_the_configured_cap() {
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, _job_store, mut config) = durable_fixture(&temp, session_id.clone());
+        config.max_output_chars = 1_000;
+        let manager = JobManager::new(config.clone())
+            .bind_canonical_async_ops(
+                session_id.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()),
+            )
+            .with_durable_job_runtime(runtime.clone());
+        // Line N of the output is the number N.
+        let command = "i=1; while [ $i -le 5000 ]; do echo $i; i=$((i+1)); done";
+        let job_id = manager
+            .spawn_job_for_call(command, None, 30, "tool-call-long-output")
+            .await
+            .expect("spawn");
+        let completed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let status = manager
+                    .get_status(&job_id)
+                    .await
+                    .expect("status")
+                    .expect("job");
+                if matches!(status.status, JobStatus::Completed { .. }) {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completion");
+        let JobStatus::Completed { stdout, .. } = &completed.status else {
+            panic!("job must complete: {completed:?}");
+        };
+        assert!(stdout.starts_with("1\n2\n3\n"), "{stdout}");
+        assert!(stdout.ends_with("\n4999\n5000\n"), "{stdout}");
+        assert!(stdout.contains(" of 5000 omitted ("), "{stdout}");
+        assert!(stdout.contains("the head ends at line "), "{stdout}");
+        assert!(
+            stdout.chars().count() < 1_600,
+            "the cap bounds the retained output: {} chars",
+            stdout.chars().count()
+        );
+
+        // shell_job_status shows compact text, not the JSON envelope.
+        let text = completed.render_for_model();
+        assert!(
+            text.starts_with(&format!("job {job_id} completed: exit code 0 (")),
+            "{text}"
+        );
+        assert!(text.contains("s)\n1\n2\n3\n"), "{text}");
+        assert!(!text.contains("\"stdout\"") && !text.contains("placement"));
+
+        // The completion notice detail is the same rendering, not a Debug dump
+        // of the status.
+        let operation_id = manager
+            .canonical_operation_for_job(&job_id)
+            .expect("canonical operation");
+        let detail = loop {
+            match manager.enrich(&operation_id) {
+                CompletionEnrichment::Found(data) => break data.detail,
+                CompletionEnrichment::Busy => tokio::task::yield_now().await,
+                CompletionEnrichment::Missing => panic!("completed job must enrich"),
+            }
+        };
+        assert!(detail.starts_with("exit code 0 ("), "{detail}");
+        assert!(detail.ends_with("\n4999\n5000"), "{detail}");
+        assert!(!detail.contains("Completed {"), "{detail}");
+
+        // The durable result holds the bounded output across restart.
+        drop(manager);
+        let reopened = JobManager::new(config)
+            .bind_canonical_async_ops(session_id, Arc::new(RuntimeOpsLifecycleRegistry::new()))
+            .with_durable_job_runtime(runtime);
+        let restored = reopened
+            .get_status(&job_id)
+            .await
+            .expect("reopened status")
+            .expect("reopened job");
+        assert!(matches!(
+            &restored.status,
+            JobStatus::Completed { stdout: restored_stdout, .. } if restored_stdout == stdout
+        ));
     }
 
     #[tokio::test]

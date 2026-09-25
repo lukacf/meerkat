@@ -24,19 +24,14 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Input arguments for the shell tool",
     "properties": {
-      "background": {
-        "default": false,
-        "description": "If true, durably submit a non-resumable shell job and return its job receipt immediately",
-        "type": "boolean"
-      },
       "command": {
         "description": "The command to execute (POSIX-style parsing for policy checks)",
         "type": "string"
       },
       "timeout_secs": {
-        "description": "Timeout in seconds (uses config default if not specified)",
+        "description": "Timeout in seconds, at least 1 (uses config default if not specified)",
         "format": "uint64",
-        "minimum": 0,
+        "minimum": 1,
         "type": [
           "integer",
           "null"

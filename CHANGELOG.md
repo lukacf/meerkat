@@ -37,6 +37,22 @@ them.
 
 ### Breaking
 
+- `meerkat_tools::builtin::ToolOutput` gains the variant
+  `JsonRenderedAsText { value, text }`; exhaustive matches must handle it.
+  `meerkat_tools::builtin::shell::ShellConfig` and `meerkat_core::ShellDefaults`
+  gain the public field `max_output_chars: usize` (serde-defaulted to 40000).
+- Dispatched `shell` and `shell_job_status` results are now one `Text` content
+  block instead of one `Structured` JSON block. This applies to the transcript
+  `tool_results` content, the `tool_result_received` and
+  `tool_execution_completed` event `content`, and every surface that carries
+  them (REST, RPC, MCP, SDKs). A `shell` result no longer carries the
+  `exit_code`, `stdout`, `stderr`, `timed_out`, `duration_secs`,
+  `stdout_lossy`, `stderr_lossy` and `placement` fields; a `shell_job_status`
+  result no longer carries the `BackgroundJob` fields (`id`, `command`,
+  `working_dir`, `placement`, `timeout_secs`, `started_at_unix`, `status`).
+  Exit status, streams and job state appear only inside the text. Code that
+  calls the tool directly (`BuiltinTool::call`) still gets the typed
+  `ShellOutput` or `BackgroundJob` through `ToolOutput::into_json`.
 - `meerkat_core::Usage` gains the public field `reasoning_tokens:
   Option<u64>`, and `meerkat_contracts::WireUsage` gains the same field.
   `meerkat_core::RunResult` gains `run_usage: Option<Usage>` and
@@ -103,6 +119,25 @@ them.
 
 ### Changed
 
+- Foreground `shell` results reach the model as compact text instead of JSON:
+  a status line (`exit code N (Xs)`, or the timeout), stdout as is, and stderr
+  under `[stderr]` only when non-empty. The JSON envelope escaped every stream
+  and carried absolute placement paths and `false` flags, and it was re-sent on
+  every later request. Transcripts and events carry the same text (see
+  Breaking).
+- `shell_job_status` results reach the model as the same compact text: the job
+  ID and state, then the exit status and output of a completed job. The detail
+  of a background-job completion notice (and of the `background_job_completed`
+  event) is now that exit status and output instead of a Rust debug dump of the
+  job status.
+- Long shell output keeps its head and its tail, in foreground calls and
+  background jobs. stdout is capped at `[shell] max_output_chars` characters
+  (default 40000, about 10K tokens; stderr gets half). A cut moves to a line
+  boundary when the line it lands in fits the cap, and the marker names the
+  omitted lines, the line where the head ends and the line where the tail
+  starts, with a `sed -n` range that pages them. Foreground calls used to keep
+  only the last 100000 characters and background jobs the last 1 MiB, which
+  dropped the start of long diffs and file listings.
 - Smaller fixed per-request prompt: the system prompt no longer carries a
   `# Available Tools` inventory. Every tool definition already reaches the
   provider through the request tool array, so the inventory repeated each
@@ -133,6 +168,12 @@ them.
 
 ### Fixed
 
+- The `shell` schema no longer advertises values the tool rejects:
+  `timeout_secs` declares a minimum of 1, and `background` is offered only when
+  durable background jobs are available, instead of failing with "requested
+  tool execution mode Detached is not supported".
+- Valid UTF-8 shell output longer than the capture buffer is no longer reported
+  as invalid UTF-8 when the buffer's edge splits a character.
 - `rkat run --export-atif` records every provider request of the run as an
   ATIF step with its own metrics: each tool-call turn, the answering turn and
   each structured-output extraction request. It used to keep only the final

@@ -15789,14 +15789,15 @@ mod tests {
             .dispatch(call)
             .await
             .expect("shell dispatch should succeed");
-        let payload: serde_json::Value =
-            serde_json::from_str(&outcome.result.text_content()).unwrap();
-        assert_eq!(
-            payload["exit_code"],
-            serde_json::json!(0),
-            "probe must run under a POSIX shell: {payload}"
+        // The model sees compact text: a status line, then stdout.
+        let text = outcome.result.text_content();
+        let mut lines = text.lines();
+        let status = lines.next().unwrap_or_default();
+        assert!(
+            status.starts_with("exit code 0 ("),
+            "probe must run under a POSIX shell: {text}"
         );
-        let stdout_program = payload["stdout"].as_str().unwrap_or_default().trim();
+        let stdout_program = lines.next().unwrap_or_default().trim();
         let stdout_basename = std::path::Path::new(stdout_program)
             .file_name()
             .and_then(|name| name.to_str())

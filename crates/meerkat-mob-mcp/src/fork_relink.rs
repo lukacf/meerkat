@@ -5,6 +5,9 @@
 //! child (and its durable [`meerkat_mob::ForkJobRecord`]) survives. This pass
 //! runs once after restore and, for every seated child with a fork job:
 //!
+//! - already finished (its reply to the job is in its durable transcript):
+//!   delivers that result, however late the restart landed, and leaves the
+//!   child seated; the opt-in `max_run` limit only bounds a run still going;
 //! - still running: waits for the run to end, racing the opt-in `max_run`
 //!   limit measured from the original start, then delivers the outcome;
 //! - idle with its own reply after the fork prefix: delivers that result;
@@ -135,9 +138,13 @@ pub async fn relink_mob_fork_children(
 
 /// Settle one fork child and deliver its outcome to the forker.
 ///
-/// Observing the child waits for its current turn boundary. With an opt-in
-/// `max_run`, that wait is raced against the limit measured from the job's
-/// original start; the limit winning cancels and retires the child (and its
+/// A child whose reply to the job is already durable delivers that reply
+/// first, before any limit is evaluated: the restart may land long after the
+/// child finished within its limit, and its real outcome must not be replaced
+/// by `max_run_elapsed`. Otherwise observing the child waits for its current
+/// turn boundary. With an opt-in `max_run`, that wait is raced against the
+/// limit measured from the job's original start; the limit winning (with
+/// still no durable reply) cancels and retires the child (and its
 /// descendants) and delivers `max_run_elapsed`.
 pub async fn relink_child(
     service: Arc<dyn meerkat_mob::MobSessionService>,
@@ -147,6 +154,9 @@ pub async fn relink_child(
     child: &AgentIdentity,
     job: &ForkJobRecord,
 ) -> ForkRelinkAction {
+    if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await {
+        return deliver(runtime.as_deref(), handle, child, job, completion).await;
+    }
     let deadline_ms = job
         .max_run_ms
         .map(|limit| job.started_at_ms.saturating_add(limit));
@@ -163,7 +173,11 @@ pub async fn relink_child(
         };
         let running = match &observed {
             None => {
-                let completion = autokill(mob_id, handle, child, job).await;
+                // The child may have finished while the limit ran down.
+                let completion = match durable_reply(&service, mob_id, handle, child, job).await {
+                    Some(completion) => completion,
+                    None => autokill(mob_id, handle, child, job).await,
+                };
                 return deliver(runtime.as_deref(), handle, child, job, completion).await;
             }
             Some(Ok(snapshot)) => snapshot.progress.as_ref().is_some_and(|progress| {
@@ -177,6 +191,31 @@ pub async fn relink_child(
         }
         tokio::time::sleep(WATCH_INTERVAL).await;
     }
+}
+
+/// The child's reply to the job, when its durable transcript already holds
+/// it, as a `completed` outcome. The child stays seated.
+async fn durable_reply(
+    service: &Arc<dyn meerkat_mob::MobSessionService>,
+    mob_id: &MobId,
+    handle: &MobHandle,
+    child: &AgentIdentity,
+    job: &ForkJobRecord,
+) -> Option<ForkOffCompletion> {
+    let session_id = handle.resolve_bridge_session_id(child).await?;
+    let session = service
+        .load_persisted_session(&session_id)
+        .await
+        .ok()
+        .flatten()?;
+    let result = job.durable_terminal_result(&session).ok().flatten()?;
+    let mut completion = ForkOffCompletion::empty(
+        child.to_string(),
+        member_ref(mob_id, child),
+        ForkOffCompletionStatus::Completed,
+    );
+    completion.bounded_result = Some(result.to_wire());
+    Some(completion)
 }
 
 async fn autokill(
@@ -210,38 +249,14 @@ async fn settled_outcome(
     child: &AgentIdentity,
     job: &ForkJobRecord,
 ) -> ForkOffCompletion {
-    let replied = match handle.resolve_bridge_session_id(child).await {
-        Some(session_id) => match service.load_persisted_session(&session_id).await {
-            Ok(Some(session)) => {
-                let messages = session.messages();
-                messages.len() > job.prefix_message_count.saturating_add(1)
-                    && matches!(
-                        messages.last(),
-                        Some(meerkat_core::Message::BlockAssistant(_))
-                    )
-            }
-            _ => false,
-        },
-        None => false,
-    };
-    if replied
-        && let Ok(result) = handle
-            .bounded_terminal_member_result(child, job.result_label.clone(), job.max_text_bytes)
-            .await
-    {
-        let mut completion = ForkOffCompletion::empty(
+    match durable_reply(service, mob_id, handle, child, job).await {
+        Some(completion) => completion,
+        None => ForkOffCompletion::empty(
             child.to_string(),
             member_ref(mob_id, child),
-            ForkOffCompletionStatus::Completed,
-        );
-        completion.bounded_result = Some(result.to_wire());
-        return completion;
+            ForkOffCompletionStatus::RestartInterrupted,
+        ),
     }
-    ForkOffCompletion::empty(
-        child.to_string(),
-        member_ref(mob_id, child),
-        ForkOffCompletionStatus::RestartInterrupted,
-    )
 }
 
 fn member_ref(mob_id: &MobId, child: &AgentIdentity) -> meerkat_contracts::WireMemberRef {

@@ -4354,6 +4354,74 @@ pub struct ForkJobRecord {
     pub max_text_bytes: usize,
 }
 
+impl ForkJobRecord {
+    /// The job's result, read from the fork child's DURABLE transcript
+    /// `session`, without consulting its runtime.
+    ///
+    /// `Some` when the child committed a terminal reply to this job after the
+    /// fork prefix: its own assistant message that neither requests tools nor
+    /// was cancelled, with nothing but System context after it. That reply
+    /// is the job's real outcome whatever the runtime is doing now, which is
+    /// what a restarted host needs before it decides a limit elapsed. `None`
+    /// when the transcript holds no such reply (the turn is still running or
+    /// did not survive).
+    pub fn durable_terminal_result(
+        &self,
+        session: &meerkat_core::Session,
+    ) -> Result<Option<BoundedHelperResult>, MobError> {
+        let own_exchange = session
+            .messages()
+            .get(self.prefix_message_count..)
+            .unwrap_or_default();
+        let Some(reply) = own_exchange
+            .iter()
+            .rev()
+            .find(|message| !matches!(message, meerkat_core::Message::System(_)))
+        else {
+            return Ok(None);
+        };
+        let meerkat_core::Message::BlockAssistant(reply) = reply else {
+            return Ok(None);
+        };
+        let requests_tools = reply
+            .blocks
+            .iter()
+            .any(|block| matches!(block, meerkat_core::types::AssistantBlock::ToolUse { .. }));
+        if requests_tools
+            || matches!(
+                reply.stop_reason,
+                Some(
+                    meerkat_core::types::StopReason::ToolUse
+                        | meerkat_core::types::StopReason::Cancelled
+                )
+            )
+        {
+            return Ok(None);
+        }
+        let text: String = reply
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                meerkat_core::types::AssistantBlock::Text { text, .. }
+                | meerkat_core::types::AssistantBlock::Transcript { text, .. } => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        BoundedHelperResult::try_from_legacy_terminal_text(
+            self.result_label.clone(),
+            text,
+            self.max_text_bytes,
+            false,
+        )
+        .map(Some)
+    }
+}
+
 /// The in-flight exact turn of a detached fork child.
 ///
 /// Resolves once the child's turn reaches an outcome. Dropping it stops the

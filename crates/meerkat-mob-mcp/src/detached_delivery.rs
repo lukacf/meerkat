@@ -105,6 +105,48 @@ pub async fn deliver_detached_completion(
     }
 }
 
+/// [`deliver_detached_completion`] for an owner that is a mob member.
+///
+/// When the runtime no longer has the owner's session live (its idle
+/// executor was retired, or the host restarted), the owner is revived
+/// through the mob and delivery is retried once. The job's idempotency key
+/// still guarantees a single record.
+#[allow(clippy::too_many_arguments)]
+pub async fn deliver_detached_completion_to_member(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    owner: &meerkat_mob::MobHandle,
+    owner_identity: &meerkat_mob::AgentIdentity,
+    owner_session_id: &SessionId,
+    tool: &'static str,
+    job_id: &str,
+    status: BackgroundJobTerminalStatus,
+    outcome: serde_json::Value,
+) -> Result<DetachedCompletionDelivered, DetachedCompletionError> {
+    match deliver_detached_completion(
+        runtime,
+        owner_session_id,
+        tool,
+        job_id,
+        status,
+        outcome.clone(),
+    )
+    .await
+    {
+        Err(DetachedCompletionError::Runtime { .. }) => {
+            owner
+                .ensure_member_live(owner_identity)
+                .await
+                .map_err(|error| DetachedCompletionError::Runtime {
+                    tool,
+                    detail: format!("reviving the owner failed: {error}"),
+                })?;
+            deliver_detached_completion(runtime, owner_session_id, tool, job_id, status, outcome)
+                .await
+        }
+        other => other,
+    }
+}
+
 /// Why a host cannot use detached delivery for a call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]

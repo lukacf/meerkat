@@ -14338,6 +14338,36 @@ impl MobHandle {
         })
     }
 
+    /// Make sure `identity`'s live session materialization exists, reviving
+    /// it through MobMachine authority when the runtime retired it (for
+    /// example an idle executor torn down, or a restart). Runs no turn.
+    pub async fn ensure_member_live(&self, identity: &AgentIdentity) -> Result<(), MobError> {
+        let session_id = self
+            .resolve_bridge_session_id(identity)
+            .await
+            .ok_or_else(|| MobError::MemberNotFound(identity.clone()))?;
+        match self
+            .session_service
+            .live_session_actor_registered(&session_id)
+            .await
+        {
+            Ok(true) => return Ok(()),
+            Ok(false) | Err(meerkat_core::service::SessionError::NotFound { .. }) => {}
+            Err(error) => return Err(MobError::SessionError(error)),
+        }
+        let agent_identity = identity.clone();
+        self.send_actor_command(
+            move |reply_tx| MobCommand::ReviveMemberLiveMaterialization {
+                agent_identity,
+                bridge_session_id: session_id,
+                scope: super::actor::MemberLiveRevivalScope::default(),
+                reply_tx,
+            },
+        )
+        .await?
+        .map(|_| ())
+    }
+
     /// Members transitively spawned by `identity` (via durable spawned_by
     /// provenance), deepest first.
     pub async fn descendants_deepest_first(&self, identity: &AgentIdentity) -> Vec<AgentIdentity> {

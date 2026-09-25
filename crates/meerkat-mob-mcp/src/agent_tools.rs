@@ -1400,6 +1400,7 @@ impl AgentMobToolSurface {
         spawn_detached_completion_custodian(
             runtime,
             self.owner_bridge_session_id.clone(),
+            Some((audit_handle.clone(), source_identity.clone())),
             job_id.clone(),
             TOOL_FORK_OFF,
             {
@@ -1572,6 +1573,7 @@ impl AgentMobToolSurface {
         spawn_detached_completion_custodian(
             runtime,
             self.owner_bridge_session_id.clone(),
+            None,
             job_id.clone(),
             TOOL_COUNCIL,
             async move {
@@ -3123,6 +3125,7 @@ impl ForkOffCompletion {
 fn spawn_detached_completion_custodian<F>(
     runtime: Arc<meerkat_runtime::MeerkatMachine>,
     owner_session_id: SessionId,
+    owner_member: Option<(MobHandle, AgentIdentity)>,
     job_id: String,
     tool_name: &'static str,
     outcome: F,
@@ -3141,16 +3144,33 @@ fn spawn_detached_completion_custodian<F>(
         } else {
             meerkat_core::event::BackgroundJobTerminalStatus::Completed
         };
-        if let Err(error) = crate::detached_delivery::deliver_detached_completion(
-            &runtime,
-            &owner_session_id,
-            tool_name,
-            &job_id,
-            status,
-            value,
-        )
-        .await
-        {
+        let delivered = match owner_member {
+            Some((handle, identity)) => {
+                crate::detached_delivery::deliver_detached_completion_to_member(
+                    &runtime,
+                    &handle,
+                    &identity,
+                    &owner_session_id,
+                    tool_name,
+                    &job_id,
+                    status,
+                    value,
+                )
+                .await
+            }
+            None => {
+                crate::detached_delivery::deliver_detached_completion(
+                    &runtime,
+                    &owner_session_id,
+                    tool_name,
+                    &job_id,
+                    status,
+                    value,
+                )
+                .await
+            }
+        };
+        if let Err(error) = delivered {
             tracing::warn!(
                 tool = tool_name,
                 job_id = %job_id,

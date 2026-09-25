@@ -23,7 +23,7 @@ pub use agent_tools::{
 };
 pub use detached_delivery::{
     DetachedCompletionDelivered, DetachedCompletionError, DetachedDeliveryUnavailable,
-    deliver_detached_completion, detached_completion_notice,
+    deliver_detached_completion, deliver_detached_completion_to_member, detached_completion_notice,
 };
 pub use public_definition::decode_public_mob_definition;
 pub use public_mcp::{

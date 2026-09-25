@@ -162,7 +162,7 @@ pub async fn relink_child(
         let running = match &observed {
             None => {
                 let completion = autokill(mob_id, handle, child, job).await;
-                return deliver(runtime.as_deref(), job, completion).await;
+                return deliver(runtime.as_deref(), handle, child, job, completion).await;
             }
             Some(Ok(snapshot)) => snapshot.progress.as_ref().is_some_and(|progress| {
                 progress.run_state == MemberRunState::RunOpen || progress.in_flight_work > 0
@@ -171,7 +171,7 @@ pub async fn relink_child(
         };
         if !running {
             let completion = settled_outcome(&service, mob_id, handle, child, job).await;
-            return deliver(runtime.as_deref(), job, completion).await;
+            return deliver(runtime.as_deref(), handle, child, job, completion).await;
         }
         tokio::time::sleep(WATCH_INTERVAL).await;
     }
@@ -248,6 +248,8 @@ fn member_ref(mob_id: &MobId, child: &AgentIdentity) -> meerkat_contracts::WireM
 
 async fn deliver(
     runtime: Option<&meerkat_runtime::MeerkatMachine>,
+    handle: &MobHandle,
+    child: &AgentIdentity,
     job: &ForkJobRecord,
     completion: ForkOffCompletion,
 ) -> ForkRelinkAction {
@@ -269,16 +271,40 @@ async fn deliver(
         Ok(value) => value,
         Err(error) => return ForkRelinkAction::Failed(error.to_string()),
     };
-    match crate::detached_delivery::deliver_detached_completion(
-        runtime,
-        &job.owner_session_id,
-        TOOL_FORK_OFF,
-        &job.job_id,
-        status,
-        value,
-    )
-    .await
-    {
+    // The forker is the child's spawner; reviving it through the mob covers
+    // an owner the restarted runtime does not have live.
+    let owner = handle
+        .roster()
+        .await
+        .get_by_identity(child)
+        .and_then(|entry| entry.spawned_by.clone());
+    let delivered = match owner {
+        Some(owner) => {
+            crate::detached_delivery::deliver_detached_completion_to_member(
+                runtime,
+                handle,
+                &owner,
+                &job.owner_session_id,
+                TOOL_FORK_OFF,
+                &job.job_id,
+                status,
+                value,
+            )
+            .await
+        }
+        None => {
+            crate::detached_delivery::deliver_detached_completion(
+                runtime,
+                &job.owner_session_id,
+                TOOL_FORK_OFF,
+                &job.job_id,
+                status,
+                value,
+            )
+            .await
+        }
+    };
+    match delivered {
         Ok(crate::detached_delivery::DetachedCompletionDelivered::Delivered) => {
             ForkRelinkAction::Delivered
         }

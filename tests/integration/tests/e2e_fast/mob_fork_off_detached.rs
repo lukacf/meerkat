@@ -462,3 +462,279 @@ async fn e2e_fast_library_host_built_like_mobkit_delivers_detached() {
         "a library host whose session service carries a runtime delivers detached"
     );
 }
+
+async fn wait_for_single_record(router: &MethodRouter, session: &SessionId, job_id: &str) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let history = session_history(router, session).await;
+        let records = recorded_completions(&history, job_id);
+        assert!(records.len() <= 1, "recorded more than once: {history}");
+        if records.len() == 1 {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the owner never recorded job {job_id}: {history}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A completion for an owner that is not live in the runtime (it never ran a
+/// turn, or its idle executor was retired) is still recorded once and wakes
+/// the owner for one turn. Re-delivering the same job records nothing more.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_detached_completion_reaches_owners_that_are_not_live() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let client: Arc<dyn LlmClient> = Arc::new(ForkOffScript {
+        requests: Arc::clone(&requests),
+    });
+    let (router, mob_state) = make_stack(temp.path(), client).await;
+    let runtime = mob_state
+        .session_service()
+        .runtime_adapter()
+        .expect("runtime-backed stack");
+    let mob_id = format!("not-live-owner-{}", uuid::Uuid::new_v4().simple());
+    let mob_id = mob_state
+        .mob_create_definition(mob_definition(&mob_id))
+        .await
+        .expect("create mob");
+    let handle = mob_state.handle_for(&mob_id).await.expect("mob handle");
+
+    for (owner, tear_down) in [("never-ran-a-turn", false), ("executor-retired", true)] {
+        handle
+            .spawn_spec(SpawnMemberSpec::new("keeper", AgentIdentity::from(owner)))
+            .await
+            .expect("spawn owner");
+        let session = handle
+            .resolve_bridge_session_id(&AgentIdentity::from(owner))
+            .await
+            .expect("owner session");
+        if tear_down {
+            assert_eq!(
+                bounded_turn(&handle, owner, FOLLOW_UP_PROMPT).await,
+                FOLLOW_UP_REPLY
+            );
+            runtime
+                .unregister_session(&session)
+                .await
+                .expect("the runtime retires the idle executor");
+        }
+        let job_id = format!("job-{owner}");
+        let before = requests.lock().unwrap().len();
+        let delivered = meerkat_mob_mcp::deliver_detached_completion_to_member(
+            &runtime,
+            &handle,
+            &AgentIdentity::from(owner),
+            &session,
+            "fork_off",
+            &job_id,
+            meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+            json!({"agent_identity": "some-child", "status": "completed"}),
+        )
+        .await;
+        assert!(delivered.is_ok(), "{owner}: {delivered:?}");
+        wait_for_single_record(&router, &session, &job_id).await;
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while requests.lock().unwrap().len() == before {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{owner} was never woken"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let again = meerkat_mob_mcp::deliver_detached_completion_to_member(
+            &runtime,
+            &handle,
+            &AgentIdentity::from(owner),
+            &session,
+            "fork_off",
+            &job_id,
+            meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+            json!({"agent_identity": "some-child", "status": "completed"}),
+        )
+        .await;
+        assert!(again.is_ok(), "{owner} redelivery: {again:?}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        wait_for_single_record(&router, &session, &job_id).await;
+    }
+    let _ = mob_state.mob_destroy(&mob_id).await;
+}
+
+const MID_TURN_PROMPT: &str = "MIDTURN-FORK fork and keep working";
+
+/// A forker that calls fork_off, then keeps working (a second tool call)
+/// until its child's completion has been admitted, so the completion arrives
+/// while the forker's own turn is still running.
+struct MidTurnScript {
+    requests: Arc<Mutex<Vec<(String, String, bool)>>>,
+    child_replied: Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn scripted_text(model: &str, text: &str) -> Vec<LlmEvent> {
+    vec![
+        LlmEvent::TextDelta {
+            delta: text.to_string(),
+            meta: None,
+        },
+        LlmEvent::UsageUpdate {
+            usage: meerkat_core::TurnUsage::host_declared(
+                meerkat_core::Provider::Anthropic,
+                model,
+                meerkat_core::Usage::default(),
+            ),
+        },
+        LlmEvent::Done {
+            outcome: LlmDoneOutcome::Success {
+                stop_reason: meerkat_core::StopReason::EndTurn,
+            },
+        },
+    ]
+}
+
+fn scripted_tool_call(model: &str, id: &str, name: &str, args: Value) -> Vec<LlmEvent> {
+    vec![
+        LlmEvent::ToolCallComplete {
+            id: id.to_string(),
+            name: name.to_string(),
+            args,
+            meta: None,
+        },
+        LlmEvent::UsageUpdate {
+            usage: meerkat_core::TurnUsage::host_declared(
+                meerkat_core::Provider::Anthropic,
+                model,
+                meerkat_core::Usage::default(),
+            ),
+        },
+        LlmEvent::Done {
+            outcome: LlmDoneOutcome::Success {
+                stop_reason: meerkat_core::StopReason::ToolUse,
+            },
+        },
+    ]
+}
+
+#[async_trait::async_trait]
+impl LlmClient for MidTurnScript {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        let last_user = last_user_text(request);
+        let rendered = format!("{:?}", request.messages);
+        let wake = matches!(request.messages.last(), Some(Message::SystemNotice(_)));
+        self.requests
+            .lock()
+            .unwrap()
+            .push((last_user.clone(), rendered.clone(), wake));
+        let model = request.model.clone();
+        let child_replied = Arc::clone(&self.child_replied);
+        Box::pin(futures::StreamExt::flat_map(
+            futures::stream::once(async move {
+                if last_user.contains(CHILD_TASK) {
+                    child_replied.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return scripted_text(&model, CHILD_REPLY);
+                }
+                if wake {
+                    return scripted_text(&model, WAKE_REPLY);
+                }
+                if !last_user.contains(MID_TURN_PROMPT) {
+                    return scripted_text(&model, FOLLOW_UP_REPLY);
+                }
+                match request_stage(&rendered) {
+                    0 => scripted_tool_call(
+                        &model,
+                        "toolu_fork_mid",
+                        "fork_off",
+                        json!({"member_id": CHILD, "task": CHILD_TASK}),
+                    ),
+                    1 => {
+                        // Keep the turn open until the child has finished and
+                        // its completion has had time to be admitted.
+                        while !child_replied.load(std::sync::atomic::Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                        scripted_tool_call(&model, "toolu_list_mid", "mob_list", json!({}))
+                    }
+                    _ => scripted_text(&model, FORK_DONE),
+                }
+            }),
+            |events| futures::stream::iter(events.into_iter().map(Ok)),
+        ))
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+}
+
+/// 0 before fork_off, 1 after its result, 2 after the follow-up tool result.
+fn request_stage(rendered: &str) -> usize {
+    if rendered.contains("toolu_list_mid") {
+        2
+    } else if rendered.contains("toolu_fork_mid") {
+        1
+    } else {
+        0
+    }
+}
+
+/// A completion that arrives while the forker's turn is still running is not
+/// lost and not duplicated: it is recorded once and the forker runs exactly
+/// one follow-up turn that sees it right after its current turn ends. (A
+/// non-live session has no mid-turn runtime input drain, so the running
+/// turn's own later model calls do not see it.)
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_detached_completion_during_a_running_turn_is_delivered_once_after_it() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let client: Arc<dyn LlmClient> = Arc::new(MidTurnScript {
+        requests: Arc::clone(&requests),
+        child_replied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let (router, mob_state) = make_stack(temp.path(), client).await;
+    let mob_id = format!("mid-turn-fork-{}", uuid::Uuid::new_v4().simple());
+    let mob_id = mob_state
+        .mob_create_definition(mob_definition(&mob_id))
+        .await
+        .expect("create mob");
+    let handle = mob_state.handle_for(&mob_id).await.expect("mob handle");
+    handle
+        .spawn_spec(SpawnMemberSpec::new("keeper", AgentIdentity::from(PARENT)))
+        .await
+        .expect("spawn forker");
+    let parent_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from(PARENT))
+        .await
+        .expect("forker session");
+
+    assert_eq!(
+        bounded_turn(&handle, PARENT, MID_TURN_PROMPT).await,
+        FORK_DONE
+    );
+    let history = session_history(&router, &parent_session).await;
+    let started = recorded_fork_off_start(&history).expect("fork_off result");
+    let job_id = started["job_id"].as_str().expect("job id").to_string();
+    wait_for_single_record(&router, &parent_session, &job_id).await;
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let requests = requests.lock().unwrap().clone();
+    let wake_turns = requests
+        .iter()
+        .filter(|(_, rendered, wake)| *wake && rendered.contains(&job_id))
+        .count();
+    assert_eq!(
+        wake_turns, 1,
+        "one follow-up turn sees the completion: {requests:#?}"
+    );
+    wait_for_single_record(&router, &parent_session, &job_id).await;
+    let _ = mob_state.mob_destroy(&mob_id).await;
+}

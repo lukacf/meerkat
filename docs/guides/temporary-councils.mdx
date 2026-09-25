@@ -193,7 +193,7 @@ council. How the sealed result reaches the caller depends on the host:
   `failed`):" followed by the outcome, with `persisted: true` on its typed
   block). It is delivered as a runtime input with the idempotency key
   `council:<job_id>`: an idle convener runs one turn that sees it, and a busy
-  one sees it at its next checkpoint or in one follow-up turn. The status is
+  one runs exactly one follow-up turn after its current turn. The status is
   **`failed`** when the exit reason is a failure (`participant_seating_failed`,
   `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`); the
   record still carries the full sealed outcome, and bound-limited ends

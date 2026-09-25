@@ -54,7 +54,8 @@ them.
   `persisted: true`). The notice is delivered to the forker's session as a
   runtime prompt input with steer handling and the idempotency key
   `fork_off:<job_id>`: an idle forker runs exactly one turn that sees it, a
-  busy forker sees it at its next checkpoint or in one follow-up turn, and a
+  busy forker runs exactly one follow-up turn after its current turn (the
+  running turn's own later model calls do not see it), and a
   forker that is not live is revived through its mob first. The outcome names
   the child and has a `status`: `completed` (with `bounded_result`, `usage`,
   `turns`, `tool_calls`), `failed` (with `error`), `max_run_elapsed` (with
@@ -273,10 +274,11 @@ them.
   carried across respawn, including `MobHandle::respawn_with_successor_spec`
   (a successor spec keeps the spawner of the incarnation it replaces). It is
   never taken from tool arguments.
-- A `fork_off` call that ends before its child is handed off never strands the
-  child: the handoff happens with no await after the fork returns, so either
-  the caller gets the result, the detached child's completion custodian is
-  already running, or the child (with its descendants) is retired.
+- A `fork_off` call that is cancelled or dropped never strands its child. The
+  handoff happens with no await after the fork returns: a detached call that
+  is dropped once the child is seated still delivers the child's completion
+  to the forker, and a blocking call dropped before the outcome arrives
+  retires the child and its descendants.
 - A detached `fork_off` child survives a host restart with its outcome
   delivery intact. After a host restores its mobs (or inserts a restored mob
   handle, as MobKit does), a one-time re-link pass settles every child whose
@@ -365,7 +367,10 @@ them.
   source's turn boundary and recovery gate and otherwise answers busy. A
   Quiescent fork whose committed end would be an unanswered input or tool
   result is refused as busy too, so a child can no longer inherit a torn
-  transcript. `fork_off` from the member's own turn and
+  transcript. `ForkSourceUnavailableCause::Running` therefore now means work
+  the source owes (a turn in flight, an admitted input not started yet, or a
+  committed end that is still unanswered), not only a running provider call;
+  its display text is unchanged. `fork_off` from the member's own turn and
   `fork_member_at_turn_boundary` are unchanged.
 - Temporary councils interrupted by a restart were never recovered on a host
   that supplies a durable council store without a persistent root (MobKit),

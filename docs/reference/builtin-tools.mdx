@@ -372,10 +372,9 @@ once however often delivery runs:
 
 - an idle forker runs exactly one turn that sees the outcome, and the notice is
   committed with that turn;
-- a forker in the middle of a turn receives it at the turn's next checkpoint
-  when its session takes runtime input mid-turn; a turn-driven forker instead
-  runs exactly one follow-up turn that sees it (the running turn's own later
-  model calls do not);
+- a forker in the middle of a turn runs exactly one follow-up turn after the
+  current one ends, and that turn sees it; the running turn's own later model
+  calls do not;
 - a forker that is no longer live (the runtime retired its idle executor, or
   the host restarted) is revived through its mob first.
 

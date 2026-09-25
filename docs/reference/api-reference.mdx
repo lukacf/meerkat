@@ -167,7 +167,8 @@ Mob runtime APIs live primarily in:
 | `roster().await` / `list_members().await` | Membership inspection |
 | `spawn_spec(SpawnMemberSpec).await` | Spawn member (returns `SpawnResult`) |
 | `spawn_many(Vec<SpawnMemberSpec>).await` | Batch spawn members in parallel (results preserve input order) |
-| `retire(...).await` | Retire member |
+| `retire(...).await` | Retire a member and every member it spawned with `fork_off` (transitively, deepest first; `retire_with_descendants` is an alias) |
+| `fork_member(...).await` | Fork a member's exact committed transcript prefix into a durable child member. Refused at once with `MobError::ForkSourceUnavailable { cause: Running }` while the source owes work: a turn in flight, an admitted input that has not started yet (queued, steered, or waiting while the member is materialized or revived), or a committed end that is still an unanswered input or tool result. The refusal never waits behind the source's turn. |
 | `wire(...).await` / `unwire(...).await` | Peer graph mutation |
 | `member(...).await?.send(...).await` / `member(...).await?.internal_turn(...).await` | Turn dispatch via `MemberHandle` |
 | `stop().await` / `resume().await` / `complete().await` / `destroy().await` | Lifecycle transitions |

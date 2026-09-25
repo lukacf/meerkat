@@ -598,8 +598,8 @@ once in the forker's transcript as a durable `BackgroundJob` system notice
 ("Background fork_off job <id> finished (completed|failed):" plus the outcome
 JSON; the typed block has `persisted: true`), delivered as a runtime input with
 steer handling and idempotency key `fork_off:<job_id>`: an idle forker runs one
-turn that sees it, a busy one sees it at its next checkpoint or in one
-follow-up turn, and a non-live forker is revived through its mob first. It is
+turn that sees it, a busy one runs exactly one follow-up turn after its
+current turn (not in-turn), and a non-live forker is revived through its mob first. It is
 readable in later turns and through session history even after the child is
 retired. The outcome status is `completed` (with `bounded_result`, `usage`,
 `turns`, `tool_calls`), `failed` (child retired), `max_run_elapsed` (run

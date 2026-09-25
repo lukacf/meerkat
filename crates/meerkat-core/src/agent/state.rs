@@ -7184,30 +7184,34 @@ fn dispatch_tool_calls_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
                 let tools_ref = Arc::clone(&tools_ref);
                 let tool_dispatch_context = tool_dispatch_context.clone();
                 let dispatch_semaphore = Arc::clone(&dispatch_semaphore);
-                let call_timeout = tool_timeouts
-                    .get(tc.name.as_str())
-                    .copied()
-                    .unwrap_or(default_timeout);
+                // An operator's per-tool override is recorded as such, so a
+                // tool that owns its lifetime bound drops only the default.
+                let core_deadline = match tool_timeouts.get(tc.name.as_str()).copied() {
+                    Some(timeout) => crate::ToolDeadlineContributor::per_tool_override(
+                        crate::ToolDeadlineOwner::CoreToolDispatch,
+                        timeout,
+                    ),
+                    None => crate::ToolDeadlineContributor::finite(
+                        crate::ToolDeadlineOwner::CoreToolDispatch,
+                        default_timeout,
+                    ),
+                };
                 async move {
                     let start = crate::time_compat::Instant::now();
-                    let resolution_context = match crate::ToolDeadlineChain::new(vec![
-                        crate::ToolDeadlineContributor::finite(
-                            crate::ToolDeadlineOwner::CoreToolDispatch,
-                            call_timeout,
-                        ),
-                    ]) {
-                        Ok(deadlines) => crate::ToolExecutionResolutionContext::new(deadlines),
-                        Err(error) => {
-                            return (
-                                tool_index,
-                                tc,
-                                Err(ToolError::from(
-                                    crate::ToolExecutionResolutionError::Deadline(error),
-                                )),
-                                start.elapsed().as_millis() as u64,
-                            );
-                        }
-                    };
+                    let resolution_context =
+                        match crate::ToolDeadlineChain::new(vec![core_deadline]) {
+                            Ok(deadlines) => crate::ToolExecutionResolutionContext::new(deadlines),
+                            Err(error) => {
+                                return (
+                                    tool_index,
+                                    tc,
+                                    Err(ToolError::from(
+                                        crate::ToolExecutionResolutionError::Deadline(error),
+                                    )),
+                                    start.elapsed().as_millis() as u64,
+                                );
+                            }
+                        };
                     let plan = match crate::resolve_tool_execution_plan_fenced(
                         &tools_ref,
                         tc.as_view(),
@@ -14703,6 +14707,115 @@ mod tests {
         assert!(
             saw_timeout_completion,
             "normal dispatch loop must emit a timeout tool completion for the hanging tool"
+        );
+    }
+
+    /// A dispatcher whose one tool owns its lifetime bound (like fork_off
+    /// or council) and takes `run_for` to answer.
+    struct ToolOwnedDeadlineDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+        run_for: std::time::Duration,
+    }
+
+    impl ToolOwnedDeadlineDispatcher {
+        fn new(run_for: std::time::Duration) -> Self {
+            Self {
+                tools: Arc::from([Arc::new(ToolDef::new(
+                    "slow_tool",
+                    "owns its lifetime bound",
+                    serde_json::json!({ "type": "object" }),
+                ))]),
+                run_for,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for ToolOwnedDeadlineDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        fn resolve_execution_plan(
+            &self,
+            _call: ToolCallView<'_>,
+            _dispatch_context: &crate::ToolDispatchContext,
+            resolution_context: &crate::ToolExecutionResolutionContext,
+        ) -> Result<crate::ResolvedToolExecutionPlan, crate::ToolExecutionResolutionError> {
+            crate::ToolExecutionContract::default()
+                .with_tool_owned_deadline()
+                .resolve_default(resolution_context.deadlines().clone())
+                .map_err(Into::into)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            tokio::time::sleep(self.run_for).await;
+            Ok(ToolResult::new(call.id.to_string(), "owned result".to_string(), false).into())
+        }
+    }
+
+    async fn run_tool_owned_call(
+        tools_config: crate::config::ToolsConfig,
+        run_for: std::time::Duration,
+    ) -> String {
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tools_config(tools_config)
+            .build_standalone(
+                Arc::new(BoundaryContextRecordingClient::new()),
+                Arc::new(ToolOwnedDeadlineDispatcher::new(run_for)),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let (tx, mut rx) = mpsc::channel(64);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            agent.run_with_events("start with a tool".to_string().into(), tx),
+        )
+        .await
+        .expect("the run completes")
+        .expect("the run succeeds");
+        let mut completed = None;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::ToolExecutionCompleted { name, content, .. } = event
+                && name == "slow_tool"
+            {
+                completed = Some(crate::types::text_content(&content));
+            }
+        }
+        completed.expect("the tool call completes")
+    }
+
+    /// A tool that owns its lifetime bound is not cut by the core DEFAULT
+    /// deadline (`tools.default_timeout`).
+    #[tokio::test]
+    async fn tool_owned_deadline_is_not_cut_by_the_default_timeout() {
+        let tools_config = crate::config::ToolsConfig {
+            default_timeout: std::time::Duration::from_millis(20),
+            ..crate::config::ToolsConfig::default()
+        };
+        let text = run_tool_owned_call(tools_config, std::time::Duration::from_millis(200)).await;
+        assert_eq!(text, "owned result");
+    }
+
+    /// An operator's explicit per-tool override (`tools.tool_timeouts`) still
+    /// bounds a tool that owns its lifetime bound.
+    #[tokio::test]
+    async fn tool_owned_deadline_obeys_an_operator_per_tool_override() {
+        let tools_config = crate::config::ToolsConfig {
+            default_timeout: std::time::Duration::from_secs(600),
+            tool_timeouts: std::collections::HashMap::from([(
+                "slow_tool".to_string(),
+                std::time::Duration::from_millis(20),
+            )]),
+            ..crate::config::ToolsConfig::default()
+        };
+        let text = run_tool_owned_call(tools_config, std::time::Duration::from_secs(30)).await;
+        assert!(
+            text.contains("\"error\":\"timeout\""),
+            "the per-tool override must time the call out, got: {text}"
         );
     }
 

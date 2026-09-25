@@ -489,10 +489,11 @@ pub use tool_execution::{
     DetachedToolExecutionPolicy, EphemeralToolBindingFingerprint, IdempotencyScope,
     ResolvedExecutionKind, ResolvedToolExecutionPlan, RestartClass, RunnerIdentity,
     StreamingToolExecutionPolicy, ToolCredentialContextRef, ToolDeadlineChain,
-    ToolDeadlineContributor, ToolDeadlineOwner, ToolExecutionApplicability, ToolExecutionContract,
-    ToolExecutionContractError, ToolExecutionDeclarationError, ToolExecutionMode,
-    ToolExecutionOwnerWitness, ToolExecutionResolutionContext, ToolExecutionResolutionError,
-    ToolOutputPolicy, ToolProgressPolicy, ephemeral_tool_catalog_binding_fingerprint,
+    ToolDeadlineContributor, ToolDeadlineOwner, ToolDeadlineSource, ToolExecutionApplicability,
+    ToolExecutionContract, ToolExecutionContractError, ToolExecutionDeclarationError,
+    ToolExecutionMode, ToolExecutionOwnerWitness, ToolExecutionResolutionContext,
+    ToolExecutionResolutionError, ToolOutputPolicy, ToolProgressPolicy,
+    ephemeral_tool_catalog_binding_fingerprint,
 };
 pub use tool_execution_policy::{
     ExecutionPolicyGatedDispatcher, ToolDispatchAdmission, ToolExecutionPolicy,

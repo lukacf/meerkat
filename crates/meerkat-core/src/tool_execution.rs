@@ -48,11 +48,25 @@ impl ToolDeadlineOwner {
     }
 }
 
+/// How a contributor's owner arrived at its deadline for this call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ToolDeadlineSource {
+    /// The owner's default for every tool (for core dispatch,
+    /// `tools.default_timeout`).
+    #[default]
+    OwnerDefault,
+    /// An explicit per-tool override the operator configured for this tool
+    /// by name (for core dispatch, `tools.tool_timeouts.<tool>`).
+    PerToolOverride,
+}
+
 /// One finite or unbounded deadline in declaration order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolDeadlineContributor {
     owner: ToolDeadlineOwner,
     timeout: Option<Duration>,
+    source: ToolDeadlineSource,
 }
 
 impl ToolDeadlineContributor {
@@ -60,6 +74,7 @@ impl ToolDeadlineContributor {
         Self {
             owner,
             timeout: Some(timeout),
+            source: ToolDeadlineSource::OwnerDefault,
         }
     }
 
@@ -67,6 +82,16 @@ impl ToolDeadlineContributor {
         Self {
             owner,
             timeout: None,
+            source: ToolDeadlineSource::OwnerDefault,
+        }
+    }
+
+    /// A finite deadline the operator configured for this tool by name.
+    pub const fn per_tool_override(owner: ToolDeadlineOwner, timeout: Duration) -> Self {
+        Self {
+            owner,
+            timeout: Some(timeout),
+            source: ToolDeadlineSource::PerToolOverride,
         }
     }
 
@@ -76,6 +101,10 @@ impl ToolDeadlineContributor {
 
     pub const fn timeout(&self) -> Option<Duration> {
         self.timeout
+    }
+
+    pub const fn source(&self) -> ToolDeadlineSource {
+        self.source
     }
 }
 
@@ -202,7 +231,15 @@ impl ToolDeadlineChain {
             let limit = contributor
                 .timeout
                 .map_or_else(|| "unbounded".to_string(), format_duration);
-            let _ = writeln!(diagnostic, "  {}: {limit}", contributor.owner.as_str());
+            let source = match contributor.source {
+                ToolDeadlineSource::OwnerDefault => "",
+                ToolDeadlineSource::PerToolOverride => " (per-tool override)",
+            };
+            let _ = writeln!(
+                diagnostic,
+                "  {}: {limit}{source}",
+                contributor.owner.as_str()
+            );
         }
         diagnostic.push_str("winner: ");
         diagnostic.push_str(
@@ -893,7 +930,8 @@ pub enum CoreDispatchDeadline {
     Applies,
     /// The tool owns its own lifetime bound (an explicit, caller-chosen
     /// limit such as fork_off's `max_run_secs` or a council deadline), so the
-    /// core default must not cut it. Other contributors still apply.
+    /// core default must not cut it. An operator's explicit per-tool
+    /// override for the tool, and every other contributor, still apply.
     ToolOwned,
 }
 
@@ -1291,7 +1329,9 @@ impl ResolvedToolExecutionPlan {
 
     /// The deadline the agent loop enforces for this call. The chain itself
     /// is never rewritten (plans must extend their upstream chain); a tool
-    /// that owns its lifetime bound only drops the core dispatch default.
+    /// that owns its lifetime bound only drops the core dispatch DEFAULT. An
+    /// explicit per-tool override the operator configured for the tool still
+    /// bounds it.
     pub fn effective_timeout(&self) -> Option<Duration> {
         match self.core_deadline {
             CoreDispatchDeadline::Applies => self.deadlines.effective_timeout(),
@@ -1299,7 +1339,10 @@ impl ResolvedToolExecutionPlan {
                 .deadlines
                 .contributors
                 .iter()
-                .filter(|contributor| contributor.owner != ToolDeadlineOwner::CoreToolDispatch)
+                .filter(|contributor| {
+                    contributor.owner != ToolDeadlineOwner::CoreToolDispatch
+                        || contributor.source != ToolDeadlineSource::OwnerDefault
+                })
                 .filter_map(|contributor| contributor.timeout)
                 .min(),
         }
@@ -1607,6 +1650,50 @@ mod tests {
             default_plan.deadlines(),
             "the chain is not rewritten, so the plan still extends its upstream"
         );
+    }
+
+    #[test]
+    fn tool_owned_deadline_keeps_an_operator_per_tool_override() {
+        // `tools.tool_timeouts.<tool>` is an explicit operator cap, not the
+        // core default, so a tool that owns its lifetime bound still obeys it.
+        let chain = ToolDeadlineChain::new(vec![ToolDeadlineContributor::per_tool_override(
+            ToolDeadlineOwner::CoreToolDispatch,
+            Duration::from_secs(300),
+        )])
+        .expect("chain");
+        let owned_plan = ToolExecutionContract::default()
+            .with_tool_owned_deadline()
+            .resolve_default(chain.clone())
+            .expect("tool-owned plan");
+        assert_eq!(
+            owned_plan.effective_timeout(),
+            Some(Duration::from_secs(300)),
+            "an explicit per-tool override bounds a tool-owned call"
+        );
+        assert!(
+            owned_plan
+                .deadlines()
+                .diagnostic()
+                .contains("per-tool override")
+        );
+
+        // Only the default is lifted: with no override the call is unbounded.
+        let default_chain = ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+            ToolDeadlineOwner::CoreToolDispatch,
+            Duration::from_secs(600),
+        )])
+        .expect("chain");
+        let owned_default = ToolExecutionContract::default()
+            .with_tool_owned_deadline()
+            .resolve_default(default_chain)
+            .expect("tool-owned plan");
+        assert_eq!(owned_default.effective_timeout(), None);
+
+        // A tool that does not own its bound sees the override as before.
+        let ordinary = ToolExecutionContract::default()
+            .resolve_default(chain)
+            .expect("default plan");
+        assert_eq!(ordinary.effective_timeout(), Some(Duration::from_secs(300)));
     }
 
     #[test]

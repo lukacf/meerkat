@@ -21421,6 +21421,142 @@ async fn test_coarse_spawn_tool_admission_is_machine_routed() {
     );
 }
 
+/// Regression (HomeCore): the member granted fork_off could not observe or
+/// retire its own children ("not allowed by policy" on member_status and
+/// list_members), because every per-member tool required manage scope over
+/// the whole mob. A member now sees and retires the members it spawned, and
+/// only those.
+#[tokio::test]
+async fn forker_without_manage_scope_observes_and_retires_only_its_own_children() {
+    let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    service.set_return_exact_run_result(true);
+    let mob_id = handle.definition().id.to_string();
+    let forker = AgentIdentity::from("owner-forker");
+    let bystander = AgentIdentity::from("bystander");
+    spawn_bounded_fork_source(&handle, &forker).await;
+    spawn_bounded_fork_source(&handle, &bystander).await;
+    let forker_session = handle
+        .resolve_bridge_session_id(&forker)
+        .await
+        .expect("forker session");
+
+    let child = AgentIdentity::from("owned-fork-child");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &forker,
+            bounded_fork_child_spec(&child),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+        )
+        .await
+        .expect("caller-turn fork");
+    run.outcome().await.expect("child outcome");
+
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline()
+        .unwrap()
+        .clone();
+    let composed = super::tools::compose_external_tools_for_profile(
+        &profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        None,
+        None,
+        Some(generated_mob_operator_authority_with_spawn_profile(
+            &mob_id, "worker",
+        )),
+    )
+    .expect("compose dispatcher")
+    .expect("operator dispatcher visible");
+    let dispatcher = match composed
+        .bind_ops_lifecycle(
+            Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+            forker_session,
+        )
+        .expect("bind forker session")
+    {
+        meerkat_core::agent::BindOutcome::Bound(bound)
+        | meerkat_core::agent::BindOutcome::Skipped(bound) => bound,
+    };
+    let call = |name: &'static str, args: serde_json::Value| {
+        let dispatcher = Arc::clone(&dispatcher);
+        async move {
+            let raw = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+            dispatcher
+                .dispatch(ToolCallView {
+                    id: "owned-member-call",
+                    name,
+                    args: &raw,
+                })
+                .await
+        }
+    };
+
+    call(
+        "member_status",
+        serde_json::json!({"member_id": "owned-fork-child"}),
+    )
+    .await
+    .expect("the forker must observe its own child");
+    assert!(
+        matches!(
+            call(
+                "member_status",
+                serde_json::json!({"member_id": "bystander"})
+            )
+            .await,
+            Err(ToolError::AccessDenied { .. })
+        ),
+        "a member it did not spawn stays out of reach"
+    );
+    let listed = call("list_members", serde_json::json!({}))
+        .await
+        .expect("the forker lists its own children");
+    let payload: serde_json::Value =
+        serde_json::from_str(&listed.result.text_content()).expect("payload");
+    let names: Vec<_> = payload["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .filter_map(|member| {
+            member["member_id"]
+                .as_str()
+                .or(member["agent_identity"].as_str())
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec!["owned-fork-child"],
+        "only owned children are listed"
+    );
+    assert!(
+        matches!(
+            call(
+                "retire_member",
+                serde_json::json!({"member_id": "bystander"})
+            )
+            .await,
+            Err(ToolError::AccessDenied { .. })
+        ),
+        "the forker cannot retire a member it did not spawn"
+    );
+    call(
+        "retire_member",
+        serde_json::json!({"member_id": "owned-fork-child"}),
+    )
+    .await
+    .expect("the forker retires its own child");
+    assert!(handle.get_member(&child).await.unwrap().is_none());
+    assert!(handle.get_member(&bystander).await.unwrap().is_some());
+}
+
 #[tokio::test]
 async fn test_visible_mob_operator_tools_emit_identity_native_member_payloads() {
     let (handle, _service) = create_test_mob(sample_definition_with_mob_tools()).await;

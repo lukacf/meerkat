@@ -14273,6 +14273,52 @@ impl MobHandle {
         })
     }
 
+    /// Resolve admission for observing or retiring one member.
+    ///
+    /// The caller supplies manage scope and the member it acts as (resolved
+    /// from its own session binding, never from tool arguments). Ownership
+    /// is read from the target's durable spawner provenance in the roster;
+    /// MobMachine composes the verdict.
+    pub async fn resolve_owned_member_admission(
+        &self,
+        can_manage_mob: bool,
+        caller: Option<&AgentIdentity>,
+        target: &AgentIdentity,
+    ) -> Result<CurrentMobAdmission, MobError> {
+        let caller_owns_member = match caller {
+            Some(caller) => self
+                .roster()
+                .await
+                .get_by_identity(target)
+                .is_some_and(|entry| entry.spawned_by.as_ref() == Some(caller)),
+            None => false,
+        };
+        let effects = self
+            .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveOwnedMemberAdmission {
+                can_manage_mob,
+                caller_owns_member,
+            })
+            .await?;
+        let admission = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::OwnedMemberAdmissionResolved { admission } => {
+                    Some(admission)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted owned-member admission observations but emitted no verdict"
+                        .into(),
+                )
+            })?;
+        Ok(match admission {
+            mob_dsl::MobCurrentMobAdmissionKind::Allowed => CurrentMobAdmission::Allowed,
+            mob_dsl::MobCurrentMobAdmissionKind::Denied => CurrentMobAdmission::Denied,
+        })
+    }
+
     /// Resolve the coarse spawn-tool admission verdict for the spawn-member
     /// tool surfaces (`spawn_member` / `spawn_many_members`).
     ///

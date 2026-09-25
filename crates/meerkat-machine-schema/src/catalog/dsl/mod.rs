@@ -4176,6 +4176,7 @@ runtime_internal_inputs!(
         ClassifyRemoteMemberRuntimeObservation,
         ResolveSpawnMemberAdmission,
         ResolveCurrentMobAdmission,
+        ResolveOwnedMemberAdmission,
         ResolveSpawnToolAdmission,
         ResolveCreateMobAdmission,
         ResolveProfileMutationAdmission,

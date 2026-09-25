@@ -686,6 +686,13 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::OperatorScopeAdmissionAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
+        // Observe/retire admission for one member is decided by MobMachine
+        // from the tool surface's manage-scope and spawner-ownership
+        // observations; driven by the tool surface, not a standalone command.
+        input: MobMachineCatalogInput::ResolveOwnedMemberAdmission,
+        reason: MobMachineRuntimeInternalReason::OperatorScopeAdmissionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
         // Coarse spawn-tool admission for the spawn-member tool surfaces is
         // decided by MobMachine, which composes the disjunction from the tool
         // surface's TWO raw observations (can_manage_mob,

@@ -7159,6 +7159,11 @@ pub mod inputs {
         pub can_manage_mob: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveOwnedMemberAdmission {
+        pub can_manage_mob: bool,
+        pub caller_owns_member: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveSpawnToolAdmission {
         pub can_manage_mob: bool,
         pub spawn_profile_scope_present: bool,
@@ -8259,6 +8264,7 @@ pub enum Input {
     ClassifyRemoteMemberRuntimeObservation(inputs::ClassifyRemoteMemberRuntimeObservation),
     ResolveSpawnMemberAdmission(inputs::ResolveSpawnMemberAdmission),
     ResolveCurrentMobAdmission(inputs::ResolveCurrentMobAdmission),
+    ResolveOwnedMemberAdmission(inputs::ResolveOwnedMemberAdmission),
     ResolveSpawnToolAdmission(inputs::ResolveSpawnToolAdmission),
     ResolveCreateMobAdmission(inputs::ResolveCreateMobAdmission),
     ResolveProfileMutationAdmission(inputs::ResolveProfileMutationAdmission),
@@ -8491,6 +8497,7 @@ impl Input {
             }
             Self::ResolveSpawnMemberAdmission(_) => InputKind::ResolveSpawnMemberAdmission,
             Self::ResolveCurrentMobAdmission(_) => InputKind::ResolveCurrentMobAdmission,
+            Self::ResolveOwnedMemberAdmission(_) => InputKind::ResolveOwnedMemberAdmission,
             Self::ResolveSpawnToolAdmission(_) => InputKind::ResolveSpawnToolAdmission,
             Self::ResolveCreateMobAdmission(_) => InputKind::ResolveCreateMobAdmission,
             Self::ResolveProfileMutationAdmission(_) => InputKind::ResolveProfileMutationAdmission,
@@ -8782,6 +8789,7 @@ pub enum InputKind {
     ClassifyRemoteMemberRuntimeObservation,
     ResolveSpawnMemberAdmission,
     ResolveCurrentMobAdmission,
+    ResolveOwnedMemberAdmission,
     ResolveSpawnToolAdmission,
     ResolveCreateMobAdmission,
     ResolveProfileMutationAdmission,
@@ -9965,6 +9973,10 @@ pub mod effects {
         pub admission: MobCurrentMobAdmissionKind,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OwnedMemberAdmissionResolved {
+        pub admission: MobCurrentMobAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnToolAdmissionResolved {
         pub admission: MobSpawnToolAdmissionKind,
     }
@@ -10532,6 +10544,7 @@ pub enum Effect {
     RemoteMemberRuntimeTerminalityClassified(effects::RemoteMemberRuntimeTerminalityClassified),
     SpawnMemberAdmissionResolved(effects::SpawnMemberAdmissionResolved),
     CurrentMobAdmissionResolved(effects::CurrentMobAdmissionResolved),
+    OwnedMemberAdmissionResolved(effects::OwnedMemberAdmissionResolved),
     SpawnToolAdmissionResolved(effects::SpawnToolAdmissionResolved),
     CreateMobAdmissionResolved(effects::CreateMobAdmissionResolved),
     ProfileMutationAdmissionResolved(effects::ProfileMutationAdmissionResolved),
@@ -10683,6 +10696,7 @@ pub enum EffectKind {
     RemoteMemberRuntimeTerminalityClassified,
     SpawnMemberAdmissionResolved,
     CurrentMobAdmissionResolved,
+    OwnedMemberAdmissionResolved,
     SpawnToolAdmissionResolved,
     CreateMobAdmissionResolved,
     ProfileMutationAdmissionResolved,
@@ -10992,6 +11006,14 @@ pub enum TransitionId {
     ResolveCurrentMobAdmissionDeniedStopped,
     ResolveCurrentMobAdmissionDeniedCompleted,
     ResolveCurrentMobAdmissionDeniedDestroyed,
+    ResolveOwnedMemberAdmissionAllowedRunning,
+    ResolveOwnedMemberAdmissionAllowedStopped,
+    ResolveOwnedMemberAdmissionAllowedCompleted,
+    ResolveOwnedMemberAdmissionAllowedDestroyed,
+    ResolveOwnedMemberAdmissionDeniedRunning,
+    ResolveOwnedMemberAdmissionDeniedStopped,
+    ResolveOwnedMemberAdmissionDeniedCompleted,
+    ResolveOwnedMemberAdmissionDeniedDestroyed,
     ResolveSpawnToolAdmissionAllowedRunning,
     ResolveSpawnToolAdmissionAllowedStopped,
     ResolveSpawnToolAdmissionAllowedCompleted,

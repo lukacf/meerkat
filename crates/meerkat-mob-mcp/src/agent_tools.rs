@@ -211,6 +211,10 @@ pub struct AgentMobToolSurface {
     /// session's builder (owner-session equality against the machine owner
     /// fact — `MobControlPrincipal::from_owner_bridge_session`).
     control_principal: meerkat_mob::MobControlPrincipal,
+    /// The owner session's operation registry, bound by the agent loop.
+    /// `fork_off` registers its detached child run here so the child's
+    /// outcome reaches the forker as a background-job completion.
+    ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
 }
 
 impl AgentMobToolSurface {
@@ -346,6 +350,7 @@ impl AgentMobToolSurface {
             // (A16); byte-identical single-user behavior. The field is the
             // v2 injection seam, not an ambient default at call sites.
             control_principal: meerkat_mob::MobControlPrincipal::Owner,
+            ops_registry: None,
         }
     }
 
@@ -358,7 +363,7 @@ impl AgentMobToolSurface {
          - mob_create: Create an explicit mob with full control over profiles, wiring, and flows\n\
          - mob_destroy: Destroy an explicit mob (cannot destroy implicit delegation mob)\n\
          - mob_spawn_member: Spawn a member into any mob\n\
-         - fork_off: Fork a durable member and run one exact child turn while retaining it\n\
+         - fork_off: Fork yourself into a durable child that runs one task in the background; you own it\n\
          - mob_retire_member: Archive a member and its session\n\
          - mob_check_member: Check a member's execution status and output\n\
          - mob_list_members: List all members of a mob\n\
@@ -491,6 +496,59 @@ impl AgentMobToolSurface {
             meerkat_mob::ProfileMutationAdmission::Denied => {
                 Err(ToolError::access_denied(tool_name))
             }
+        }
+    }
+
+    /// The member this surface's session is bound to, when it belongs to
+    /// `mob_id`. Resolved from the session binding, never from arguments.
+    async fn caller_identity_in_mob(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Option<AgentIdentity>, ToolError> {
+        let bound = self
+            .state
+            .member_for_bridge_session(&self.owner_bridge_session_id)
+            .await
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "resolving the calling member's session binding failed: {error}"
+                ))
+            })?;
+        Ok(bound.and_then(|(bound_mob, identity)| (&bound_mob == mob_id).then_some(identity)))
+    }
+
+    /// Admission to observe or retire one member: manage scope over the mob,
+    /// or durable spawner provenance naming the calling member. MobMachine
+    /// decides; this mirrors its verdict (Denied -> access_denied).
+    async fn ensure_owned_member_authority(
+        &self,
+        tool_name: &str,
+        mob_id: &MobId,
+        target: &AgentIdentity,
+    ) -> Result<(), ToolError> {
+        let can_manage_mob = self
+            .authority_context_snapshot()
+            .can_manage_mob(mob_id.as_str());
+        let caller = if can_manage_mob {
+            None
+        } else {
+            self.caller_identity_in_mob(mob_id).await?
+        };
+        let handle = self.bound_handle(mob_id).await.map_err(|error| {
+            ToolError::execution_failed(format!(
+                "tool '{tool_name}' member admission failed: {error}"
+            ))
+        })?;
+        match handle
+            .resolve_owned_member_admission(can_manage_mob, caller.as_ref(), target)
+            .await
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "tool '{tool_name}' member admission failed: {error}"
+                ))
+            })? {
+            meerkat_mob::CurrentMobAdmission::Allowed => Ok(()),
+            meerkat_mob::CurrentMobAdmission::Denied => Err(ToolError::access_denied(tool_name)),
         }
     }
 
@@ -1239,6 +1297,175 @@ impl AgentMobToolSurface {
         member.tool_access_policy = self
             .resolve_child_tool_access_policy_boxed(call.name, member.tool_access_policy.take())
             .await?;
+        let max_run = match args.max_run_secs {
+            Some(0) => {
+                return Err(ToolError::invalid_arguments(
+                    call.name,
+                    "max_run_secs must be at least 1 when set; omit it for no limit",
+                ));
+            }
+            Some(secs) => Some(std::time::Duration::from_secs(secs)),
+            None => None,
+        };
+
+        // Without a bound operation registry there is no channel to deliver a
+        // detached outcome, so the call keeps the blocking contract.
+        let Some(registry) = self.ops_registry.clone() else {
+            return self
+                .dispatch_fork_off_blocking(
+                    call,
+                    &audit_handle,
+                    &mob_id,
+                    &source_identity,
+                    member,
+                    (args.message_count, args.result_label, args.max_text_bytes),
+                )
+                .await;
+        };
+
+        let operation_id = meerkat_core::ops_lifecycle::OperationId::new();
+        registry
+            .register_operation(meerkat_core::ops_lifecycle::OperationSpec {
+                id: operation_id.clone(),
+                kind: meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp,
+                owner_session_id: self.owner_bridge_session_id.clone(),
+                display_name: format!("fork_off {}", member.identity),
+                source_label: TOOL_FORK_OFF.to_string(),
+                operation_source: None,
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "tool '{}' could not register the child run: {error}",
+                    call.name
+                ))
+            })?;
+
+        let handle = audit_handle.clone();
+        let operation_source = source_identity.clone();
+        let result_label = args.result_label;
+        let max_text_bytes = args.max_text_bytes;
+        let message_count = args.message_count;
+        let forked = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            handle
+                .fork_member_then_run_detached(
+                    &operation_source,
+                    member,
+                    message_count,
+                    result_label,
+                    max_text_bytes,
+                    // fork_off runs inside the source member's own turn, so its
+                    // active admission is the caller, not a competing writer.
+                    meerkat_core::DurableForkSourceAdmission::CallerTurn,
+                    max_run,
+                )
+                .await
+        })
+        .await;
+        let (fork, run) = match forked {
+            Ok(forked) => forked,
+            Err(error) => {
+                // The handle was never returned: remove the operation without
+                // minting a completion the forker would also have to read.
+                if registry
+                    .rollback_unreturned_operation(&operation_id)
+                    .is_err()
+                {
+                    let _ = registry.abort_provisioning(&operation_id, Some(error.to_string()));
+                }
+                return Err(Self::map_bounded_member_run_error(call, error));
+            }
+        };
+        registry
+            .provisioning_succeeded(&operation_id)
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "tool '{}' could not start tracking the child run: {error}",
+                    call.name
+                ))
+            })?;
+        self.record_successful_operator_action_boxed(&audit_handle, call.name)
+            .await;
+
+        let identity = fork.agent_identity.to_string();
+        let member_ref = meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity);
+        let completion_registry = Arc::clone(&registry);
+        let completion_operation = operation_id.clone();
+        let completion_identity = identity.clone();
+        let completion_member_ref = member_ref.clone();
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let outcome = run.outcome().await;
+            let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let (completion, failed) = ForkOffCompletion::from_outcome(
+                completion_identity,
+                completion_member_ref,
+                outcome,
+            );
+            let content = match serde_json::to_string(&completion) {
+                Ok(content) => content,
+                Err(error) => {
+                    let _ = completion_registry.fail_operation(
+                        &completion_operation,
+                        format!("fork_off could not encode the child outcome: {error}"),
+                    );
+                    return;
+                }
+            };
+            let _ = if failed {
+                completion_registry.fail_operation(&completion_operation, content)
+            } else {
+                completion_registry.complete_operation(
+                    &completion_operation,
+                    meerkat_core::ops::OperationResult {
+                        id: completion_operation.clone(),
+                        content,
+                        is_error: false,
+                        duration_ms,
+                        tokens_used: 0,
+                    },
+                )
+            };
+        });
+
+        let started = ForkOffStarted {
+            status: ForkOffStartedStatus::Running,
+            mob_id: mob_id.to_string(),
+            source_member_id: source_identity.to_string(),
+            agent_identity: identity,
+            member_ref,
+            fork_session_id: fork.session_id.to_string(),
+            cache_inheritance: fork.cache_inheritance,
+            job_id: operation_id.to_string(),
+            max_run_secs: args.max_run_secs,
+        };
+        let value = serde_json::to_value(started).map_err(|error| {
+            ToolError::execution_failed(format!(
+                "tool '{}' failed to encode durable fork start: {error}",
+                call.name
+            ))
+        })?;
+        let content = serde_json::to_string(&value)
+            .map_err(|error| ToolError::execution_failed(format!("encode tool result: {error}")))?;
+        Ok(meerkat_core::ToolDispatchOutcome::new(
+            meerkat_core::types::ToolResult::new(call.id.to_string(), content, false),
+            vec![meerkat_core::ops::AsyncOpRef::detached(operation_id)],
+            vec![],
+        ))
+    }
+
+    /// Blocking fork_off for surfaces without a bound operation registry: the
+    /// call waits for the child's exact turn and returns its result.
+    async fn dispatch_fork_off_blocking(
+        &self,
+        call: ToolCallView<'_>,
+        audit_handle: &meerkat_mob::MobHandle,
+        mob_id: &MobId,
+        source_identity: &AgentIdentity,
+        member: SpawnMemberSpec,
+        (message_count, result_label, max_text_bytes): (Option<usize>, String, usize),
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let handle = audit_handle.clone();
         let operation_source = source_identity.clone();
         let outcome = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
@@ -1246,18 +1473,16 @@ impl AgentMobToolSurface {
                 .fork_member_then_run_bounded(
                     &operation_source,
                     member,
-                    args.message_count,
-                    args.result_label,
-                    args.max_text_bytes,
-                    // fork_off runs inside the source member's own turn, so its
-                    // active admission is the caller, not a competing writer.
+                    message_count,
+                    result_label,
+                    max_text_bytes,
                     meerkat_core::DurableForkSourceAdmission::CallerTurn,
                 )
                 .await
         })
         .await
         .map_err(|error| Self::map_bounded_member_run_error(call, error))?;
-        self.record_successful_operator_action_boxed(&audit_handle, call.name)
+        self.record_successful_operator_action_boxed(audit_handle, call.name)
             .await;
         let identity = outcome.fork.agent_identity.to_string();
         let bounded_result = outcome.turn.result().result().to_wire();
@@ -1505,14 +1730,16 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
         let mob_id = MobId::from(args.mob_id);
-        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
+        let identity = AgentIdentity::from(args.member_id);
+        self.ensure_owned_member_authority(call.name, &mob_id, &identity)
+            .await?;
         let audit_handle = self
             .bound_handle(&mob_id)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
         self.state
-            .mob_retire(&mob_id, AgentIdentity::from(args.member_id))
+            .mob_retire(&mob_id, identity)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
 
@@ -1531,9 +1758,10 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
         let mob_id = MobId::from(args.mob_id);
-        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
-
         let identity = AgentIdentity::from(args.member_id);
+        self.ensure_owned_member_authority(call.name, &mob_id, &identity)
+            .await?;
+
         let snapshot = self
             .state
             .mob_member_status(&mob_id, &identity)
@@ -1560,13 +1788,39 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
 
         let mob_id = MobId::from(args.mob_id);
-        self.ensure_mob_scope_authority(call.name, &mob_id).await?;
+        let manage = self.ensure_mob_scope_authority(call.name, &mob_id).await;
+        let owner_view = match manage {
+            Ok(()) => None,
+            // Without manage scope a member of this mob still sees the
+            // members it spawned (e.g. its fork_off children), and only those.
+            Err(denied) => match self.caller_identity_in_mob(&mob_id).await? {
+                Some(caller) => Some(caller),
+                None => return Err(denied),
+            },
+        };
 
-        let members = self
+        let mut members = self
             .state
             .mob_list_members(&mob_id)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
+        if let Some(caller) = owner_view {
+            let handle = self
+                .bound_handle(&mob_id)
+                .await
+                .map_err(|e| Self::map_mob_error(call, e))?;
+            let mut owned = Vec::with_capacity(members.len());
+            for member in members {
+                let admission = handle
+                    .resolve_owned_member_admission(false, Some(&caller), &member.agent_identity)
+                    .await
+                    .map_err(|e| Self::map_mob_error(call, e))?;
+                if matches!(admission, meerkat_mob::CurrentMobAdmission::Allowed) {
+                    owned.push(member);
+                }
+            }
+            members = owned;
+        }
 
         Self::encode_result(call, json!({"members": members}))
     }
@@ -2037,7 +2291,7 @@ impl AgentToolDispatcher for AgentMobToolSurface {
 
     fn bind_ops_lifecycle(
         self: Arc<Self>,
-        _registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+        registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
         owner_bridge_session_id: SessionId,
     ) -> Result<meerkat_core::agent::BindOutcome, meerkat_core::agent::OpsLifecycleBindError> {
         if Arc::strong_count(&self) != 1 {
@@ -2058,6 +2312,7 @@ impl AgentToolDispatcher for AgentMobToolSurface {
             comms_peer_id: this.comms_peer_id,
             comms_runtime: this.comms_runtime,
             snapshot_context: this.snapshot_context,
+            ops_registry: Some(registry),
         })))
     }
 }
@@ -2221,7 +2476,9 @@ fn build_tool_defs_with_profile_support(
             TOOL_FORK_OFF,
             "Delegate one task through a real durable transcript fork.\n\n\
              Unlike delegate, the child starts from an exact committed prefix of an existing mob member's transcript. Unlike prompt-context fork_helper, this persists a real child session and provisions it through the ordinary resume path. The tool visibly commits the task and expected-output guidance as the child input, captures ordinary final assistant text under the caller's byte bound, and retains the child in the normal mob roster.\n\n\
-             The parent remains responsible for replying to the user. The child does not autonomously deliver across sessions. The returned bounded result is ordinary final text with explicit status and truncation, not a validated summary or report.",
+             The call returns as soon as the child is seated and its turn admitted, with status \"running\", the child's agent_identity and member_ref, and a job_id. It does not wait for the child: the child may run for as long as its task needs. When the child's turn ends you receive a background job notice for that job_id whose detail is the child's outcome: the bounded final text on completion, or the error.\n\n\
+             The child belongs to you. It has no deadline unless you set max_run_secs, after which its run is cancelled and it is retired. Otherwise use mob_check_member to observe it and mob_retire_member to end it. A child whose turn fails is retired automatically; a child whose turn completes stays seated for further work until you retire it.\n\n\
+             The parent remains responsible for replying to the user. The child does not autonomously deliver across sessions. The bounded result is ordinary final text with explicit status and truncation, not a validated summary or report.",
             typed_schema::<ForkOffArgs>(),
         ),
         tool_def(
@@ -2480,6 +2737,11 @@ struct ForkOffArgs {
     /// Maximum UTF-8 bytes returned, including any truncation marker.
     #[serde(default = "fork_off_default_max_text_bytes")]
     max_text_bytes: usize,
+    /// Optional autokill: cancel the child's run and retire the child once
+    /// it has run this many seconds. Omit for no limit; the child then runs
+    /// until it finishes, and you retire it with mob_retire_member.
+    #[serde(default)]
+    max_run_secs: Option<u64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2725,6 +2987,112 @@ struct ForkOffResult {
     usage: meerkat_core::Usage,
     turns: u32,
     tool_calls: u32,
+}
+
+/// Immediate `fork_off` result: the child is seated and its turn admitted.
+#[derive(Serialize)]
+struct ForkOffStarted {
+    status: ForkOffStartedStatus,
+    mob_id: String,
+    source_member_id: String,
+    agent_identity: String,
+    member_ref: meerkat_contracts::WireMemberRef,
+    fork_session_id: String,
+    cache_inheritance: meerkat_core::ForkCacheInheritance,
+    /// Background job that reports the child's outcome when its turn ends.
+    job_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_run_secs: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ForkOffStartedStatus {
+    Running,
+}
+
+/// The child's outcome, delivered to the forker as the background job's
+/// completion detail.
+#[derive(Serialize)]
+struct ForkOffCompletion {
+    agent_identity: String,
+    member_ref: meerkat_contracts::WireMemberRef,
+    status: ForkOffCompletionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bounded_result: Option<meerkat_contracts::MobBoundedHelperResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<meerkat_core::Usage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turns: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_run_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retirement_error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ForkOffCompletionStatus {
+    /// The turn completed; the child stays seated for further work.
+    Completed,
+    /// The turn failed; the child was retired.
+    Failed,
+    /// `max_run_secs` elapsed; the run was cancelled and the child retired.
+    MaxRunElapsed,
+    /// The runtime supervising the child stopped before the turn ended.
+    SupervisorStopped,
+}
+
+impl ForkOffCompletion {
+    /// Returns the completion and whether it reports a failure.
+    fn from_outcome(
+        agent_identity: String,
+        member_ref: meerkat_contracts::WireMemberRef,
+        outcome: Option<meerkat_mob::ForkChildRunOutcome>,
+    ) -> (Self, bool) {
+        let mut completion = Self {
+            agent_identity,
+            member_ref,
+            status: ForkOffCompletionStatus::SupervisorStopped,
+            bounded_result: None,
+            usage: None,
+            turns: None,
+            tool_calls: None,
+            error: None,
+            max_run_secs: None,
+            retirement_error: None,
+        };
+        let failed = match outcome {
+            Some(meerkat_mob::ForkChildRunOutcome::Completed(turn)) => {
+                completion.status = ForkOffCompletionStatus::Completed;
+                completion.bounded_result = Some(turn.result().result().to_wire());
+                completion.usage = Some(turn.result().usage().clone());
+                completion.turns = Some(turn.result().turns());
+                completion.tool_calls = Some(turn.result().tool_calls());
+                false
+            }
+            Some(meerkat_mob::ForkChildRunOutcome::Failed(error)) => {
+                completion.status = ForkOffCompletionStatus::Failed;
+                completion.error = Some(error.to_string());
+                true
+            }
+            Some(meerkat_mob::ForkChildRunOutcome::MaxRunElapsed {
+                max_run,
+                retirement_error,
+            }) => {
+                completion.status = ForkOffCompletionStatus::MaxRunElapsed;
+                completion.max_run_secs = Some(max_run.as_secs());
+                completion.retirement_error = retirement_error;
+                true
+            }
+            Some(_) | None => true,
+        };
+        (completion, failed)
+    }
 }
 
 fn fork_off_default_result_label() -> String {

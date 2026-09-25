@@ -297,6 +297,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveCurrentMobAdmissionDeniedDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveOwnedMemberAdmissionAllowedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveOwnedMemberAdmissionAllowedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveOwnedMemberAdmissionAllowedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveOwnedMemberAdmissionAllowedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveOwnedMemberAdmissionDeniedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveOwnedMemberAdmissionDeniedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveOwnedMemberAdmissionDeniedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveOwnedMemberAdmissionDeniedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSpawnToolAdmissionAllowedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4116,6 +4140,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `CurrentMobAdmissionResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OwnedMemberAdmissionResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SpawnToolAdmissionResolved`

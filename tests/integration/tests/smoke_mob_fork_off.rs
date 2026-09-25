@@ -471,16 +471,45 @@ async fn e2e_smoke_s96_mob_fork_off_vertical() {
             parent_history
         ),
     };
+    // fork_off returns once the child's turn is admitted; the child's result
+    // arrives later as a background-job completion. Read it from the child's
+    // canonical session once its turn has settled.
+    assert_eq!(
+        fork_result["status"].as_str(),
+        Some("running"),
+        "fork_off must return promptly with the running child: {fork_result}"
+    );
+    assert!(
+        fork_result["job_id"].as_str().is_some(),
+        "fork_off must name the background job that reports the child: {fork_result}"
+    );
+    let child_text = {
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            match handle
+                .bounded_terminal_member_result(
+                    &AgentIdentity::from(FORK_ONE),
+                    "fork-child",
+                    16 * 1024,
+                )
+                .await
+            {
+                Ok(result) => break result.text().to_string(),
+                Err(error) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "fork child did not settle: {error}"
+                    );
+                    sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+    };
     let child_rows = turn_usages(&events, FORK_ONE).await;
     let child_usage = child_rows
         .first()
         .unwrap_or_else(|| panic!("fork child must emit a turn_completed usage row"));
     let (child_created, child_read) = cached_tokens(child_usage);
-    let child_text = fork_result["bounded_result"]["text"]
-        .as_str()
-        .or_else(|| fork_result["bounded_result"].as_str())
-        .unwrap_or_else(|| panic!("fork_off result without bounded_result text: {fork_result}"))
-        .to_string();
     let fork_session = SessionId::parse(
         fork_result["fork_session_id"]
             .as_str()

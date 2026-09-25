@@ -620,6 +620,39 @@ impl MobOperatorToolDispatcher {
         }
     }
 
+    /// The member this dispatcher's owner session is bound to, if any.
+    async fn caller_identity(&self) -> Option<AgentIdentity> {
+        let owner = self.owner_bridge_session_id.as_ref()?;
+        self.handle
+            .roster()
+            .await
+            .list()
+            .find(|entry| entry.member_ref.bridge_session_id() == Some(owner))
+            .map(|entry| entry.agent_identity.clone())
+    }
+
+    async fn ensure_owned_member_scope(
+        &self,
+        tool_name: &str,
+        target: &AgentIdentity,
+    ) -> Result<(), ToolError> {
+        let can_manage_mob = self.can_manage_current_mob();
+        let caller = if can_manage_mob {
+            None
+        } else {
+            self.caller_identity().await
+        };
+        let admission = self
+            .handle
+            .resolve_owned_member_admission(can_manage_mob, caller.as_ref(), target)
+            .await
+            .map_err(|error| Self::map_mob_error_to_tool_access(tool_name, error))?;
+        match admission {
+            CurrentMobAdmission::Allowed => Ok(()),
+            CurrentMobAdmission::Denied => Err(ToolError::access_denied(tool_name)),
+        }
+    }
+
     fn can_manage_current_mob(&self) -> bool {
         let mob_id = self.handle.definition().id.as_str();
         self.authority_context.can_manage_mob(mob_id)
@@ -1067,6 +1100,12 @@ struct ForceCancelArgs {
     member_id: String,
 }
 
+/// The target of a per-member operator tool, read for admission only.
+#[derive(Deserialize)]
+struct OwnedMemberTargetArgs {
+    member_id: String,
+}
+
 #[derive(Deserialize)]
 struct MemberStatusArgs {
     member_id: String,
@@ -1120,7 +1159,27 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        if self.tools.iter().any(|tool| tool.name == call.name)
+        let mut owner_list_view = None;
+        if matches!(
+            call.name,
+            TOOL_MEMBER_STATUS | TOOL_RETIRE_MEMBER | TOOL_FORCE_CANCEL_MEMBER
+        ) && self.tools.iter().any(|tool| tool.name == call.name)
+        {
+            // Per-member tools: manage scope, or the caller spawned the target.
+            let args: OwnedMemberTargetArgs = call
+                .parse_args()
+                .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+            self.ensure_owned_member_scope(call.name, &AgentIdentity::from(args.member_id))
+                .await?;
+        } else if call.name == TOOL_LIST_MEMBERS
+            && self.tools.iter().any(|tool| tool.name == call.name)
+        {
+            if let Err(denied) = self.ensure_current_mob_scope(call.name).await {
+                // Without manage scope a member sees only the members it
+                // spawned (its fork_off children).
+                owner_list_view = Some(self.caller_identity().await.ok_or(denied)?);
+            }
+        } else if self.tools.iter().any(|tool| tool.name == call.name)
             && !matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS)
         {
             self.ensure_current_mob_scope(call.name).await?;
@@ -1333,7 +1392,27 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 Self::encode_result(call, json!({"ok": true}))
             }
             TOOL_LIST_MEMBERS => {
-                let members = self.handle.list_members().await;
+                let mut members = self.handle.list_members().await;
+                if let Some(caller) = owner_list_view.as_ref() {
+                    let mut owned = Vec::with_capacity(members.len());
+                    for entry in members {
+                        let admission = self
+                            .handle
+                            .resolve_owned_member_admission(
+                                false,
+                                Some(caller),
+                                &entry.agent_identity,
+                            )
+                            .await
+                            .map_err(|error| {
+                                Self::map_mob_error_to_tool_access(call.name, error)
+                            })?;
+                        if matches!(admission, CurrentMobAdmission::Allowed) {
+                            owned.push(entry);
+                        }
+                    }
+                    members = owned;
+                }
                 let mob_id = self.handle.definition().id.clone();
                 let members = members
                     .into_iter()

@@ -259,6 +259,17 @@ pub fn role_in_request(request: &LlmRequest) -> Option<String> {
 // Real session service + MobMcpState
 // ===========================================================================
 
+/// How a fixture's mob state gets its runtime adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixtureRuntime {
+    /// Whatever `MobMcpState::new` derives from the session service.
+    DerivedFromService,
+    /// The runtime-backed composition product surfaces use.
+    RuntimeBacked,
+    /// No runtime adapter at all.
+    Absent,
+}
+
 pub struct CouncilFixture {
     /// Per-fixture identity scope.
     ///
@@ -381,7 +392,7 @@ impl CouncilFixture {
         script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
         customize: impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState,
     ) -> Self {
-        Self::build(script, customize, false)
+        Self::build(script, customize, FixtureRuntime::DerivedFromService)
     }
 
     /// A fixture over the runtime-backed composition product surfaces use
@@ -390,13 +401,21 @@ impl CouncilFixture {
     pub fn new_runtime_backed(
         script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
     ) -> Self {
-        Self::build(script, |state, _root| state, true)
+        Self::build(script, |state, _root| state, FixtureRuntime::RuntimeBacked)
+    }
+
+    /// A fixture whose mob state has NO runtime adapter: the host shape that
+    /// cannot admit a detached completion, whatever it declares.
+    pub fn new_without_runtime_adapter(
+        script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
+    ) -> Self {
+        Self::build(script, |state, _root| state, FixtureRuntime::Absent)
     }
 
     fn build(
         script: impl Fn(&LlmRequest) -> ScriptedTurn + Send + Sync + 'static,
         customize: impl FnOnce(MobMcpState, &std::path::Path) -> MobMcpState,
-        runtime_backed: bool,
+        runtime: FixtureRuntime,
     ) -> Self {
         let temp = tempfile::tempdir().expect("council temp dir");
         let root = temp.path().to_path_buf();
@@ -405,7 +424,7 @@ impl CouncilFixture {
         let calls = client.calls();
         let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
             Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
-        let (service, runtime_adapter) = if runtime_backed {
+        let (service, runtime_adapter) = if runtime == FixtureRuntime::RuntimeBacked {
             let (service, runtime) = runtime_backed_service(&root, runtime_store.clone(), client);
             (service, Some(runtime))
         } else {
@@ -415,10 +434,12 @@ impl CouncilFixture {
             )
         };
         let state_root = root.join("state");
-        let state = customize(
-            Self::state_over(&service, runtime_adapter.as_ref()),
-            &state_root,
-        );
+        let state = if runtime == FixtureRuntime::Absent {
+            MobMcpState::new_with_runtime_adapter(service.clone(), None, MobControlPrincipal::Owner)
+        } else {
+            Self::state_over(&service, runtime_adapter.as_ref())
+        };
+        let state = customize(state, &state_root);
         let state = state
             .try_with_persistent_storage_root(Some(state_root))
             .expect("open rooted council + capability custody")

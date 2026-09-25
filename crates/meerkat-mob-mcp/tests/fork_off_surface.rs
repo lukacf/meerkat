@@ -29,7 +29,9 @@ use meerkat_core::{
 use meerkat_mob::{
     AgentIdentity, BoundedResultSpec, MobHandle, SpawnMemberSpec, WorkOrigin, WorkSpec,
 };
-use meerkat_mob_mcp::{AgentMobToolSurface, DetachedCompletionDelivery, MobMcpState};
+use meerkat_mob_mcp::{
+    AgentMobToolSurface, DetachedCompletionDelivery, DetachedDeliveryUnavailable, MobMcpState,
+};
 use serde_json::{Value, json};
 use support::{CouncilFixture, ScriptedTurn, TurnGate, last_user_text, role_in_request, user_text};
 
@@ -453,7 +455,8 @@ fn member_names(listed: &Value) -> Vec<String> {
 /// fork_off returns while the child is still running. When the child
 /// finishes, its outcome is recorded once in the forker's transcript, the
 /// idle forker is woken for exactly one turn that sees it, and later model
-/// requests keep carrying it.
+/// requests keep carrying it. The forker here has never run a turn of its
+/// own, so this is also the not-live owner case of a member that never ran.
 #[tokio::test(flavor = "multi_thread")]
 async fn detached_fork_off_completion_reaches_the_forkers_next_model_request() {
     let log = RequestLog::default();
@@ -718,6 +721,27 @@ async fn detached_council_completion_reaches_the_convener() {
         &job_id,
         "COUNCIL-SUMMARY-9Z",
     );
+    let outcome: Value = serde_json::from_str(&record.detail).expect("typed council outcome");
+    assert_eq!(
+        outcome["result"]["exit_reason"]["reason"], "completed",
+        "{outcome}"
+    );
+    let participants = outcome["result"]["participants"]
+        .as_array()
+        .expect("participants");
+    assert_eq!(participants.len(), 2, "{outcome}");
+    assert!(
+        participants
+            .iter()
+            .all(|participant| participant["seated"] == true),
+        "every participant of a council with a derived id is seated: {outcome}"
+    );
+    assert!(
+        outcome["result"]["exchanges"]
+            .as_array()
+            .is_some_and(|exchanges| exchanges.len() >= 2),
+        "the participants ran their exchanges: {outcome}"
+    );
 
     let prompt = "FOLLOW-UP-C what did the council decide?";
     assert_eq!(
@@ -778,6 +802,10 @@ async fn one_shot_hosts_block_for_the_fork_off_result() {
     let result = result_json(&outcome);
     assert_eq!(result["agent_identity"], "blocking-child", "{result}");
     assert_eq!(result["bounded_result"]["text"], CHILD_REPLY, "{result}");
+    assert_eq!(
+        result["blocked_because"], "host_declared_unavailable",
+        "the result says, typed, why the call blocked: {result}"
+    );
     assert!(
         result.get("job_id").is_none(),
         "no job on the blocking path: {result}"
@@ -863,6 +891,10 @@ async fn one_shot_hosts_block_for_the_council_result() {
         "the sealed result is in the call: {result}"
     );
     assert_eq!(
+        result["blocked_because"], "host_declared_unavailable",
+        "the result says, typed, why the call blocked: {result}"
+    );
+    assert_eq!(
         any_completion_records(
             &persisted_messages(fixture.service.as_ref(), &convener.session).await
         ),
@@ -919,6 +951,236 @@ async fn fork_off_and_council_are_not_cut_by_the_core_tool_deadline() {
             );
         }
     }
+    fixture.teardown().await;
+}
+
+/// A council that fails (every participant's provider call errors) completes
+/// its job as failed, and the durable record carries the typed outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_detached_council_completes_its_job_as_failed() {
+    let log = RequestLog::default();
+    let recorder = log.clone();
+    let fixture = CouncilFixture::new_runtime_backed(move |request| {
+        recorder.record(request);
+        let council_turn = role_in_request(request).is_some()
+            || user_text(request).contains("bounded plain-text summary");
+        if council_turn {
+            ScriptedTurn::Fail("participant provider unavailable".to_string())
+        } else {
+            ScriptedTurn::Text(FOLLOW_UP_REPLY.to_string())
+        }
+    });
+    fixture.seed_source_mob(&["convener", "alice", "bob"]).await;
+    let mob_id = fixture.source_mob_id().to_string();
+    let convener = bind_surface(
+        &fixture.state,
+        member_session(&fixture, "convener").await,
+        convener_authority(&mob_id),
+    );
+
+    let started = call(&convener.surface, "council", council_args(&fixture, None))
+        .await
+        .expect("council starts");
+    assert_eq!(started["status"], "running", "{started}");
+    let job_id = started["job_id"].as_str().expect("job id").to_string();
+
+    let record = wait_for_completion(&fixture, &convener.session, &job_id).await;
+    assert_eq!(
+        record.status,
+        BackgroundJobTerminalStatus::Failed,
+        "a council whose exit is a failure fails its job: {record:?}"
+    );
+    let outcome: Value = serde_json::from_str(&record.detail).expect("typed council outcome");
+    let reason = outcome["result"]["exit_reason"]["reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("typed exit reason in the record: {outcome}"));
+    assert_ne!(reason, "completed", "{outcome}");
+    assert_one_completion_record(
+        &persisted_messages(fixture.service.as_ref(), &convener.session).await,
+        "council",
+        &job_id,
+        reason,
+    );
+    fixture.teardown().await;
+}
+
+// ===========================================================================
+// Hosts that cannot deliver detached, and owners that are not live
+// ===========================================================================
+
+/// A host that declares detached delivery but has no runtime to admit the
+/// completion does not pretend: fork_off and council block for their result
+/// and say why, typed, in the result.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_declaring_delivery_without_a_runtime_blocks_and_says_why() {
+    let fixture = CouncilFixture::new_without_runtime_adapter(routed_script(
+        RequestLog::default(),
+        vec![(CHILD_TASK, ChildReply::Text(CHILD_REPLY))],
+    ));
+    fixture.seed_source_mob(&["forker", "alice", "bob"]).await;
+    fixture
+        .state
+        .set_detached_completion_delivery(DetachedCompletionDelivery::Available);
+    assert_eq!(
+        fixture.state.detached_delivery_blocked_because(),
+        Some(DetachedDeliveryUnavailable::NoRuntimeAdapter)
+    );
+    let mob_id = fixture.source_mob_id().to_string();
+    let forker = member_surface(&fixture, "forker").await;
+
+    let forked = call(
+        &forker.surface,
+        "fork_off",
+        fork_args("unroutable-child", CHILD_TASK),
+    )
+    .await
+    .expect("fork_off blocks for its result");
+    assert_eq!(forked["bounded_result"]["text"], CHILD_REPLY, "{forked}");
+    assert!(forked.get("job_id").is_none(), "{forked}");
+    assert_eq!(forked["blocked_because"], "no_runtime_adapter", "{forked}");
+
+    let convener = bind_surface(
+        &fixture.state,
+        forker.session.clone(),
+        convener_authority(&mob_id),
+    );
+    let council = call(
+        &convener.surface,
+        "council",
+        council_args(&fixture, Some("no-runtime")),
+    )
+    .await
+    .expect("council blocks for its result");
+    assert!(council.get("job_id").is_none(), "{council}");
+    assert_eq!(
+        council["blocked_because"], "no_runtime_adapter",
+        "{council}"
+    );
+    assert_eq!(
+        any_completion_records(
+            &persisted_messages(fixture.service.as_ref(), &forker.session).await
+        ),
+        0,
+        "nothing is recorded for results the calls already returned"
+    );
+    fixture.teardown().await;
+}
+
+/// The owner has run a turn and the runtime has since retired its executor
+/// when the child finishes: the completion still lands once and wakes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn detached_completion_reaches_an_owner_whose_executor_was_torn_down() {
+    let log = RequestLog::default();
+    let gate = TurnGate::new();
+    let _release_on_exit = OpenOnDrop(gate.clone());
+    let fixture = CouncilFixture::new_runtime_backed(routed_script(
+        log.clone(),
+        vec![(CHILD_TASK, ChildReply::Gated(gate.clone(), CHILD_REPLY))],
+    ));
+    fixture.seed_source_mob(&["forker"]).await;
+    let forker = member_surface(&fixture, "forker").await;
+    assert_eq!(
+        drive_turn(&fixture, "forker", "FOLLOW-UP-W warm up").await,
+        FOLLOW_UP_REPLY
+    );
+
+    let job_id =
+        start_detached_fork(&forker, "late-child", fork_args("late-child", CHILD_TASK)).await;
+    gate.wait_entered(1).await;
+    fixture
+        .runtime_adapter
+        .as_ref()
+        .expect("runtime-backed fixture")
+        .unregister_session(&forker.session)
+        .await
+        .expect("the runtime retires the owner's idle executor");
+    gate.open();
+
+    let record = wait_for_completion(&fixture, &forker.session, &job_id).await;
+    assert_eq!(
+        record.status,
+        BackgroundJobTerminalStatus::Completed,
+        "{record:?}"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let woken = log
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| {
+                request.rendered.contains(&job_id) && !request.last_user.contains("FOLLOW-UP-A")
+            })
+            .count();
+        if woken >= 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the revived owner was never woken"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let prompt = "FOLLOW-UP-A after the revival";
+    assert_eq!(
+        drive_turn(&fixture, "forker", prompt).await,
+        FOLLOW_UP_REPLY
+    );
+    let request = log.request_for(prompt);
+    assert!(
+        request.rendered.contains(&job_id) && request.rendered.contains(CHILD_REPLY),
+        "{}",
+        request.rendered
+    );
+    assert_one_completion_record(
+        &persisted_messages(fixture.service.as_ref(), &forker.session).await,
+        "fork_off",
+        &job_id,
+        CHILD_REPLY,
+    );
+    fixture.teardown().await;
+}
+
+/// The fixture's role profile defaults to autonomous_host, which cannot run a
+/// tracked turn. fork_off still works: the child runs turn-driven.
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_off_of_an_autonomous_host_role_runs_the_child_turn_driven() {
+    let fixture = CouncilFixture::new_runtime_backed(routed_script(
+        RequestLog::default(),
+        vec![(CHILD_TASK, ChildReply::Text(CHILD_REPLY))],
+    ));
+    fixture.seed_source_mob(&["forker"]).await;
+    let handle = source_handle(&fixture).await;
+    let role = handle
+        .definition()
+        .profiles
+        .get(&meerkat_mob::ProfileName::from("participant"))
+        .and_then(|binding| binding.as_inline())
+        .expect("inline participant profile")
+        .clone();
+    assert_eq!(
+        role.runtime_mode,
+        meerkat_mob::MobRuntimeMode::AutonomousHost,
+        "precondition: the role defaults to autonomous_host"
+    );
+    let forker = member_surface(&fixture, "forker").await;
+
+    let job_id =
+        start_detached_fork(&forker, "role-child", fork_args("role-child", CHILD_TASK)).await;
+    let record = wait_for_completion(&fixture, &forker.session, &job_id).await;
+    assert_eq!(
+        record.status,
+        BackgroundJobTerminalStatus::Completed,
+        "{record:?}"
+    );
+    assert!(record.detail.contains(CHILD_REPLY), "{record:?}");
+    let child = handle
+        .get_member(&AgentIdentity::from("role-child"))
+        .await
+        .expect("get member")
+        .expect("the completed child stays seated");
+    assert_eq!(child.runtime_mode, meerkat_mob::MobRuntimeMode::TurnDriven);
     fixture.teardown().await;
 }
 

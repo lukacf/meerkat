@@ -185,11 +185,13 @@ The renderer produces two output formats:
     <available_skills mode="collections">
       <collection source="00000000-0000-4b11-8111-000000000001" count="8">Embedded skills</collection>
       <collection source="dc256086-0d2f-4f61-a307-320d4148107f" count="3">Company skills</collection>
-
-      Use the browse_skills tool to list skills in a source or search.
-      Use the load_skill tool to activate a skill by SkillKey.
     </available_skills>
     ```
+
+    The inventory never names tools. When a session actually composes both
+    `browse_skills` and `load_skill`, the factory appends one guidance line
+    after the inventory telling the model to browse with `browse_skills` and
+    activate with `load_skill`.
 
     This section is injected into the system prompt via the `extra_sections` parameter of `assemble_system_prompt()` in `crates/meerkat/src/prompt_assembly.rs`.
   </Tab>
@@ -310,8 +312,8 @@ they do not advertise these tools even though skill inventory, preload, and
 typed `skill_refs` remain available. An allow-list applied later through
 `ToolScope` cannot compose a policy-disabled implementation.
 
-Collection-mode prompt rendering (more than 12 skills) still mentions
-`browse_skills` and `load_skill`; on a normal factory-built session, use public
+The skill inventory mentions `browse_skills` and `load_skill` only when both
+are composed for the session; on a normal factory-built session, use public
 skill introspection plus typed preload or `skill_refs` instead.
 
 ## Invoking skills

@@ -171,32 +171,18 @@ pub struct GenerateImageTool {
     runtime: ImageGenerationToolRuntime,
 }
 
-const GENERATE_IMAGE_TOOL_DOCUMENTATION: &str = r#"Generate or edit an assistant image through the session-owned image substrate.
+/// Tool-level guidance. Per-field semantics live once, in the `request`
+/// argument schema below; this text carries only what the schema cannot:
+/// when to use the tool, routing, and cross-field rules.
+const GENERATE_IMAGE_TOOL_DOCUMENTATION: &str = r#"Generate or edit an image. Use this whenever the user asks to generate, create, draw, render, or edit an image; do not substitute shell scripts, drawing libraries, or placeholder files while this tool is available. To save the result to disk, generate it here first, then save the returned blob (with blob_save_file when available).
 
-Use this tool whenever the user asks you to generate, create, draw, render, or edit an image. If the user asks to save the result to disk, generate the image here first, then save the returned blob with `blob_save_file`. Do not use shell scripts, drawing libraries, or placeholder files as a substitute for requested image generation when this tool is available.
-
-Use a simple request shape unless you explicitly need the canonical internal shape:
-{"request":{"intent":"generate","prompt":"a cozy tabby cat by a sunlit window","size":"1024x1024","quality":"auto","format":"png","count":1}}
+Put every field inside "request" as described by its schema; never pass size or any other field at the top level. Prefer intent:"generate"; intent:{"type":"create"} is only a compatibility alias.
 
 Routing and defaults:
-- target defaults to "auto".
-- On image-capable sessions, auto uses the current provider's registered image default.
-- On non-image-capable session providers, auto is unsupported; set provider:"openai" or provider:"gemini".
-- provider:"openai" or provider:"gemini" uses that provider's registered image default.
-- To force a model, pass provider plus model. Passing only model is accepted when the catalog identifies a configured provider for that model.
-- For image-only requests that need current or recent information, pass the freshness requirement in the prompt and, when using OpenAI hosted image generation, prefer provider_params.web_search here instead of doing a separate manual web search first.
-
-Supported request fields:
-- intent: "generate" for a new image, "edit" only with source_images. If omitted and prompt is present, intent defaults to "generate".
-- prompt: text prompt for generation.
-- instruction: edit instruction for edit requests.
-- size: "auto", "1024x1024", "1024x1536", "1536x1024", or "WIDTHxHEIGHT". Size support is model/provider dependent; unsupported values may be rejected by the provider.
-- quality: "auto", "low", "medium", or "high". Quality support is model/provider dependent.
-- format: "auto", "png", "jpeg", "jpg", or "webp". Format support is model/provider dependent.
-- provider_params: optional provider-specific JSON parameters documented by the selected provider profile.
-- count/n: currently only 1 is supported.
-
-Do not pass size as a bare top-level string outside request. Do not use intent:{type:"create"} unless you mean the compatibility alias for generate; prefer intent:"generate"."#;
+- Without provider or model, image-capable sessions use the current provider's registered image default; sessions whose provider cannot generate images must set provider:"openai" or provider:"gemini".
+- provider alone uses that provider's registered image default. To force a model, pass provider plus model; model alone is accepted when the catalog identifies a configured provider for that model.
+- For image-only requests that need current or recent information, state the freshness requirement in the prompt and, with OpenAI hosted image generation, prefer provider_params.web_search over a separate manual web search.
+- Size, quality, and format support is model/provider dependent; unsupported values may be rejected by the provider."#;
 
 impl GenerateImageTool {
     pub fn new(runtime: ImageGenerationToolRuntime) -> Self {
@@ -220,7 +206,7 @@ impl GenerateImageTool {
 struct GenerateImageToolArgs {
     #[schemars(
         with = "GenerateImageToolRequestSchema",
-        description = "Image request. For normal generation, use {\"intent\":\"generate\",\"prompt\":\"...\",\"size\":\"1024x1024\",\"quality\":\"auto\",\"format\":\"png\",\"count\":1}. Omit optional fields to use automatic defaults. Provider/model and size behavior is described in the tool description."
+        description = "Image request. For normal generation, use {\"intent\":\"generate\",\"prompt\":\"...\",\"size\":\"1024x1024\",\"quality\":\"auto\",\"format\":\"png\",\"count\":1}. Omit optional fields to use automatic defaults."
     )]
     request: GenerateImageToolRequest,
 }
@@ -240,10 +226,12 @@ struct GenerateImageToolRequestSchema {
         description = "Optional source images for edits, using Meerkat image references from earlier assistant images or blobs."
     )]
     source_images: Option<Vec<ImageSourceRef>>,
+    // Same item shape as `source_images`; the schema points there instead of
+    // repeating the image-reference definition (inlined per use on the wire).
     #[schemars(
-        description = "Optional reference images for generation, using Meerkat image references from earlier assistant images or blobs."
+        description = "Optional reference images for generation. Items use the same image reference shape as source_images items."
     )]
-    reference_images: Option<Vec<ImageSourceRef>>,
+    reference_images: Option<Vec<serde_json::Map<String, Value>>>,
     #[schemars(
         description = "Optional size: \"auto\", \"1024x1024\", \"1024x1536\", \"1536x1024\", or \"WIDTHxHEIGHT\"."
     )]
@@ -254,14 +242,16 @@ struct GenerateImageToolRequestSchema {
         description = "Optional output format: \"auto\", \"png\", \"jpeg\", \"jpg\", or \"webp\"."
     )]
     format: Option<String>,
-    #[schemars(description = "Optional number of images to generate. Defaults to 1.")]
+    #[schemars(
+        description = "Optional number of images to generate (alias n). Currently only 1 is supported."
+    )]
     count: Option<u32>,
     #[schemars(description = "Optional provider override such as \"openai\" or \"gemini\".")]
     provider: Option<String>,
     #[schemars(description = "Optional model override for the selected provider.")]
     model: Option<String>,
     #[schemars(
-        description = "Provider-specific image model parameters validated by the selected provider."
+        description = "Provider-specific image model parameters validated by the selected provider; see the configured provider parameters in the tool description."
     )]
     provider_params: Option<Value>,
 }
@@ -1388,6 +1378,28 @@ mod tests {
             request.pointer("/properties/size").is_some(),
             "request schema should expose size directly: {request:#?}"
         );
+        assert!(
+            request
+                .pointer("/properties/count/description")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|description| description.contains("Currently only 1 is supported")),
+            "count limits live on the count field: {request:#?}"
+        );
+        // Providers inline `$ref`s, so a second reference to the image
+        // reference definition would repeat it on every request.
+        let reference_items = request
+            .pointer("/properties/reference_images/items")
+            .expect("reference_images items schema");
+        assert!(
+            !reference_items.to_string().contains("$ref"),
+            "reference_images must point at source_images instead of repeating the image reference definition: {reference_items}"
+        );
+        assert!(
+            request
+                .pointer("/properties/source_images/items/$ref")
+                .is_some(),
+            "source_images keeps the full image reference definition: {request:#?}"
+        );
     }
 
     #[test]
@@ -1406,9 +1418,8 @@ mod tests {
         for expected in [
             "registered image default",
             "catalog identifies a configured provider for that model",
-            "count/n: currently only 1 is supported",
             "provider_params",
-            "Size support is model/provider dependent",
+            "Size, quality, and format support is model/provider dependent",
         ] {
             assert!(
                 description.contains(expected),

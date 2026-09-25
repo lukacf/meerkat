@@ -882,6 +882,12 @@ fn create_schedule_schema() -> Value {
     })
 }
 
+/// Update schema. The replaceable trigger, target, and policy shapes are
+/// identical to `meerkat_schedule_create`, which is always advertised next to
+/// this tool, so they point at the create schema instead of repeating it:
+/// providers inline every nested definition, and the full trigger/target
+/// schemas are about 12 KB of every request. Arguments are parsed by the same
+/// typed `UpdateScheduleRequest` either way.
 fn update_schedule_schema() -> Value {
     json!({
         "type": "object",
@@ -892,11 +898,19 @@ fn update_schedule_schema() -> Value {
             },
             "name": { "type": "string" },
             "description": { "type": "string" },
-            "trigger": trigger_spec_schema(),
-            "target": target_binding_schema(),
-            "misfire_policy": misfire_policy_schema(),
-            "overlap_policy": overlap_policy_schema(),
-            "missing_target_policy": missing_target_policy_schema(),
+            "trigger": same_shape_as_create("trigger"),
+            "target": same_shape_as_create("target"),
+            "misfire_policy": same_shape_as_create("misfire_policy"),
+            "overlap_policy": {
+                "type": "string",
+                "enum": ["allow_concurrent", "skip_if_running"],
+                "description": "Same values as meerkat_schedule_create.overlap_policy."
+            },
+            "missing_target_policy": {
+                "type": "string",
+                "enum": ["skip", "mark_misfired"],
+                "description": "Same values as meerkat_schedule_create.missing_target_policy."
+            },
             "labels": {
                 "type": "object",
                 "additionalProperties": { "type": "string" }
@@ -912,6 +926,15 @@ fn update_schedule_schema() -> Value {
         },
         "required": ["schedule_id"],
         "additionalProperties": false,
+    })
+}
+
+fn same_shape_as_create(field: &'static str) -> Value {
+    json!({
+        "type": "object",
+        "description": format!(
+            "Replacement {field}; uses exactly the JSON shape of meerkat_schedule_create.{field}."
+        ),
     })
 }
 
@@ -1652,6 +1675,56 @@ mod tests {
         assert_eq!(
             variants[2]["properties"]["type"]["const"],
             json!("calendar")
+        );
+    }
+
+    /// `meerkat_schedule_update` advertises the replaceable shapes by
+    /// reference to `meerkat_schedule_create` instead of repeating ~12 KB of
+    /// trigger/target schema on every request, and every such reference names
+    /// a field the create schema actually defines.
+    #[test]
+    fn update_schema_points_at_create_shapes_instead_of_repeating_them() {
+        let tools = schedule_tools_list();
+        let schema_of = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect("schedule tool schema must exist")["inputSchema"]
+                .clone()
+        };
+        let create = schema_of("meerkat_schedule_create");
+        let update = schema_of("meerkat_schedule_update");
+
+        for field in ["trigger", "target", "misfire_policy"] {
+            let property = &update["properties"][field];
+            assert!(
+                property.get("oneOf").is_none(),
+                "update.{field} must not repeat the create definition: {property}"
+            );
+            assert_eq!(
+                property["description"].as_str(),
+                Some(
+                    format!(
+                        "Replacement {field}; uses exactly the JSON shape of meerkat_schedule_create.{field}."
+                    )
+                    .as_str()
+                )
+            );
+            assert!(
+                create["properties"][field].get("oneOf").is_some(),
+                "create.{field} keeps the full definition the update schema points at"
+            );
+        }
+        for field in ["overlap_policy", "missing_target_policy"] {
+            assert_eq!(
+                update["properties"][field]["enum"], create["properties"][field]["enum"],
+                "update.{field} keeps the same closed value set as create"
+            );
+        }
+        assert_eq!(update["required"], json!(["schedule_id"]));
+        assert!(
+            update.to_string().len() * 4 < create.to_string().len(),
+            "update schema should be a small fraction of the create schema"
         );
     }
 

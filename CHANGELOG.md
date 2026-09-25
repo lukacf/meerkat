@@ -85,6 +85,34 @@ them.
   (xAI) are detected from the row's exact arithmetic (`total_tokens` equals
   prompt plus completion plus reasoning), and their output counts reasoning.
 
+### Changed
+
+- Smaller fixed per-request prompt: the system prompt no longer carries a
+  `# Available Tools` inventory. Every tool definition already reaches the
+  provider through the request tool array, so the inventory repeated each
+  composed tool's full description on every request (about 11-12 KB on a
+  CLI `--tools workspace` or `--yolo` session) and could not follow later
+  composition or visibility changes. Only guidance for families that are
+  actually composed remains (comms usage, deferred catalog discovery, skill
+  discovery). The composed tool set and dispatch are unchanged.
+  Behavior-only: `meerkat_skills::renderer::render_inventory` in collection
+  mode no longer names `browse_skills`/`load_skill`; both tools are
+  default-disabled, and the factory now appends
+  `meerkat_tools::builtin::skills::SKILL_DISCOVERY_TOOL_GUIDANCE` only when
+  both are composed.
+- Trimmed the largest tool definitions without dropping information:
+  `apply_patch` documents its grammar once (the argument schema no longer
+  repeats it) and its example now matches the real anchor semantics;
+  `generate_image` keeps per-field rules in its schema only and advertises the
+  image-reference definition once; `meerkat_schedule_update` points its
+  trigger/target/misfire shapes at `meerkat_schedule_create` instead of
+  repeating about 12 KB of schema; the comms send tools document image
+  references once, on the `blocks` argument; the OpenAI and Gemini image
+  parameter notes are shorter.
+- OpenAI tool emission drops the root `$schema` and `title` annotations that
+  schemars stamps on every derived tool schema (Gemini emission already did).
+  `ToolDef.input_schema` is unchanged.
+
 ### Fixed
 
 - The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)

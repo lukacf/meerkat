@@ -2363,6 +2363,7 @@ mod tests {
                 structured_output: serde_json::json!({"v": 7}),
                 schema_warnings: None,
                 request_usage: Vec::new(),
+                origin: meerkat_core::StructuredOutputOrigin::ExtractionRequest,
             },
         );
         registry

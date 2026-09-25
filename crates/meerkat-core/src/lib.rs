@@ -91,6 +91,7 @@ pub mod storage_diagnostics;
 pub mod storage_durability;
 pub mod storage_layout;
 pub mod streaming_tool;
+pub mod structured_output;
 pub mod surface_metadata;
 pub mod time_compat;
 pub mod tool_catalog;
@@ -196,8 +197,8 @@ pub use event::{
     CompactionFailureReason, CompactionFitByteEvidence, CompactionFitTokenEvidence,
     CompactionPreservedHistoryFit, EventEnvelope, EventSourceIdentity, ExternalToolDelta,
     ExternalToolDeltaPhase, InteractionFailureReason, ScopedAgentEvent,
-    SkillResolutionFailureReason, StreamScopeFrame, StreamTruncationReason, ToolCallArguments,
-    ToolCallArgumentsError, ToolConfigChangeOperation, ToolConfigChangeStatus,
+    SkillResolutionFailureReason, StreamScopeFrame, StreamTruncationReason, StructuredOutputOrigin,
+    ToolCallArguments, ToolCallArgumentsError, ToolConfigChangeOperation, ToolConfigChangeStatus,
     ToolConfigChangedPayload, TurnErrorMetadata, VerboseEventConfig, agent_event_type,
     compare_event_envelopes, format_verbose_event, format_verbose_event_with_config,
     turn_usage_summary, usage_summary,

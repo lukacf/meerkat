@@ -429,8 +429,8 @@ match event {
     AgentEvent::RunFailed { session_id, error_report, .. } => {}
 
     // Structured-output extraction (after a completed main run)
-    AgentEvent::ExtractionSucceeded { session_id, structured_output, schema_warnings } => {}
-    AgentEvent::ExtractionFailed { session_id, last_output, attempts, reason } => {}
+    AgentEvent::ExtractionSucceeded { session_id, structured_output, schema_warnings, origin, .. } => {}
+    AgentEvent::ExtractionFailed { session_id, last_output, attempts, reason, .. } => {}
 
     // Hook lifecycle
     AgentEvent::HookStarted { hook_id, point } => {}

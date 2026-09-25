@@ -60,18 +60,25 @@ them.
   gains `run_usage: Option<WireUsage>` and `request_usage: Vec<WireTurnUsage>`.
   Struct literals naming every field must add them; all are serde-defaulted
   and skipped when empty, so the JSON shape is additive.
-- `Usage::add` and `CumulativeUsage::add_turn` now aggregate
+- Behaviour-only: `Usage::add` and `CumulativeUsage::add_turn` now aggregate
   `cache_read_tokens`, `cache_creation_tokens` and `reasoning_tokens` instead of
-  clearing them, and `CumulativeUsage::from_usage` keeps them (clamped to their
-  parent totals) instead of clearing them. `Usage::cumulative_delta_since` is
-  new.
+  clearing them, and `CumulativeUsage::from_usage` keeps them instead of
+  clearing them. `Usage::add` sums already-normalized totals field by field;
+  `add_turn` (per call) and `from_usage` (per total) clamp cache reads to the
+  input total and cache writes to what reads leave, so reads plus writes never
+  exceed input, and clamp reasoning to output. `Usage::cumulative_delta_since`
+  and `Usage::is_zero` are new.
+- Behaviour-only: `Session::record_cumulative_usage` normalizes the stored total
+  before adding, as `record_turn_usage` already did, so a pre-0.8.22 total with
+  raw summed cache counters is never mixed with normalized deltas.
 - `meerkat_core::agent::compact::CompactionOutcome` gains the public field
   `summary_source: CompactionSummarySource` (new enum: `ProviderCall`,
   `HostCurator`, `MechanicalFallback`).
-- `meerkat_live::host::ObservationOutcome::UserContentCommitted` now holds
-  `observation: Box<LiveAdapterObservation>` instead of the observation by
-  value; the larger `Usage` pushed the enum over the large-variant limit.
-- Gemini `output_tokens` now counts thinking tokens as well as candidates,
+- Not measured by the semver gate: `meerkat_live::host::ObservationOutcome::UserContentCommitted`
+  now holds `observation: Box<LiveAdapterObservation>` instead of the
+  observation by value; the larger `Usage` pushed the enum over the
+  large-variant limit.
+- Behaviour-only: Gemini `output_tokens` now counts thinking tokens as well as candidates,
   matching how Gemini bills them. Output totals rise on Gemini thinking models,
   and `max_tokens` budgets now charge thinking, so a Gemini run can reach
   `budget_exhausted` earlier than before.
@@ -80,12 +87,25 @@ them.
   Vec<TurnUsage>`, one usage row per answered structured-output extraction
   request. Struct literals naming every field must add it; it is
   serde-defaulted and skipped when empty, so the JSON shape is additive.
+- `meerkat_core::AgentEvent::ExtractionSucceeded` gains the public field
+  `origin: StructuredOutputOrigin` (new enum `meerkat_core::StructuredOutputOrigin`:
+  `ExtractionRequest`, `FinalReply`). Struct literals naming every field must
+  add it; it is serde-defaulted to `extraction_request` and omitted when it has
+  that value, so the JSON shape is additive and older event logs read as
+  before.
 - Behaviour: `turn_completed` is now published for every committed agent-loop
   provider call, including tool-loop calls (`stop_reason: tool_use`), instead of
   only the call that closes the run. It pairs with the call's `turn_started`.
   Consumers that counted `turn_completed` as one per run, or treated it as the
   end of a run, must read `run_completed` for that. Consumers summing
   `turn_completed.usage` rows now see every agent-loop call.
+- Behaviour-only: Chat Completions backends that report reasoning beside
+  `completion_tokens` (xAI) are detected from the row's exact arithmetic
+  (`total_tokens` equals prompt plus completion plus reasoning), and their
+  `output_tokens` now counts reasoning. Output totals rise on those backends,
+  and `max_tokens` budgets now charge reasoning, so such a run can reach
+  `budget_exhausted` earlier than before. A backend that omits `total_tokens`
+  is read as OpenAI's convention (reasoning inside completion).
 
 ### Added
 
@@ -105,12 +125,14 @@ them.
   the run made (tool-loop calls, structured-output extraction and compaction
   summaries made by the model included; curator and mechanical summaries make
   no request and add no row). A run that suspends for callback results keeps
-  one account across the resume. The Python and TypeScript SDK `RunResult`
+  one account: once its staged callback results are applied, the next run
+  continues it, whether that is `run_pending` or a content turn. The Python and TypeScript SDK `RunResult`
   expose them as `run_usage`/`request_usage` and `runUsage`/`requestUsage`,
-  and every SDK `Usage` gains `reasoning_tokens`/`reasoningTokens`.
-- Chat Completions backends that report reasoning beside `completion_tokens`
-  (xAI) are detected from the row's exact arithmetic (`total_tokens` equals
-  prompt plus completion plus reasoning), and their output counts reasoning.
+  the `@rkat/web` `TurnResult` as `run_usage`/`request_usage`, and every SDK
+  `Usage` gains `reasoning_tokens`/`reasoningTokens`. The generated
+  `WireUsage`/`WireRunResult` twins gain the same fields and a `WireTurnUsage`.
+- `Session::reported_total_usage` returns the session total as every
+  reporting surface shows it, normalized, without touching the stored total.
 - Extraction outcome events carry `request_usage`, one per-call usage row for
   each extraction request (retries after a failed validation included), so
   structured-output extraction is accounted on the event stream.
@@ -165,6 +187,33 @@ them.
   `ToolDef.input_schema` is unchanged. Behavior-only:
   `meerkat_openai::normalize_openai_tool_parameters_schema` removes both root
   keys.
+- Structured output (`--schema`, `output_schema`) shows the model the schema
+  up front and skips the extraction request when it is not needed. Every
+  request of a schema-bearing run carries a delimited `<structured_output>`
+  section, appended to the system prompt, stating that the final reply must be
+  a single JSON value matching the schema and including the schema as the
+  provider compiles it for validation. The section is byte-identical across
+  the run's requests, so prompt caching is unaffected, and it is request-only:
+  it is never written into the session transcript. Runs without a schema are
+  unchanged. When the final reply of the tool loop already validates (after
+  the existing code-fence and named-wrapper normalization, and with known JSON
+  Schema `format` keywords such as `date-time`, `email`, `uri` and `uuid`
+  asserted, since native constrained decoding enforces them on the extraction
+  request), it becomes `structured_output` and no extraction request is sent.
+  `RunResult` and the RPC, REST and SDK result shapes are the same as for a
+  successful extraction, `RunResult.text` is that reply, and the events are
+  `run_completed` then `extraction_succeeded`, whose new `origin` field is
+  `final_reply` (with no `request_usage`), so the ATIF export and `--verbose`
+  output record no extraction request for it. Any other final reply runs the
+  extraction path exactly as before: same prompt, temperature 0, no tools, the
+  native schema slot with unchanged `strict` defaults, and the same retry and
+  attempt accounting. After a sticky model fallback, the retried request shows
+  the schema as the fallback provider compiles it. Requests that reference
+  Gemini cached content are not given the section, and provider-authored cache
+  breakpoints over a request carrying it are not recorded as durable cache
+  evidence, since they describe a system prompt the transcript does not
+  contain. `meerkat_core::structured_output` and
+  `meerkat_core::StructuredOutputOrigin` are new public API.
 
 ### Fixed
 
@@ -174,6 +223,17 @@ them.
   tool execution mode Detached is not supported".
 - Valid UTF-8 shell output longer than the capture buffer is no longer reported
   as invalid UTF-8 when the buffer's edge splits a character.
+- A run that suspends for callback results continues its usage account only
+  after that run's staged callback results are applied; the next run of the
+  agent then continues it, whether `run_pending` or a content turn that carries
+  a new prompt. A run with no applied results discards the suspended account
+  instead of absorbing its calls. The carry-over is in memory, so an agent
+  rebuilt from storage resumes with a fresh account.
+- Pre-0.8.22 sessions report normalized usage everywhere: session read
+  `billing.usage`, mob run accounting (`usage_total` and each member), the run
+  result, run deltas and compaction rollback. Aborting an uncommitted
+  compaction on such a session no longer moves the reported total, and an abort
+  that recorded nothing restores the stored total byte for byte.
 - `rkat run --export-atif` records every provider request of the run as an
   ATIF step with its own metrics: each tool-call turn, the answering turn and
   each structured-output extraction request. It used to keep only the final

@@ -379,12 +379,11 @@ class Usage(TypedDict, total=False):
       one run. Its `input_tokens` is the saturating sum of each call's
       *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail
       fields and `reasoning_tokens` are provider-normalized sums: every
-      provider's cache-read and cache-write counts are subsets of that call's
-      presented input, and reasoning is a subset of output, so on a cumulative
-      value `cache_read_tokens <= input_tokens`,
-      `cache_creation_tokens <= input_tokens` and
-      `reasoning_tokens <= output_tokens` on every provider. A field stays
-      `None` until some call reports it.
+      provider's cache-read and cache-write counts are disjoint parts of that
+      call's presented input, and reasoning is a subset of output, so on a
+      cumulative value `cache_read_tokens + cache_creation_tokens <=
+      input_tokens` and `reasoning_tokens <= output_tokens` on every provider.
+      A field stays `None` until some call reports it.
 
     # What consumers must not sum
 
@@ -1259,6 +1258,10 @@ class StreamTruncationReasonOversizedRemoteEvent(TypedDict, total=False):
 StreamTruncationReason = StreamTruncationReasonChannelFull | StreamTruncationReasonStreamLagged | StreamTruncationReasonOutputAudioDegraded | StreamTruncationReasonRemoteCursorOverrun | StreamTruncationReasonOversizedRemoteEvent
 
 
+# Which request produced a run's structured output.
+StructuredOutputOrigin = Literal['extraction_request', 'final_reply']
+
+
 class SystemNoticePeer(TypedDict, total=False):
     """Peer identity carried in a typed comms transcript block.
 
@@ -1469,6 +1472,7 @@ class AgentEventRunCompleted(TypedDict, total=False):
 class AgentEventExtractionSucceeded(TypedDict, total=False):
     """Structured-output extraction succeeded after a completed main run.
     """
+    origin: NotRequired[StructuredOutputOrigin]
     request_usage: NotRequired[list[TurnUsage]]
     schema_warnings: NotRequired[Optional[list[SchemaWarning]]]
     session_id: Required[SessionId]

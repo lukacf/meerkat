@@ -262,6 +262,7 @@ mod tests {
                 structured_output: serde_json::json!({"answer": 42}),
                 schema_warnings: None,
                 request_usage: Vec::new(),
+                origin: crate::event::StructuredOutputOrigin::ExtractionRequest,
             })
             .expect("terminal");
         assert_eq!(terminal.kind, TurnTerminalKind::ExtractionSucceeded);
@@ -282,6 +283,7 @@ mod tests {
                 structured_output: serde_json::json!({"answer": 42}),
                 schema_warnings: None,
                 request_usage: Vec::new(),
+                origin: crate::event::StructuredOutputOrigin::ExtractionRequest,
             })
             .expect("terminal");
         assert_eq!(

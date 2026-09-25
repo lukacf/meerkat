@@ -683,7 +683,13 @@ fn cumulative_usage_clamps_detail_counters_to_their_parent_totals() {
     let mut cumulative = CumulativeUsage::default();
     cumulative.add_turn(&recorded_openai_turn(100, 500, 700, 10, 90));
     assert_eq!(cumulative.cache_read_tokens, Some(100));
-    assert_eq!(cumulative.cache_creation_tokens, Some(100));
+    // Reads and writes are disjoint parts of input: writes get what reads
+    // leave, so reads + writes never exceed input.
+    assert_eq!(cumulative.cache_creation_tokens, Some(0));
+    let mut split = CumulativeUsage::default();
+    split.add_turn(&recorded_openai_turn(100, 60, 70, 10, 5));
+    assert_eq!(split.cache_read_tokens, Some(60));
+    assert_eq!(split.cache_creation_tokens, Some(40));
     assert_eq!(cumulative.reasoning_tokens, Some(10));
 }
 

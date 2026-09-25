@@ -559,6 +559,9 @@ fn map_server_error(err: oai_rt_rs::error::ServerError) -> LlmError {
 }
 
 #[cfg(test)]
+mod structured_output_tests;
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;

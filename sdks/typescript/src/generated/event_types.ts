@@ -284,12 +284,11 @@ export interface ProviderTokenAccounting {
  *   one run. Its `input_tokens` is the saturating sum of each call's
  *   *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail
  *   fields and `reasoning_tokens` are provider-normalized sums: every
- *   provider's cache-read and cache-write counts are subsets of that call's
- *   presented input, and reasoning is a subset of output, so on a cumulative
- *   value `cache_read_tokens <= input_tokens`,
- *   `cache_creation_tokens <= input_tokens` and
- *   `reasoning_tokens <= output_tokens` on every provider. A field stays
- *   `None` until some call reports it.
+ *   provider's cache-read and cache-write counts are disjoint parts of that
+ *   call's presented input, and reasoning is a subset of output, so on a
+ *   cumulative value `cache_read_tokens + cache_creation_tokens <=
+ *   input_tokens` and `reasoning_tokens <= output_tokens` on every provider.
+ *   A field stays `None` until some call reports it.
  *
  * # What consumers must not sum
  *
@@ -975,6 +974,11 @@ export type StreamTruncationReason = {
   max_bytes: number;
 };
 
+/**
+ * Which request produced a run's structured output.
+ */
+export type StructuredOutputOrigin = "extraction_request" | "final_reply";
+
 export type ToolCallArguments = Record<string, unknown>;
 
 export interface SystemTime {
@@ -1126,6 +1130,7 @@ export type AgentEvent = {
   type: "run_completed";
   usage: CumulativeUsage;
 } | {
+  origin?: StructuredOutputOrigin;
   request_usage?: TurnUsage[];
   schema_warnings?: SchemaWarning[] | null;
   session_id: SessionId;

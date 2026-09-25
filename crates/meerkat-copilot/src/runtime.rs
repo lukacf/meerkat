@@ -2641,6 +2641,218 @@ mod tests {
         );
     }
 
+    /// Records what the routed client hands the provider adapter and compiles
+    /// schemas with a marker, standing in for the route's adapter client.
+    struct StructuredOutputRecordingClient {
+        seen: Arc<Mutex<Vec<meerkat_llm_core::LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl meerkat_llm_core::LlmClient for StructuredOutputRecordingClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_llm_core::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_llm_core::LlmRequest,
+        ) -> meerkat_llm_core::LlmStream<'a> {
+            self.seen.lock().push(request.clone());
+            Box::pin(futures::stream::empty())
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+            Ok(())
+        }
+
+        fn compile_schema(
+            &self,
+            output_schema: &meerkat_core::OutputSchema,
+        ) -> Result<meerkat_core::schema::CompiledSchema, meerkat_core::schema::SchemaError>
+        {
+            let mut schema = output_schema.schema.as_value().clone();
+            schema["x-compiled-by"] = serde_json::json!("route-adapter");
+            Ok(meerkat_core::schema::CompiledSchema {
+                schema,
+                warnings: Vec::new(),
+            })
+        }
+    }
+
+    /// Structured output on every Copilot route: the routed client (and the
+    /// account capability gate in front of the adapter) hands the adapter the
+    /// exact request the agent loop composed, schema section and native
+    /// schema slot included, and the section shows the schema the route's
+    /// adapter compiles. The adapters' lowering of those requests is pinned in
+    /// the provider crates.
+    #[tokio::test]
+    async fn routed_client_passes_structured_output_requests_through_unchanged() {
+        use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
+        use meerkat_core::structured_output::{
+            OUTPUT_SCHEMA_INSTRUCTIONS_OPEN, project_output_schema_instructions,
+            render_output_schema_instructions,
+        };
+
+        let runtime = Arc::new(CopilotRuntime::new());
+        let (auth_binding, binding) = validated_binding();
+        let (env, _) = resolver_environment(&auth_binding).await;
+        let persistence_id = env
+            .provider_auth_persistence()
+            .expect("test persistence")
+            .authority_id();
+        let state = runtime
+            .account_state(
+                persistence_id,
+                binding.credential_identity(),
+                CopilotBackendConfig::default(),
+            )
+            .expect("account state");
+        let snapshot = CopilotModelSnapshot::from_models(vec![crate::CopilotModel {
+            id: "gpt-test".to_string(),
+            vendor: None,
+            name: None,
+            version: None,
+            model_picker_enabled: None,
+            capabilities: crate::CopilotModelCapabilities {
+                supports: crate::CopilotModelSupports {
+                    tool_calls: Some(true),
+                    streaming: Some(true),
+                    structured_outputs: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            policy: None,
+            supported_endpoints: vec![CopilotEndpoint::Responses],
+        }])
+        .expect("model snapshot");
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: 1,
+            token: "derived".to_string(),
+            source_generation: 1,
+            source_expires_at: None,
+            refresh_at: Utc::now() + Duration::hours(1),
+            api_base: "https://copilot.example.test".to_string(),
+            models: Some(Arc::new(snapshot)),
+            model_discovery_refresh_at: None,
+        });
+        let authorizer = Arc::new(CopilotAuthorizer {
+            state: Arc::clone(&state),
+            binding: binding.clone(),
+            env,
+            transport: Arc::new(ScriptedTransport::new([])),
+        });
+        let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: binding.backend(),
+            backend_profile: binding.backend_profile().clone(),
+            credential_identity: binding.credential_identity().clone(),
+            auth_lease: Arc::new(
+                meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                    authorizer,
+                    AuthMetadata::default(),
+                    crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                ),
+            ),
+        };
+        runtime.accounts.lock().insert(
+            CopilotAccountCacheKey {
+                persistence_id,
+                credential_identity: binding.credential_identity().clone(),
+            },
+            Arc::downgrade(&state),
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_factory = Arc::clone(&seen);
+        let factory: CopilotRouteClientFactory = Arc::new(move |_, _| {
+            Ok(Arc::new(StructuredOutputRecordingClient {
+                seen: Arc::clone(&seen_for_factory),
+            }))
+        });
+        let client = routed_client(
+            Arc::clone(&runtime),
+            connection,
+            Provider::OpenAI,
+            "gpt-test".to_string(),
+            factory,
+        )
+        .expect("routed client");
+
+        let schema = meerkat_core::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {"verdict": {"type": "string"}},
+            "required": ["verdict"]
+        }))
+        .expect("valid schema");
+        let compiled = client.compile_schema(&schema).expect("compile");
+        assert_eq!(
+            compiled.schema["x-compiled-by"], "route-adapter",
+            "the routed client compiles with the route's adapter"
+        );
+        let section = render_output_schema_instructions(&compiled.schema);
+        let mut messages = vec![
+            meerkat_core::Message::System(meerkat_core::SystemMessage::new("You are a reviewer.")),
+            meerkat_core::Message::User(meerkat_core::UserMessage::text("review")),
+        ];
+        project_output_schema_instructions(&mut messages, &section);
+        let tool = Arc::new(meerkat_core::ToolDef {
+            name: "lookup".into(),
+            description: "returns a fixed observation".to_string(),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            provenance: None,
+        });
+        let mut main_turn =
+            meerkat_llm_core::LlmRequest::new("gpt-test", messages.clone()).with_tools(vec![tool]);
+        main_turn.provider_params = Some(ProviderTag::OpenAi(OpenAiProviderTag::default()));
+        let mut extraction =
+            meerkat_llm_core::LlmRequest::new("gpt-test", messages).with_temperature(0.0);
+        extraction.provider_params = Some(ProviderTag::OpenAi(OpenAiProviderTag {
+            structured_output: Some(schema.clone()),
+            ..Default::default()
+        }));
+
+        for request in [&main_turn, &extraction] {
+            let projection = client
+                .project_replay_request(&request.messages)
+                .expect("route projection");
+            let prepared =
+                meerkat_llm_core::PreparedLlmRequest::from_projection(request.clone(), projection);
+            let events = client.stream_prepared(&prepared).collect::<Vec<_>>().await;
+            assert!(events.is_empty(), "unexpected routed events: {events:?}");
+        }
+        let seen = seen.lock().clone();
+        assert_eq!(seen.len(), 2, "both requests reached the adapter");
+        for (sent, received) in [&main_turn, &extraction].into_iter().zip(&seen) {
+            assert_eq!(
+                serde_json::to_value(received).expect("serialize"),
+                serde_json::to_value(sent).expect("serialize"),
+                "the routed client hands the adapter the request unchanged"
+            );
+            assert_eq!(
+                serde_json::to_string(&received.messages)
+                    .expect("serialize")
+                    .matches(OUTPUT_SCHEMA_INSTRUCTIONS_OPEN)
+                    .count(),
+                1,
+                "the section reaches the adapter exactly once"
+            );
+        }
+        let Some(ProviderTag::OpenAi(tag)) = seen[1].provider_params.as_ref() else {
+            panic!("extraction keeps its provider tag");
+        };
+        assert!(
+            tag.structured_output.is_some(),
+            "the extraction request keeps its native schema slot"
+        );
+    }
+
     #[test]
     fn account_capability_gate_rejects_excess_output_budget() {
         let client = capability_gated_client(

@@ -2035,6 +2035,26 @@ impl std::fmt::Display for InteractionFailureReason {
     }
 }
 
+/// Which request produced a run's structured output.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuredOutputOrigin {
+    /// A dedicated extraction request after the main run.
+    #[default]
+    ExtractionRequest,
+    /// The run's final reply already validated against the output schema
+    /// (validate-first), so no extraction request was sent.
+    FinalReply,
+}
+
+impl StructuredOutputOrigin {
+    /// Whether the structured output came from an extraction request.
+    pub fn is_extraction_request(&self) -> bool {
+        matches!(self, Self::ExtractionRequest)
+    }
+}
+
 /// Events emitted during agent execution
 ///
 /// These events form the streaming API for consumers.
@@ -2084,6 +2104,16 @@ pub enum AgentEvent {
         /// zeros.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         request_usage: Vec<crate::types::TurnUsage>,
+        /// Which request produced `structured_output`. `final_reply` means the
+        /// run's final reply already validated against the schema, so no
+        /// extraction request was sent and `request_usage` is empty. Absent
+        /// means `extraction_request`, which is also what every event written
+        /// before this field existed means.
+        #[serde(
+            default,
+            skip_serializing_if = "StructuredOutputOrigin::is_extraction_request"
+        )]
+        origin: StructuredOutputOrigin,
     },
 
     /// Structured-output extraction failed after a completed main run.
@@ -2685,6 +2715,15 @@ pub fn format_verbose_event_with_config(
             // would turn "no answer" into a wrong answer that looks right.
             None => format!("  ── Turn complete: {stop_reason:?} (tokens unmeasured)"),
         }),
+        AgentEvent::ExtractionSucceeded {
+            request_usage,
+            origin: StructuredOutputOrigin::FinalReply,
+            ..
+        } => Some(extraction_verbose_lines(
+            "  ✓ Structured output validated from the final reply (no extraction request)"
+                .to_string(),
+            request_usage,
+        )),
         AgentEvent::ExtractionSucceeded { request_usage, .. } => Some(extraction_verbose_lines(
             "  ✓ Extraction succeeded".to_string(),
             request_usage,
@@ -4491,6 +4530,53 @@ mod tests {
     /// call's cached input is in it, and extraction outcomes print one line
     /// per extraction request.
     #[test]
+    fn extraction_succeeded_origin_is_additive_on_the_wire() {
+        let session_id = SessionId::new();
+        let extraction = AgentEvent::ExtractionSucceeded {
+            session_id: session_id.clone(),
+            structured_output: serde_json::json!({"answer": 1}),
+            schema_warnings: None,
+            request_usage: Vec::new(),
+            origin: StructuredOutputOrigin::ExtractionRequest,
+        };
+        let value = serde_json::to_value(&extraction).expect("serialize");
+        assert!(
+            value.get("origin").is_none(),
+            "the extraction-request default is omitted: {value}"
+        );
+        let decoded: AgentEvent = serde_json::from_value(value).expect("an event without origin");
+        assert!(matches!(
+            decoded,
+            AgentEvent::ExtractionSucceeded {
+                origin: StructuredOutputOrigin::ExtractionRequest,
+                ..
+            }
+        ));
+
+        let final_reply = AgentEvent::ExtractionSucceeded {
+            session_id,
+            structured_output: serde_json::json!({"answer": 1}),
+            schema_warnings: None,
+            request_usage: Vec::new(),
+            origin: StructuredOutputOrigin::FinalReply,
+        };
+        assert_eq!(
+            format_verbose_event(&final_reply).as_deref(),
+            Some("  ✓ Structured output validated from the final reply (no extraction request)")
+        );
+        let value = serde_json::to_value(&final_reply).expect("serialize");
+        assert_eq!(value["origin"], "final_reply");
+        let decoded: AgentEvent = serde_json::from_value(value).expect("deserialize");
+        assert!(matches!(
+            decoded,
+            AgentEvent::ExtractionSucceeded {
+                origin: StructuredOutputOrigin::FinalReply,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn verbose_usage_lines_use_presented_input_and_cover_extraction_requests() {
         let anthropic = crate::types::TurnUsage::new(
             Usage {
@@ -4516,6 +4602,7 @@ mod tests {
             structured_output: serde_json::json!({"answer": 1}),
             schema_warnings: None,
             request_usage: vec![anthropic.clone(), anthropic],
+            origin: StructuredOutputOrigin::ExtractionRequest,
         })
         .expect("extraction outcome is verbose");
         assert_eq!(

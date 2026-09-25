@@ -558,7 +558,7 @@ impl SessionAgent for FactoryAgent {
             updated_at: s.updated_at(),
             message_count: s.messages().len(),
             total_tokens: s.total_tokens(),
-            usage: s.total_usage(),
+            usage: s.reported_total_usage(),
             last_assistant_text: s.last_assistant_text(),
         }
     }

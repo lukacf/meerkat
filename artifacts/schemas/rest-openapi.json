@@ -474,6 +474,10 @@
           {
             "description": "Structured-output extraction succeeded after a completed main run.",
             "properties": {
+              "origin": {
+                "$ref": "#/components/schemas/StructuredOutputOrigin",
+                "description": "Which request produced `structured_output`. `final_reply` means the\nrun's final reply already validated against the schema, so no\nextraction request was sent and `request_usage` is empty. Absent\nmeans `extraction_request`, which is also what every event written\nbefore this field existed means."
+              },
               "request_usage": {
                 "description": "One row per measured provider request of this extraction phase, in\norder: the first attempt and each retry. Extraction publishes no\n`turn_completed`, so these rows are the only per-call accounting\nfor it on the event stream. An attempt whose provider sent no\naccounting publishes no row (its absence is reported by\n`turn_usage_accounting_unmeasured`), so this is never padded with\nzeros.",
                 "items": {
@@ -16414,6 +16418,21 @@
           }
         ]
       },
+      "StructuredOutputOrigin": {
+        "description": "Which request produced a run's structured output.",
+        "oneOf": [
+          {
+            "const": "extraction_request",
+            "description": "A dedicated extraction request after the main run.",
+            "type": "string"
+          },
+          {
+            "const": "final_reply",
+            "description": "The run's final reply already validated against the output schema\n(validate-first), so no extraction request was sent.",
+            "type": "string"
+          }
+        ]
+      },
       "StructuredProviderExtension": {
         "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
         "properties": {
@@ -17955,7 +17974,7 @@
         "type": "object"
       },
       "Usage": {
-        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail\n  fields and `reasoning_tokens` are provider-normalized sums: every\n  provider's cache-read and cache-write counts are subsets of that call's\n  presented input, and reasoning is a subset of output, so on a cumulative\n  value `cache_read_tokens <= input_tokens`,\n  `cache_creation_tokens <= input_tokens` and\n  `reasoning_tokens <= output_tokens` on every provider. A field stays\n  `None` until some call reports it.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  unconditionally. Every committed agent-loop call publishes a\n  `turn_completed` row and every extraction request a `request_usage` row\n  on the extraction outcome event, but the compaction summary call and a\n  call whose turn fails after the provider answered are charged to the\n  cumulative account without a row.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_every_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
+        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail\n  fields and `reasoning_tokens` are provider-normalized sums: every\n  provider's cache-read and cache-write counts are disjoint parts of that\n  call's presented input, and reasoning is a subset of output, so on a\n  cumulative value `cache_read_tokens + cache_creation_tokens <=\n  input_tokens` and `reasoning_tokens <= output_tokens` on every provider.\n  A field stays `None` until some call reports it.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  unconditionally. Every committed agent-loop call publishes a\n  `turn_completed` row and every extraction request a `request_usage` row\n  on the extraction outcome event, but the compaction summary call and a\n  call whose turn fails after the provider answered are charged to the\n  cumulative account without a row.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_every_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
         "properties": {
           "cache_creation_tokens": {
             "format": "uint64",

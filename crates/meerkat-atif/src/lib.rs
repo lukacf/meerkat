@@ -453,18 +453,27 @@ impl TrajectoryBuilder {
             AgentEvent::ExtractionSucceeded {
                 structured_output,
                 request_usage,
+                origin,
                 ..
             } => {
                 self.extraction_open = false;
-                // The main run closed at `RunCompleted`; each extraction
-                // request that followed is its own step. A success proves at
-                // least one request was answered, so a log without rows (an
-                // unmeasured provider, or a log written before extraction
-                // published them) still records one unmetered step.
                 if let Some(turn) = pending.take() {
                     append_agent_step(steps, turn, None);
                 }
-                let attempts = request_usage.len().max(1);
+                // The main run closed at `RunCompleted`; each extraction
+                // request that followed is its own step. A success from an
+                // extraction request proves at least one request was answered,
+                // so a log without rows (an unmeasured provider, or a log
+                // written before extraction published them) still records one
+                // unmetered step. When validate-first accepted the run's final
+                // reply (which the step closed at `RunCompleted` already
+                // records), no extraction request was sent and no extraction
+                // step is added.
+                let attempts = if origin.is_extraction_request() {
+                    request_usage.len().max(1)
+                } else {
+                    0
+                };
                 for attempt in 0..attempts {
                     let usage = request_usage.get(attempt);
                     let message = if attempt + 1 == attempts {
@@ -1264,6 +1273,7 @@ mod tests {
                 } else {
                     Vec::new()
                 },
+                origin: meerkat_core::StructuredOutputOrigin::ExtractionRequest,
             },
         ]);
         events
@@ -1394,6 +1404,73 @@ mod tests {
                 .total_prompt_tokens,
             Some(1200)
         );
+    }
+
+    /// Validate-first: the run's final reply already validated, so no
+    /// extraction request was sent. The answering turn is the only agent step;
+    /// the success adds no extraction step, metered or not.
+    #[test]
+    fn a_final_reply_structured_output_adds_no_extraction_step() {
+        let id = SessionId::new();
+        let reply = r#"{"comments":[]}"#;
+        let events = [
+            AgentEvent::RunStarted {
+                session_id: id.clone(),
+                input: RunInput::Content {
+                    content: ContentInput::Text("review this".into()),
+                },
+            },
+            AgentEvent::TurnStarted { turn_number: 0 },
+            AgentEvent::TextComplete {
+                content: reply.into(),
+            },
+            AgentEvent::TurnCompleted {
+                stop_reason: meerkat_core::StopReason::EndTurn,
+                usage: Some(openai_usage(1200, 20, 1000, 4)),
+            },
+            AgentEvent::RunCompleted {
+                session_id: id.clone(),
+                result: reply.into(),
+                structured_output: None,
+                extraction_required: true,
+                usage: Usage::default().into(),
+                terminal_cause_kind: None,
+            },
+            AgentEvent::ExtractionSucceeded {
+                session_id: id.clone(),
+                structured_output: serde_json::json!({"comments": []}),
+                schema_warnings: None,
+                request_usage: Vec::new(),
+                origin: meerkat_core::StructuredOutputOrigin::FinalReply,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| envelope(&id, index as u64 + 1, event))
+        .collect::<Vec<_>>();
+        let trajectory = trajectory_from_events(&events, test_agent()).unwrap();
+        let agent_steps = trajectory
+            .steps
+            .iter()
+            .filter(|step| step.source == StepSource::Agent)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            agent_steps.len(),
+            1,
+            "only the answering turn made a request"
+        );
+        assert_eq!(agent_steps[0].message, AtifContent::Text(reply.into()));
+        assert!(
+            agent_steps[0]
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.get("request_kind"))
+                .is_none(),
+            "the answering turn is not an extraction step"
+        );
+        let totals = trajectory.final_metrics.as_ref().unwrap();
+        assert_eq!(totals.total_steps, 2, "the user input and the answer");
+        assert_eq!(totals.total_prompt_tokens, Some(1200));
     }
 
     /// A failed extraction keeps the failure on the step of its last request.

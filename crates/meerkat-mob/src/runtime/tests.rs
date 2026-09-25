@@ -21558,6 +21558,123 @@ async fn forker_without_manage_scope_observes_and_retires_only_its_own_children(
     assert!(handle.get_member(&bystander).await.unwrap().is_some());
 }
 
+/// force_cancel_member follows the same ownership admission as member_status
+/// and retire_member: without manage scope the forker cancels the running
+/// runs of members in its own spawn tree (a grandchild included), and no one
+/// else's.
+#[tokio::test]
+async fn forker_force_cancels_only_running_members_it_owns() {
+    let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let mob_id = handle.definition().id.to_string();
+    let forker = AgentIdentity::from("cancel-forker");
+    let bystander = AgentIdentity::from("cancel-bystander");
+    spawn_bounded_fork_source(&handle, &forker).await;
+    spawn_bounded_fork_source(&handle, &bystander).await;
+    let forker_session = handle
+        .resolve_bridge_session_id(&forker)
+        .await
+        .expect("forker session");
+    // Every fork turn from here on runs until something cancels it.
+    service.set_start_turn_delay_ms(600_000);
+    let child = AgentIdentity::from("cancel-child");
+    let child_run = caller_turn_fork_child(&handle, &forker, &child, None).await;
+    let grandchild = AgentIdentity::from("cancel-grandchild");
+    let grandchild_run = caller_turn_fork_child(&handle, &child, &grandchild, None).await;
+
+    let profile = handle
+        .definition()
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline()
+        .unwrap()
+        .clone();
+    let composed = super::tools::compose_external_tools_for_profile(
+        &profile,
+        &BTreeMap::new(),
+        handle.clone(),
+        None,
+        None,
+        Some(generated_mob_operator_authority_with_spawn_profile(
+            &mob_id, "worker",
+        )),
+    )
+    .expect("compose dispatcher")
+    .expect("operator dispatcher visible");
+    let dispatcher = match composed
+        .bind_ops_lifecycle(
+            Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+            forker_session,
+        )
+        .expect("bind forker session")
+    {
+        meerkat_core::agent::BindOutcome::Bound(bound)
+        | meerkat_core::agent::BindOutcome::Skipped(bound) => bound,
+    };
+    let force_cancel = |member: &'static str| {
+        let dispatcher = Arc::clone(&dispatcher);
+        async move {
+            let raw = serde_json::value::RawValue::from_string(
+                serde_json::json!({"member_id": member}).to_string(),
+            )
+            .unwrap();
+            dispatcher
+                .dispatch(ToolCallView {
+                    id: "owned-force-cancel",
+                    name: "force_cancel_member",
+                    args: &raw,
+                })
+                .await
+        }
+    };
+
+    // force_cancel_member requests a cooperative boundary cancel of the
+    // member's in-flight run; count those requests to see which calls reached
+    // a member and which were refused before any effect.
+    let before = service.cancel_after_boundary_call_count();
+    assert!(
+        matches!(
+            force_cancel("cancel-bystander").await,
+            Err(ToolError::AccessDenied { .. })
+        ),
+        "a member the forker did not spawn stays out of reach"
+    );
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        before,
+        "a refused force cancel reaches no member"
+    );
+    force_cancel("cancel-grandchild")
+        .await
+        .expect("the forker cancels its grandchild's run");
+    let after_grandchild = service.cancel_after_boundary_call_count();
+    assert!(
+        after_grandchild > before,
+        "the grandchild's run received the cancel"
+    );
+    force_cancel("cancel-child")
+        .await
+        .expect("the forker cancels its child's run");
+    assert!(
+        service.cancel_after_boundary_call_count() > after_grandchild,
+        "the child's run received the cancel"
+    );
+    assert!(handle.get_member(&bystander).await.unwrap().is_some());
+
+    // Release the deliberately endless runs: retiring the child cascades to
+    // the grandchild, and both supervised runs then reach an outcome.
+    handle
+        .retire_with_descendants(child.clone())
+        .await
+        .expect("retire the cancelled subtree");
+    for (member, run) in [("grandchild", grandchild_run), ("child", child_run)] {
+        tokio::time::timeout(std::time::Duration::from_secs(20), run.outcome())
+            .await
+            .unwrap_or_else(|_| panic!("the retired {member} run must end"));
+    }
+    assert!(handle.get_member(&grandchild).await.unwrap().is_none());
+}
+
 async fn caller_turn_fork_child(
     handle: &MobHandle,
     forker: &AgentIdentity,

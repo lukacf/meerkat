@@ -11,7 +11,8 @@
 //! `MobHandle::fork_member_then_run_bounded`. Both children are retired and
 //! the parent answers again. Every assertion reads authoritative state (mob
 //! roster, persisted sessions, per-call provider usage rows, the tool result
-//! recorded in the parent transcript), never model narration.
+//! and the detached child's completion recorded in the parent transcript),
+//! never model narration.
 //!
 //! The child usage counters are the measured answer to "does a fork re-bill
 //! the whole parent prefix": the child's first request must report
@@ -243,6 +244,54 @@ fn recorded_fork_off_result(history: &Value) -> Option<Result<Value, String>> {
     None
 }
 
+/// The detached `fork_off` completion recorded in the forker's own
+/// transcript for `job_id`: the durable `BackgroundJob` system notice whose
+/// block is `persisted` for this job. Returned as
+/// `{"job_id", "status", "outcome"}`, where `outcome` is the typed fork_off
+/// completion carried in the block's detail. The record must exist at most
+/// once.
+fn recorded_fork_off_completion(history: &Value, job_id: &str) -> Option<Value> {
+    let blocks: Vec<&Value> = history_messages(history)
+        .iter()
+        .filter(|message| {
+            message["role"].as_str() == Some("system_notice")
+                && message["kind"].as_str() == Some("background_job")
+        })
+        .filter_map(|message| {
+            message["blocks"].as_array()?.iter().find(|block| {
+                block["job_id"].as_str() == Some(job_id)
+                    && block["persisted"].as_bool() == Some(true)
+            })
+        })
+        .collect();
+    assert!(
+        blocks.len() <= 1,
+        "the fork_off completion must be recorded once, found {}: {history}",
+        blocks.len()
+    );
+    let block = blocks.first()?;
+    let detail = block["detail"]
+        .as_str()
+        .unwrap_or_else(|| panic!("fork_off completion record without detail: {block}"));
+    let outcome: Value = serde_json::from_str(detail).unwrap_or_else(|error| {
+        panic!("fork_off completion detail is not JSON ({error}): {detail}")
+    });
+    Some(json!({"job_id": job_id, "status": block["status"], "outcome": outcome}))
+}
+
+/// One short line per transcript message (role and a prefix of its JSON),
+/// for failure diagnostics.
+fn history_summary(history: &Value) -> Vec<String> {
+    history_messages(history)
+        .iter()
+        .map(|message| {
+            let role = message["role"].as_str().unwrap_or("?");
+            let body: String = message.to_string().chars().take(160).collect();
+            format!("{role}: {body}")
+        })
+        .collect()
+}
+
 fn history_messages(history: &Value) -> &Vec<Value> {
     history
         .get("messages")
@@ -471,40 +520,51 @@ async fn e2e_smoke_s96_mob_fork_off_vertical() {
             parent_history
         ),
     };
-    // fork_off returns once the child's turn is admitted; the child's result
-    // arrives later as a background-job completion. Read it from the child's
-    // canonical session once its turn has settled.
+    // fork_off returns once the child's turn is admitted. The child's result
+    // must then reach the FORKER itself: its completion is recorded once in
+    // the forker's own durable transcript, keyed by the job id fork_off
+    // returned, and that recorded outcome is what the forker's later model
+    // calls read. Reading the child's session directly would not show that.
     assert_eq!(
         fork_result["status"].as_str(),
         Some("running"),
         "fork_off must return promptly with the running child: {fork_result}"
     );
-    assert!(
-        fork_result["job_id"].as_str().is_some(),
-        "fork_off must name the background job that reports the child: {fork_result}"
-    );
-    let child_text = {
+    let job_id = fork_result["job_id"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("fork_off must name the background job that reports the child: {fork_result}")
+        })
+        .to_string();
+    let completion = {
         let deadline = Instant::now() + Duration::from_secs(300);
         loop {
-            match handle
-                .bounded_terminal_member_result(
-                    &AgentIdentity::from(FORK_ONE),
-                    "fork-child",
-                    16 * 1024,
-                )
-                .await
-            {
-                Ok(result) => break result.text().to_string(),
-                Err(error) => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "fork child did not settle: {error}"
-                    );
-                    sleep(Duration::from_millis(500)).await;
-                }
+            let history = session_history(&router, &parent_session).await;
+            if let Some(completion) = recorded_fork_off_completion(&history, &job_id) {
+                break completion;
             }
+            assert!(
+                Instant::now() < deadline,
+                "the forker's transcript never received the fork_off completion for job \
+                 {job_id}: {history}"
+            );
+            sleep(Duration::from_millis(500)).await;
         }
     };
+    assert_eq!(
+        completion["outcome"]["status"].as_str(),
+        Some("completed"),
+        "the forker must receive the child's completed outcome: {completion}"
+    );
+    assert_eq!(
+        completion["outcome"]["agent_identity"].as_str(),
+        Some(FORK_ONE),
+        "the completion must name the child: {completion}"
+    );
+    let child_text = completion["outcome"]["bounded_result"]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("fork_off completion without bounded_result text: {completion}"))
+        .to_string();
     let child_rows = turn_usages(&events, FORK_ONE).await;
     let child_usage = child_rows
         .first()
@@ -607,8 +667,10 @@ async fn e2e_smoke_s96_mob_fork_off_vertical() {
             "running-source refusal must carry the Running cause"
         ),
         other => {
+            let parent_rows = history_summary(&session_history(&router, &parent_session).await);
             panic!(
-                "an external fork of a running source must be refused with a typed cause, got {other:?}"
+                "an external fork of a running source must be refused with a typed cause, got \
+                 {other:?}; parent transcript after the attempt: {parent_rows:#?}"
             )
         }
     }

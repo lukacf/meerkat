@@ -33,8 +33,6 @@ use meerkat_core::{CurrentTurnImageRef, ToolDispatchContext};
 
 const RUNTIME_COMMAND_AUTHORITY_UNAVAILABLE_CODE: &str = "runtime_command_authority_unavailable";
 
-const COMMS_BLOCKS_DESCRIPTION: &str = "\n\nMultimodal blocks:\n- Use blocks to send text and images alongside the body/request/response.\n- {\"type\":\"image_ref\",\"source\":\"current_turn\",\"index\":0} refers only to an image attached to the current admitted user input turn. The index counts only the turn's image blocks (0 = the first image, skipping non-image blocks).\n- {\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:...\",\"media_type\":\"image/png\"} refers to a generated or otherwise blob-backed image, such as an image returned by generate_image earlier in this assistant turn or a previous turn.\n- Do not use source=current_turn for generated images; generated images must be sent with source=blob, blob_id, and media_type.";
-
 const SEND_REQUEST_CONTRACTS_DESCRIPTION: &str = "\n\nSupported request contracts:\n- checksum_token: Use for a simple correlated check/ack/review. params must be {\"subject\":\"<subject>\"}. The responder should send_response with status completed and result {\"request_intent\":\"checksum_token\",\"request_subject\":\"<same subject>\",\"token\":\"<token or checksum>\"}.\n- supervisor.bridge: Use for supervisor bridge control. params include the bridge command payload, for example command observe_member with supervisor, epoch, and protocol_version fields.";
 
 const SEND_RESPONSE_CONTRACTS_DESCRIPTION: &str = "\n\nResponse result contracts:\n- For checksum_token requests, completed responses must use result {\"request_intent\":\"checksum_token\",\"request_subject\":\"<same subject from request params.subject>\",\"token\":\"<token or checksum>\"}.\n- For supervisor.bridge requests, completed acknowledgements use result {\"result\":\"ack\",\"ok\":true}; failed responses use result {\"result\":\"rejected\",\"cause\":\"unsupported\",\"reason\":\"<reason>\"}.";
@@ -42,6 +40,14 @@ const SEND_RESPONSE_CONTRACTS_DESCRIPTION: &str = "\n\nResponse result contracts
 fn schema_for<T: JsonSchema>() -> Value {
     let schema = schemars::schema_for!(T);
     let mut value = schema.to_value();
+
+    if let Value::Object(ref mut obj) = value {
+        // The root `title`/`description` come from the input struct's name and
+        // rustdoc; the tool description already owns that text, so repeating
+        // it in every request's tool schema only costs tokens.
+        obj.remove("title");
+        obj.remove("description");
+    }
 
     if let Value::Object(ref mut obj) = value
         && obj.get("type").and_then(Value::as_str) == Some("object")
@@ -71,11 +77,13 @@ pub struct SendMessageInput {
     pub display_name: Option<String>,
     /// Message body
     pub body: String,
-    /// Optional multimodal blocks. Use image_ref entries such as
-    /// {"type":"image_ref","source":"current_turn","index":0} to forward
-    /// images from the current admitted user turn, or
-    /// {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"}
-    /// to forward a generated/blob-backed image without inlining bytes in the tool call.
+    /// Optional multimodal blocks (text and images) sent alongside the body.
+    /// {"type":"image_ref","source":"current_turn","index":0} refers only to
+    /// an image attached to the current admitted user input turn; index counts
+    /// only that turn's image blocks (0 = the first image). Generated or other
+    /// blob-backed images, such as an image returned by generate_image, must
+    /// use {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"};
+    /// generated images must be sent with source=blob, never source=current_turn.
     #[serde(default)]
     pub blocks: Option<Vec<CommsToolContentBlock>>,
     /// "queue" for next turn boundary (normal), "steer" for urgent preemption
@@ -98,11 +106,13 @@ pub struct ReplyToPeerInput {
     pub reply_to: Option<String>,
     /// Reply body
     pub body: String,
-    /// Optional multimodal blocks. Use image_ref entries such as
-    /// {"type":"image_ref","source":"current_turn","index":0} to forward
-    /// images from the current admitted user turn, or
-    /// {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"}
-    /// to forward a generated/blob-backed image without inlining bytes in the tool call.
+    /// Optional multimodal blocks (text and images) sent alongside the body.
+    /// {"type":"image_ref","source":"current_turn","index":0} refers only to
+    /// an image attached to the current admitted user input turn; index counts
+    /// only that turn's image blocks (0 = the first image). Generated or other
+    /// blob-backed images, such as an image returned by generate_image, must
+    /// use {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"};
+    /// generated images must be sent with source=blob, never source=current_turn.
     #[serde(default)]
     pub blocks: Option<Vec<CommsToolContentBlock>>,
     /// "queue" for next turn boundary (normal), "steer" for urgent preemption
@@ -131,11 +141,13 @@ pub struct SendRequestInput {
         description = "Request parameters for the selected intent. For checksum_token use {\"subject\":\"image_receipt_check\"}. For supervisor.bridge use the bridge command payload described in the tool text."
     )]
     pub params: CommsPeerRequestParams,
-    /// Optional multimodal blocks. Use image_ref entries such as
-    /// {"type":"image_ref","source":"current_turn","index":0} to forward
-    /// images from the current admitted user turn, or
-    /// {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"}
-    /// to forward a generated/blob-backed image without inlining bytes in the tool call.
+    /// Optional multimodal blocks (text and images) sent alongside the body.
+    /// {"type":"image_ref","source":"current_turn","index":0} refers only to
+    /// an image attached to the current admitted user input turn; index counts
+    /// only that turn's image blocks (0 = the first image). Generated or other
+    /// blob-backed images, such as an image returned by generate_image, must
+    /// use {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"};
+    /// generated images must be sent with source=blob, never source=current_turn.
     #[serde(default)]
     pub blocks: Option<Vec<CommsToolContentBlock>>,
 }
@@ -197,11 +209,13 @@ pub struct SendResponseInput {
         description = "Typed response payload. For checksum_token use {\"request_intent\":\"checksum_token\",\"request_subject\":\"image_receipt_check\",\"token\":\"generated-image-response-ok\"}. For supervisor.bridge use simple bridge reply objects such as {\"result\":\"ack\",\"ok\":true}."
     )]
     pub result: Option<CommsPeerResponseResult>,
-    /// Optional multimodal blocks. Use image_ref entries such as
-    /// {"type":"image_ref","source":"current_turn","index":0} to forward
-    /// images from the current admitted user turn, or
-    /// {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"}
-    /// to forward a generated/blob-backed image without inlining bytes in the tool call.
+    /// Optional multimodal blocks (text and images) sent alongside the body.
+    /// {"type":"image_ref","source":"current_turn","index":0} refers only to
+    /// an image attached to the current admitted user input turn; index counts
+    /// only that turn's image blocks (0 = the first image). Generated or other
+    /// blob-backed images, such as an image returned by generate_image, must
+    /// use {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"};
+    /// generated images must be sent with source=blob, never source=current_turn.
     #[serde(default)]
     pub blocks: Option<Vec<CommsToolContentBlock>>,
     /// Handling mode override for terminal responses: "steer" or "queue" (optional)
@@ -280,22 +294,22 @@ pub fn tools_list() -> Vec<Value> {
     vec![
         json!({
             "name": "send_message",
-            "description": format!("{}{}{}", "Send a fire-and-forget message to a peer. No response is expected.\n\nWhen to use: Use send_message for one-way collaboration — status updates, notifications, sharing results, or any case where you do not need the peer to reply with structured data. If you need a correlated reply, use send_request instead.\n\nhandling_mode:\n- \"queue\": The message is delivered at the peer's next turn boundary. Use for ordinary collaboration where you do not want to preempt the peer's current task.\n- \"steer\": The peer processes your message immediately, interrupting its current work. Use only for urgent or time-sensitive collaboration.", COMMS_BLOCKS_DESCRIPTION, "\n\nExamples:\n1. Fire-and-forget collaboration:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"body\": \"FYI: the database migration completed successfully.\", \"handling_mode\": \"queue\"}\n2. Send a generated image without expecting a reply:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"body\": \"Here is the generated mockup.\", \"blocks\": [{\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:generated-image\",\"media_type\":\"image/png\"}], \"handling_mode\": \"queue\"}\n3. Urgent preemption:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"reporter\", \"body\": \"Stop before editing section 3; the requirement changed.\", \"handling_mode\": \"steer\"}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user."),
+            "description": format!("{}{}", "Send a fire-and-forget message to a peer. No response is expected.\n\nWhen to use: Use send_message for one-way collaboration - status updates, notifications, sharing results, or any case where you do not need the peer to reply with structured data. If you need a correlated reply, use send_request instead.\n\nhandling_mode:\n- \"queue\": The message is delivered at the peer's next turn boundary. Use for ordinary collaboration where you do not want to preempt the peer's current task.\n- \"steer\": The peer processes your message immediately, interrupting its current work. Use only for urgent or time-sensitive collaboration.", "\n\nExamples:\n1. Fire-and-forget collaboration:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"body\": \"FYI: the database migration completed successfully.\", \"handling_mode\": \"queue\"}\n2. Send a generated image without expecting a reply:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"body\": \"Here is the generated mockup.\", \"blocks\": [{\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:generated-image\",\"media_type\":\"image/png\"}], \"handling_mode\": \"queue\"}\n3. Urgent preemption:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"reporter\", \"body\": \"Stop before editing section 3; the requirement changed.\", \"handling_mode\": \"steer\"}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user."),
             "inputSchema": schema_for::<SendMessageInput>()
         }),
         json!({
             "name": "reply_to_peer",
-            "description": format!("{}{}{}", "Reply to the peer message that triggered the current turn. The reply is pre-addressed: the runtime already knows which peer sent the triggering message, so you do not supply a peer_id.\n\nWhen to use: Use reply_to_peer to answer a peer message you received this turn. Use send_message with an explicit peer_id for unsolicited outreach, and use send_response only for typed request/response contracts (send_request traffic).\n\nreply_to (optional): Only needed when more than one peer message arrived in this turn. On an ambiguous call the error lists the available delivery ids; retry with reply_to set to one of them.\n\nhandling_mode:\n- \"queue\": The reply is delivered at the peer's next turn boundary. Use for ordinary collaboration.\n- \"steer\": The peer processes your reply immediately, interrupting its current work. Use only for urgent or time-sensitive collaboration.", COMMS_BLOCKS_DESCRIPTION, "\n\nExamples:\n1. Reply to the turn's peer message:\n   {\"body\": \"Done — the database migration completed successfully.\", \"handling_mode\": \"queue\"}\n2. Disambiguate between multiple deliveries in one turn:\n   {\"reply_to\": \"<delivery-id-from-ambiguous_reply-error>\", \"body\": \"Acknowledged.\", \"handling_mode\": \"queue\"}\n\nFailure handling:\n- no_reply_capability: This turn was not triggered by a peer message; there is nothing to reply to. Use peers + send_message instead.\n- ambiguous_reply: Multiple peer messages arrived this turn. Retry with reply_to set to one of the listed delivery ids.\n- unknown_reply_to: The reply_to value does not match any of this turn's deliveries. Use one of the listed delivery ids.\n- peer_not_found_or_not_trusted / peer_unreachable: Same as send_message — the sending peer is no longer trusted or reachable."),
+            "description": format!("{}{}", "Reply to the peer message that triggered the current turn. The reply is pre-addressed: the runtime already knows which peer sent the triggering message, so you do not supply a peer_id.\n\nWhen to use: Use reply_to_peer to answer a peer message you received this turn. Use send_message with an explicit peer_id for unsolicited outreach, and use send_response only for typed request/response contracts (send_request traffic).\n\nreply_to (optional): Only needed when more than one peer message arrived in this turn. On an ambiguous call the error lists the available delivery ids; retry with reply_to set to one of them.\n\nhandling_mode:\n- \"queue\": The reply is delivered at the peer's next turn boundary. Use for ordinary collaboration.\n- \"steer\": The peer processes your reply immediately, interrupting its current work. Use only for urgent or time-sensitive collaboration.", "\n\nExamples:\n1. Reply to the turn's peer message:\n   {\"body\": \"Done - the database migration completed successfully.\", \"handling_mode\": \"queue\"}\n2. Disambiguate between multiple deliveries in one turn:\n   {\"reply_to\": \"<delivery-id-from-ambiguous_reply-error>\", \"body\": \"Acknowledged.\", \"handling_mode\": \"queue\"}\n\nFailure handling:\n- no_reply_capability: This turn was not triggered by a peer message; there is nothing to reply to. Use peers + send_message instead.\n- ambiguous_reply: Multiple peer messages arrived this turn. Retry with reply_to set to one of the listed delivery ids.\n- unknown_reply_to: The reply_to value does not match any of this turn's deliveries. Use one of the listed delivery ids.\n- peer_not_found_or_not_trusted / peer_unreachable: Same as send_message - the sending peer is no longer trusted or reachable."),
             "inputSchema": schema_for::<ReplyToPeerInput>()
         }),
         json!({
             "name": "send_request",
-            "description": format!("{}{}{}{}", "Send a typed structured request to a peer and expect a correlated response. The peer will reply using send_response with the same request ID.\n\nWhen to use: Use send_request for typed comms request contracts such as checksum_token or supervisor.bridge. The response will arrive as an incoming message with the original request ID in its in_reply_to field, so you can match it. If you just need to share information without expecting a reply, use send_message instead.\n\nhandling_mode:\n- \"queue\": The request is delivered at the peer's next turn boundary. Use when the peer can handle it after finishing its current task.\n- \"steer\": The peer processes your request immediately, interrupting its current work. Use only for requests that block your own progress.", SEND_REQUEST_CONTRACTS_DESCRIPTION, COMMS_BLOCKS_DESCRIPTION, "\n\nExamples:\n1. checksum_token image review request:\n   {\"peer_id\":\"<peer-id-from-peers>\",\"display_name\":\"reviewer\",\"intent\":\"checksum_token\",\"params\":{\"subject\":\"image_receipt_check\"},\"blocks\":[{\"type\":\"text\",\"text\":\"Please inspect this generated image and return a receipt token with an image receipt.\"},{\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:generated-image\",\"media_type\":\"image/png\"}],\"handling_mode\":\"queue\"}\n2. supervisor bridge request/reply:\n  {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"member\", \"intent\": \"supervisor.bridge\", \"params\": {\"command\": \"observe_member\", \"supervisor\": {\"name\": \"supervisor\", \"peer_id\": \"<supervisor-peer-id>\", \"address\": \"inproc://supervisor\", \"pubkey\": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}, \"epoch\": 1, \"protocol_version\": 2}, \"handling_mode\": \"queue\"}\n  The peer receives this and sends back with your peer_id:\n  {\"peer_id\": \"<your-peer-id>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user.\n- Missing response: There is no built-in timeout. If the peer does not respond, it may have failed or dropped the request. Re-send or check with the peer via send_message."),
+            "description": format!("{}{}{}", "Send a typed structured request to a peer and expect a correlated response. The peer will reply using send_response with the same request ID.\n\nWhen to use: Use send_request for typed comms request contracts such as checksum_token or supervisor.bridge. The response will arrive as an incoming message with the original request ID in its in_reply_to field, so you can match it. If you just need to share information without expecting a reply, use send_message instead.\n\nhandling_mode:\n- \"queue\": The request is delivered at the peer's next turn boundary. Use when the peer can handle it after finishing its current task.\n- \"steer\": The peer processes your request immediately, interrupting its current work. Use only for requests that block your own progress.", SEND_REQUEST_CONTRACTS_DESCRIPTION, "\n\nExamples:\n1. checksum_token image review request:\n   {\"peer_id\":\"<peer-id-from-peers>\",\"display_name\":\"reviewer\",\"intent\":\"checksum_token\",\"params\":{\"subject\":\"image_receipt_check\"},\"blocks\":[{\"type\":\"text\",\"text\":\"Please inspect this generated image and return a receipt token with an image receipt.\"},{\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:generated-image\",\"media_type\":\"image/png\"}],\"handling_mode\":\"queue\"}\n2. supervisor bridge request/reply:\n  {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"member\", \"intent\": \"supervisor.bridge\", \"params\": {\"command\": \"observe_member\", \"supervisor\": {\"name\": \"supervisor\", \"peer_id\": \"<supervisor-peer-id>\", \"address\": \"inproc://supervisor\", \"pubkey\": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}, \"epoch\": 1, \"protocol_version\": 2}, \"handling_mode\": \"queue\"}\n  The peer receives this and sends back with your peer_id:\n  {\"peer_id\": \"<your-peer-id>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user.\n- Missing response: There is no built-in timeout. If the peer does not respond, it may have failed or dropped the request. Re-send or check with the peer via send_message."),
             "inputSchema": schema_for::<SendRequestInput>()
         }),
         json!({
             "name": "send_response",
-            "description": format!("{}{}{}{}", "Send a typed response to a previous peer request. The in_reply_to field must match the request ID from the original send_request message you received.\n\nWhen to use: Use send_response after receiving a typed comms request from a peer. The requester is waiting for a correlated reply.\n\nstatus values:\n- \"accepted\": Acknowledge receipt; you will send a \"completed\" or \"failed\" response later. Do not include handling_mode on accepted progress responses.\n- \"completed\": The request succeeded. Include a typed result when the request contract requires one.\n- \"failed\": The request could not be fulfilled. Include a typed rejection result when the request contract requires one.\n\nhandling_mode (optional): Override how the requester processes this terminal response. Defaults to the original request's mode. Use \"steer\" only for urgent preemption, or \"queue\" to deliver at the requester's next turn boundary.", SEND_RESPONSE_CONTRACTS_DESCRIPTION, COMMS_BLOCKS_DESCRIPTION, "\n\nExamples:\n1. Completed checksum_token response with a generated image receipt:\n   {\"peer_id\":\"<peer-id-from-peers>\",\"display_name\":\"requester\",\"in_reply_to\":\"<request-id>\",\"status\":\"completed\",\"result\":{\"request_intent\":\"checksum_token\",\"request_subject\":\"image_receipt_check\",\"token\":\"generated-image-response-ok\"},\"blocks\":[{\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:receipt-image\",\"media_type\":\"image/png\"}],\"handling_mode\":\"queue\"}\n2. Acceptance then later completion:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"accepted\"}\n   ...later...\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n3. Failure response:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"failed\", \"result\": {\"result\": \"rejected\", \"cause\": \"unsupported\", \"reason\": \"unsupported command\"}}\n\nFailure handling:\n- peer_not_found_or_not_trusted / peer_unreachable: Same as send_message. The requester will not receive your response — they may re-send the request.\n- Invalid in_reply_to: If the ID is not a valid UUID or does not match a known request, the call fails with a validation error."),
+            "description": format!("{}{}{}", "Send a typed response to a previous peer request. The in_reply_to field must match the request ID from the original send_request message you received.\n\nWhen to use: Use send_response after receiving a typed comms request from a peer. The requester is waiting for a correlated reply.\n\nstatus values:\n- \"accepted\": Acknowledge receipt; you will send a \"completed\" or \"failed\" response later. Do not include handling_mode on accepted progress responses.\n- \"completed\": The request succeeded. Include a typed result when the request contract requires one.\n- \"failed\": The request could not be fulfilled. Include a typed rejection result when the request contract requires one.\n\nhandling_mode (optional): Override how the requester processes this terminal response. Defaults to the original request's mode. Use \"steer\" only for urgent preemption, or \"queue\" to deliver at the requester's next turn boundary.", SEND_RESPONSE_CONTRACTS_DESCRIPTION, "\n\nExamples:\n1. Completed checksum_token response with a generated image receipt:\n   {\"peer_id\":\"<peer-id-from-peers>\",\"display_name\":\"requester\",\"in_reply_to\":\"<request-id>\",\"status\":\"completed\",\"result\":{\"request_intent\":\"checksum_token\",\"request_subject\":\"image_receipt_check\",\"token\":\"generated-image-response-ok\"},\"blocks\":[{\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:receipt-image\",\"media_type\":\"image/png\"}],\"handling_mode\":\"queue\"}\n2. Acceptance then later completion:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"accepted\"}\n   ...later...\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n3. Failure response:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"failed\", \"result\": {\"result\": \"rejected\", \"cause\": \"unsupported\", \"reason\": \"unsupported command\"}}\n\nFailure handling:\n- peer_not_found_or_not_trusted / peer_unreachable: Same as send_message. The requester will not receive your response - they may re-send the request.\n- Invalid in_reply_to: If the ID is not a valid UUID or does not match a known request, the call fails with a validation error."),
             "inputSchema": schema_for::<SendResponseInput>()
         }),
         json!({
@@ -1450,8 +1464,25 @@ mod tests {
                 .to_string()
         };
 
-        for name in ["send_message", "send_request", "send_response"] {
-            let text = description(name);
+        // Image reference rules are documented once per tool, on the `blocks`
+        // argument, rather than repeated in the tool description.
+        let blocks_description = |name: &str| -> String {
+            tools
+                .iter()
+                .find(|tool| tool["name"].as_str() == Some(name))
+                .and_then(|tool| {
+                    tool["inputSchema"]["properties"]["blocks"]["description"].as_str()
+                })
+                .expect("blocks description")
+                .to_string()
+        };
+        for name in [
+            "send_message",
+            "reply_to_peer",
+            "send_request",
+            "send_response",
+        ] {
+            let text = blocks_description(name);
             assert!(
                 text.contains("\"source\":\"blob\""),
                 "{name} should document blob-backed generated image refs"
@@ -1463,6 +1494,10 @@ mod tests {
             assert!(
                 text.contains("generated images must be sent with source=blob"),
                 "{name} should distinguish generated images from current-turn input"
+            );
+            assert!(
+                !description(name).contains("Multimodal blocks:"),
+                "{name} must not repeat the blocks documentation in its description"
             );
         }
 

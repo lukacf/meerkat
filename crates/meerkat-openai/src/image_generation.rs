@@ -238,13 +238,10 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
     fn image_generation_documentation(&self) -> Option<&'static str> {
         Some(
             r#"OpenAI:
-- Models: provider:"openai" uses the catalog OpenAI image default; supported image targets and their hosted-tool vs Images API routes are owned by the shared model catalog.
-- Use Meerkat's universal size, quality, format, count, and intent fields for normal requests; the adapter lowers format to OpenAI output_format.
-- provider_params is only for advanced OpenAI-specific overrides. For the current hosted gpt-image-2 route, public callers should normally use {"background":"auto"|"opaque","output_compression":0..100,"moderation":"auto"|"low","action":"auto"|"generate"|"edit"}.
-- Hosted Responses routes: provider_params may also include {"reasoning_effort":<a level advertised by the backing text model>,"web_search":true|false|null|{...}}. The current gpt-image-2 default is backed by GPT-5.4 and stops at xhigh; GPT-5.6 text-model routes also accept max. Use this for current/fresh image-only requests instead of searching separately first; object web_search values are lowered to the OpenAI hosted web_search tool with type:"web_search".
-- action applies only to the hosted Responses image tool and is usually omitted in favor of the top-level Meerkat intent. Images API requests reject action.
-- Images API requests reject reasoning_effort and web_search.
-- background:"transparent" is model-dependent; gpt-image-2 rejects it."#,
+- Normal requests need no provider_params: use the universal size, quality, format, count, and intent fields (format maps to output_format).
+- provider_params (advanced overrides): {"background":"auto"|"opaque","output_compression":0..100,"moderation":"auto"|"low","action":"auto"|"generate"|"edit"}. background:"transparent" is model-dependent; gpt-image-2 rejects it.
+- Hosted Responses routes also accept {"reasoning_effort":<a level the backing text model advertises>,"web_search":true|false|null|{...}}. The gpt-image-2 default is backed by GPT-5.4 (up to xhigh); GPT-5.6 text-model routes also accept max. An object web_search becomes the hosted web_search tool with type:"web_search".
+- action applies only to the hosted Responses image tool and is usually omitted in favor of intent. Images API requests reject action, reasoning_effort, and web_search."#,
         )
     }
 

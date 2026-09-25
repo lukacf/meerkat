@@ -9116,6 +9116,7 @@ mod tests {
                     session_id,
                     structured_output: json!({"answer": 42}),
                     schema_warnings: None,
+                    request_usage: Vec::new(),
                 },
             ))
             .await
@@ -9186,6 +9187,7 @@ mod tests {
                     last_output: "committed primary output".to_string(),
                     attempts: 1,
                     reason: "invalid shape".to_string(),
+                    request_usage: Vec::new(),
                 },
             ))
             .await

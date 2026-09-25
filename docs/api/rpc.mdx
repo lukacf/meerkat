@@ -2714,8 +2714,8 @@ explicitly marked legacy row; not every variant is emitted by current writers.
 |-------|-------------|
 | `run_started` | Agent execution began |
 | `run_completed` | Agent run finished |
-| `extraction_succeeded` | Structured-output extraction succeeded after a completed run |
-| `extraction_failed` | Structured-output extraction failed after a completed run |
+| `extraction_succeeded` | Structured-output extraction succeeded after a completed run; `request_usage` has one usage row per extraction request |
+| `extraction_failed` | Structured-output extraction failed after a completed run; `request_usage` has one usage row per answered extraction request |
 | `run_failed` | Agent run failed |
 | `turn_started` | New LLM call within the turn |
 | `reasoning_delta` | Streaming reasoning/thinking chunk from the model |
@@ -2726,7 +2726,7 @@ explicitly marked legacy row; not every variant is emitted by current writers.
 | `assistant_image_appended` | Canonical assistant image block appended to transcript history |
 | `tool_call_requested` | LLM wants to call a tool |
 | `tool_result_received` | Tool result processed |
-| `turn_completed` | LLM call finished; absent `usage` means no accounting row, not zero tokens |
+| `turn_completed` | LLM call finished (every agent-loop call, including tool-loop calls with `stop_reason: tool_use`); absent `usage` means no accounting row, not zero tokens |
 | `turn_usage_accounting_unmeasured` | Provider accounting was absent; no zero row may be fabricated, and this observation alone does not assert turn completion |
 | `turn_usage_accounting_identity_disputed` | Reported counters exist but provider/model attribution differs; preserve the reported identity and counters |
 | `tool_execution_started` | Tool dispatch began |

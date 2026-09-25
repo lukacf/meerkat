@@ -1596,6 +1596,7 @@ where
                 session_id: self.session.id().clone(),
                 structured_output,
                 schema_warnings,
+                request_usage: self.extraction_state.request_usage().to_vec(),
             },
         )
         .await;
@@ -1614,6 +1615,7 @@ where
                 last_output: error.last_output.clone(),
                 attempts: error.attempts,
                 reason: error.reason.clone(),
+                request_usage: self.extraction_state.request_usage().to_vec(),
             },
         )
         .await;

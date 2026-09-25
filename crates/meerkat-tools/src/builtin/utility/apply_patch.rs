@@ -20,10 +20,46 @@ impl ApplyPatchTool {
     }
 }
 
+/// Model-facing documentation of the patch grammar. This is the single copy:
+/// the `patch` argument schema points here instead of repeating it.
+const APPLY_PATCH_DESCRIPTION: &str = "Apply a patch that adds, deletes, updates, or moves files. Paths are relative to the project root; absolute paths and paths that escape the root via '..' are rejected.
+
+The patch begins with '*** Begin Patch' and ends with '*** End Patch', each on its own line and used once, with one or more file operations between them:
+- '*** Add File: <path>' followed by the file content, every line prefixed with '+'.
+- '*** Delete File: <path>' with no body.
+- '*** Update File: <path>', optionally followed by '*** Move to: <new_path>', then one or more hunks. A move still needs at least one hunk.
+
+Hunks:
+- A hunk starts with '@@ <anchor>', where <anchor> is the literal text of a line in the file (never a line number). The next line equal to <anchor> is found and the hunk applies to the lines after it. A bare '@@' has no anchor: the hunk lines are searched from the current position (the top of the file for the first hunk).
+- Hunk lines start with ' ' (unchanged context; the space is required), '-' (remove) or '+' (add). A blank line inside a hunk is an empty context line.
+- Context and '-' lines must match consecutive file lines. Trailing whitespace and Unicode punctuation such as smart quotes are normalized; anything else must match exactly or the patch is rejected.
+- Hunks apply top to bottom; each search starts after the previous hunk. Put '*** End of File' after a hunk's last line to drop the file's trailing newline.
+
+Example (update, move, add, delete):
+";
+
+/// Documented example; kept separate so a test can apply it verbatim.
+const APPLY_PATCH_EXAMPLE: &str = "*** Begin Patch
+*** Update File: src/config.rs
+@@ fn defaults() {
+-    let timeout = 30;
++    let timeout = 60;
+     let retries = 3;
+*** Update File: src/old_name.rs
+*** Move to: src/new_name.rs
+@@
+-fn old_func() {}
++fn new_func() {}
+*** Add File: src/utils/helper.py
++def greet(name):
++    return f\"Hello, {name}\"
+*** Delete File: src/deprecated.rs
+*** End Patch";
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ApplyPatchArgs {
     #[schemars(
-        description = "The full patch text. Must begin with '*** Begin Patch' on its own line and end with '*** End Patch' on its own line. Between these markers, include one or more file operations.\n\nAll file paths are relative to the project root (never absolute, never start with /).\n\n--- ADD A NEW FILE ---\nUse '*** Add File: <path>' followed by lines prefixed with '+'.\n\n*** Begin Patch\n*** Add File: src/utils/helper.py\n+def greet(name):\n+    return f\"Hello, {name}\"\n*** End Patch\n\n--- DELETE A FILE ---\nUse '*** Delete File: <path>' with no body lines.\n\n*** Begin Patch\n*** Delete File: src/old_module.py\n*** End Patch\n\n--- UPDATE AN EXISTING FILE ---\nUse '*** Update File: <path>' followed by one or more hunks. Each hunk starts with '@@ context_line' to locate where the change goes, then uses line prefixes: ' ' (space) for unchanged context, '-' for lines to remove, '+' for lines to add.\n\n*** Begin Patch\n*** Update File: src/config.rs\n@@ let timeout = 30;\n-let timeout = 30;\n+let timeout = 60;\n*** End Patch\n\n--- MOVE / RENAME A FILE ---\nUse '*** Update File: <old_path>' immediately followed by '*** Move to: <new_path>', then hunks (if content also changes) or no hunks (pure rename not supported; include at least one hunk).\n\n*** Begin Patch\n*** Update File: src/old_name.rs\n*** Move to: src/new_name.rs\n@@ fn old_func()\n-fn old_func()\n+fn new_func()\n*** End Patch\n\n--- MULTI-FILE PATCH ---\nChain multiple operations in a single patch.\n\n*** Begin Patch\n*** Add File: src/new.rs\n+pub fn added() {}\n*** Update File: src/lib.rs\n@@ mod existing;\n+mod new;\n*** Delete File: src/deprecated.rs\n*** End Patch\n\n--- HUNK MATCHING ---\nThe '@@ context_line' locates a unique line in the file; search starts from the top (or after the previous hunk). The '-' lines must exactly match consecutive lines in the file at that location. If context or old lines cannot be found, the patch is rejected with an error. Matching tolerates trailing whitespace differences and Unicode normalization (smart quotes -> ASCII, etc.), but the line content must otherwise match.\n\nMultiple hunks in one Update File are applied top-to-bottom. Each hunk's search starts after the previous hunk's match position.\n\nUse '@@' (bare, no text after it) when the first hunk has no context line and the old lines are unambiguous.\n\nUse '*** End of File' after the last hunk's lines to strip the file's trailing newline.\n\n--- COMMON SYNTAX MISTAKES ---\n1. Forgetting the space prefix on context lines (every unchanged line MUST start with ' ').\n2. Using '@@' with a line number instead of the actual line content. It takes literal text, not a number.\n3. Omitting '+' prefix on Add File content lines.\n4. Putting absolute paths instead of project-root-relative paths.\n5. Including the '*** Begin Patch' / '*** End Patch' markers more than once.\n6. Adding blank lines between hunks that get parsed as empty context lines. Blank lines in hunks are treated as empty context (matched against empty lines in the file)."
+        description = "The complete patch text in the format described by the tool description."
     )]
     patch: String,
 }
@@ -102,9 +138,12 @@ impl BuiltinTool for ApplyPatchTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: self.name().into(),
-            description: "Apply a structured patch to create, update, delete, or move files inside the project root.\n\nThe patch string uses a line-oriented grammar with these markers:\n- '*** Begin Patch' / '*** End Patch' — wrap the entire patch\n- '*** Add File: <path>' — create a new file (followed by '+' prefixed content lines)\n- '*** Delete File: <path>' — remove an existing file\n- '*** Update File: <path>' — modify an existing file (followed by hunks)\n- '*** Move to: <path>' — rename/move (immediately after Update File header, before hunks)\n- '@@ <context_line>' — locate a hunk by matching a literal line in the file\n- '@@' — bare context marker (no search text, for first-hunk-at-top-of-file)\n- '*** End of File' — strip trailing newline from the result\n\nUpdate File hunk line prefixes:\n  ' ' (space) = unchanged context line (MUST be present for lines you are not changing)\n  '-' = line to remove (must match the file exactly)\n  '+' = line to insert\n\nAll paths are relative to the project root. Paths that escape the root via '..' are rejected.\n\nHunk matching: '@@ context_line' searches forward from the current position for an exact line match. The '-' (old) lines must then match consecutive lines at that position. If context or old lines are not found, the patch is rejected. Matching tolerates trailing whitespace and Unicode smart-quote normalization, but content must otherwise match verbatim. Multiple hunks per file are applied top-to-bottom; each search resumes after the previous match.\n\nExamples:\n\n1) Add a file:\n*** Begin Patch\n*** Add File: src/utils/helper.py\n+def greet(name):\n+    return f\"Hello, {name}\"\n*** End Patch\n\n2) Update a file (replace one line):\n*** Begin Patch\n*** Update File: src/config.rs\n@@ let timeout = 30;\n-let timeout = 30;\n+let timeout = 60;\n*** End Patch\n\n3) Delete a file:\n*** Begin Patch\n*** Delete File: src/old_module.py\n*** End Patch\n\n4) Multi-file patch (add + update + delete):\n*** Begin Patch\n*** Add File: src/new.rs\n+pub fn added() {}\n*** Update File: src/lib.rs\n@@ mod existing;\n+mod new;\n*** Delete File: src/deprecated.rs\n*** End Patch\n\n5) Rename/move with edits:\n*** Begin Patch\n*** Update File: src/old_name.rs\n*** Move to: src/new_name.rs\n@@ fn old_func()\n-fn old_func()\n+fn new_func()\n*** End Patch\n\nCommon mistakes:\n- Forgetting the ' ' (space) prefix on unchanged context lines.\n- Using line numbers after '@@' instead of literal line text.\n- Omitting '+' prefix on Add File content lines.\n- Using absolute paths instead of project-root-relative paths.\n- Adding unintended blank lines inside hunks (blank lines are parsed as empty-line context matches).".into(),
+            description: format!("{APPLY_PATCH_DESCRIPTION}{APPLY_PATCH_EXAMPLE}"),
             input_schema: crate::schema::schema_for::<ApplyPatchArgs>(),
-            provenance: Some(ToolProvenance { kind: ToolSourceKind::Builtin, source_id: "builtin".into() }),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Builtin,
+                source_id: "builtin".into(),
+            }),
         }
     }
 
@@ -751,6 +790,80 @@ mod tests {
 
     fn wrap_patch(body: &str) -> String {
         format!("*** Begin Patch\n{body}\n*** End Patch")
+    }
+
+    /// The example embedded in the tool description must be a patch the
+    /// tool actually accepts, with the documented anchor semantics.
+    #[test]
+    fn documented_example_applies_verbatim() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/utils")).unwrap();
+        std::fs::write(
+            root.join("src/config.rs"),
+            "fn defaults() {\n    let timeout = 30;\n    let retries = 3;\n}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/old_name.rs"), "fn old_func() {}\n").unwrap();
+        std::fs::write(root.join("src/deprecated.rs"), "// gone\n").unwrap();
+
+        let affected = apply_patch(root, APPLY_PATCH_EXAMPLE).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/config.rs")).unwrap(),
+            "fn defaults() {\n    let timeout = 60;\n    let retries = 3;\n}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/new_name.rs")).unwrap(),
+            "fn new_func() {}\n"
+        );
+        assert!(!root.join("src/old_name.rs").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/utils/helper.py")).unwrap(),
+            "def greet(name):\n    return f\"Hello, {name}\"\n"
+        );
+        assert!(!root.join("src/deprecated.rs").exists());
+        assert_eq!(affected.added.len(), 1);
+        assert_eq!(affected.modified.len(), 2);
+        assert_eq!(affected.deleted.len(), 1);
+    }
+
+    /// The grammar is documented once, in the tool description; the `patch`
+    /// argument schema points at it instead of repeating it.
+    #[test]
+    fn grammar_is_documented_once_and_keeps_every_rule() {
+        let def = ApplyPatchTool::new(PathBuf::from("/tmp")).def();
+        let schema_text = def.input_schema.to_string();
+        assert!(
+            !schema_text.contains("*** Begin Patch"),
+            "the argument schema must not repeat the grammar: {schema_text}"
+        );
+        for rule in [
+            "*** Begin Patch",
+            "*** End Patch",
+            "*** Add File: <path>",
+            "*** Delete File: <path>",
+            "*** Update File: <path>",
+            "*** Move to: <new_path>",
+            "A move still needs at least one hunk",
+            "'@@ <anchor>'",
+            "never a line number",
+            "bare '@@'",
+            "the space is required",
+            "A blank line inside a hunk is an empty context line",
+            "Trailing whitespace",
+            "smart quotes",
+            "each search starts after the previous hunk",
+            "*** End of File",
+            "'..'",
+            "absolute paths",
+        ] {
+            assert!(
+                def.description.contains(rule),
+                "tool description must document {rule:?}: {}",
+                def.description
+            );
+        }
     }
 
     #[test]

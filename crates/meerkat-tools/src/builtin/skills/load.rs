@@ -47,12 +47,12 @@ fn parse_key(source_raw: &str, skill_raw: &str) -> Result<SkillKey, BuiltinToolE
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl BuiltinTool for LoadSkillTool {
     fn name(&self) -> &'static str {
-        "load_skill"
+        super::LOAD_SKILL_TOOL_NAME
     }
 
     fn def(&self) -> ToolDef {
         ToolDef {
-            name: "load_skill".into(),
+            name: super::LOAD_SKILL_TOOL_NAME.into(),
             description:
                 "Load a skill's full instructions by (source_uuid, skill_name) into the conversation."
                     .into(),

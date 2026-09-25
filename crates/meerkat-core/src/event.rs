@@ -2075,6 +2075,15 @@ pub enum AgentEvent {
         structured_output: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
+        /// One row per measured provider request of this extraction phase, in
+        /// order: the first attempt and each retry. Extraction publishes no
+        /// `turn_completed`, so these rows are the only per-call accounting
+        /// for it on the event stream. An attempt whose provider sent no
+        /// accounting publishes no row (its absence is reported by
+        /// `turn_usage_accounting_unmeasured`), so this is never padded with
+        /// zeros.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        request_usage: Vec<crate::types::TurnUsage>,
     },
 
     /// Structured-output extraction failed after a completed main run.
@@ -2083,6 +2092,12 @@ pub enum AgentEvent {
         last_output: String,
         attempts: u32,
         reason: String,
+        /// One row per measured provider request this extraction phase made
+        /// before it failed, with the same meaning as on
+        /// [`AgentEvent::ExtractionSucceeded`]. Empty when the phase failed
+        /// before any extraction request was answered.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        request_usage: Vec<crate::types::TurnUsage>,
     },
 
     /// Agent run failed
@@ -2180,6 +2195,13 @@ pub enum AgentEvent {
     },
 
     /// Turn completed.
+    ///
+    /// Published once per committed agent-loop provider request: each
+    /// tool-loop call (`stop_reason: tool_use`) and the call that closes the
+    /// run, each after its assistant message is committed, so it pairs with
+    /// the [`AgentEvent::TurnStarted`] of the same request. Structured-output
+    /// extraction requests publish their accounting on the extraction outcome
+    /// event instead (`request_usage`).
     ///
     /// # Why `usage` is optional
     ///
@@ -2656,13 +2678,28 @@ pub fn format_verbose_event_with_config(
         }
         AgentEvent::TurnCompleted { stop_reason, usage } => Some(match usage {
             Some(usage) => format!(
-                "  ── Turn complete: {:?} ({} in / {} out tokens)",
-                stop_reason, usage.input_tokens, usage.output_tokens
+                "  ── Turn complete: {stop_reason:?}, {}",
+                turn_usage_summary(usage)
             ),
             // Absent accounting must read as absent. Rendering `0 in / 0 out`
             // would turn "no answer" into a wrong answer that looks right.
             None => format!("  ── Turn complete: {stop_reason:?} (tokens unmeasured)"),
         }),
+        AgentEvent::ExtractionSucceeded { request_usage, .. } => Some(extraction_verbose_lines(
+            "  ✓ Extraction succeeded".to_string(),
+            request_usage,
+        )),
+        AgentEvent::ExtractionFailed {
+            reason,
+            request_usage,
+            ..
+        } => Some(extraction_verbose_lines(
+            format!(
+                "  ✗ Extraction failed: {}",
+                truncate_preview(reason, config.max_text_bytes)
+            ),
+            request_usage,
+        )),
         AgentEvent::TextComplete { content } => {
             if content.is_empty() {
                 None
@@ -2761,6 +2798,49 @@ pub fn format_verbose_event_with_config(
         )),
         _ => None,
     }
+}
+
+/// One-line token summary of a normalized usage total, such as a run's
+/// `run_usage`: `1234 tokens (1200 in / 34 out, 900 cached, 12 reasoning)`.
+///
+/// The input component is read as-is, so it must already be on the
+/// presented-input denominator ([`crate::types::CumulativeUsage`]); for one
+/// provider call use [`turn_usage_summary`]. The cached and reasoning parts
+/// appear only when a call reported them, and cache writes only when there
+/// were some (Anthropic reports a zero on every call that wrote nothing).
+pub fn usage_summary(usage: &crate::types::Usage) -> String {
+    let mut details = format!("{} in / {} out", usage.input_tokens, usage.output_tokens);
+    if let Some(cached) = usage.cache_read_tokens {
+        details.push_str(&format!(", {cached} cached"));
+    }
+    if let Some(written) = usage.cache_creation_tokens.filter(|written| *written > 0) {
+        details.push_str(&format!(", {written} cache write"));
+    }
+    if let Some(reasoning) = usage.reasoning_tokens {
+        details.push_str(&format!(", {reasoning} reasoning"));
+    }
+    format!("{} tokens ({details})", usage.total_tokens())
+}
+
+/// [`usage_summary`] for one provider call, on the presented-input
+/// denominator the run total uses, so the per-call lines of a run add up to
+/// its total on every provider (a raw Anthropic `input_tokens` would not).
+pub fn turn_usage_summary(usage: &crate::types::TurnUsage) -> String {
+    let mut normalized = crate::types::CumulativeUsage::default();
+    normalized.add_turn(usage);
+    usage_summary(normalized.as_usage())
+}
+
+fn extraction_verbose_lines(status: String, request_usage: &[crate::types::TurnUsage]) -> String {
+    let mut lines = status;
+    for (index, usage) in request_usage.iter().enumerate() {
+        lines.push_str(&format!(
+            "\n  ── Extraction request {}: {}",
+            index + 1,
+            turn_usage_summary(usage)
+        ));
+    }
+    lines
 }
 
 fn truncate_preview(input: &str, max_bytes: usize) -> String {
@@ -4405,5 +4485,54 @@ mod tests {
         b.timestamp_ms = 10;
         assert_eq!(compare_event_envelopes(&a, &b), Ordering::Less);
         assert_eq!(compare_event_envelopes(&b, &a), Ordering::Greater);
+    }
+
+    /// The verbose per-call line counts presented input, so an Anthropic
+    /// call's cached input is in it, and extraction outcomes print one line
+    /// per extraction request.
+    #[test]
+    fn verbose_usage_lines_use_presented_input_and_cover_extraction_requests() {
+        let anthropic = crate::types::TurnUsage::new(
+            Usage {
+                input_tokens: 120,
+                output_tokens: 90,
+                cache_creation_tokens: Some(0),
+                cache_read_tokens: Some(4300),
+                reasoning_tokens: None,
+                provider_accounting: None,
+            },
+            crate::ProviderTokenAccounting::anthropic("claude-test", 120, 0, 4300),
+        );
+        assert_eq!(
+            format_verbose_event(&AgentEvent::TurnCompleted {
+                stop_reason: StopReason::ToolUse,
+                usage: Some(anthropic.clone()),
+            })
+            .as_deref(),
+            Some("  ── Turn complete: ToolUse, 4510 tokens (4420 in / 90 out, 4300 cached)")
+        );
+        let lines = format_verbose_event(&AgentEvent::ExtractionSucceeded {
+            session_id: SessionId::new(),
+            structured_output: serde_json::json!({"answer": 1}),
+            schema_warnings: None,
+            request_usage: vec![anthropic.clone(), anthropic],
+        })
+        .expect("extraction outcome is verbose");
+        assert_eq!(
+            lines,
+            "  ✓ Extraction succeeded\n  ── Extraction request 1: 4510 tokens (4420 in / 90 out, 4300 cached)\n  ── Extraction request 2: 4510 tokens (4420 in / 90 out, 4300 cached)"
+        );
+        let with_reasoning = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_tokens: Some(3),
+            cache_read_tokens: None,
+            reasoning_tokens: Some(2),
+            provider_accounting: None,
+        };
+        assert_eq!(
+            usage_summary(&with_reasoning),
+            "15 tokens (10 in / 5 out, 3 cache write, 2 reasoning)"
+        );
     }
 }

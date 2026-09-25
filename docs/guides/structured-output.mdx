@@ -82,7 +82,8 @@ or:
 ```
 
 Extraction attempts do not publish ordinary streamed text or additional
-`turn_completed` events. A failed extraction is not a `run_failed` event: the
+`turn_completed` events; the outcome event's `request_usage` lists the token
+usage of each extraction request. A failed extraction is not a `run_failed` event: the
 main agentic run completed, and `RunResult.extraction_error` carries the
 post-main failure.
 

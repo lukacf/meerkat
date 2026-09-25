@@ -180,6 +180,9 @@ pub enum ExportError {
 
 #[derive(Debug, Clone)]
 struct PendingTurn {
+    /// The loop's turn counter from the `TurnStarted` that opened this turn;
+    /// `None` when a content event arrived with no announced turn.
+    turn_number: Option<u32>,
     timestamp: Option<String>,
     message: String,
     reasoning: String,
@@ -190,12 +193,29 @@ struct PendingTurn {
 impl PendingTurn {
     fn new(timestamp_ms: u64) -> Self {
         Self {
+            turn_number: None,
             timestamp: timestamp(timestamp_ms),
             message: String::new(),
             reasoning: String::new(),
             tool_calls: Vec::new(),
             observations: Vec::new(),
         }
+    }
+
+    fn started(turn_number: u32, timestamp_ms: u64) -> Self {
+        Self {
+            turn_number: Some(turn_number),
+            ..Self::new(timestamp_ms)
+        }
+    }
+
+    /// Whether the turn recorded any output: text, reasoning, a tool call or
+    /// a tool observation.
+    fn recorded_output(&self) -> bool {
+        !self.message.is_empty()
+            || !self.reasoning.is_empty()
+            || !self.tool_calls.is_empty()
+            || !self.observations.is_empty()
     }
 }
 
@@ -222,6 +242,10 @@ pub struct TrajectoryBuilder {
     failure_detail: Option<String>,
     retained_bytes: usize,
     charged_steps: usize,
+    /// Between a `RunCompleted` that requires extraction and the extraction
+    /// outcome. Extraction streams its JSON as text deltas; they belong to
+    /// the extraction steps the outcome event records, not to a new turn.
+    extraction_open: bool,
 }
 
 impl TrajectoryBuilder {
@@ -256,12 +280,29 @@ impl TrajectoryBuilder {
     pub fn push(&mut self, envelope: &EventEnvelope<AgentEvent>) -> Result<(), ExportError> {
         let steps = &mut self.steps;
         let pending = &mut self.pending;
+        if self.extraction_open
+            && matches!(
+                &envelope.payload,
+                AgentEvent::TextDelta { .. }
+                    | AgentEvent::TextComplete { .. }
+                    | AgentEvent::ReasoningDelta { .. }
+                    | AgentEvent::ReasoningComplete { .. }
+            )
+        {
+            return Ok(());
+        }
         match &envelope.payload {
             AgentEvent::RunStarted {
                 session_id: id,
                 input,
             } => {
                 self.session_id = Some(id.to_string());
+                // A new run opens with no extraction phase in progress, even
+                // when an earlier run's extraction never published an outcome.
+                self.extraction_open = false;
+                // A turn still pending belongs to an earlier run that ended
+                // without a terminal event. It precedes this run's input.
+                close_unfinished_turn(steps, pending.take());
                 if let RunInput::Content { content } = input {
                     steps.push(Step {
                         step_id: next_id(steps),
@@ -280,8 +321,24 @@ impl TrajectoryBuilder {
                     });
                 }
             }
-            AgentEvent::TurnStarted { .. } => {
-                *pending = Some(PendingTurn::new(envelope.timestamp_ms));
+            AgentEvent::TurnStarted { turn_number } => {
+                match pending.take() {
+                    // The loop re-announces the turn it is already in when a
+                    // compaction boundary sends it back to rebuild the request
+                    // (`CallingLlmGate::Repoll` does not advance the turn
+                    // counter). The earlier announcement produced no committed
+                    // response, so the re-entered request replaces it instead
+                    // of becoming an empty, unmetered step.
+                    Some(turn) if turn.turn_number == Some(*turn_number) => {}
+                    // Every other provider request is a step. A turn still
+                    // pending here never published `TurnCompleted`: logs
+                    // written before tool-loop turns published their
+                    // completion carry one such turn per tool round. It is
+                    // kept as an unmetered step rather than overwritten, which
+                    // used to reduce a tool-using run to its final answer.
+                    turn => close_unfinished_turn(steps, turn),
+                }
+                *pending = Some(PendingTurn::started(*turn_number, envelope.timestamp_ms));
             }
             AgentEvent::ReasoningDelta { delta } => pending
                 .get_or_insert_with(|| PendingTurn::new(envelope.timestamp_ms))
@@ -370,8 +427,13 @@ impl TrajectoryBuilder {
                     }
                 }
             }
-            AgentEvent::RunCompleted { result, .. } => {
+            AgentEvent::RunCompleted {
+                result,
+                extraction_required,
+                ..
+            } => {
                 self.terminal_status = Some("completed");
+                self.extraction_open = *extraction_required;
                 if let Some(mut turn) = pending.take() {
                     if turn.message.is_empty() {
                         turn.message.clone_from(result);
@@ -380,19 +442,67 @@ impl TrajectoryBuilder {
                 }
             }
             AgentEvent::RunFailed { error_report, .. } => {
+                // A run can fail inside its extraction phase (after
+                // `RunCompleted { extraction_required: true }`) without an
+                // extraction outcome event. The phase ends with the run.
+                self.extraction_open = false;
                 self.terminal_status = Some("failed");
                 self.failure_detail = Some(error_report.message.clone());
                 flush_failed_turn(steps, pending, error_report.message.clone());
             }
+            AgentEvent::ExtractionSucceeded {
+                structured_output,
+                request_usage,
+                ..
+            } => {
+                self.extraction_open = false;
+                // The main run closed at `RunCompleted`; each extraction
+                // request that followed is its own step. A success proves at
+                // least one request was answered, so a log without rows (an
+                // unmeasured provider, or a log written before extraction
+                // published them) still records one unmetered step.
+                if let Some(turn) = pending.take() {
+                    append_agent_step(steps, turn, None);
+                }
+                let attempts = request_usage.len().max(1);
+                for attempt in 0..attempts {
+                    let usage = request_usage.get(attempt);
+                    let message = if attempt + 1 == attempts {
+                        structured_output.to_string()
+                    } else {
+                        String::new()
+                    };
+                    append_extraction_step(steps, envelope.timestamp_ms, message, usage, None);
+                    if let Some(usage) = usage {
+                        add_totals(&mut self.totals, usage);
+                    }
+                }
+            }
             AgentEvent::ExtractionFailed {
                 last_output,
                 reason,
+                request_usage,
                 ..
             } => {
                 self.terminal_status = Some("failed");
+                self.extraction_open = false;
                 let detail = format!("{reason}; last_output={last_output}");
                 self.failure_detail = Some(detail.clone());
-                flush_failed_turn(steps, pending, detail);
+                // A turn still pending here is the main turn of a run whose
+                // extraction setup failed before `RunCompleted`.
+                flush_failed_turn(steps, pending, detail.clone());
+                let attempts = request_usage.len();
+                for (attempt, usage) in request_usage.iter().enumerate() {
+                    let failure = (attempt + 1 == attempts).then(|| detail.clone());
+                    append_extraction_step(
+                        steps,
+                        envelope.timestamp_ms,
+                        String::new(),
+                        Some(usage),
+                        failure,
+                    );
+                    add_totals(&mut self.totals, usage);
+                }
             }
             _ => {}
         }
@@ -431,6 +541,7 @@ impl TrajectoryBuilder {
             failure_detail,
             retained_bytes: _,
             charged_steps: _,
+            extraction_open: _,
         } = self;
         totals.total_steps = steps.len() as u64;
         let extra = terminal_status.map(|status| {
@@ -552,28 +663,93 @@ fn append_agent_step(steps: &mut Vec<Step>, turn: PendingTurn, usage: Option<&Tu
         step_id: next_id(steps),
         timestamp: turn.timestamp,
         source: StepSource::Agent,
-        model_name: None,
+        model_name: usage.map(|usage| usage.accounting().model.clone()),
         message: AtifContent::Text(turn.message),
         reasoning_content: (!turn.reasoning.is_empty()).then_some(turn.reasoning),
         tool_calls: turn.tool_calls,
         observation: (!turn.observations.is_empty()).then_some(Observation {
             results: turn.observations,
         }),
-        metrics: usage.map(|usage| Metrics {
-            prompt_tokens: Some(usage.presented_tokens()),
-            completion_tokens: Some(usage.output_tokens),
-            cached_tokens: usage.cache_read_tokens,
-            cost_usd: None,
-            logprobs: None,
-            prompt_token_ids: None,
-            completion_token_ids: None,
-            extra: None,
-        }),
+        metrics: usage.map(step_metrics),
         llm_call_count: Some(1),
         extra: None,
         reasoning_effort: None,
         is_copied_context: None,
     });
+}
+
+/// One structured-output extraction request as an agent step, marked so a
+/// consumer can tell it from the agentic turns that produced the answer.
+fn append_extraction_step(
+    steps: &mut Vec<Step>,
+    timestamp_ms: u64,
+    message: String,
+    usage: Option<&TurnUsage>,
+    failure_detail: Option<String>,
+) {
+    let mut extra = Map::from_iter([(
+        String::from("request_kind"),
+        Value::String(String::from("structured_output_extraction")),
+    )]);
+    if let Some(detail) = failure_detail {
+        extra.insert(String::from("failure_detail"), Value::String(detail));
+    }
+    steps.push(Step {
+        step_id: next_id(steps),
+        timestamp: timestamp(timestamp_ms),
+        source: StepSource::Agent,
+        model_name: usage.map(|usage| usage.accounting().model.clone()),
+        message: AtifContent::Text(message),
+        reasoning_content: None,
+        tool_calls: Vec::new(),
+        observation: None,
+        metrics: usage.map(step_metrics),
+        llm_call_count: Some(1),
+        extra: Some(extra),
+        reasoning_effort: None,
+        is_copied_context: None,
+    });
+}
+
+/// Per-step metrics for one provider request. `prompt_tokens` is the
+/// presented input on every provider (never the raw, for Anthropic
+/// uncached-only, counter), so step metrics add up to the run total.
+fn step_metrics(usage: &TurnUsage) -> Metrics {
+    let mut extra = Map::new();
+    if let Some(written) = usage.cache_creation_tokens {
+        extra.insert(
+            String::from("cache_creation_tokens"),
+            Value::from(written.min(usage.presented_tokens())),
+        );
+    }
+    if let Some(reasoning) = usage.reasoning_tokens {
+        extra.insert(
+            String::from("reasoning_tokens"),
+            Value::from(reasoning.min(usage.output_tokens)),
+        );
+    }
+    Metrics {
+        prompt_tokens: Some(usage.presented_tokens()),
+        completion_tokens: Some(usage.output_tokens),
+        cached_tokens: usage
+            .cache_read_tokens
+            .map(|cached| cached.min(usage.presented_tokens())),
+        cost_usd: None,
+        logprobs: None,
+        prompt_token_ids: None,
+        completion_token_ids: None,
+        extra: (!extra.is_empty()).then_some(extra),
+    }
+}
+
+/// Export a turn that ended without `TurnCompleted` as an unmetered step. A
+/// turn that recorded no output is not evidence of an answered provider
+/// request, so it is dropped rather than exported as an empty step that claims
+/// one LLM call.
+fn close_unfinished_turn(steps: &mut Vec<Step>, turn: Option<PendingTurn>) {
+    if let Some(turn) = turn.filter(PendingTurn::recorded_output) {
+        append_agent_step(steps, turn, None);
+    }
 }
 
 fn flush_failed_turn(steps: &mut Vec<Step>, pending: &mut Option<PendingTurn>, detail: String) {
@@ -606,8 +782,28 @@ fn add_totals(totals: &mut FinalMetrics, usage: &TurnUsage) {
             totals
                 .total_cached_tokens
                 .unwrap_or_default()
-                .saturating_add(cached),
+                .saturating_add(cached.min(usage.presented_tokens())),
         );
+    }
+    let details = [
+        (
+            "total_cache_creation_tokens",
+            usage
+                .cache_creation_tokens
+                .map(|written| written.min(usage.presented_tokens())),
+        ),
+        (
+            "total_reasoning_tokens",
+            usage
+                .reasoning_tokens
+                .map(|reasoning| reasoning.min(usage.output_tokens)),
+        ),
+    ];
+    for (key, count) in details {
+        let Some(count) = count else { continue };
+        let extra = totals.extra.get_or_insert_with(Map::new);
+        let previous = extra.get(key).and_then(Value::as_u64).unwrap_or_default();
+        extra.insert(key.to_string(), Value::from(previous.saturating_add(count)));
     }
 }
 fn next_id(steps: &[Step]) -> u64 {
@@ -976,6 +1172,532 @@ mod tests {
             "the bound {retained_bytes} must not exceed the document it bounds ({} bytes)",
             document.len()
         );
+    }
+
+    fn envelope(id: &SessionId, seq: u64, event: AgentEvent) -> EventEnvelope<AgentEvent> {
+        EventEnvelope::new_with_source(EventSourceIdentity::session(id.clone()), seq, None, event)
+    }
+
+    fn openai_usage(prompt: u64, output: u64, cached: u64, reasoning: u64) -> TurnUsage {
+        TurnUsage::new(
+            Usage {
+                input_tokens: prompt,
+                output_tokens: output,
+                cache_creation_tokens: None,
+                cache_read_tokens: Some(cached),
+                reasoning_tokens: Some(reasoning),
+                provider_accounting: None,
+            },
+            meerkat_core::ProviderTokenAccounting::openai("gpt-test", prompt),
+        )
+    }
+
+    /// The events of one structured-output run: a tool-loop turn, the
+    /// answering turn, and two extraction requests. `tool_turn_completes`
+    /// selects the current log shape (the tool-loop turn publishes
+    /// `TurnCompleted`) or the shape earlier releases wrote (it does not, and
+    /// extraction publishes no rows).
+    fn tool_and_extraction_run(
+        id: &SessionId,
+        tool_turn_completes: bool,
+    ) -> Vec<EventEnvelope<AgentEvent>> {
+        let mut events = vec![
+            AgentEvent::RunStarted {
+                session_id: id.clone(),
+                input: RunInput::Content {
+                    content: ContentInput::Text("review this".into()),
+                },
+            },
+            AgentEvent::TurnStarted { turn_number: 0 },
+            AgentEvent::ToolCallRequested {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                args: meerkat_core::event::ToolCallArguments::from_value(
+                    serde_json::json!({"path": "src/lib.rs"}),
+                )
+                .unwrap(),
+            },
+            AgentEvent::ToolExecutionCompleted {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                content: ContentBlock::text_vec("fn main() {}".into()),
+                is_error: false,
+                duration_ms: 2,
+            },
+        ];
+        if tool_turn_completes {
+            events.push(AgentEvent::TurnCompleted {
+                stop_reason: meerkat_core::StopReason::ToolUse,
+                usage: Some(openai_usage(1000, 10, 0, 3)),
+            });
+        }
+        events.extend([
+            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::TextComplete {
+                content: "looks fine".into(),
+            },
+            AgentEvent::TurnCompleted {
+                stop_reason: meerkat_core::StopReason::EndTurn,
+                usage: Some(openai_usage(1200, 20, 1000, 4)),
+            },
+            AgentEvent::RunCompleted {
+                session_id: id.clone(),
+                result: "looks fine".into(),
+                structured_output: None,
+                extraction_required: true,
+                usage: Usage::default().into(),
+                terminal_cause_kind: None,
+            },
+            // Extraction streams its JSON as deltas; they are not a turn.
+            AgentEvent::TextDelta {
+                delta: r#"{"comments": []}"#.into(),
+            },
+            AgentEvent::ExtractionSucceeded {
+                session_id: id.clone(),
+                structured_output: serde_json::json!({"comments": []}),
+                schema_warnings: None,
+                request_usage: if tool_turn_completes {
+                    vec![
+                        openai_usage(1250, 25, 1200, 5),
+                        openai_usage(1300, 30, 1250, 6),
+                    ]
+                } else {
+                    Vec::new()
+                },
+            },
+        ]);
+        events
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| envelope(id, index as u64 + 1, event))
+            .collect()
+    }
+
+    /// Every provider request of the run is a step with its own metrics: the
+    /// tool-loop turn, the answering turn, and each extraction request.
+    #[test]
+    fn every_provider_request_is_a_step_with_metrics() {
+        let id = SessionId::new();
+        let trajectory =
+            trajectory_from_events(&tool_and_extraction_run(&id, true), test_agent()).unwrap();
+        let agent_steps = trajectory
+            .steps
+            .iter()
+            .filter(|step| step.source == StepSource::Agent)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            agent_steps.len(),
+            4,
+            "tool turn, answer, two extraction requests"
+        );
+
+        let tool_step = agent_steps[0];
+        assert_eq!(tool_step.tool_calls[0].function_name, "read_file");
+        assert_eq!(
+            tool_step.observation.as_ref().unwrap().results[0]
+                .source_call_id
+                .as_deref(),
+            Some("call-1")
+        );
+        let prompts = agent_steps
+            .iter()
+            .map(|step| {
+                step.metrics
+                    .as_ref()
+                    .and_then(|metrics| metrics.prompt_tokens)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            prompts,
+            vec![Some(1000), Some(1200), Some(1250), Some(1300)]
+        );
+        assert_eq!(
+            agent_steps[1].message,
+            AtifContent::Text("looks fine".into())
+        );
+        for step in &agent_steps[2..] {
+            assert_eq!(
+                step.extra
+                    .as_ref()
+                    .and_then(|extra| extra.get("request_kind")),
+                Some(&Value::String("structured_output_extraction".into()))
+            );
+        }
+        assert_eq!(
+            agent_steps[3].message,
+            AtifContent::Text(r#"{"comments":[]}"#.into()),
+            "the last extraction request carries the extracted output"
+        );
+        assert_eq!(
+            agent_steps[3]
+                .metrics
+                .as_ref()
+                .and_then(|metrics| metrics.extra.as_ref())
+                .and_then(|extra| extra.get("reasoning_tokens")),
+            Some(&Value::from(6))
+        );
+        assert_eq!(agent_steps[0].model_name.as_deref(), Some("gpt-test"));
+
+        let totals = trajectory.final_metrics.as_ref().unwrap();
+        assert_eq!(totals.total_steps, 5);
+        assert_eq!(totals.total_prompt_tokens, Some(1000 + 1200 + 1250 + 1300));
+        assert_eq!(totals.total_completion_tokens, Some(10 + 20 + 25 + 30));
+        assert_eq!(totals.total_cached_tokens, Some(1000 + 1200 + 1250));
+        assert_eq!(
+            totals
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.get("total_reasoning_tokens")),
+            Some(&Value::from(3 + 4 + 5 + 6))
+        );
+    }
+
+    /// The log shape earlier releases wrote: tool-loop turns never published
+    /// `TurnCompleted` and extraction published no rows. The exporter used to
+    /// overwrite each such turn at the next `TurnStarted`, so a tool-using
+    /// run exported only its final answer. Every turn now survives, unmetered
+    /// where the log recorded no accounting.
+    #[test]
+    fn a_log_without_tool_turn_completions_keeps_every_turn() {
+        let id = SessionId::new();
+        let trajectory =
+            trajectory_from_events(&tool_and_extraction_run(&id, false), test_agent()).unwrap();
+        let agent_steps = trajectory
+            .steps
+            .iter()
+            .filter(|step| step.source == StepSource::Agent)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            agent_steps.len(),
+            3,
+            "tool turn, answer, the extraction request"
+        );
+        assert_eq!(agent_steps[0].tool_calls[0].function_name, "read_file");
+        assert!(agent_steps[0].observation.is_some());
+        assert!(
+            agent_steps[0].metrics.is_none(),
+            "a turn the log never accounted for is unmetered, not zero"
+        );
+        assert_eq!(
+            agent_steps[1]
+                .metrics
+                .as_ref()
+                .and_then(|metrics| metrics.prompt_tokens),
+            Some(1200)
+        );
+        assert!(agent_steps[2].metrics.is_none());
+        assert_eq!(
+            trajectory
+                .final_metrics
+                .as_ref()
+                .unwrap()
+                .total_prompt_tokens,
+            Some(1200)
+        );
+    }
+
+    /// A failed extraction keeps the failure on the step of its last request.
+    #[test]
+    fn failed_extraction_requests_are_steps_with_the_failure_on_the_last() {
+        let id = SessionId::new();
+        let events = vec![
+            envelope(&id, 1, AgentEvent::TurnStarted { turn_number: 0 }),
+            envelope(
+                &id,
+                2,
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    usage: Some(openai_usage(100, 5, 0, 0)),
+                },
+            ),
+            envelope(
+                &id,
+                3,
+                AgentEvent::RunCompleted {
+                    session_id: id.clone(),
+                    result: "answer".into(),
+                    structured_output: None,
+                    extraction_required: true,
+                    usage: Usage::default().into(),
+                    terminal_cause_kind: None,
+                },
+            ),
+            envelope(
+                &id,
+                4,
+                AgentEvent::ExtractionFailed {
+                    session_id: id.clone(),
+                    last_output: "answer".into(),
+                    attempts: 2,
+                    reason: "schema mismatch".into(),
+                    request_usage: vec![openai_usage(110, 6, 100, 0), openai_usage(120, 7, 110, 0)],
+                },
+            ),
+        ];
+        let trajectory = trajectory_from_events(&events, test_agent()).unwrap();
+        assert_eq!(trajectory.steps.len(), 3);
+        assert!(
+            trajectory.steps[1]
+                .extra
+                .as_ref()
+                .unwrap()
+                .get("failure_detail")
+                .is_none()
+        );
+        assert!(
+            trajectory.steps[2]
+                .extra
+                .as_ref()
+                .unwrap()
+                .get("failure_detail")
+                .is_some()
+        );
+        assert_eq!(
+            trajectory
+                .final_metrics
+                .as_ref()
+                .unwrap()
+                .total_prompt_tokens,
+            Some(100 + 110 + 120)
+        );
+        assert_eq!(
+            trajectory.extra.as_ref().unwrap().get("terminal_status"),
+            Some(&Value::String("failed".into()))
+        );
+    }
+
+    fn envelopes(id: &SessionId, events: Vec<AgentEvent>) -> Vec<EventEnvelope<AgentEvent>> {
+        events
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| envelope(id, index as u64 + 1, event))
+            .collect()
+    }
+
+    fn run_started(id: &SessionId, text: &str) -> AgentEvent {
+        AgentEvent::RunStarted {
+            session_id: id.clone(),
+            input: RunInput::Content {
+                content: ContentInput::Text(text.into()),
+            },
+        }
+    }
+
+    fn run_completed(id: &SessionId, result: &str, extraction_required: bool) -> AgentEvent {
+        AgentEvent::RunCompleted {
+            session_id: id.clone(),
+            result: result.into(),
+            structured_output: None,
+            extraction_required,
+            usage: Usage::default().into(),
+            terminal_cause_kind: None,
+        }
+    }
+
+    fn agent_steps(trajectory: &Trajectory) -> Vec<&Step> {
+        trajectory
+            .steps
+            .iter()
+            .filter(|step| step.source == StepSource::Agent)
+            .collect()
+    }
+
+    /// A compaction boundary sends the loop back to rebuild its request
+    /// without advancing the turn counter, so the same turn is announced twice
+    /// (the sequence captured from the real loop with a curator compactor:
+    /// `turn_started`, `compaction_started`, `compaction_completed`,
+    /// `turn_started`, ...). The second announcement replaces the first
+    /// instead of leaving an empty, unmetered step behind that claims an LLM
+    /// call nobody made. The retry path's repoll can follow an attempt that
+    /// streamed partial text before it failed; that text is superseded too.
+    #[test]
+    fn a_compaction_repoll_that_reannounces_the_turn_adds_no_step() {
+        let id = SessionId::new();
+        for first_attempt_streamed in [false, true] {
+            let mut events = vec![
+                run_started(&id, "summarize"),
+                AgentEvent::TurnStarted { turn_number: 0 },
+            ];
+            if first_attempt_streamed {
+                events.push(AgentEvent::TextDelta {
+                    delta: "partial".into(),
+                });
+            }
+            events.extend([
+                AgentEvent::CompactionStarted {
+                    input_tokens: 90_000,
+                    estimated_history_tokens: 95_000,
+                    message_count: 40,
+                },
+                AgentEvent::CompactionCompleted {
+                    summary_tokens: 800,
+                    messages_before: 40,
+                    messages_after: 3,
+                },
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TextDelta {
+                    delta: "answer".into(),
+                },
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    usage: Some(openai_usage(3000, 40, 0, 0)),
+                },
+                run_completed(&id, "answer", false),
+            ]);
+            let trajectory = trajectory_from_events(&envelopes(&id, events), test_agent()).unwrap();
+            let steps = agent_steps(&trajectory);
+            assert_eq!(
+                steps.len(),
+                1,
+                "one provider request answered (first attempt streamed: {first_attempt_streamed})"
+            );
+            assert_eq!(steps[0].message, AtifContent::Text("answer".into()));
+            assert_eq!(
+                steps[0].metrics.as_ref().and_then(|m| m.prompt_tokens),
+                Some(3000)
+            );
+            let totals = trajectory.final_metrics.as_ref().unwrap();
+            assert_eq!(totals.total_steps, 2, "the user step and the answer");
+            assert_eq!(totals.total_prompt_tokens, Some(3000));
+        }
+    }
+
+    /// A tool-loop turn that published no completion is still a step when the
+    /// next turn has a new number, and a turn announced without any output
+    /// before the next turn is not one.
+    #[test]
+    fn an_unfinished_turn_is_a_step_only_when_it_recorded_output() {
+        let id = SessionId::new();
+        let events = vec![
+            run_started(&id, "go"),
+            AgentEvent::TurnStarted { turn_number: 0 },
+            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::ReasoningComplete {
+                content: "look first".into(),
+            },
+            AgentEvent::TurnStarted { turn_number: 2 },
+            AgentEvent::TextComplete {
+                content: "done".into(),
+            },
+            run_completed(&id, "done", false),
+        ];
+        let trajectory = trajectory_from_events(&envelopes(&id, events), test_agent()).unwrap();
+        let steps = agent_steps(&trajectory);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].reasoning_content.as_deref(), Some("look first"));
+        assert_eq!(steps[1].message, AtifContent::Text("done".into()));
+    }
+
+    /// Each run restarts the loop's turn counter. A turn left pending by a run
+    /// that ended without a terminal event is exported before the next run's
+    /// input, and the next run's first `TurnStarted` (same number, new run) is
+    /// not mistaken for a re-announcement of it.
+    #[test]
+    fn a_turn_left_pending_by_an_interrupted_run_precedes_the_next_run() {
+        let id = SessionId::new();
+        let events = vec![
+            run_started(&id, "first"),
+            AgentEvent::TurnStarted { turn_number: 0 },
+            AgentEvent::ToolCallRequested {
+                id: "call-1".into(),
+                name: "shell".into(),
+                args: meerkat_core::event::ToolCallArguments::from_value(
+                    serde_json::json!({"command": "ls"}),
+                )
+                .unwrap(),
+            },
+            run_started(&id, "second"),
+            AgentEvent::TurnStarted { turn_number: 0 },
+            AgentEvent::TextComplete {
+                content: "second answer".into(),
+            },
+            AgentEvent::TurnCompleted {
+                stop_reason: meerkat_core::StopReason::EndTurn,
+                usage: Some(openai_usage(500, 5, 0, 0)),
+            },
+            run_completed(&id, "second answer", false),
+        ];
+        let trajectory = trajectory_from_events(&envelopes(&id, events), test_agent()).unwrap();
+        let sources = trajectory
+            .steps
+            .iter()
+            .map(|step| step.source)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sources,
+            vec![
+                StepSource::User,
+                StepSource::Agent,
+                StepSource::User,
+                StepSource::Agent
+            ]
+        );
+        assert_eq!(trajectory.steps[1].tool_calls[0].function_name, "shell");
+        assert!(trajectory.steps[1].metrics.is_none());
+        assert_eq!(
+            trajectory.steps[3].message,
+            AtifContent::Text("second answer".into())
+        );
+    }
+
+    /// An extraction phase that ends without an outcome event (the run fails
+    /// inside it, or the log simply moves on to the next run) must not keep
+    /// swallowing text and reasoning: the next run's answer is exported.
+    #[test]
+    fn an_extraction_phase_without_an_outcome_does_not_hide_later_runs() {
+        let id = SessionId::new();
+        for fails_inside_extraction in [true, false] {
+            let mut events = vec![
+                run_started(&id, "first"),
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TextComplete {
+                    content: "first answer".into(),
+                },
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    usage: Some(openai_usage(100, 5, 0, 0)),
+                },
+                run_completed(&id, "first answer", true),
+                AgentEvent::TextDelta {
+                    delta: r#"{"partial": "#.into(),
+                },
+            ];
+            if fails_inside_extraction {
+                events.push(AgentEvent::RunFailed {
+                    session_id: id.clone(),
+                    error_report: meerkat_core::AgentErrorReport::from_agent_error(
+                        &meerkat_core::AgentError::InternalError(
+                            "max tokens reached during extraction".into(),
+                        ),
+                    ),
+                    terminal_cause_kind: None,
+                });
+            }
+            events.extend([
+                run_started(&id, "second"),
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::ReasoningComplete {
+                    content: "thinking".into(),
+                },
+                AgentEvent::TextComplete {
+                    content: "second answer".into(),
+                },
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    usage: Some(openai_usage(200, 6, 0, 0)),
+                },
+            ]);
+            let trajectory = trajectory_from_events(&envelopes(&id, events), test_agent()).unwrap();
+            let steps = agent_steps(&trajectory);
+            assert_eq!(
+                steps.len(),
+                2,
+                "the extraction deltas are not a step (run failed: {fails_inside_extraction})"
+            );
+            let last = steps[1];
+            assert_eq!(last.message, AtifContent::Text("second answer".into()));
+            assert_eq!(last.reasoning_content.as_deref(), Some("thinking"));
+        }
     }
 
     /// Embedded member trajectories get the document identity ATIF refs use.

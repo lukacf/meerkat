@@ -75,28 +75,17 @@ them.
   matching how Gemini bills them. Output totals rise on Gemini thinking models,
   and `max_tokens` budgets now charge thinking, so a Gemini run can reach
   `budget_exhausted` earlier than before.
-
-### Changed
-
-- Foreground `shell` results reach the model as compact text instead of JSON:
-  a status line (`exit code N (Xs)`, or the timeout), stdout as is, and stderr
-  under `[stderr]` only when non-empty. The JSON envelope escaped every stream
-  and carried absolute placement paths and `false` flags, and it was re-sent on
-  every later request. Transcripts and events carry the same text (see
-  Breaking).
-- `shell_job_status` results reach the model as the same compact text: the job
-  ID and state, then the exit status and output of a completed job. The detail
-  of a background-job completion notice (and of the `background_job_completed`
-  event) is now that exit status and output instead of a Rust debug dump of the
-  job status.
-- Long shell output keeps its head and its tail, in foreground calls and
-  background jobs. stdout is capped at `[shell] max_output_chars` characters
-  (default 40000, about 10K tokens; stderr gets half). A cut moves to a line
-  boundary when the line it lands in fits the cap, and the marker names the
-  omitted lines, the line where the head ends and the line where the tail
-  starts, with a `sed -n` range that pages them. Foreground calls used to keep
-  only the last 100000 characters and background jobs the last 1 MiB, which
-  dropped the start of long diffs and file listings.
+- `meerkat_core::AgentEvent::ExtractionSucceeded` and
+  `AgentEvent::ExtractionFailed` gain the public field `request_usage:
+  Vec<TurnUsage>`, one usage row per answered structured-output extraction
+  request. Struct literals naming every field must add it; it is
+  serde-defaulted and skipped when empty, so the JSON shape is additive.
+- Behaviour: `turn_completed` is now published for every committed agent-loop
+  provider call, including tool-loop calls (`stop_reason: tool_use`), instead of
+  only the call that closes the run. It pairs with the call's `turn_started`.
+  Consumers that counted `turn_completed` as one per run, or treated it as the
+  end of a run, must read `run_completed` for that. Consumers summing
+  `turn_completed.usage` rows now see every agent-loop call.
 
 ### Added
 
@@ -122,6 +111,60 @@ them.
 - Chat Completions backends that report reasoning beside `completion_tokens`
   (xAI) are detected from the row's exact arithmetic (`total_tokens` equals
   prompt plus completion plus reasoning), and their output counts reasoning.
+- Extraction outcome events carry `request_usage`, one per-call usage row for
+  each extraction request (retries after a failed validation included), so
+  structured-output extraction is accounted on the event stream.
+- `meerkat_core::usage_summary` and `turn_usage_summary` format the one-line
+  token summaries `rkat run --verbose` prints.
+
+### Changed
+
+- Foreground `shell` results reach the model as compact text instead of JSON:
+  a status line (`exit code N (Xs)`, or the timeout), stdout as is, and stderr
+  under `[stderr]` only when non-empty. The JSON envelope escaped every stream
+  and carried absolute placement paths and `false` flags, and it was re-sent on
+  every later request. Transcripts and events carry the same text (see
+  Breaking).
+- `shell_job_status` results reach the model as the same compact text: the job
+  ID and state, then the exit status and output of a completed job. The detail
+  of a background-job completion notice (and of the `background_job_completed`
+  event) is now that exit status and output instead of a Rust debug dump of the
+  job status.
+- Long shell output keeps its head and its tail, in foreground calls and
+  background jobs. stdout is capped at `[shell] max_output_chars` characters
+  (default 40000, about 10K tokens; stderr gets half). A cut moves to a line
+  boundary when the line it lands in fits the cap, and the marker names the
+  omitted lines, the line where the head ends and the line where the tail
+  starts, with a `sed -n` range that pages them. Foreground calls used to keep
+  only the last 100000 characters and background jobs the last 1 MiB, which
+  dropped the start of long diffs and file listings.
+- Smaller fixed per-request prompt: the system prompt no longer carries a
+  `# Available Tools` inventory. Every tool definition already reaches the
+  provider through the request tool array, so the inventory repeated each
+  composed tool's full description on every request (about 11-12 KB on a
+  CLI `--tools workspace` or `--yolo` session) and could not follow later
+  composition or visibility changes. Only guidance for families that are
+  actually composed remains (comms usage, deferred catalog discovery, skill
+  discovery). The composed tool set and dispatch are unchanged.
+  Behavior-only: `meerkat_skills::renderer::render_inventory` in collection
+  mode no longer names `browse_skills`/`load_skill`; both tools are
+  default-disabled, and the factory now appends
+  `meerkat_tools::builtin::skills::SKILL_DISCOVERY_TOOL_GUIDANCE` only when
+  both are composed.
+- Trimmed the largest tool definitions without dropping information:
+  `apply_patch` documents its grammar once (the argument schema no longer
+  repeats it) and its example now matches the real anchor semantics;
+  `generate_image` keeps per-field rules in its schema only and advertises the
+  image-reference definition once; the comms send tools document image
+  references once, on the `blocks` argument; the OpenAI and Gemini image
+  parameter notes are shorter.
+  Behavior-only: `meerkat_comms::mcp::tools::tools_list` returns the slimmer
+  definitions.
+- OpenAI tool emission drops the root `$schema` and `title` annotations that
+  schemars stamps on every derived tool schema (Gemini emission already did).
+  `ToolDef.input_schema` is unchanged. Behavior-only:
+  `meerkat_openai::normalize_openai_tool_parameters_schema` removes both root
+  keys.
 
 ### Fixed
 
@@ -131,6 +174,28 @@ them.
   tool execution mode Detached is not supported".
 - Valid UTF-8 shell output longer than the capture buffer is no longer reported
   as invalid UTF-8 when the buffer's edge splits a character.
+- `rkat run --export-atif` records every provider request of the run as an
+  ATIF step with its own metrics: each tool-call turn, the answering turn and
+  each structured-output extraction request. It used to keep only the final
+  agent step, because a tool-call turn published no completion and was
+  overwritten by the next turn. Event logs written by earlier releases now
+  export their tool-call turns too, as unmetered steps. Step metrics carry
+  `cache_creation_tokens` and `reasoning_tokens` in `extra`, steps name their
+  model, and `final_metrics` sums every step.
+- `rkat run` and `rkat run --resume` wait for the session event log to finish
+  writing before exiting, and the drained `.rkat/sessions/<id>/events.jsonl` is
+  synced to disk. A run that streamed many deltas could exit 0 with the log
+  (and the realm event store the ATIF export reads) ending mid `text_delta`,
+  with no `run_completed`. If the log cannot finish, `rkat` now says so on
+  stderr. A failed keep-alive signal wait no longer skips this shutdown.
+- `rkat run --verbose` and `--stream` print one token line per provider request,
+  the first request and each extraction request included, on the presented
+  input denominator with cached and reasoning counts, and the closing `total`
+  is the run's `run_usage`. It used to print a line only for the final turn and
+  a total that was the session-cumulative `run_completed.usage`, which excludes
+  extraction and, on a resumed session, includes earlier runs. In keep-alive
+  mode, whose later runs return no result, each run's total is folded from its
+  per-request lines.
 
 - The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)
   and 033 (the office demo) pass again and run in pull-request CI. A new

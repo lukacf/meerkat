@@ -91,7 +91,12 @@ fn render_inventory_flat(skills: &[SkillDescriptor]) -> String {
     output
 }
 
-/// Collection summary with tool hints.
+/// Collection summary.
+///
+/// The summary names no tools: the skill discovery tools (`browse_skills`,
+/// `load_skill`) are default-disabled, so the inventory cannot know whether
+/// they exist in a session. Hosts append tool guidance only when those tools
+/// are actually composed.
 fn render_inventory_collections(collections: &[SkillCollection]) -> String {
     let mut output = String::from("<available_skills mode=\"collections\">\n");
     for coll in collections {
@@ -104,9 +109,6 @@ fn render_inventory_collections(collections: &[SkillCollection]) -> String {
             escape_xml(&coll.description),
         );
     }
-    output.push('\n');
-    output.push_str("  Use the browse_skills tool to list skills in a source or search.\n");
-    output.push_str("  Use the load_skill tool to activate a skill by SkillKey.\n");
     output.push_str("</available_skills>");
     output
 }
@@ -243,8 +245,10 @@ mod tests {
         assert!(output.ends_with("</available_skills>"));
         assert!(output.contains("<collection source="));
         assert!(output.contains("Entity extraction</collection>"));
-        assert!(output.contains("browse_skills"));
-        assert!(output.contains("load_skill"));
+        // The inventory cannot know whether the default-disabled discovery
+        // tools are composed, so it never names them.
+        assert!(!output.contains("browse_skills"));
+        assert!(!output.contains("load_skill"));
         assert!(!output.contains("<skill id="));
     }
 

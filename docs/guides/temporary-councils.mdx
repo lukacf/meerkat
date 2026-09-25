@@ -178,31 +178,43 @@ resolves each member's current profile and placement, synthesizes the explicit
 temporary `MobDefinition`, derives stable branch identities, and starts the
 council. How the sealed result reaches the caller depends on the host:
 
-- **Detached (hosts that outlive the call).** The JSON-RPC, REST, and MCP
-  servers, `rkat run --keep-alive`, and `rkat mob deploy --surface rpc` can
-  deliver a completion after the call returns. There the call returns at once
-  with `{"status": "running", "council_id": ..., "job_id": ...}` and the
-  council runs as a background operation of the convener's session. When it
-  ends, the record `{"tool": "council", "job_id": ..., "outcome": {"result",
-  "cleanup", "replayed"}}` is appended once to the convener's session as an
-  ordinary durable System message ("Background council job `<job_id>`
-  finished:" followed by the record), and the background job then completes
-  with the same record, which wakes the convener. The job **fails** instead
-  when the exit reason is a failure (`participant_seating_failed`,
+- **Detached (hosts that outlive the call).** A host with a runtime adapter
+  (the JSON-RPC, REST, and MCP servers, MobKit), `rkat run --keep-alive`, and
+  `rkat mob deploy --surface rpc` can deliver a completion after the call
+  returns. There the call returns at once with
+  `{"status": "running", "council_id": ..., "job_id": ..., "note": ...}`. When
+  the council ends, its sealed outcome (`result`, `cleanup`, `replayed`) is
+  recorded once in the convener's transcript as a durable `BackgroundJob`
+  system notice ("Background council job `<job_id>` finished (`completed` or
+  `failed`):" followed by the outcome, with `persisted: true` on its typed
+  block). It is delivered as a runtime input with the idempotency key
+  `council:<job_id>`: an idle convener runs one turn that sees it, and a busy
+  one sees it at its next checkpoint or in one follow-up turn. The status is
+  **`failed`** when the exit reason is a failure (`participant_seating_failed`,
   `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`); the
   record still carries the full sealed outcome, and bound-limited ends
   (`max_exchanges_reached`, `deadline_exceeded`) complete normally with their
-  partial result. The System message survives later model calls, turns, and
-  reloads and is readable through the convener's session history; the job
-  notice is transient.
+  partial result. The notice survives later model calls, turns, and reloads
+  and is readable through the convener's session history.
 - **Blocking (one-shot hosts).** A host that may exit when the turn ends cannot
   deliver a later completion: the `rkat` CLI unless it stays alive, such as
   `rkat run` without `--keep-alive`. There the call waits for the council and
-  returns the sealed outcome as its ordinary tool result.
+  returns the sealed outcome as its ordinary tool result, with
+  `blocked_because` (`host_declared_unavailable`, or `no_runtime_adapter` for a
+  host that declares delivery without a runtime).
 
 In both forms the council's own `timeout_seconds` bounds it. The agent loop's
 default tool deadline does not cut the call, so a council longer than that
-deadline still delivers its result.
+deadline still delivers its result; an operator's explicit
+`tools.tool_timeouts.council` entry still applies.
+
+A detached council's convener also hears back across a restart. The council's
+custody record carries the convener's job. After the post-restore recovery
+sweep, every council from an earlier process whose job is not yet settled has
+its outcome delivered: its sealed result when it finished before the restart,
+or the typed `coordinator_interrupted` outcome once the dead coordinator's
+claim lease is observed expired. Councils are never re-executed, and delivery
+uses the same idempotency key, so the outcome is recorded once.
 
 ### Example Tool Call
 
@@ -258,7 +270,7 @@ conflict.
 On a detached host, a refusal that the council itself decides after the call
 returned (an over-budget bound, a `council_id` conflict, `capability_unavailable`
 for a durable request on a process-bound store) is recorded with
-`{"error": ...}` as its outcome and the background job **fails**. On a
+`{"error": ...}` as its outcome with status **`failed`**. On a
 blocking host the same refusals are tool errors.
 
 Seating failures, wiring gaps, exhausted budgets, and elapsed deadlines are

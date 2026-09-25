@@ -39,49 +39,57 @@ them.
 
 - Behavior-only: `fork_off` is detached (`meerkat-mob-mcp`
   `AgentMobToolSurface`) on hosts that declare
-  `DetachedCompletionDelivery::Available` (the `MobMcpState` default, so the
-  JSON-RPC, REST and MCP servers; `rkat run --keep-alive`; `rkat mob deploy
+  `DetachedCompletionDelivery::Available` and have a runtime adapter (the
+  default for a `MobMcpState` built with one, so the JSON-RPC, REST and MCP
+  servers and MobKit; also `rkat run --keep-alive` and `rkat mob deploy
   --surface rpc`). There the tool returns once the child is seated and its
   turn admitted, with `status: "running"`, `mob_id`, `source_member_id`,
   `agent_identity`, `member_ref`, `fork_session_id`, `cache_inheritance`,
-  `job_id`, and `max_run_secs` when set. It no longer waits for the child and
-  no longer carries `bounded_result`, `usage`, `turns` or `tool_calls`. When
-  the child's turn ends, the record `{"tool": "fork_off", "job_id", "outcome"}`
-  is appended once to the forker's session as an ordinary durable System
-  message ("Background fork_off job <job_id> finished:", idempotent per job),
-  and the background job for `job_id` then completes or fails with the same
-  record as its detail, which wakes the forker. The `outcome` names the child
-  and has a `status`: `completed` (with `bounded_result`, `usage`, `turns`,
-  `tool_calls`), `failed` (with `error`), `max_run_elapsed` (with
+  `job_id`, a plain-language `note`, and `max_run_secs` when set. It no longer
+  waits for the child and no longer carries `bounded_result`, `usage`, `turns`
+  or `tool_calls`. When the child's turn ends, its outcome is recorded once in
+  the forker's transcript as a durable `BackgroundJob` system notice
+  ("Background fork_off job <job_id> finished (completed|failed):" followed by
+  the outcome JSON; the typed block is `SystemNoticeBlock::BackgroundJob` with
+  `persisted: true`). The notice is delivered to the forker's session as a
+  runtime prompt input with steer handling and the idempotency key
+  `fork_off:<job_id>`: an idle forker runs exactly one turn that sees it, a
+  busy forker sees it at its next checkpoint or in one follow-up turn, and a
+  forker that is not live is revived through its mob first. The outcome names
+  the child and has a `status`: `completed` (with `bounded_result`, `usage`,
+  `turns`, `tool_calls`), `failed` (with `error`), `max_run_elapsed` (with
   `max_run_secs` and any `retirement_error`), `supervisor_stopped`, or
-  `restart_interrupted` (see Changed for restart re-linking). The
-  `rkat` CLI declares `Unavailable` unless it stays alive, so `rkat run`
-  without `--keep-alive` and one-shot `rkat mob` commands keep a blocking
-  `fork_off` that returns the completed result directly (a child that does not
-  complete is a tool error carrying the outcome record). Neither form has a
-  default deadline and the agent loop's default tool deadline no longer cuts a
-  blocking call; the new optional `max_run_secs` argument is an opt-in
-  autokill, honored in both forms, that cancels the child's run and retires
-  it. Prompts and hosts that read `bounded_result` from a detached tool result
-  must read the recorded outcome instead.
+  `restart_interrupted` (see Changed for restart re-linking). The `rkat` CLI
+  declares `Unavailable` unless it stays alive, so `rkat run` without
+  `--keep-alive` and one-shot `rkat mob` commands keep a blocking `fork_off`
+  that returns the completed result directly, with `blocked_because`
+  (`host_declared_unavailable`, or `no_runtime_adapter` for a host that
+  declares delivery without a runtime); a child that does not complete is a
+  tool error carrying the outcome. Neither form has a default deadline and the
+  agent loop's default tool deadline no longer cuts a blocking call (an
+  explicit `tools.tool_timeouts.fork_off` entry still does); the new optional
+  `max_run_secs` argument is an opt-in autokill, honored in both forms, that
+  cancels the child's run and retires it. Prompts and hosts that read
+  `bounded_result` from a detached tool result must read the recorded notice
+  instead.
 - Behavior-only: `fork_off` rejects arguments it does not define. Its arguments
   deserialize with `deny_unknown_fields` and its schema advertises
   `additionalProperties: false`, so an unknown field is an `invalid_arguments`
   error instead of being ignored. A host wrapper that adds its own fields must
   strip them before dispatch (MobKit strips `idle_retire_secs`).
 - Behavior-only: `council` is detached on the same hosts. The tool returns
-  `{"status": "running", "council_id", "job_id"}`; the sealed outcome
-  (`result`, `cleanup`, `replayed`) is recorded as
-  `{"tool": "council", "job_id", "outcome"}` in a durable System message in
-  the convener's session and delivered as that job's completion. A refusal the
-  council decides after the call returned (a bound, a `council_id` conflict,
-  `capability_unavailable`) is recorded as `{"error": ...}` and fails the job
-  instead of being a tool error. A sealed council whose exit reason is a
-  failure (`participant_seating_failed`, `wiring_incomplete`,
-  `exchange_failed`, `coordinator_interrupted`) also fails the job; the record
-  keeps the full outcome. One-shot hosts keep the blocking contract.
-  The council's `timeout_seconds` bounds it; the agent loop's default tool
-  deadline no longer cuts the call.
+  `{"status": "running", "council_id", "job_id", "note"}`; the sealed outcome
+  (`result`, `cleanup`, `replayed`) is recorded and delivered the same way, as
+  a "Background council job <job_id> finished" notice with the idempotency key
+  `council:<job_id>`. A refusal the council decides after the call returned (a
+  bound, a `council_id` conflict, `capability_unavailable`) is recorded as
+  `{"error": ...}` with status `failed` instead of being a tool error. A
+  sealed council whose exit reason is a failure (`participant_seating_failed`,
+  `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`) is also
+  recorded as `failed`, with the full outcome. One-shot hosts keep the
+  blocking contract, and the blocking result carries `blocked_because`. The
+  council's `timeout_seconds` bounds it; the agent loop's default tool deadline
+  no longer cuts the call.
 - Behavior-only: `TemporaryCouncilId::new` accepts only ASCII alphanumerics,
   `-` and `_`; it accepted `.` and `:` before. The id is embedded in the
   temporary mob id and every participant's comms name, which refuse those
@@ -119,10 +127,24 @@ them.
   turn (`fork_off`) carry that provenance; `MobHandle::retire` still retires
   one member.
 - Behavior-only: a background-job completion for a detached operation without a
-  process-local enrichment record (`fork_off`, `council`, `mob_wait_ready`)
-  carries the operation's terminal outcome (the result content, or the error or
-  reason) as its `detail`, and so as `AgentEvent::BackgroundJobCompleted`'s
-  `detail`. It was an empty string before.
+  process-local enrichment record (for example `mob_wait_ready`) carries the
+  operation's terminal outcome (the result content, or the error or reason) as
+  its `detail`, and so as `AgentEvent::BackgroundJobCompleted`'s `detail`. It
+  was an empty string before.
+- `SystemNoticeBlock::BackgroundJob` (`meerkat-core`) gains the field
+  `persisted: bool` (serde default `false`; exhaustive struct patterns and
+  struct literals must name it or use `..`). `true` marks the one durable
+  completion record of a detached job; behavior-only:
+  `SystemNoticeMessage::is_synthetic_refresh_projection` now returns `false`
+  for a `BackgroundJob` notice with a persisted block, so such a notice stays
+  in the transcript instead of being replaced at the next model call. New
+  method `SystemNoticeMessage::persisted_background_job_id`.
+- `meerkat_mob::store::TemporaryCouncilRecord` gains the public field
+  `detached_job: Option<TemporaryCouncilJobBinding>` (struct literals must
+  name it): the convener's detached job, so a restarted host can deliver the
+  council's outcome. It is a serde-default sidecar outside the request
+  fingerprint and the lifecycle machine; records written before this release
+  decode it as absent.
 - **Generated `MobMachine` vocabulary (`meerkat-machine-schema`,
   `meerkat-machine-kernels`, `meerkat-mob`):** the machine gains the input
   `ResolveOwnedMemberAdmission { can_manage_mob, caller_owns_member }`, the
@@ -196,6 +218,24 @@ them.
   outlives a tool call long enough to deliver detached completions; the
   default is `Available`. One-shot hosts declare `Unavailable`, and `fork_off`
   and `council` block for their result there.
+- `meerkat-mob-mcp`: the `detached_delivery` module
+  (`deliver_detached_completion`, `deliver_detached_completion_to_member`,
+  `detached_completion_notice`, `DetachedCompletionDelivered`,
+  `DetachedCompletionError`, `DetachedDeliveryUnavailable` with
+  `HostDeclaredUnavailable` and `NoRuntimeAdapter`),
+  `MobMcpState::detached_delivery_blocked_because`, the `council_relink` module
+  (`relink_detached_councils`, `relink_council`, `CouncilRelinkReport`), and
+  `MobMcpState::relink_detached_councils`; `TemporaryCouncilCoordinator::run_detached`.
+- `meerkat-mob`: `MobHandle::ensure_member_live` (revive a member's live
+  materialization without running a turn), `ForkJobRecord::durable_terminal_result`,
+  and `TemporaryCouncilJobBinding` (`job_id`, `owner_session_id`,
+  `settled_at`).
+- `meerkat-runtime`: `PromptInput::detached_job_completed`, the prompt input
+  that carries one durable completion notice with steer handling.
+- `meerkat-core`: `ToolDeadlineSource` (`OwnerDefault`, `PerToolOverride`;
+  `#[non_exhaustive]`), `ToolDeadlineContributor::per_tool_override`, and
+  `ToolDeadlineContributor::source`. `meerkat-session`:
+  `PersistentSessionService::QUIESCENT_FORK_BOUNDARY_BOUND`.
 - `fork_off` accepts `max_run_secs`: an optional autokill that cancels the
   child's run and retires the child once it has run that long. Omitted means no
   limit.
@@ -203,13 +243,18 @@ them.
 ### Changed
 
 - The agent loop bounds a tool call by
-  `ResolvedToolExecutionPlan::effective_timeout`, which ignores the
-  `CoreToolDispatch` deadline contributor when the tool's
-  `ToolExecutionContract` declares `CoreDispatchDeadline::ToolOwned`. The
-  resolved `ToolDeadlineChain` is unchanged and other contributors still bound
-  the call. `fork_off` and `council` declare `ToolOwned` in their catalog
+  `ResolvedToolExecutionPlan::effective_timeout`, which ignores the core
+  dispatch DEFAULT deadline when the tool's `ToolExecutionContract` declares
+  `CoreDispatchDeadline::ToolOwned`. An explicit per-tool override
+  (`tools.tool_timeouts.<tool>`, recorded as `ToolDeadlineSource::PerToolOverride`)
+  and every other contributor still bound the call, and the deadline
+  diagnostic names per-tool overrides. The resolved `ToolDeadlineChain` is
+  unchanged. `fork_off` and `council` declare `ToolOwned` in their catalog
   entries; every other tool keeps the default `Applies` and the same deadline
   as before.
+- `MobMcpState` declares detached completion delivery by default only when it
+  has a runtime adapter. Declaring `Available` without one logs an error, and
+  `fork_off` and `council` then block and report `no_runtime_adapter`.
 - `fork_off` records the forking member as the child's owner. The provenance is
   durable on `MemberSpawnedEvent` and `RosterEntry`, restored on resume, and
   carried across respawn, including `MobHandle::respawn_with_successor_spec`
@@ -222,13 +267,20 @@ them.
 - A detached `fork_off` child survives a host restart with its outcome
   delivery intact. After a host restores its mobs (or inserts a restored mob
   handle, as MobKit does), a one-time re-link pass settles every child whose
-  job began in a previous process: a still-running child is observed until its
-  turn ends, with `max_run_secs` measured from the original start (autokill
-  cascades); an idle child that already replied after its fork prefix has that
-  result delivered; otherwise `restart_interrupted` is delivered and the child
-  stays seated. Delivery uses the same durable record and idempotency key, so
-  an outcome recorded before the restart is not recorded twice. A restarted
-  host does not wake an idle forker; it sees the outcome on its next turn.
+  job began in a previous process: a child whose reply to the job is already
+  in its durable transcript has that reply delivered, however late the restart
+  landed; a still-running child is observed until its turn ends, with
+  `max_run_secs` measured from the original start (autokill cascades);
+  otherwise `restart_interrupted` is delivered and the child stays seated.
+  Delivery uses the same durable notice and idempotency key, so an outcome
+  recorded before the restart is not recorded twice, and an idle forker is
+  woken to see it.
+- A detached council's convener hears back across a restart. The council's
+  custody record carries the convener's job; after the post-restore recovery
+  sweep, every council from an earlier process whose job is not settled has
+  its outcome delivered once: its sealed result, or `coordinator_interrupted`
+  once the dead coordinator's claim lease is observed expired. Councils are
+  never re-executed.
 - A completed `fork_off` child stays seated until its forker retires it.
   Meerkat adds no retention limit of its own; MobKit applies its
   `idle_retire_secs` policy to fork children.
@@ -284,6 +336,25 @@ them.
   a valid image. Unattested references still fail closed. Existing MobKit
   references are accepted once MobKit's blob adapter implements
   `attest_address`.
+- An external durable fork of a mob member (`MobHandle::fork_member` and every
+  other `Quiescent` fork) was accepted while the source had admitted an input
+  that had not started yet, then blocked until the source's turn ended and
+  could branch a torn transcript. It is now refused at once with
+  `ForkSourceUnavailable { Running }` while the source owes a turn: a provider
+  call in flight, or an admitted input that is queued, steered, or waiting
+  while the runtime materializes or revives the member. The refusal never
+  queues behind the turn: the durable fork owner waits at most
+  `PersistentSessionService::QUIESCENT_FORK_BOUNDARY_BOUND` (1 s) for the
+  source's turn boundary and recovery gate and otherwise answers busy. A
+  Quiescent fork whose committed end would be an unanswered input or tool
+  result is refused as busy too, so a child can no longer inherit a torn
+  transcript. `fork_off` from the member's own turn and
+  `fork_member_at_turn_boundary` are unchanged.
+- The runtime loop injected a completion wake into an idle owner even when the
+  owner's own turn had already applied that completion. The wake found no
+  pending boundary, so each such completion cost a spurious wake, an executor
+  teardown and a revival. Completions at or below the agent-applied cursor are
+  now treated as delivered; an unapplied completion still wakes the owner.
 - A mob member could not run again after the runtime retired its idle executor.
   When a detached operation's completion wake found no pending boundary (the
   member's own turn had already seen the completion), the runtime retired the

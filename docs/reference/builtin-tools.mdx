@@ -323,9 +323,11 @@ input, and admits the child's one turn. The child runs turn-driven whatever
 its role's default runtime mode, like a `delegate` helper. What happens next
 depends on whether the host can deliver a completion after the call returns.
 
-**Detached.** Hosts that outlive the call declare that they can: the JSON-RPC,
-REST, and MCP servers, `rkat run --keep-alive`, and `rkat mob deploy --surface
-rpc`. There `fork_off` returns without waiting for the child's turn:
+**Detached.** A host delivers detached completions when it declares it can and
+has a runtime to admit them. A host built with a runtime adapter declares it by
+default: the JSON-RPC, REST, and MCP servers and MobKit. `rkat run
+--keep-alive` and `rkat mob deploy --surface rpc` declare it too. There
+`fork_off` returns without waiting for the child's turn:
 
 ```json
 {
@@ -336,13 +338,13 @@ rpc`. There `fork_off` returns without waiting for the child's turn:
   "member_ref": "...",
   "fork_session_id": "...",
   "cache_inheritance": { "...": "..." },
-  "job_id": "..."
+  "job_id": "...",
+  "note": "Running in the background. The result will be added to your conversation later as \"Background fork_off job ... finished\". ..."
 }
 ```
 
-When the child's turn ends, the outcome is recorded as
-`{"tool": "fork_off", "job_id": ..., "outcome": {...}}`. The `outcome` names the
-child (`agent_identity`, `member_ref`) and carries a `status`:
+When the child's turn ends, its outcome names the child (`agent_identity`,
+`member_ref`) and carries a `status`:
 
 | `status` | Meaning |
 |----------|---------|
@@ -352,39 +354,30 @@ child (`agent_identity`, `member_ref`) and carries a `status`:
 | `supervisor_stopped` | The runtime supervising the child stopped (mob shutdown) before the turn ended. |
 | `restart_interrupted` | The host restarted while the child ran and the child's turn did not survive the restart. The child stays seated for its forker. |
 
-The record reaches the forker in two ways:
+The outcome is recorded once, durably, in the forker's own transcript as a
+`BackgroundJob` system notice: "Background fork_off job `<job_id>` finished
+(`completed` or `failed`):" followed by the outcome JSON. Its typed block,
+`SystemNoticeBlock::BackgroundJob`, carries the `job_id`, the tool name, the
+status, the outcome JSON as `detail`, and `persisted: true`, which marks it as
+a durable completion record rather than a progress notice that is refreshed at
+each model call (`SystemNoticeMessage::persisted_background_job_id` finds it).
+It stays in the transcript across later model calls, turns, and reloads, and it
+remains readable after the child is retired: in the transcript the model sees,
+and through the forker's session history (`session/history` over JSON-RPC,
+`GET /sessions/{id}/history` over REST).
 
-- **Durably, in the forker's own transcript.** It is appended once to the
-  forker's session as an ordinary System message ("Background fork_off job
-  `<job_id>` finished:" followed by the record). It stays there across later
-  model calls, turns, and reloads, and it remains readable after the child is
-  retired: in the transcript the model sees, and through the forker's session
-  history (`session/history` over JSON-RPC, `GET /sessions/{id}/history` over
-  REST).
-- **As a wake-up.** The background job for `job_id` then completes (or fails)
-  with the same record as its detail, which wakes an idle forker. That notice
-  is transient; the durable System message is the copy to rely on. If the
-  record cannot be appended, the notice is still delivered.
+The record is delivered to the forker's session as a runtime input with steer
+handling and the idempotency key `fork_off:<job_id>`, so it is written exactly
+once however often delivery runs:
 
-**Across a restart.** A detached child carries a durable job record (job id,
-forker session, start time, opt-in limit, fork prefix length, and result bound)
-on its spawn event and roster entry. When a host restores its mobs, or inserts
-a restored mob handle as MobKit does, a one-time re-link pass settles every
-child whose job began in a previous process:
-
-- a child still running is observed until its turn ends, with `max_run_secs`
-  measured from the original start (an elapsed limit autokills it and its
-  descendants);
-- an idle child that already replied after its fork prefix has that result
-  delivered;
-- otherwise `restart_interrupted` is delivered and the child stays seated.
-
-Delivery writes the same durable System message under the same idempotency key,
-so a job whose outcome was recorded before the restart is never recorded
-twice. A restarted host cannot wake an idle forker, because the job's
-in-memory operation did not survive; the forker sees the re-linked outcome on
-its next turn. `MobMcpState::relink_restored_fork_children` runs the pass
-explicitly.
+- an idle forker runs exactly one turn that sees the outcome, and the notice is
+  committed with that turn;
+- a forker in the middle of a turn receives it at the turn's next checkpoint
+  when its session takes runtime input mid-turn; a turn-driven forker instead
+  runs exactly one follow-up turn that sees it (the running turn's own later
+  model calls do not);
+- a forker that is no longer live (the runtime retired its idle executor, or
+  the host restarted) is revived through its mob first.
 
 **Blocking.** A one-shot host may exit when the turn ends and so cannot deliver
 a later completion. The `rkat` CLI is one-shot unless it stays alive: `rkat
@@ -392,33 +385,60 @@ run` without `--keep-alive` and the other one-shot `rkat mob` commands. There
 `fork_off` waits for the child and returns the completed result as its tool
 result (`bounded_result`, `usage`, `turns`, `tool_calls`, and the child's
 identity and sessions). A child that does not complete is a tool error whose
-text carries the same outcome record.
+text carries the same outcome. A blocking result names why it blocked in
+`blocked_because`: `host_declared_unavailable`, or `no_runtime_adapter` for a
+host that declares detached delivery but has no runtime (which also logs an
+error).
 
 Neither form has a default deadline: the child runs for as long as its task
-needs. The agent loop's default tool deadline does not cut a blocking call; a
-deadline the host itself imposes on tool calls still applies. `max_run_secs` is an opt-in autokill, honored in both forms, that
-cancels the child's run and retires the child once it has run that long; omit
-it for no limit. `fork_off` rejects arguments it does not define, so a
-misspelled or invented field is an argument error instead of a silently
-ignored intent.
+needs. The agent loop's default tool deadline does not cut a blocking call. An
+operator's explicit `tools.tool_timeouts.fork_off` entry still bounds it, as
+does a deadline the host itself imposes on tool calls. `max_run_secs` is an
+opt-in autokill, honored in both forms, that cancels the child's run and
+retires the child once it has run that long; omit it for no limit. `fork_off`
+rejects arguments it does not define, so a misspelled or invented field is an
+argument error instead of a silently ignored intent.
+
+**Across a restart.** A detached child carries a durable job record (job id,
+forker session, start time, opt-in limit, fork prefix length, and result bound)
+on its spawn event and roster entry. When a host restores its mobs, or inserts
+a restored mob handle as MobKit does, a one-time re-link pass settles every
+child whose job began in a previous process:
+
+- a child whose reply to the job is already in its durable transcript has that
+  reply delivered, however late the restart landed, and stays seated;
+- a child still running is observed until its turn ends, with `max_run_secs`
+  measured from the original start (an elapsed limit autokills it and its
+  descendants);
+- otherwise `restart_interrupted` is delivered and the child stays seated.
+
+Delivery uses the same record and idempotency key, so an outcome recorded
+before the restart is never recorded twice, and an idle forker is woken to see
+it. `MobMcpState::relink_restored_fork_children` runs the pass explicitly.
 
 `council` follows the same split. Detached, it returns `status: "running"`,
-the `council_id`, and a `job_id`, and the sealed outcome (`result`, `cleanup`,
-`replayed`) is recorded and delivered the same way, as
-`{"tool": "council", "job_id": ..., "outcome": {...}}`; a council that fails
-after the call returned records `{"error": ...}` as its outcome, and a council
-whose exit reason is a failure (`participant_seating_failed`,
-`wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`) fails its
-job while the record keeps the full sealed outcome. Blocking, it returns the
-sealed outcome as its tool result. Its own `timeout_seconds` bounds
-it in both forms, and the agent loop's default tool deadline does not. See
+the `council_id`, a `job_id`, and a `note`, and the sealed outcome (`result`,
+`cleanup`, `replayed`) is recorded and delivered the same way, as a
+"Background council job `<job_id>` finished" notice with the idempotency key
+`council:<job_id>`. A council that fails after the call returned is recorded
+with `{"error": ...}` as its outcome and status `failed`, and so is a sealed
+council whose exit reason is a failure (`participant_seating_failed`,
+`wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`), whose
+record keeps the full sealed outcome. A detached council also survives a
+restart: its custody record carries the convener's job, and after the
+post-restore recovery sweep the council's sealed result is delivered, or
+`coordinator_interrupted` once the dead coordinator's lease has expired
+(councils are never re-executed); `MobMcpState::relink_detached_councils` runs
+this explicitly. Blocking, `council` returns the sealed outcome as its tool
+result, with `blocked_because`. Its own `timeout_seconds` bounds it in both
+forms, and the agent loop's default tool deadline does not. See
 [Temporary Councils](/guides/temporary-councils#agent-tool).
 
 An embedding host declares the capability on its `MobMcpState`
 (`with_detached_completion_delivery` / `set_detached_completion_delivery` with
-`DetachedCompletionDelivery::Available` or `Unavailable`); the default is
-`Available`. Detached delivery also needs the session's operation registry,
-which runtime-backed sessions bind; without one the tools block.
+`DetachedCompletionDelivery::Available` or `Unavailable`). The default follows
+the presence of a runtime adapter, and `detached_delivery_blocked_because`
+reports why the tools would block.
 
 ### Forked children belong to their forker
 

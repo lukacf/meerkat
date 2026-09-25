@@ -566,8 +566,8 @@ With generated authority, `AgentMobToolSurface`
 | `mob_create` | Create a mob from a definition |
 | `mob_destroy` | Destroy a mob and archive all members |
 | `mob_spawn_member` | Spawn a member into an authorized mob |
-| `fork_off` | Fork the current durable member's committed transcript prefix through the resume path into a child the caller owns, and run the task in the background; the outcome arrives as a background-job completion (blocking on one-shot hosts) |
-| `council` | Fork existing specialist members into a temporary discussion mob, run bounded rounds/merge, and clean up; the sealed outcome arrives as a background-job completion (blocking on one-shot hosts) |
+| `fork_off` | Fork the current durable member's committed transcript prefix through the resume path into a child the caller owns, and run the task in the background; the outcome is recorded in the forker's transcript as a durable `BackgroundJob` notice (blocking on one-shot hosts) |
+| `council` | Fork existing specialist members into a temporary discussion mob, run bounded rounds/merge, and clean up; the sealed outcome is recorded in the convener's transcript as a durable `BackgroundJob` notice (blocking on one-shot hosts) |
 | `mob_retire_member` | Archive a member and its session (manage scope, or the caller owns the member) |
 | `mob_check_member` | Check a member's execution status and output (manage scope, or the caller owns the member) |
 | `mob_list_members` | List members of a mob (without manage scope: only the caller's own descendants) |
@@ -587,30 +587,35 @@ low-level `Session::fork()` / `fork_at()` / `fork_replacing()` are separate
 structural primitives. Every fork starts with zero usage: the source's
 lifetime token counters are not copied into the child.
 
-`fork_off` is detached where the host declares it can deliver a later
-completion (`MobMcpState` `DetachedCompletionDelivery::Available`, the default:
-the JSON-RPC, REST and MCP servers, `rkat run --keep-alive`, `rkat mob deploy
---surface rpc`). It returns once the child is seated and its turn admitted:
-`status: "running"`, `agent_identity`, `member_ref`, `fork_session_id`,
-`cache_inheritance`, and a `job_id`. When the child's turn ends, the record
-`{"tool": "fork_off", "job_id", "outcome"}` is appended once to the forker's
-session as an ordinary durable System message ("Background fork_off job <id>
-finished:"), readable in later turns and through the forker's session history
-even after the child is retired; then the background job completes with the
-same record, which wakes the forker (that notice is transient). The `outcome`
-status is `completed` (with `bounded_result`, `usage`, `turns`, `tool_calls`),
-`failed` (child retired), `max_run_elapsed` (run cancelled, child retired),
-`supervisor_stopped`, or `restart_interrupted`. The child's durable
-`ForkJobRecord` lets a restarted host re-link it: a one-time pass after restore
-(or when MobKit inserts a restored handle) observes a still-running child with
-`max_run` measured from the original start, delivers an idle child's reply, or
-delivers `restart_interrupted`, under the same idempotency key; an idle forker
-is not woken after a restart and sees the outcome on its next turn. The `rkat` CLI declares `Unavailable` unless it stays
-alive, so `rkat run` without `--keep-alive` and one-shot `rkat mob` commands
-block and return the child's result directly. Neither form has a default
-deadline, and the agent loop's default tool deadline does not cut it;
-`max_run_secs` is an opt-in autokill, honored in both forms, that cancels the
-run and retires the child.
+`fork_off` is detached where the host can deliver a later completion: it
+declares `DetachedCompletionDelivery::Available` and has a runtime adapter
+(the default for hosts built with one: the JSON-RPC, REST and MCP servers,
+MobKit; also `rkat run --keep-alive` and `rkat mob deploy --surface rpc`). It
+returns once the child is seated and its turn admitted: `status: "running"`,
+`agent_identity`, `member_ref`, `fork_session_id`, `cache_inheritance`, a
+`job_id`, and a `note`. When the child's turn ends, its outcome is recorded
+once in the forker's transcript as a durable `BackgroundJob` system notice
+("Background fork_off job <id> finished (completed|failed):" plus the outcome
+JSON; the typed block has `persisted: true`), delivered as a runtime input with
+steer handling and idempotency key `fork_off:<job_id>`: an idle forker runs one
+turn that sees it, a busy one sees it at its next checkpoint or in one
+follow-up turn, and a non-live forker is revived through its mob first. It is
+readable in later turns and through session history even after the child is
+retired. The outcome status is `completed` (with `bounded_result`, `usage`,
+`turns`, `tool_calls`), `failed` (child retired), `max_run_elapsed` (run
+cancelled, child retired), `supervisor_stopped`, or `restart_interrupted`. The
+child's durable `ForkJobRecord` lets a restarted host re-link it: a one-time
+pass after restore (or when MobKit inserts a restored handle) delivers a reply
+already in the child's durable transcript, observes a still-running child with
+`max_run` measured from the original start, or delivers `restart_interrupted`,
+under the same idempotency key, and wakes an idle forker. The `rkat` CLI
+declares `Unavailable` unless it stays alive, so `rkat run` without
+`--keep-alive` and one-shot `rkat mob` commands block and return the child's
+result directly, with `blocked_because` (`host_declared_unavailable` or
+`no_runtime_adapter`). Neither form has a default deadline, and the agent
+loop's default tool deadline does not cut it (an explicit
+`tools.tool_timeouts.fork_off` still does); `max_run_secs` is an opt-in
+autokill, honored in both forms, that cancels the run and retires the child.
 
 The forker owns its child, and transitively every member that child forks
 (ownership never flows upward). Ownership is durable spawn provenance
@@ -636,9 +641,12 @@ resolved by the tool; participants are forks, not the original members. Like
 `fork_off`, a council is detached where the host can deliver a later
 completion: the call returns `status: "running"`, the `council_id`, and a
 `job_id`, and the sealed outcome (`result`, `cleanup`, `replayed`, or `error`
-when it fails after the call returned) is recorded as a durable System message
-in the convener's session and delivered as that job's completion; a failure
-exit reason fails the job. `council_id` may contain only ASCII alphanumerics,
+when it fails after the call returned) is recorded and delivered the same way
+as a "Background council job ... finished" notice; a failure exit reason gives
+it status `failed`. A detached council also re-links after a restart: its
+custody record carries the convener's job, and the outcome (or
+`coordinator_interrupted` once the dead coordinator's lease expires) is
+delivered once. `council_id` may contain only ASCII alphanumerics,
 `-` and `_` (the derived default is `agent-<uuid>`). On a
 one-shot host the call blocks and returns the sealed outcome.
 `timeout_seconds` bounds it; the agent loop's default tool deadline does not.

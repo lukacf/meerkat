@@ -7755,3 +7755,61 @@ async def test_mob_collection_helpers_raise_on_malformed_entries() -> None:
     with pytest.raises(MeerkatError, match="must be an object") as excinfo:
         await client.wait_mob_ready("mob-1")
     assert excinfo.value.code == "INVALID_RESPONSE"
+
+
+def test_run_result_carries_cache_reasoning_run_and_request_usage():
+    from meerkat.client import MeerkatClient
+
+    accounting = {
+        "provider": "openai",
+        "model": "gpt-5.6-luna",
+        "presented_tokens": 13264,
+        "convention": "open_ai_input_includes_cached_subset",
+        "aggregation": "provider_inclusive_input_total",
+    }
+    result = MeerkatClient._parse_run_result(
+        {
+            "session_id": "s1",
+            "text": "ok",
+            "turns": 2,
+            "tool_calls": 1,
+            "usage": {
+                "input_tokens": 31062,
+                "output_tokens": 89,
+                "total_tokens": 31151,
+                "cache_creation_tokens": 17795,
+                "cache_read_tokens": 13261,
+                "reasoning_tokens": 11,
+            },
+            "run_usage": {"input_tokens": 17798, "output_tokens": 41, "cache_read_tokens": 13261},
+            "request_usage": [
+                {
+                    "input_tokens": 13264,
+                    "output_tokens": 48,
+                    "cache_read_tokens": 0,
+                    "reasoning_tokens": 11,
+                    "accounting": accounting,
+                }
+            ],
+        }
+    )
+    assert result.usage.cache_read_tokens == 13261
+    assert result.usage.reasoning_tokens == 11
+    assert result.run_usage is not None and result.run_usage.input_tokens == 17798
+    assert result.request_usage is not None and len(result.request_usage) == 1
+    assert result.request_usage[0].reasoning_tokens == 11
+    assert result.request_usage[0].accounting is not None
+    assert result.request_usage[0].accounting.presented_tokens == 13264
+
+    bare = MeerkatClient._parse_run_result(
+        {
+            "session_id": "s1",
+            "text": "ok",
+            "turns": 1,
+            "tool_calls": 0,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+    )
+    assert bare.run_usage is None
+    assert bare.request_usage is None
+    assert bare.usage.reasoning_tokens is None

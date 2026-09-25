@@ -88,6 +88,7 @@ impl SessionAgent for MockAgent {
                 output_tokens: 5,
                 cache_creation_tokens: None,
                 cache_read_tokens: None,
+                reasoning_tokens: None,
                 provider_accounting: None,
             },
             turns: 1,
@@ -97,6 +98,8 @@ impl SessionAgent for MockAgent {
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         })
     }
 
@@ -148,6 +151,7 @@ impl SessionAgent for MockAgent {
                 output_tokens: 5,
                 cache_creation_tokens: None,
                 cache_read_tokens: None,
+                reasoning_tokens: None,
                 provider_accounting: None,
             },
             last_assistant_text: Some("Hello from mock".to_string()),
@@ -364,6 +368,8 @@ fn successful_run_result(session: &Session, text: impl Into<String>) -> RunResul
         extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
+        run_usage: None,
+        request_usage: Vec::new(),
     }
 }
 

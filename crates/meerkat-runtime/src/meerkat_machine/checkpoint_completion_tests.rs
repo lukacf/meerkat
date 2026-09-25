@@ -409,6 +409,8 @@ async fn checkpoint_apply_with_run_result_uses_run_authority_live_and_after_rest
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         }));
         fixture
             .checkpoint_batch_with_terminal(std::slice::from_ref(&input_id), Some(&terminal))

@@ -685,6 +685,8 @@ export interface HelpRequest {
 
 export interface HelpResponse {
   extraction_error?: Record<string, unknown> | null;
+  request_usage?: Record<string, unknown>[];
+  run_usage?: WireUsage | null;
   schema_warnings?: Record<string, unknown>[] | null;
   session_id: string;
   session_ref?: string | null;

@@ -695,6 +695,7 @@ mod tests {
                         output_tokens: 50,
                         cache_creation_tokens: None,
                         cache_read_tokens: None,
+                        reasoning_tokens: None,
                         provider_accounting: None,
                     },
                 ),

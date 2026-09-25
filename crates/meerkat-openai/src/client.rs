@@ -3230,6 +3230,14 @@ fn apply_responses_usage(target: &mut Usage, usage: &Value, model: &str) {
     if let Some(cache_write_tokens) = cache_write_tokens {
         target.cache_creation_tokens = Some(cache_write_tokens);
     }
+    let reasoning_tokens = usage
+        .get("output_tokens_details")
+        .or_else(|| usage.get("completion_tokens_details"))
+        .and_then(|details| details.get("reasoning_tokens"))
+        .and_then(Value::as_u64);
+    if let Some(reasoning_tokens) = reasoning_tokens {
+        target.reasoning_tokens = Some(reasoning_tokens);
+    }
     target.provider_accounting = Some(meerkat_core::ProviderTokenAccounting::openai(
         model,
         target.input_tokens,
@@ -6665,6 +6673,39 @@ mod tests {
         apply_responses_usage(&mut fallback_usage, &fallback, "gpt-5.5");
         assert_eq!(fallback_usage.cache_read_tokens, Some(8));
         assert_eq!(fallback_usage.cache_creation_tokens, Some(4));
+    }
+
+    #[test]
+    fn test_responses_usage_maps_recorded_gpt56_reasoning_and_cache_counts() {
+        // Recorded verbatim from a live gpt-5.6-luna `response.completed`.
+        let usage_value = serde_json::json!({
+            "input_tokens": 37679,
+            "input_tokens_details": {"cache_write_tokens": 10710, "cached_tokens": 26966},
+            "output_tokens": 2722,
+            "output_tokens_details": {"reasoning_tokens": 2588},
+            "total_tokens": 40401
+        });
+        let mut usage = Usage::default();
+        apply_responses_usage(&mut usage, &usage_value, "gpt-5.6-luna");
+        assert_eq!(usage.input_tokens, 37679);
+        assert_eq!(usage.cache_read_tokens, Some(26966));
+        assert_eq!(usage.cache_creation_tokens, Some(10710));
+        assert_eq!(usage.output_tokens, 2722);
+        assert_eq!(usage.reasoning_tokens, Some(2588));
+
+        let chat_shape = serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 6,
+            "completion_tokens_details": {"reasoning_tokens": 4}
+        });
+        let mut chat_usage = Usage::default();
+        apply_responses_usage(&mut chat_usage, &chat_shape, "gpt-5.6-luna");
+        assert_eq!(chat_usage.reasoning_tokens, Some(4));
+
+        let without = serde_json::json!({"input_tokens": 3, "output_tokens": 1});
+        let mut without_usage = Usage::default();
+        apply_responses_usage(&mut without_usage, &without, "gpt-5.6-luna");
+        assert_eq!(without_usage.reasoning_tokens, None);
     }
 
     #[test]

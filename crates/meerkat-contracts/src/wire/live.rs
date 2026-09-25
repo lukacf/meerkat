@@ -2735,6 +2735,7 @@ mod tests {
                         output_tokens: 5,
                         cache_creation_tokens: Some(1),
                         cache_read_tokens: Some(2),
+                        reasoning_tokens: None,
                         provider_accounting: None,
                     },
                 ),
@@ -2908,6 +2909,7 @@ mod tests {
                     total_tokens: 12,
                     cache_creation_tokens: None,
                     cache_read_tokens: None,
+                    reasoning_tokens: None,
                 },
             },
             WireLiveAdapterObservation::AssistantTranscriptTruncated {
@@ -2943,6 +2945,7 @@ mod tests {
                         total_tokens: 46,
                         cache_creation_tokens: Some(1),
                         cache_read_tokens: Some(2),
+                        reasoning_tokens: None,
                     },
                     accounting: meerkat_core::ProviderTokenAccounting::host_declared(
                         meerkat_core::Provider::Other,

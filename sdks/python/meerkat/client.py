@@ -37,7 +37,7 @@ from urllib.error import URLError
 
 from .errors import CapabilityUnavailableError, MeerkatError
 from .event_envelope import parse_agent_event_envelope
-from .events import Usage
+from .events import Usage, _parse_usage
 from .generated.rpc_contracts import RpcRequest
 from .generated.types import (
     CONTRACT_VERSION,
@@ -7234,41 +7234,29 @@ class MeerkatClient:
     @staticmethod
     def _parse_run_result(data: dict[str, Any]) -> RunResult:
         context = "Invalid run result"
-        usage_data = MeerkatClient._require_dict(data.get("usage"), "usage", context)
-        usage = Usage(
-            input_tokens=MeerkatClient._require_number_field(
-                usage_data,
-                "input_tokens",
-                context,
-                "usage.input_tokens",
-            ),
-            output_tokens=MeerkatClient._require_number_field(
-                usage_data,
-                "output_tokens",
-                context,
-                "usage.output_tokens",
-            ),
-            cache_creation_tokens=(
-                MeerkatClient._require_number_field(
-                    usage_data,
-                    "cache_creation_tokens",
-                    context,
-                    "usage.cache_creation_tokens",
-                )
-                if usage_data.get("cache_creation_tokens") is not None
-                else None
-            ),
-            cache_read_tokens=(
-                MeerkatClient._require_number_field(
-                    usage_data,
-                    "cache_read_tokens",
-                    context,
-                    "usage.cache_read_tokens",
-                )
-                if usage_data.get("cache_read_tokens") is not None
-                else None
-            ),
+        def parse_usage_field(raw: Any, name: str) -> Usage:
+            try:
+                return _parse_usage(raw)
+            except ValueError as error:
+                message = str(error)
+                if message.startswith("usage."):
+                    message = message[len("usage.") :]
+                raise MeerkatError("INVALID_RESPONSE", f"{context}: {name}.{message}") from error
+
+        usage = parse_usage_field(data.get("usage"), "usage")
+        run_usage = (
+            parse_usage_field(data["run_usage"], "run_usage")
+            if data.get("run_usage") is not None
+            else None
         )
+        request_usage: list[Usage] | None = None
+        if data.get("request_usage") is not None:
+            rows = MeerkatClient._require_list_field(
+                {"request_usage": data["request_usage"]}, "request_usage", context
+            )
+            request_usage = [
+                parse_usage_field(row, f"request_usage[{index}]") for index, row in enumerate(rows)
+            ]
         raw_warnings = data.get("schema_warnings")
         schema_warnings: list[SchemaWarning] | None = None
         if raw_warnings is not None:
@@ -7327,6 +7315,8 @@ class MeerkatClient:
             turns=MeerkatClient._require_number_field(data, "turns", context),
             tool_calls=MeerkatClient._require_number_field(data, "tool_calls", context),
             usage=usage,
+            run_usage=run_usage,
+            request_usage=request_usage,
             terminal_cause_kind=data.get("terminal_cause_kind")
             if isinstance(data.get("terminal_cause_kind"), str)
             else None,

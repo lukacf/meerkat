@@ -65,8 +65,10 @@ export interface ProviderTokenAccounting {
  *
  * Cumulative (`run_completed.usage`, `RunResult.usage`): a *session*-cumulative
  * total whose `inputTokens` is already the sum of each recorded call's presented
- * tokens, whose cache fields are always absent, and which carries no
- * `accounting` because a session may span providers and models. It is persisted
+ * tokens, whose cache and reasoning fields are normalized sums
+ * (`cacheReadTokens <= inputTokens`, `reasoningTokens <= outputTokens` on every
+ * provider), and which carries no `accounting` because a session may span
+ * providers and models. It is persisted
  * with the session, so on the second run of a session it already contains the
  * first run's calls.
  *
@@ -81,6 +83,9 @@ export interface Usage {
   readonly outputTokens: number;
   readonly cacheCreationTokens?: number;
   readonly cacheReadTokens?: number;
+  /** Reasoning (thinking) tokens, a subset of `outputTokens`. Absent when the
+   * provider reports no separate count (Anthropic). */
+  readonly reasoningTokens?: number;
   /** Absent on cumulative usage and on rows written before 0.8.22. */
   readonly accounting?: ProviderTokenAccounting;
 }
@@ -754,7 +759,8 @@ function parseAccounting(raw: unknown): ProviderTokenAccounting | undefined {
   };
 }
 
-function parseUsage(raw: unknown): Usage {
+/** Parse a wire usage object (per-call or cumulative). */
+export function parseUsage(raw: unknown): Usage {
   if (!isPlainRecord(raw)) {
     throw new Error("missing usage");
   }
@@ -768,6 +774,9 @@ function parseUsage(raw: unknown): Usage {
     cacheReadTokens: raw.cache_read_tokens != null
       ? requireNumberField(raw, "cache_read_tokens")
       : undefined,
+    ...(raw.reasoning_tokens != null
+      ? { reasoningTokens: requireNumberField(raw, "reasoning_tokens") }
+      : {}),
     ...(accounting !== undefined ? { accounting } : {}),
   };
 }

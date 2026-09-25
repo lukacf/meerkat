@@ -3273,6 +3273,8 @@ async fn completion_waiter_fails_closed_when_runtime_finalization_fails() {
                     extraction_error: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
+                    run_usage: None,
+                    request_usage: Vec::new(),
                 },
             ))
         }
@@ -3645,6 +3647,8 @@ async fn runtime_loop_checkpoints_session_snapshot_after_machine_commit() {
                     extraction_error: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
+                    run_usage: None,
+                    request_usage: Vec::new(),
                 },
             )
             .with_session(Arc::new(session))
@@ -4600,6 +4604,8 @@ async fn idle_explicit_steer_peer_request_runs_through_runtime_loop() {
                     extraction_error: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
+                    run_usage: None,
+                    request_usage: Vec::new(),
                 },
             ))
         }
@@ -4721,6 +4727,8 @@ async fn runtime_loop_checkpoint_failure_is_completion_finalization_failure() {
                     extraction_error: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
+                    run_usage: None,
+                    request_usage: Vec::new(),
                 },
             )
             .with_session(Arc::new(session))
@@ -29502,6 +29510,8 @@ impl CoreExecutor for RuntimeRecoveryExecutor {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             },
         )
         .with_session(Arc::new(self.session.clone()))

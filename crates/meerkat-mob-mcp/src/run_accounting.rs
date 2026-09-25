@@ -105,9 +105,7 @@ pub fn mob_run_accounting_projection(members: Vec<MobMemberUsageInput>) -> WireM
                 entry.provider = Some(provider);
                 entry.message_count = Some(message_count);
                 // `Usage::add` is the canonical accumulator for already
-                // normalized cumulative usage. It drops cache counters because
-                // their relation to `input_tokens` is provider-specific, so the
-                // total reports none while each member entry keeps its own.
+                // normalized cumulative usage, cache and reasoning included.
                 total.add(&usage);
                 entry.usage = Some(usage.into());
             }
@@ -168,13 +166,10 @@ mod tests {
         assert_eq!(projection.usage_total.input_tokens, 350);
         assert_eq!(projection.usage_total.output_tokens, 35);
         assert_eq!(projection.usage_total.total_tokens, 385);
-        // Deliberate asymmetry, owned by `Usage::add`: cache counters are kept
-        // per member but dropped from the aggregate, because their relation to
-        // `input_tokens` is provider-specific and the aggregate may span
-        // providers. An auditor summing the member cache counters will not
-        // find them in `usage_total`; the wire doc states that.
-        assert_eq!(projection.usage_total.cache_creation_tokens, None);
-        assert_eq!(projection.usage_total.cache_read_tokens, None);
+        // Member usage is already normalized, so the aggregate sums the
+        // cache counters too; the member without them contributes zero.
+        assert_eq!(projection.usage_total.cache_creation_tokens, Some(64));
+        assert_eq!(projection.usage_total.cache_read_tokens, Some(128));
         let cached_member = projection
             .members
             .iter()

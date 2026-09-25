@@ -282,9 +282,14 @@ export interface ProviderTokenAccounting {
  * - **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a
  *   running total over every provider call recorded on the *session*, not on
  *   one run. Its `input_tokens` is the saturating sum of each call's
- *   *presented* tokens (see [`CumulativeUsage::add_turn`]), and its cache
- *   detail fields are always `None` because their relationship to the input
- *   total is provider-specific.
+ *   *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail
+ *   fields and `reasoning_tokens` are provider-normalized sums: every
+ *   provider's cache-read and cache-write counts are subsets of that call's
+ *   presented input, and reasoning is a subset of output, so on a cumulative
+ *   value `cache_read_tokens <= input_tokens`,
+ *   `cache_creation_tokens <= input_tokens` and
+ *   `reasoning_tokens <= output_tokens` on every provider. A field stays
+ *   `None` until some call reports it.
  *
  * # What consumers must not sum
  *
@@ -316,11 +321,13 @@ export type Usage = {
   input_tokens: number;
   output_tokens: number;
   provider_accounting?: ProviderTokenAccounting | null;
+  reasoning_tokens?: number | null;
 };
 
 /**
- * Cumulative usage across committed turns. Cache detail counters are not
- * aggregated because their relationship to input totals is provider-specific.
+ * Cumulative usage across committed turns. Cache detail counters and
+ * reasoning are aggregated as provider-normalized subsets: see
+ * [`CumulativeUsage::add_turn`].
  *
  * This value is **already a total**, and the total is session-scoped: on the
  * event stream it is `Session::total_usage()`, which is persisted with the
@@ -1066,6 +1073,7 @@ export type TurnUsage = {
   input_tokens: number;
   output_tokens: number;
   provider_accounting?: ProviderTokenAccounting | null;
+  reasoning_tokens?: number | null;
 };
 
 /**

@@ -1867,6 +1867,10 @@ where
         let saved_compactor = self.compactor.take();
         let saved_compaction_curator = self.compaction_curator.take();
         let saved_last_input_tokens = self.last_input_tokens;
+        let saved_run_usage_baseline = self.run_usage_baseline.clone();
+        let saved_run_request_usage = std::mem::take(&mut self.run_request_usage);
+        let saved_run_usage_suspended_for_callback =
+            std::mem::take(&mut self.run_usage_suspended_for_callback);
         let saved_compaction_cadence = self.compaction_cadence.clone();
         let saved_pending_compaction_boundary_index = self.pending_compaction_boundary_index.take();
         let saved_pending_compaction_request_pressure =
@@ -1955,6 +1959,9 @@ where
         self.compactor = saved_compactor;
         self.compaction_curator = saved_compaction_curator;
         self.last_input_tokens = saved_last_input_tokens;
+        self.run_usage_baseline = saved_run_usage_baseline;
+        self.run_request_usage = saved_run_request_usage;
+        self.run_usage_suspended_for_callback = saved_run_usage_suspended_for_callback;
         self.compaction_cadence = saved_compaction_cadence;
         self.pending_compaction_boundary_index = saved_pending_compaction_boundary_index;
         self.pending_compaction_request_pressure = saved_pending_compaction_request_pressure;
@@ -2695,6 +2702,9 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             compactor: None,
             compaction_curator: None,
             last_input_tokens: self.last_input_tokens,
+            run_usage_baseline: crate::types::Usage::default(),
+            run_request_usage: Vec::new(),
+            run_usage_suspended_for_callback: false,
             compaction_cadence: self.compaction_cadence.clone(),
             pending_compaction_boundary_index: None,
             pending_compaction_request_pressure: None,

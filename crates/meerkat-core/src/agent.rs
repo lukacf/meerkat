@@ -2498,6 +2498,15 @@ where
     pub(crate) compaction_curator: Option<Arc<dyn crate::compact::CompactionCurator>>,
     /// Input tokens from the last LLM response (for compaction trigger).
     pub(crate) last_input_tokens: u64,
+    /// Session usage total when the current `run_loop` entry began. The
+    /// run's own usage is the session total's delta from this baseline.
+    pub(crate) run_usage_baseline: crate::types::Usage,
+    /// Per-request usage recorded during the current run.
+    pub(crate) run_request_usage: Vec<crate::types::TurnUsage>,
+    /// Set when the current run suspended for callback results, so the
+    /// resuming `run_loop` entry continues the same run account. In-memory
+    /// only: an agent rebuilt from storage starts a fresh account.
+    pub(crate) run_usage_suspended_for_callback: bool,
     /// Session-scoped compaction cadence tracked across runs.
     pub(crate) compaction_cadence: SessionCompactionCadence,
     /// Machine-issued compaction check parked until the request has been fully

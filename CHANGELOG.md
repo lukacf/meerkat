@@ -35,6 +35,56 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_core::Usage` gains the public field `reasoning_tokens:
+  Option<u64>`, and `meerkat_contracts::WireUsage` gains the same field.
+  `meerkat_core::RunResult` gains `run_usage: Option<Usage>` and
+  `request_usage: Vec<TurnUsage>`, and `meerkat_contracts::WireRunResult`
+  gains `run_usage: Option<WireUsage>` and `request_usage: Vec<WireTurnUsage>`.
+  Struct literals naming every field must add them; all are serde-defaulted
+  and skipped when empty, so the JSON shape is additive.
+- `Usage::add` and `CumulativeUsage::add_turn` now aggregate
+  `cache_read_tokens`, `cache_creation_tokens` and `reasoning_tokens` instead of
+  clearing them, and `CumulativeUsage::from_usage` keeps them (clamped to their
+  parent totals) instead of clearing them. `Usage::cumulative_delta_since` is
+  new.
+- `meerkat_core::agent::compact::CompactionOutcome` gains the public field
+  `summary_source: CompactionSummarySource` (new enum: `ProviderCall`,
+  `HostCurator`, `MechanicalFallback`).
+- `meerkat_live::host::ObservationOutcome::UserContentCommitted` now holds
+  `observation: Box<LiveAdapterObservation>` instead of the observation by
+  value; the larger `Usage` pushed the enum over the large-variant limit.
+- Gemini `output_tokens` now counts thinking tokens as well as candidates,
+  matching how Gemini bills them. Output totals rise on Gemini thinking models,
+  and `max_tokens` budgets now charge thinking, so a Gemini run can reach
+  `budget_exhausted` earlier than before.
+
+### Added
+
+- Cumulative usage reports cached input, cache writes and reasoning. The run
+  result's `usage` (what `rkat run --output json` prints), `run_completed.usage`,
+  the RPC and REST run results and mob run accounting now carry
+  `cache_read_tokens`, `cache_creation_tokens` and a new `reasoning_tokens`,
+  normalized on every provider so `cache_read_tokens <= input_tokens` and
+  `reasoning_tokens <= output_tokens`. Harnesses that read `cache_read_tokens`
+  from the run result no longer see `null` on OpenAI runs.
+- Per-call usage records reasoning tokens from OpenAI Responses
+  (`output_tokens_details.reasoning_tokens`), Chat Completions
+  (`completion_tokens_details.reasoning_tokens`) and Gemini
+  (`thoughtsTokenCount`).
+- Run results carry `run_usage`, the usage of that run alone, beside the
+  session-cumulative `usage`, and `request_usage`, one row per provider request
+  the run made (tool-loop calls, structured-output extraction and compaction
+  summaries made by the model included; curator and mechanical summaries make
+  no request and add no row). A run that suspends for callback results keeps
+  one account across the resume. The Python and TypeScript SDK `RunResult`
+  expose them as `run_usage`/`request_usage` and `runUsage`/`requestUsage`,
+  and every SDK `Usage` gains `reasoning_tokens`/`reasoningTokens`.
+- Chat Completions backends that report reasoning beside `completion_tokens`
+  (xAI) are detected from the row's exact arithmetic (`total_tokens` equals
+  prompt plus completion plus reasoning), and their output counts reasoning.
+
 ### Fixed
 
 - The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)

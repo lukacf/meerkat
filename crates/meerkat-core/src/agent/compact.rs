@@ -729,7 +729,7 @@ where
     // belongs to. A summary call charged under a foreign identity is still
     // charged: only attribution is in question.
     let mut summary_usage_identity_dispute = None;
-    let (summary_text, summary_usage) = if let Some(curator) = curator {
+    let (summary_text, summary_usage, summary_source) = if let Some(curator) = curator {
         let curator_window = CompactionWindow {
             messages: model_messages,
             last_input_tokens,
@@ -743,6 +743,7 @@ where
                     "host-compaction-curator",
                     Usage::default(),
                 ),
+                CompactionSummarySource::HostCurator,
             ),
             Err(e) => {
                 if event_stream_open
@@ -811,7 +812,7 @@ where
                     client.model(),
                 )?;
                 summary_usage_identity_dispute = dispute;
-                (summary, usage)
+                (summary, usage, CompactionSummarySource::ProviderCall)
             }
             Err(e) if is_compaction_capacity_error(&e) && !observation_source.has_observations => {
                 tracing::warn!(
@@ -827,6 +828,7 @@ where
                         "mechanical-compaction-fallback",
                         Usage::default(),
                     ),
+                    CompactionSummarySource::MechanicalFallback,
                 )
             }
             Err(e) => {
@@ -891,6 +893,7 @@ where
         new_messages: result.messages,
         discarded: result.discarded,
         summary_usage,
+        summary_source,
         summary_usage_identity_dispute,
         session_boundary_index,
         messages_before: message_count,
@@ -1016,6 +1019,17 @@ impl ValidatedCompactionRewrite {
     }
 }
 
+/// Who produced a compaction summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionSummarySource {
+    /// The summarization LLM call: a real provider request.
+    ProviderCall,
+    /// A configured host curator; no provider request was made.
+    HostCurator,
+    /// The mechanical capacity fallback; no provider request was made.
+    MechanicalFallback,
+}
+
 /// Result of a successful compaction.
 pub struct CompactionOutcome {
     /// New session messages to replace current history.
@@ -1024,6 +1038,9 @@ pub struct CompactionOutcome {
     pub discarded: Vec<CompactionDiscard>,
     /// Usage from the summary LLM call.
     pub summary_usage: TurnUsage,
+    /// Who produced the summary. Only [`CompactionSummarySource::ProviderCall`]
+    /// is backed by a provider request; the others carry zero usage.
+    pub summary_source: CompactionSummarySource,
     /// Set when the summary call's accounting named a provider/model other
     /// than the one requested. The usage above is charged exactly as reported;
     /// the caller owns routing this dispute onto the session's event stream.

@@ -1226,6 +1226,15 @@ function parseMobHelperResult(raw: unknown, context: string): MobHelperResult {
             ),
           }
         : {}),
+      ...(usage.reasoning_tokens != null
+        ? {
+            reasoning_tokens: requireNonNegativeIntegerField(
+              usage,
+              'reasoning_tokens',
+              `${context}: usage.reasoning_tokens must be number`,
+            ),
+          }
+        : {}),
       ...(providerAccounting !== undefined
         ? { provider_accounting: providerAccounting }
         : {}),

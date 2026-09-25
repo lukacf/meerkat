@@ -2580,7 +2580,7 @@
       },
       "CumulativeUsage": {
         "$ref": "#/$defs/Usage",
-        "description": "Cumulative usage across committed turns. Cache detail counters are not\naggregated because their relationship to input totals is provider-specific.\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
+        "description": "Cumulative usage across committed turns. Cache detail counters and\nreasoning are aggregated as provider-normalized subsets: see\n[`CumulativeUsage::add_turn`].\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
       },
       "DeferredCatalogDelta": {
         "description": "Additive hidden-catalog delta metadata for runtime notices.",
@@ -5389,6 +5389,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -5418,7 +5427,7 @@
         "type": "object"
       },
       "Usage": {
-        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]), and its cache\n  detail fields are always `None` because their relationship to the input\n  total is provider-specific.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
+        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail\n  fields and `reasoning_tokens` are provider-normalized sums: every\n  provider's cache-read and cache-write counts are subsets of that call's\n  presented input, and reasoning is a subset of output, so on a cumulative\n  value `cache_read_tokens <= input_tokens`,\n  `cache_creation_tokens <= input_tokens` and\n  `reasoning_tokens <= output_tokens` on every provider. A field stays\n  `None` until some call reports it.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
         "properties": {
           "cache_creation_tokens": {
             "format": "uint64",
@@ -5456,6 +5465,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -23797,7 +23815,7 @@
       },
       "CumulativeUsage": {
         "$ref": "#/$defs/Usage",
-        "description": "Cumulative usage across committed turns. Cache detail counters are not\naggregated because their relationship to input totals is provider-specific.\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
+        "description": "Cumulative usage across committed turns. Cache detail counters and\nreasoning are aggregated as provider-normalized subsets: see\n[`CumulativeUsage::add_turn`].\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
       },
       "DeferredCatalogDelta": {
         "description": "Additive hidden-catalog delta metadata for runtime notices.",
@@ -26678,6 +26696,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -26707,7 +26734,7 @@
         "type": "object"
       },
       "Usage": {
-        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]), and its cache\n  detail fields are always `None` because their relationship to the input\n  total is provider-specific.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
+        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail\n  fields and `reasoning_tokens` are provider-normalized sums: every\n  provider's cache-read and cache-write counts are subsets of that call's\n  presented input, and reasoning is a subset of output, so on a cumulative\n  value `cache_read_tokens <= input_tokens`,\n  `cache_creation_tokens <= input_tokens` and\n  `reasoning_tokens <= output_tokens` on every provider. A field stays\n  `None` until some call reports it.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
         "properties": {
           "cache_creation_tokens": {
             "format": "uint64",
@@ -26745,6 +26772,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -36219,7 +36255,7 @@
       },
       "CumulativeUsage": {
         "$ref": "#/$defs/Usage",
-        "description": "Cumulative usage across committed turns. Cache detail counters are not\naggregated because their relationship to input totals is provider-specific.\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
+        "description": "Cumulative usage across committed turns. Cache detail counters and\nreasoning are aggregated as provider-normalized subsets: see\n[`CumulativeUsage::add_turn`].\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
       },
       "DeferredCatalogDelta": {
         "description": "Additive hidden-catalog delta metadata for runtime notices.",
@@ -39879,6 +39915,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -39908,7 +39953,7 @@
         "type": "object"
       },
       "Usage": {
-        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]), and its cache\n  detail fields are always `None` because their relationship to the input\n  total is provider-specific.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
+        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail\n  fields and `reasoning_tokens` are provider-normalized sums: every\n  provider's cache-read and cache-write counts are subsets of that call's\n  presented input, and reasoning is a subset of output, so on a cumulative\n  value `cache_read_tokens <= input_tokens`,\n  `cache_creation_tokens <= input_tokens` and\n  `reasoning_tokens <= output_tokens` on every provider. A field stays\n  `None` until some call reports it.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
         "properties": {
           "cache_creation_tokens": {
             "format": "uint64",
@@ -39946,6 +39991,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -44189,7 +44243,7 @@
         ]
       },
       "Usage": {
-        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]), and its cache\n  detail fields are always `None` because their relationship to the input\n  total is provider-specific.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
+        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail\n  fields and `reasoning_tokens` are provider-normalized sums: every\n  provider's cache-read and cache-write counts are subsets of that call's\n  presented input, and reasoning is a subset of output, so on a cumulative\n  value `cache_read_tokens <= input_tokens`,\n  `cache_creation_tokens <= input_tokens` and\n  `reasoning_tokens <= output_tokens` on every provider. A field stays\n  `None` until some call reports it.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
         "properties": {
           "cache_creation_tokens": {
             "format": "uint64",
@@ -44227,6 +44281,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -51994,7 +52057,7 @@
       },
       "CumulativeUsage": {
         "$ref": "#/$defs/Usage",
-        "description": "Cumulative usage across committed turns. Cache detail counters are not\naggregated because their relationship to input totals is provider-specific.\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
+        "description": "Cumulative usage across committed turns. Cache detail counters and\nreasoning are aggregated as provider-normalized subsets: see\n[`CumulativeUsage::add_turn`].\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
       },
       "CustomModelConfig": {
         "additionalProperties": false,
@@ -56985,6 +57048,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -57014,7 +57086,7 @@
         "type": "object"
       },
       "Usage": {
-        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]), and its cache\n  detail fields are always `None` because their relationship to the input\n  total is provider-specific.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
+        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail\n  fields and `reasoning_tokens` are provider-normalized sums: every\n  provider's cache-read and cache-write counts are subsets of that call's\n  presented input, and reasoning is a subset of output, so on a cumulative\n  value `cache_read_tokens <= input_tokens`,\n  `cache_creation_tokens <= input_tokens` and\n  `reasoning_tokens <= output_tokens` on every provider. A field stays\n  `None` until some call reports it.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
         "properties": {
           "cache_creation_tokens": {
             "format": "uint64",
@@ -57052,6 +57124,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -70220,7 +70301,7 @@
       },
       "CumulativeUsage": {
         "$ref": "#/$defs/Usage",
-        "description": "Cumulative usage across committed turns. Cache detail counters are not\naggregated because their relationship to input totals is provider-specific.\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
+        "description": "Cumulative usage across committed turns. Cache detail counters and\nreasoning are aggregated as provider-normalized subsets: see\n[`CumulativeUsage::add_turn`].\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
       },
       "DeferredCatalogDelta": {
         "description": "Additive hidden-catalog delta metadata for runtime notices.",
@@ -73880,6 +73961,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -73909,7 +73999,7 @@
         "type": "object"
       },
       "Usage": {
-        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]), and its cache\n  detail fields are always `None` because their relationship to the input\n  total is provider-specific.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
+        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail\n  fields and `reasoning_tokens` are provider-normalized sums: every\n  provider's cache-read and cache-write counts are subsets of that call's\n  presented input, and reasoning is a subset of output, so on a cumulative\n  value `cache_read_tokens <= input_tokens`,\n  `cache_creation_tokens <= input_tokens` and\n  `reasoning_tokens <= output_tokens` on every provider. A field stays\n  `None` until some call reports it.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
         "properties": {
           "cache_creation_tokens": {
             "format": "uint64",
@@ -73947,6 +74037,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -79622,7 +79721,7 @@
       },
       "CumulativeUsage": {
         "$ref": "#/$defs/Usage",
-        "description": "Cumulative usage across committed turns. Cache detail counters are not\naggregated because their relationship to input totals is provider-specific.\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
+        "description": "Cumulative usage across committed turns. Cache detail counters and\nreasoning are aggregated as provider-normalized subsets: see\n[`CumulativeUsage::add_turn`].\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
       },
       "DeferredCatalogDelta": {
         "description": "Additive hidden-catalog delta metadata for runtime notices.",
@@ -82494,6 +82593,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -82523,7 +82631,7 @@
         "type": "object"
       },
       "Usage": {
-        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]), and its cache\n  detail fields are always `None` because their relationship to the input\n  total is provider-specific.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
+        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail\n  fields and `reasoning_tokens` are provider-normalized sums: every\n  provider's cache-read and cache-write counts are subsets of that call's\n  presented input, and reasoning is a subset of output, so on a cumulative\n  value `cache_read_tokens <= input_tokens`,\n  `cache_creation_tokens <= input_tokens` and\n  `reasoning_tokens <= output_tokens` on every provider. A field stays\n  `None` until some call reports it.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
         "properties": {
           "cache_creation_tokens": {
             "format": "uint64",
@@ -82561,6 +82669,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -86671,6 +86788,36 @@
         ],
         "type": "object"
       },
+      "PresentedTokenConvention": {
+        "description": "Provider-native convention used to normalize tokens presented to a model.",
+        "oneOf": [
+          {
+            "const": "anthropic_disjoint_input_components",
+            "description": "Anthropic reports uncached, cache-write, and cache-read input as\ndisjoint components. The normalized total is their saturating sum.",
+            "type": "string"
+          },
+          {
+            "const": "open_ai_input_includes_cached_subset",
+            "description": "OpenAI prompt/input tokens already include the cached-token subset.",
+            "type": "string"
+          },
+          {
+            "const": "gemini_prompt_includes_cached_subset",
+            "description": "Gemini prompt tokens already include the cached-content subset.",
+            "type": "string"
+          },
+          {
+            "const": "open_ai_compatible_prompt_includes_cache_details",
+            "description": "OpenAI-compatible prompt tokens are treated as the provider's inclusive\nprompt total; cache detail fields are observational subsets only.",
+            "type": "string"
+          },
+          {
+            "const": "host_declared_inclusive_input_total",
+            "description": "A custom/embedded client explicitly declares its `input_tokens` field\nas an inclusive presented-input total. This is never inferred from\ncache detail fields.",
+            "type": "string"
+          }
+        ]
+      },
       "Provider": {
         "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
         "enum": [
@@ -86681,6 +86828,38 @@
           "other"
         ],
         "type": "string"
+      },
+      "ProviderTokenAccounting": {
+        "additionalProperties": false,
+        "description": "One provider adapter's normalized accounting for a single model turn.",
+        "properties": {
+          "aggregation": {
+            "$ref": "#/$defs/TokenAggregationProvenance"
+          },
+          "convention": {
+            "$ref": "#/$defs/PresentedTokenConvention"
+          },
+          "model": {
+            "type": "string"
+          },
+          "presented_tokens": {
+            "description": "Tokens presented to the model for this request. Output tokens are not\nincluded.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider"
+          }
+        },
+        "required": [
+          "provider",
+          "model",
+          "presented_tokens",
+          "convention",
+          "aggregation"
+        ],
+        "type": "object"
       },
       "QuarantinedSkillIdentity": {
         "description": "Identity of a quarantined skill entry.\n\nDeliberately NOT a [`SkillKey`]: a quarantined entry is, by definition, an\nentry that failed validation, so it must never be confusable with a\ncanonical, loadable key. The raw identifier is preserved verbatim for\noperator diagnostics (it may be an invalid slug, e.g. `\"Not A Valid\nSlug\"`), but it cannot be parsed back into a `SkillKey` and handed to\n`load()`. This closes the \"fabricated canonical-looking SkillKey\" gap: a\nquarantine placeholder can never shadow or collide with a real skill named\n`invalid-skill`.",
@@ -87087,6 +87266,21 @@
         "description": "Canonical source identifier.",
         "type": "string"
       },
+      "TokenAggregationProvenance": {
+        "description": "How the provider adapter obtained the normalized presented-token total.",
+        "oneOf": [
+          {
+            "const": "sum_disjoint_provider_components",
+            "description": "Sum of provider-documented disjoint input components.",
+            "type": "string"
+          },
+          {
+            "const": "provider_inclusive_input_total",
+            "description": "Provider-issued inclusive prompt/input total copied without adding\ncache detail fields.",
+            "type": "string"
+          }
+        ]
+      },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
         "enum": [
@@ -87104,6 +87298,61 @@
           "fatal_failure"
         ],
         "type": "string"
+      },
+      "WireTurnUsage": {
+        "description": "One provider turn with adapter-authored normalized accounting evidence.",
+        "properties": {
+          "accounting": {
+            "$ref": "#/$defs/ProviderTokenAccounting"
+          },
+          "cache_creation_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cache_read_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens, a subset of `output_tokens`. Absent when\nthe provider does not report a separate reasoning count.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "total_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "accounting"
+        ],
+        "type": "object"
       },
       "WireUsage": {
         "description": "Canonical token usage for wire protocol.",
@@ -87134,6 +87383,15 @@
             "minimum": 0,
             "type": "integer"
           },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens, a subset of `output_tokens`. Absent when\nthe provider does not report a separate reasoning count.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "total_tokens": {
             "format": "uint64",
             "minimum": 0,
@@ -87160,6 +87418,24 @@
             "type": "null"
           }
         ]
+      },
+      "request_usage": {
+        "description": "One row per provider request this run made, in order; see\n`RunResult::request_usage`.",
+        "items": {
+          "$ref": "#/$defs/WireTurnUsage"
+        },
+        "type": "array"
+      },
+      "run_usage": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireUsage"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Usage accrued by this run alone; see `RunResult::run_usage`."
       },
       "schema_warnings": {
         "items": {
@@ -87214,7 +87490,8 @@
         "type": "integer"
       },
       "usage": {
-        "$ref": "#/$defs/WireUsage"
+        "$ref": "#/$defs/WireUsage",
+        "description": "Session-cumulative usage; see `RunResult::usage`."
       }
     },
     "required": [
@@ -100778,7 +101055,7 @@
         ]
       },
       "Usage": {
-        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]), and its cache\n  detail fields are always `None` because their relationship to the input\n  total is provider-specific.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
+        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail\n  fields and `reasoning_tokens` are provider-normalized sums: every\n  provider's cache-read and cache-write counts are subsets of that call's\n  presented input, and reasoning is a subset of output, so on a cumulative\n  value `cache_read_tokens <= input_tokens`,\n  `cache_creation_tokens <= input_tokens` and\n  `reasoning_tokens <= output_tokens` on every provider. A field stays\n  `None` until some call reports it.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
         "properties": {
           "cache_creation_tokens": {
             "format": "uint64",
@@ -100816,6 +101093,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -108713,7 +108999,7 @@
           },
           "usage_total": {
             "$ref": "#/$defs/WireUsage",
-            "description": "Sum of the per-member usage that was readable. Members with\n`usage_unavailable` contribute nothing, so this is a floor, not a\nclaim of completeness.\n\nInput and output tokens only: the cache counters are absent here even\nwhen members report them, because their relation to `input_tokens` is\nprovider-specific and this aggregate may span providers. Read cache\nnumbers per member, never off this total."
+            "description": "Sum of the per-member usage that was readable. Members with\n`usage_unavailable` contribute nothing, so this is a floor, not a\nclaim of completeness.\n\nCache and reasoning counters are summed too. Member usage is already\nsession-cumulative and provider-normalized, so on every provider the\ncache counters are subsets of `input_tokens` and reasoning is a subset\nof `output_tokens`, and the sums keep that relation."
           }
         },
         "required": [
@@ -108879,6 +109165,15 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens, a subset of `output_tokens`. Absent when\nthe provider does not report a separate reasoning count.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "total_tokens": {
             "format": "uint64",
@@ -116573,6 +116868,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -133706,7 +134010,7 @@
       },
       "CumulativeUsage": {
         "$ref": "#/$defs/Usage",
-        "description": "Cumulative usage across committed turns. Cache detail counters are not\naggregated because their relationship to input totals is provider-specific.\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
+        "description": "Cumulative usage across committed turns. Cache detail counters and\nreasoning are aggregated as provider-normalized subsets: see\n[`CumulativeUsage::add_turn`].\n\nThis value is **already a total**, and the total is session-scoped: on the\nevent stream it is `Session::total_usage()`, which is persisted with the\nsession and restored on resume, so `run_completed.usage` on the second run of\na session already contains the first run's calls. Adding it to per-call\nusage, or summing the values observed on two runs, double-counts. It also\nintentionally carries no [`crate::ProviderTokenAccounting`], because one\nsession may span providers and models and so cannot truthfully claim a\nsingle per-call convention; per-model attribution is read from the per-call\n`turn_completed` rows, which cover only the calls that closed a run."
       },
       "DeferredCatalogDelta": {
         "description": "Additive hidden-catalog delta metadata for runtime notices.",
@@ -136553,6 +136857,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -136582,7 +136895,7 @@
         "type": "object"
       },
       "Usage": {
-        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]), and its cache\n  detail fields are always `None` because their relationship to the input\n  total is provider-specific.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
+        "description": "Token usage statistics.\n\n# The same field names carry two different denominators\n\nThis shape is reused for two semantically different accounts, and\n`input_tokens` does not mean the same thing in both:\n\n- **Per-call** ([`TurnUsage`], carried by `turn_completed.usage`): raw\n  provider counters for exactly one provider request. For Anthropic\n  `input_tokens` is the *uncached* input only, with cache-write and\n  cache-read input reported separately in `cache_creation_tokens` and\n  `cache_read_tokens`. The normalized presented-input total for that one\n  call is [`TurnUsage::presented_tokens`].\n- **Cumulative** ([`CumulativeUsage`], carried by `run_completed.usage`): a\n  running total over every provider call recorded on the *session*, not on\n  one run. Its `input_tokens` is the saturating sum of each call's\n  *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail\n  fields and `reasoning_tokens` are provider-normalized sums: every\n  provider's cache-read and cache-write counts are subsets of that call's\n  presented input, and reasoning is a subset of output, so on a cumulative\n  value `cache_read_tokens <= input_tokens`,\n  `cache_creation_tokens <= input_tokens` and\n  `reasoning_tokens <= output_tokens` on every provider. A field stays\n  `None` until some call reports it.\n\n# What consumers must not sum\n\n- Never sum `run_completed.usage` with per-call usage, and never sum\n  `run_completed.usage` across runs: each value is already the whole\n  session's total to date, so adding two of them double-counts everything\n  before the later one. Take the latest value.\n- Never sum per-call `input_tokens` and expect it to match\n  `run_completed.usage.input_tokens`. On a cache-heavy Anthropic session the\n  two use different denominators and will not agree. Sum\n  `turn_completed.usage.accounting.presented_tokens` (that is,\n  [`TurnUsage::presented_tokens`]) instead, which is exactly what\n  [`CumulativeUsage::add_turn`] does.\n- Do not expect the per-call rows to reconcile with the cumulative account\n  either. Intermediate tool-loop calls, the structured-output extraction\n  call, and the compaction summary call are all charged to the cumulative\n  account and publish no `turn_completed` row, so the rows cover a strict\n  subset of the tokens.\n\nThe worked example lives in `docs/reference/usage-accounting.mdx`. Its\nnumbers are pinned against the agent loop by\n`turn_rows_cover_one_call_while_the_run_total_is_session_cumulative`\n(`crates/meerkat-core/src/agent/usage_accounting_tests.rs`) and against this type's\narithmetic by `cumulative_usage_matches_documented_aggregation_example`.",
         "properties": {
           "cache_creation_tokens": {
             "format": "uint64",
@@ -136620,6 +136933,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -142732,6 +143054,15 @@
               }
             ],
             "description": "Provider-authored normalized input accounting for one model turn.\n\nCumulative usage intentionally leaves this `None`: an aggregate may\nspan providers and models and therefore cannot truthfully carry one\nper-turn convention. Shared policy reads [`Usage::presented_tokens`]\non turn usage and never interprets cache detail fields directly."
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens the provider reported as a subset of\n`output_tokens`. `None` when the provider does not report a separate\nreasoning count (Anthropic folds thinking into `output_tokens`).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -143529,6 +143860,15 @@
             "minimum": 0,
             "type": "integer"
           },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens, a subset of `output_tokens`. Absent when\nthe provider does not report a separate reasoning count.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "total_tokens": {
             "format": "uint64",
             "minimum": 0,
@@ -143571,6 +143911,15 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens, a subset of `output_tokens`. Absent when\nthe provider does not report a separate reasoning count.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "total_tokens": {
             "format": "uint64",
@@ -148753,6 +149102,15 @@
             "minimum": 0,
             "type": "integer"
           },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens, a subset of `output_tokens`. Absent when\nthe provider does not report a separate reasoning count.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "total_tokens": {
             "format": "uint64",
             "minimum": 0,
@@ -148800,7 +149158,7 @@
       },
       "usage_total": {
         "$ref": "#/$defs/WireUsage",
-        "description": "Sum of the per-member usage that was readable. Members with\n`usage_unavailable` contribute nothing, so this is a floor, not a\nclaim of completeness.\n\nInput and output tokens only: the cache counters are absent here even\nwhen members report them, because their relation to `input_tokens` is\nprovider-specific and this aggregate may span providers. Read cache\nnumbers per member, never off this total."
+        "description": "Sum of the per-member usage that was readable. Members with\n`usage_unavailable` contribute nothing, so this is a floor, not a\nclaim of completeness.\n\nCache and reasoning counters are summed too. Member usage is already\nsession-cumulative and provider-normalized, so on every provider the\ncache counters are subsets of `input_tokens` and reasoning is a subset\nof `output_tokens`, and the sums keep that relation."
       }
     },
     "required": [
@@ -148852,6 +149210,15 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens, a subset of `output_tokens`. Absent when\nthe provider does not report a separate reasoning count.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "total_tokens": {
             "format": "uint64",
@@ -148980,7 +149347,7 @@
           },
           "usage_total": {
             "$ref": "#/$defs/WireUsage",
-            "description": "Sum of the per-member usage that was readable. Members with\n`usage_unavailable` contribute nothing, so this is a floor, not a\nclaim of completeness.\n\nInput and output tokens only: the cache counters are absent here even\nwhen members report them, because their relation to `input_tokens` is\nprovider-specific and this aggregate may span providers. Read cache\nnumbers per member, never off this total."
+            "description": "Sum of the per-member usage that was readable. Members with\n`usage_unavailable` contribute nothing, so this is a floor, not a\nclaim of completeness.\n\nCache and reasoning counters are summed too. Member usage is already\nsession-cumulative and provider-normalized, so on every provider the\ncache counters are subsets of `input_tokens` and reasoning is a subset\nof `output_tokens`, and the sums keep that relation."
           }
         },
         "required": [
@@ -149105,6 +149472,15 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens, a subset of `output_tokens`. Absent when\nthe provider does not report a separate reasoning count.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "total_tokens": {
             "format": "uint64",
@@ -150655,6 +151031,36 @@
         ],
         "type": "object"
       },
+      "PresentedTokenConvention": {
+        "description": "Provider-native convention used to normalize tokens presented to a model.",
+        "oneOf": [
+          {
+            "const": "anthropic_disjoint_input_components",
+            "description": "Anthropic reports uncached, cache-write, and cache-read input as\ndisjoint components. The normalized total is their saturating sum.",
+            "type": "string"
+          },
+          {
+            "const": "open_ai_input_includes_cached_subset",
+            "description": "OpenAI prompt/input tokens already include the cached-token subset.",
+            "type": "string"
+          },
+          {
+            "const": "gemini_prompt_includes_cached_subset",
+            "description": "Gemini prompt tokens already include the cached-content subset.",
+            "type": "string"
+          },
+          {
+            "const": "open_ai_compatible_prompt_includes_cache_details",
+            "description": "OpenAI-compatible prompt tokens are treated as the provider's inclusive\nprompt total; cache detail fields are observational subsets only.",
+            "type": "string"
+          },
+          {
+            "const": "host_declared_inclusive_input_total",
+            "description": "A custom/embedded client explicitly declares its `input_tokens` field\nas an inclusive presented-input total. This is never inferred from\ncache detail fields.",
+            "type": "string"
+          }
+        ]
+      },
       "Provider": {
         "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
         "enum": [
@@ -150665,6 +151071,38 @@
           "other"
         ],
         "type": "string"
+      },
+      "ProviderTokenAccounting": {
+        "additionalProperties": false,
+        "description": "One provider adapter's normalized accounting for a single model turn.",
+        "properties": {
+          "aggregation": {
+            "$ref": "#/$defs/TokenAggregationProvenance"
+          },
+          "convention": {
+            "$ref": "#/$defs/PresentedTokenConvention"
+          },
+          "model": {
+            "type": "string"
+          },
+          "presented_tokens": {
+            "description": "Tokens presented to the model for this request. Output tokens are not\nincluded.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider"
+          }
+        },
+        "required": [
+          "provider",
+          "model",
+          "presented_tokens",
+          "convention",
+          "aggregation"
+        ],
+        "type": "object"
       },
       "QuarantinedSkillIdentity": {
         "description": "Identity of a quarantined skill entry.\n\nDeliberately NOT a [`SkillKey`]: a quarantined entry is, by definition, an\nentry that failed validation, so it must never be confusable with a\ncanonical, loadable key. The raw identifier is preserved verbatim for\noperator diagnostics (it may be an invalid slug, e.g. `\"Not A Valid\nSlug\"`), but it cannot be parsed back into a `SkillKey` and handed to\n`load()`. This closes the \"fabricated canonical-looking SkillKey\" gap: a\nquarantine placeholder can never shadow or collide with a real skill named\n`invalid-skill`.",
@@ -151071,6 +151509,21 @@
         "description": "Canonical source identifier.",
         "type": "string"
       },
+      "TokenAggregationProvenance": {
+        "description": "How the provider adapter obtained the normalized presented-token total.",
+        "oneOf": [
+          {
+            "const": "sum_disjoint_provider_components",
+            "description": "Sum of provider-documented disjoint input components.",
+            "type": "string"
+          },
+          {
+            "const": "provider_inclusive_input_total",
+            "description": "Provider-issued inclusive prompt/input total copied without adding\ncache detail fields.",
+            "type": "string"
+          }
+        ]
+      },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
         "enum": [
@@ -151088,6 +151541,61 @@
           "fatal_failure"
         ],
         "type": "string"
+      },
+      "WireTurnUsage": {
+        "description": "One provider turn with adapter-authored normalized accounting evidence.",
+        "properties": {
+          "accounting": {
+            "$ref": "#/$defs/ProviderTokenAccounting"
+          },
+          "cache_creation_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cache_read_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens, a subset of `output_tokens`. Absent when\nthe provider does not report a separate reasoning count.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "total_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+          "accounting"
+        ],
+        "type": "object"
       },
       "WireUsage": {
         "description": "Canonical token usage for wire protocol.",
@@ -151118,6 +151626,15 @@
             "minimum": 0,
             "type": "integer"
           },
+          "reasoning_tokens": {
+            "description": "Reasoning (thinking) tokens, a subset of `output_tokens`. Absent when\nthe provider does not report a separate reasoning count.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "total_tokens": {
             "format": "uint64",
             "minimum": 0,
@@ -151144,6 +151661,24 @@
             "type": "null"
           }
         ]
+      },
+      "request_usage": {
+        "description": "One row per provider request this run made, in order; see\n`RunResult::request_usage`.",
+        "items": {
+          "$ref": "#/$defs/WireTurnUsage"
+        },
+        "type": "array"
+      },
+      "run_usage": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireUsage"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Usage accrued by this run alone; see `RunResult::run_usage`."
       },
       "schema_warnings": {
         "items": {
@@ -151198,7 +151733,8 @@
         "type": "integer"
       },
       "usage": {
-        "$ref": "#/$defs/WireUsage"
+        "$ref": "#/$defs/WireUsage",
+        "description": "Session-cumulative usage; see `RunResult::usage`."
       }
     },
     "required": [
@@ -160177,6 +160713,15 @@
         "format": "uint64",
         "minimum": 0,
         "type": "integer"
+      },
+      "reasoning_tokens": {
+        "description": "Reasoning (thinking) tokens, a subset of `output_tokens`. Absent when\nthe provider does not report a separate reasoning count.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
       },
       "total_tokens": {
         "format": "uint64",

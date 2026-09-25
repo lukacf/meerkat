@@ -366,6 +366,7 @@ import {
 } from "./mob.js";
 import { parseAgentEventEnvelope } from "./event-envelope.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
+import { parseUsage } from "./events.js";
 import { EventSubscription } from "./subscription.js";
 import type {
   AgentEventEnvelope,
@@ -5757,37 +5758,23 @@ export class MeerkatClient {
 
   static parseRunResult(data: Record<string, unknown>): RunResult {
     const context = "Invalid run result";
-    const usageRaw = MeerkatClient.requireRecord(data.usage, "usage", context);
-    const usage: Usage = {
-      inputTokens: MeerkatClient.requireNumberField(
-        usageRaw,
-        "input_tokens",
-        context,
-        "usage.input_tokens",
-      ),
-      outputTokens: MeerkatClient.requireNumberField(
-        usageRaw,
-        "output_tokens",
-        context,
-        "usage.output_tokens",
-      ),
-      cacheCreationTokens: usageRaw?.cache_creation_tokens != null
-        ? MeerkatClient.requireNumberField(
-            usageRaw,
-            "cache_creation_tokens",
-            context,
-            "usage.cache_creation_tokens",
-          )
-        : undefined,
-      cacheReadTokens: usageRaw?.cache_read_tokens != null
-        ? MeerkatClient.requireNumberField(
-            usageRaw,
-            "cache_read_tokens",
-            context,
-            "usage.cache_read_tokens",
-          )
-        : undefined,
+    const parseUsageField = (raw: unknown, field: string): Usage => {
+      try {
+        return parseUsage(raw);
+      } catch (error) {
+        throw new MeerkatError(
+          "INVALID_RESPONSE",
+          `${context}: ${field}.${(error as Error).message}`,
+        );
+      }
     };
+    const usage = parseUsageField(data.usage, "usage");
+    const runUsage = data.run_usage == null ? undefined : parseUsageField(data.run_usage, "run_usage");
+    const requestUsage = data.request_usage == null
+      ? undefined
+      : MeerkatClient.requireRecordArray(data.request_usage, context).map((row, index) =>
+          parseUsageField(row, `request_usage[${index}]`),
+        );
 
     const rawWarnings = data.schema_warnings;
     const schemaWarnings: SchemaWarning[] | undefined = rawWarnings == null
@@ -5835,6 +5822,8 @@ export class MeerkatClient {
       turns: MeerkatClient.requireNumberField(data, "turns", context),
       toolCalls: MeerkatClient.requireNumberField(data, "tool_calls", context),
       usage,
+      ...(runUsage !== undefined ? { runUsage } : {}),
+      ...(requestUsage !== undefined ? { requestUsage } : {}),
       terminalCauseKind:
         typeof data.terminal_cause_kind === "string"
           ? (data.terminal_cause_kind as RunResult["terminalCauseKind"])

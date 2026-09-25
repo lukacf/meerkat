@@ -16086,6 +16086,7 @@ mod mob_run_accounting_render_tests {
                     total_tokens: 150,
                     cache_creation_tokens: None,
                     cache_read_tokens: None,
+                    reasoning_tokens: None,
                 }),
                 usage_unavailable: None,
             }],
@@ -16095,6 +16096,7 @@ mod mob_run_accounting_render_tests {
                 total_tokens: 150,
                 cache_creation_tokens: None,
                 cache_read_tokens: None,
+                reasoning_tokens: None,
             },
             members_usage_unavailable: 0,
             member_session_ids: vec!["sess-1".to_string()],
@@ -21332,6 +21334,8 @@ default_model = "gemma"
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 
@@ -21392,6 +21396,8 @@ default_model = "gemma"
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 
@@ -21743,6 +21749,8 @@ default_model = "gemma"
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 
@@ -21788,6 +21796,8 @@ default_model = "gemma"
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 
@@ -22156,6 +22166,8 @@ default_model = "gemma"
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         };
 
         let path = write_html_output_artifact(&scope, &result)
@@ -22184,6 +22196,8 @@ default_model = "gemma"
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         };
 
         let first = write_html_output_artifact(&scope, &result)
@@ -28452,6 +28466,8 @@ supports_reasoning = true
                 quarantined: vec![],
                 collection_fault: None,
             }),
+            run_usage: None,
+            request_usage: Vec::new(),
         };
         let json = serde_json::json!({
             "text": result.text,

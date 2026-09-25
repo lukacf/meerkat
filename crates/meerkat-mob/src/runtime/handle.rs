@@ -15573,6 +15573,8 @@ mod tests {
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            request_usage: Vec::new(),
+            run_usage: None,
         }
     }
 

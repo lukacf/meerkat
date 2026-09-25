@@ -7092,6 +7092,8 @@ mod tests {
                 quarantined: vec![],
                 collection_fault: None,
             }),
+            run_usage: None,
+            request_usage: Vec::new(),
         };
 
         let payload = format_agent_result(Ok(result), &session_id).expect("formatted payload");

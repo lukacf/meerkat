@@ -2909,6 +2909,11 @@ where
                             // can silently refund usage.
                             self.session.record_turn_usage(&outcome.summary_usage);
                             self.budget.record_turn_usage(&outcome.summary_usage);
+                            if outcome.summary_source
+                                == crate::agent::compact::CompactionSummarySource::ProviderCall
+                            {
+                                self.run_request_usage.push(outcome.summary_usage.clone());
+                            }
                             // The summary call's accounting identity is routed,
                             // not repaired: the counters above are charged as
                             // reported and the disagreement is published.
@@ -3808,19 +3813,14 @@ where
         live: &crate::types::Usage,
         rollback: &crate::types::Usage,
     ) -> Result<crate::types::Usage, AgentError> {
-        fn delta(live: u64, rollback: u64, field: &str) -> Result<u64, AgentError> {
-            live.checked_sub(rollback).ok_or_else(|| {
-                AgentError::InternalError(format!(
-                    "compaction rollback observed non-monotonic {field} usage ({live} < {rollback})"
-                ))
-            })
-        }
-        Ok(crate::types::Usage {
-            input_tokens: delta(live.input_tokens, rollback.input_tokens, "input-token")?,
-            output_tokens: delta(live.output_tokens, rollback.output_tokens, "output-token")?,
-            cache_creation_tokens: None,
-            cache_read_tokens: None,
-            provider_accounting: None,
+        // Both snapshots are normalized first: a legacy session's stored total
+        // can carry raw cache sums that a later recorded turn clamps.
+        let live = crate::types::CumulativeUsage::from_usage(live.clone()).into_inner();
+        let rollback = crate::types::CumulativeUsage::from_usage(rollback.clone()).into_inner();
+        live.cumulative_delta_since(&rollback).ok_or_else(|| {
+            AgentError::InternalError(format!(
+                "compaction rollback observed non-monotonic usage (live {live:?} < rollback {rollback:?})"
+            ))
         })
     }
 
@@ -4095,7 +4095,9 @@ where
         let result = RunResult {
             text: extraction_error.last_output.clone(),
             session_id: self.session.id().clone(),
-            usage: self.session.total_usage(),
+            usage: self.reported_session_usage(),
+            run_usage: self.run_usage_delta(),
+            request_usage: self.run_request_usage.clone(),
             turns: turn_count + 1,
             tool_calls: tool_call_count,
             terminal_cause_kind: None,
@@ -4151,6 +4153,20 @@ where
         Ok(())
     }
 
+    /// The session total as reported and as used for deltas: normalized so
+    /// the cache and reasoning counters are subsets of their parent totals.
+    /// Sessions saved before 0.8.22 summed raw per-call cache counters, which
+    /// can exceed the input total; the stored value is left untouched.
+    fn reported_session_usage(&self) -> crate::types::Usage {
+        crate::types::CumulativeUsage::from_usage(self.session.total_usage()).into_inner()
+    }
+
+    /// Usage accrued since the current run began.
+    fn run_usage_delta(&self) -> Option<crate::types::Usage> {
+        self.reported_session_usage()
+            .cumulative_delta_since(&self.run_usage_baseline)
+    }
+
     /// The main agent loop
     #[allow(unused_assignments)]
     pub(super) async fn run_loop(
@@ -4193,6 +4209,13 @@ where
         // park is a separate seam and remains unbounded here.
         self.budget.begin_turn();
         self.extraction_state.reset();
+        // A run that suspended for callback results continues in this entry:
+        // keep its baseline and rows so calls made before the suspension stay
+        // in this run's usage. Every other entry starts a fresh run account.
+        if !std::mem::take(&mut self.run_usage_suspended_for_callback) {
+            self.run_usage_baseline = self.reported_session_usage();
+            self.run_request_usage.clear();
+        }
         // RuntimeStore holds the pre-run Session snapshot until an explicit
         // sticky-fallback CAS advances its control projection. Seal that exact
         // parent once; CallingLlm visibility promotion/catalog refreshes mutate
@@ -5884,6 +5907,7 @@ where
             self.budget.record_turn_usage(turn_usage);
             self.last_input_tokens = turn_usage.presented_tokens();
             self.session.record_turn_usage(turn_usage);
+            self.run_request_usage.push(turn_usage.clone());
         }
         if let Some(exceeded) = self.budget.observe().exceeded() {
             emit_phase_event!(self, ctx, budget_warning_event(exceeded));
@@ -6581,6 +6605,7 @@ where
             })?;
             self.execute_turn_effects(&transition, ctx.turn_count, ctx.event_tx)
                 .await?;
+            self.run_usage_suspended_for_callback = true;
             if callback_pending.len() == 1 {
                 let (tool_use_id, tool_name, args) = callback_pending.remove(0);
                 return Err(AgentError::CallbackPending {
@@ -6759,7 +6784,9 @@ where
                 let result = RunResult {
                     text: extraction_error.last_output.clone(),
                     session_id: self.session.id().clone(),
-                    usage: self.session.total_usage(),
+                    usage: self.reported_session_usage(),
+                    run_usage: self.run_usage_delta(),
+                    request_usage: self.run_request_usage.clone(),
                     turns: ctx.turn_count + 1,
                     tool_calls: ctx.tool_call_count,
                     terminal_cause_kind: None,
@@ -6787,7 +6814,9 @@ where
                 .unwrap_or_default()
                 .to_string(),
             session_id: self.session.id().clone(),
-            usage: self.session.total_usage(),
+            usage: self.reported_session_usage(),
+            run_usage: self.run_usage_delta(),
+            request_usage: self.run_request_usage.clone(),
             turns: ctx.turn_count + 1,
             tool_calls: ctx.tool_call_count,
             terminal_cause_kind: None,
@@ -6891,7 +6920,9 @@ where
             let mut result = RunResult {
                 text: final_text.clone(),
                 session_id: self.session.id().clone(),
-                usage: self.session.total_usage(),
+                usage: self.reported_session_usage(),
+                run_usage: self.run_usage_delta(),
+                request_usage: self.run_request_usage.clone(),
                 turns: ctx.turn_count + 1,
                 tool_calls: ctx.tool_call_count,
                 terminal_cause_kind: None,
@@ -6951,7 +6982,9 @@ where
         let mut result = RunResult {
             text: final_text,
             session_id: self.session.id().clone(),
-            usage: self.session.total_usage(),
+            usage: self.reported_session_usage(),
+            run_usage: self.run_usage_delta(),
+            request_usage: self.run_request_usage.clone(),
             turns: ctx.turn_count + 1,
             tool_calls: ctx.tool_call_count,
             terminal_cause_kind: None,
@@ -6999,7 +7032,9 @@ where
             SurfaceResultClass::Success => Ok(RunResult {
                 text: self.session.last_assistant_text().unwrap_or_default(),
                 session_id: self.session.id().clone(),
-                usage: self.session.total_usage(),
+                usage: self.reported_session_usage(),
+                run_usage: self.run_usage_delta(),
+                request_usage: self.run_request_usage.clone(),
                 turns,
                 tool_calls,
                 terminal_cause_kind: public_terminal_cause_kind(cause_kind),
@@ -9429,6 +9464,7 @@ mod tests {
                                 output_tokens: 4,
                                 cache_creation_tokens: Some(6),
                                 cache_read_tokens: Some(9),
+                                reasoning_tokens: None,
                                 provider_accounting: None,
                             },
                         ),
@@ -9702,6 +9738,7 @@ mod tests {
             output_tokens: 4,
             cache_creation_tokens: Some(6),
             cache_read_tokens: Some(9),
+            reasoning_tokens: None,
             provider_accounting: None,
         });
         assert_eq!(agent.session().total_usage(), expected);
@@ -9750,6 +9787,7 @@ mod tests {
             output_tokens: 4,
             cache_creation_tokens: Some(6),
             cache_read_tokens: Some(9),
+            reasoning_tokens: None,
             provider_accounting: None,
         });
         assert_eq!(agent.session().total_usage(), expected);
@@ -9893,6 +9931,7 @@ mod tests {
             output_tokens: 7,
             cache_creation_tokens: Some(5),
             cache_read_tokens: Some(3),
+            reasoning_tokens: None,
             provider_accounting: None,
         };
         agent
@@ -12019,10 +12058,22 @@ mod tests {
 
         agent.run("first".into()).await.unwrap();
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
-        agent
+        let second = agent
             .run_with_events("second".into(), tx)
             .await
             .expect("curated compaction should commit and continue the turn");
+        assert!(
+            second
+                .request_usage
+                .iter()
+                .all(|row| row.accounting().model != "host-compaction-curator"),
+            "a curated summary makes no provider request and adds no request row"
+        );
+        assert_eq!(
+            second.request_usage.len(),
+            1,
+            "only the turn's own provider call is a request row"
+        );
 
         let mut saw_completed = false;
         while let Ok(event) = rx.try_recv() {
@@ -15329,6 +15380,141 @@ mod tests {
         );
     }
 
+    /// Calls made before a callback suspension stay in the resumed run's
+    /// run_usage and request_usage.
+    #[tokio::test]
+    async fn callback_resume_keeps_the_run_usage_account() {
+        struct CallbackPendingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for CallbackPendingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                Err(ToolError::callback_pending(
+                    call.name,
+                    serde_json::json!({ "question": "approve?" }),
+                ))
+            }
+        }
+
+        struct TwoStepClient {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl AgentLlmClient for TwoStepClient {
+            async fn stream_response(
+                &self,
+                _messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let usage = |input: u64, output: u64| {
+                    normalized_test_usage(
+                        self,
+                        Usage {
+                            input_tokens: input,
+                            output_tokens: output,
+                            ..Default::default()
+                        },
+                    )
+                };
+                Ok(if call == 0 {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::ToolUse {
+                            id: "callback-call".to_string(),
+                            name: "ask_user".into(),
+                            args: serde_json::value::RawValue::from_string(
+                                r#"{"question":"approve?"}"#.to_string(),
+                            )
+                            .expect("static callback arguments should parse"),
+                            meta: None,
+                        }],
+                        StopReason::ToolUse,
+                        usage(1000, 10),
+                    )
+                } else {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "approved, done".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        usage(1500, 20),
+                    )
+                })
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
+            .build_standalone(
+                Arc::new(TwoStepClient {
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                }),
+                Arc::new(CallbackPendingDispatcher {
+                    tools: Arc::from([Arc::new(ToolDef::new(
+                        "ask_user",
+                        "waits for an external callback",
+                        serde_json::json!({ "type": "object" }),
+                    ))]),
+                }),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let error = agent
+            .run("ask for approval".to_string().into())
+            .await
+            .expect_err("the first entry suspends for the callback");
+        assert!(matches!(error, AgentError::CallbackPending { .. }));
+        agent
+            .apply_pending_callback_tool_results(vec![ToolResult::new(
+                "callback-call".to_string(),
+                "approved".to_string(),
+                false,
+            )])
+            .expect("the callback result applies");
+        let result = agent
+            .run_pending()
+            .await
+            .expect("the resumed run completes");
+
+        assert_eq!(
+            result.request_usage.len(),
+            2,
+            "the pre-suspension call stays in the resumed run's rows"
+        );
+        let run_usage = result.run_usage.expect("run usage");
+        assert_eq!(run_usage.input_tokens, 2500);
+        assert_eq!(run_usage.output_tokens, 30);
+        assert_eq!(result.usage.input_tokens, 2500);
+    }
+
     #[tokio::test]
     async fn callback_pending_preserves_completed_sibling_outcome() {
         struct MixedCallbackDispatcher {
@@ -18003,6 +18189,7 @@ mod tests {
                         output_tokens: 500,
                         cache_creation_tokens: None,
                         cache_read_tokens: None,
+                        reasoning_tokens: None,
                         provider_accounting: None,
                     },
                 ),
@@ -22099,6 +22286,76 @@ mod tests {
             crate::TurnUsage::host_declared(crate::Provider::Other, "mock-model", Usage::default())
                 .into_inner(),
         )
+    }
+
+    fn openai_text_response(
+        text: &str,
+        input: u64,
+        cached: u64,
+        output: u64,
+    ) -> super::LlmStreamResult {
+        super::LlmStreamResult::new(
+            vec![AssistantBlock::Text {
+                text: text.to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+            crate::TurnUsage::new(
+                Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_read_tokens: Some(cached),
+                    ..Default::default()
+                },
+                crate::ProviderTokenAccounting::openai("gpt-5.6-luna", input),
+            )
+            .into_inner(),
+        )
+    }
+
+    /// run_usage and request_usage cover the extraction call and its retry,
+    /// not only the agentic turn.
+    #[tokio::test]
+    async fn run_usage_and_request_rows_cover_extraction_and_its_retry() {
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": { "answer": { "type": "string" } },
+            "required": ["answer"]
+        }))
+        .unwrap();
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            openai_text_response("I found the answer", 1000, 0, 20),
+            openai_text_response("not json", 1100, 1000, 5),
+            openai_text_response(r#"{"answer": "42"}"#, 1200, 1100, 7),
+        ]));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let result = agent
+            .run("What is the answer?".to_string().into())
+            .await
+            .expect("extraction retry should succeed");
+        assert_eq!(client.calls_made(), 3, "agentic + extraction + retry");
+        assert_eq!(result.structured_output.as_ref().unwrap()["answer"], "42");
+        assert_eq!(result.request_usage.len(), 3, "one row per provider call");
+        let run_usage = result.run_usage.expect("run usage");
+        assert_eq!(run_usage.input_tokens, 3300);
+        assert_eq!(run_usage.output_tokens, 32);
+        assert_eq!(run_usage.cache_read_tokens, Some(2100));
+        assert_eq!(
+            result
+                .request_usage
+                .iter()
+                .map(crate::TurnUsage::presented_tokens)
+                .sum::<u64>(),
+            run_usage.input_tokens
+        );
+        assert_eq!(
+            result.usage.input_tokens, 3300,
+            "fresh session: total equals run"
+        );
     }
 
     /// Happy path: agent with output_schema, LLM returns valid JSON

@@ -1609,20 +1609,75 @@ impl AgentMobToolSurface {
             merge_back,
         );
         request.durability = durability;
-        let outcome = self
-            .state
-            .temporary_council()
-            .run(request)
-            .await
-            .map_err(|error| Self::map_council_error(call, error))?;
-        Self::encode_result(
-            call,
-            json!({
-                "result": outcome.result,
-                "cleanup": outcome.cleanup,
-                "replayed": outcome.replayed,
-            }),
-        )
+
+        // A council's own deadline may exceed the agent loop's default tool
+        // deadline, which would cut the convener's call while the council
+        // keeps running and seals a result nobody receives. With a bound
+        // operation registry the council runs detached: the call returns the
+        // council id and a job id, and the sealed outcome arrives as that
+        // job's completion. Without one the call keeps the blocking contract.
+        let Some(registry) = self.ops_registry.clone() else {
+            let outcome = self
+                .state
+                .temporary_council()
+                .run(request)
+                .await
+                .map_err(|error| Self::map_council_error(call, error))?;
+            return Self::encode_result(call, council_outcome_json(&outcome));
+        };
+        let council_label = request.council_id.as_str().to_string();
+        let operation_id = meerkat_core::ops_lifecycle::OperationId::new();
+        registry
+            .register_operation(meerkat_core::ops_lifecycle::OperationSpec {
+                id: operation_id.clone(),
+                kind: meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp,
+                owner_session_id: self.owner_bridge_session_id.clone(),
+                display_name: format!("council {council_label}"),
+                source_label: TOOL_COUNCIL.to_string(),
+                operation_source: None,
+                child_session_id: None,
+                expect_peer_channel: false,
+            })
+            .and_then(|()| registry.provisioning_succeeded(&operation_id))
+            .map_err(|error| {
+                ToolError::execution_failed(format!(
+                    "tool '{}' could not register the council run: {error}",
+                    call.name
+                ))
+            })?;
+        let council = self.state.temporary_council();
+        let completion_registry = Arc::clone(&registry);
+        let completion_operation = operation_id.clone();
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let outcome = council.run(request).await;
+            let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let _ = match outcome {
+                Ok(outcome) => completion_registry.complete_operation(
+                    &completion_operation,
+                    meerkat_core::ops::OperationResult {
+                        id: completion_operation.clone(),
+                        content: council_outcome_json(&outcome).to_string(),
+                        is_error: false,
+                        duration_ms,
+                        tokens_used: 0,
+                    },
+                ),
+                Err(error) => completion_registry
+                    .fail_operation(&completion_operation, format!("council failed: {error}")),
+            };
+        });
+        let content = json!({
+            "status": "running",
+            "council_id": council_label,
+            "job_id": operation_id.to_string(),
+        })
+        .to_string();
+        Ok(meerkat_core::ToolDispatchOutcome::new(
+            meerkat_core::types::ToolResult::new(call.id.to_string(), content, false),
+            vec![meerkat_core::ops::AsyncOpRef::detached(operation_id)],
+            vec![],
+        ))
     }
 
     #[inline(never)]
@@ -2494,7 +2549,9 @@ fn build_tool_defs_with_profile_support(
              discussion. The tool resolves and copies their existing profiles; you do not construct \
              a temporary mob definition. The default merge asks the last participant for a bounded \
              summary. council_id is optional and should be supplied only when you need an explicit \
-             idempotency key across retries.",
+             idempotency key across retries. The call returns at once with status \"running\", \
+             the council_id and a job_id; the sealed result arrives as that job's completion \
+             notice when the council ends.",
             typed_schema::<CouncilArgs>(),
         ),
         tool_def(
@@ -3093,6 +3150,16 @@ impl ForkOffCompletion {
         };
         (completion, failed)
     }
+}
+
+fn council_outcome_json(
+    outcome: &crate::temporary_council::TemporaryCouncilOutcome,
+) -> serde_json::Value {
+    json!({
+        "result": outcome.result,
+        "cleanup": outcome.cleanup,
+        "replayed": outcome.replayed,
+    })
 }
 
 fn fork_off_default_result_label() -> String {
@@ -5920,6 +5987,78 @@ mod tests {
             unknown_profile_error,
             ToolError::AccessDenied { .. }
         ));
+    }
+
+    /// A fork_off that fails before returning its handle must not leave a
+    /// background job behind for the forker to wait on.
+    #[tokio::test]
+    async fn failed_fork_off_leaves_no_background_job() {
+        let state = MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(sample_definition("fork-off-failure"))
+            .await
+            .expect("create mob");
+        let handle = state.handle_for(&mob_id).await.expect("handle");
+        let parent_identity = AgentIdentity::from("parent");
+        state
+            .mob_spawn_spec(
+                &mob_id,
+                SpawnMemberSpec::new(ProfileName::from("worker"), parent_identity.clone()),
+            )
+            .await
+            .expect("spawn parent");
+        let parent_session = handle
+            .resolve_bridge_session_id(&parent_identity)
+            .await
+            .expect("parent bridge session");
+        let registry = Arc::new(meerkat_runtime::ops_lifecycle::RuntimeOpsLifecycleRegistry::new());
+        let surface: Arc<dyn AgentToolDispatcher> = Arc::new(AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            spawn_profile_authority(mob_id.as_str(), "worker"),
+            "claude-sonnet-4-5".to_string(),
+            parent_session.clone(),
+            None,
+            None,
+            None,
+        ));
+        let surface = surface
+            .bind_ops_lifecycle(registry.clone(), parent_session)
+            .expect("bind ops lifecycle")
+            .into_dispatcher();
+
+        let args = serde_json::value::RawValue::from_string(
+            json!({"member_id": "doomed-fork", "task": "anything"}).to_string(),
+        )
+        .unwrap();
+        // The in-memory session service has no durable fork authority, so
+        // the fork itself fails after the operation was registered.
+        surface
+            .dispatch(ToolCallView {
+                id: "fork-off-fails",
+                name: "fork_off",
+                args: &args,
+            })
+            .await
+            .expect_err("the fork must fail on a service without durable fork authority");
+        use meerkat_core::ops_lifecycle::OpsLifecycleRegistry as _;
+        let operations = registry.list_operations().expect("list operations");
+        assert!(
+            operations.iter().all(|operation| !matches!(
+                operation.status,
+                meerkat_core::ops_lifecycle::OperationStatus::Provisioning
+                    | meerkat_core::ops_lifecycle::OperationStatus::Running
+            )),
+            "no running job may remain: {operations:?}"
+        );
+        assert!(
+            handle
+                .get_member(&AgentIdentity::from("doomed-fork"))
+                .await
+                .expect("roster read")
+                .is_none(),
+            "no child may be seated"
+        );
     }
 
     #[tokio::test]

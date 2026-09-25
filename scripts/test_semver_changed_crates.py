@@ -82,8 +82,18 @@ class ClassifierRepo:
         git(self.root, "add", "-A")
         git(self.root, "commit", "-q", "-m", message)
 
-    def classify(self, crates: list[str]) -> classifier.Classification:
-        return classifier.classify(self.root, "v0.1.0", "HEAD", crates)
+    def classify(
+        self, crates: list[str], published: frozenset[str] = frozenset()
+    ) -> classifier.Classification:
+        return classifier.classify(
+            self.root, "v0.1.0", "HEAD", crates, lambda name: name in published
+        )
+
+    def move_crates(self, destination: str) -> None:
+        """Move every crate from crates/ to `destination`/ and point the workspace at it."""
+        git(self.root, "mv", "crates", destination)
+        root = self.root / "Cargo.toml"
+        root.write_text(root.read_text().replace("crates/", f"{destination}/"))
 
 
 class ClassifierTests(unittest.TestCase):
@@ -171,6 +181,63 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(result.changed, ["ghost"])
         self.assertIn("not a workspace member", result.reasons["ghost"])
 
+    def test_moved_crate_with_identical_source_is_unchanged(self) -> None:
+        self.repo.move_crates("packages")
+        self.repo.commit("move crates")
+        result = self.repo.classify(["alpha", "beta"], published=frozenset({"alpha", "beta"}))
+        self.assertEqual(result.changed, [])
+        self.assertEqual(result.first_publish, [])
+        self.assertEqual(result.unchanged, ["alpha", "beta"])
+        self.assertIn("moved crates/alpha -> packages/alpha", result.reasons["alpha"])
+
+    def test_moved_crate_with_a_source_change_is_changed(self) -> None:
+        self.repo.move_crates("packages")
+        (self.repo.root / "packages" / "alpha" / "src" / "lib.rs").write_text("pub fn g() {}\n")
+        self.repo.commit("move crates and change alpha")
+        result = self.repo.classify(["alpha", "beta"], published=frozenset({"alpha", "beta"}))
+        self.assertEqual(result.changed, ["alpha"])
+        self.assertEqual(result.unchanged, ["beta"])
+        self.assertIn("crates/alpha -> packages/alpha", result.reasons["alpha"])
+
+    def test_moved_crate_bazel_and_test_trees_still_do_not_count(self) -> None:
+        self.repo.move_crates("packages")
+        (self.repo.root / "packages" / "alpha" / "BUILD.bazel").write_text('version = "0.1.1"\n')
+        tests = self.repo.root / "packages" / "beta" / "tests"
+        tests.mkdir()
+        (tests / "smoke.rs").write_text("#[test] fn t() {}\n")
+        self.repo.commit("move + bazel + tests")
+        result = self.repo.classify(["alpha", "beta"], published=frozenset({"alpha", "beta"}))
+        self.assertEqual(result.changed, [])
+        self.assertEqual(result.unchanged, ["alpha", "beta"])
+
+    def test_new_unpublished_name_after_a_move_is_first_publish(self) -> None:
+        self.repo.move_crates("packages")
+        gamma = self.repo.root / "packages" / "gamma"
+        (gamma / "src").mkdir(parents=True)
+        (gamma / "Cargo.toml").write_text(
+            '[package]\nname = "gamma"\nversion.workspace = true\nedition.workspace = true\n'
+        )
+        (gamma / "src" / "lib.rs").write_text("pub fn h() {}\n")
+        self.repo.commit("move and add gamma")
+        result = self.repo.classify(
+            ["alpha", "beta", "gamma"], published=frozenset({"alpha", "beta"})
+        )
+        self.assertEqual(result.first_publish, ["gamma"])
+        self.assertEqual(result.unchanged, ["alpha", "beta"])
+
+    def test_published_crate_missing_from_the_baseline_is_never_first_publish(self) -> None:
+        delta = self.repo.root / "crates" / "delta"
+        (delta / "src").mkdir(parents=True)
+        (delta / "Cargo.toml").write_text(
+            '[package]\nname = "delta"\nversion.workspace = true\nedition.workspace = true\n'
+        )
+        (delta / "src" / "lib.rs").write_text("pub fn d() {}\n")
+        self.repo.commit("add delta, already on the registry")
+        result = self.repo.classify(["delta"], published=frozenset({"delta"}))
+        self.assertEqual(result.first_publish, [])
+        self.assertEqual(result.changed, ["delta"])
+        self.assertIn("published on the registry", result.reasons["delta"])
+
     def test_cli_emits_json(self) -> None:
         completed = subprocess.run(
             [
@@ -182,6 +249,7 @@ class ClassifierTests(unittest.TestCase):
                 "v0.1.0",
                 "--release-crate",
                 "alpha",
+                "--assume-unpublished",
             ],
             check=True,
             capture_output=True,

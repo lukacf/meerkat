@@ -35,6 +35,18 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- The release semver gate identifies crates by package name across the baseline
+  and candidate trees. After the move into `crates/` it resolved every crate by
+  its old directory, classified all of them as identical or first publications,
+  and measured none (the 0.8.42 pre-check checked 0 crates). The classifier now
+  reads each revision's workspace, compares a crate's baseline directory with its
+  current one (a pure move is not a change), ignores the local `path` of member
+  dependencies, and treats a name missing from the baseline workspace as a first
+  publication only when crates.io has never published it. Against v0.8.41 the
+  gate now measures 16 crates.
+
 ## [0.8.42] - 2026-09-24
 
 ### Added

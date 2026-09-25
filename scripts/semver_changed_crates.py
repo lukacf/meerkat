@@ -13,6 +13,13 @@ publishing it for the first time (`first_publish`).
 The classification is deliberately conservative: any difference in the crate
 directory, in the workspace dependency table entries the crate references, or
 in `[workspace.package]` fields other than `version` marks the crate changed.
+
+Crates are identified by package name, not by directory: each side's workspace
+is read at its own revision and the crate's baseline directory is compared with
+its HEAD directory, so moving a crate (for example into `crates/`) is not a
+change by itself. A name absent from the baseline workspace is a first
+publication only when the registry has never published it; a published crate
+missing from the baseline workspace is measured to fail closed.
 """
 
 from __future__ import annotations
@@ -23,7 +30,10 @@ import pathlib
 import subprocess
 import sys
 import tomllib
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
+from typing import Callable
 
 DEPENDENCY_TABLES = ("dependencies", "build-dependencies")
 
@@ -81,19 +91,60 @@ def git_show(repo_root: pathlib.Path, rev: str, path: str) -> str | None:
     return result.stdout
 
 
-def tree_changed(repo_root: pathlib.Path, baseline: str, head: str, rel_dir: str) -> bool:
-    """True when any API-relevant tracked file under `rel_dir` differs between the revisions."""
-    pathspecs = [rel_dir] + [f":(exclude){rel_dir}/{path}" for path in NON_API_PATHSPECS]
-    result = _git(repo_root, "diff", "--quiet", baseline, head, "--", *pathspecs)
+def tree_changed(
+    repo_root: pathlib.Path,
+    baseline: str,
+    head: str,
+    baseline_dir: str,
+    head_dir: str | None = None,
+) -> bool:
+    """True when any API-relevant tracked file differs between the crate's two directories.
+
+    The crate may live in a different directory at each revision; the trees are
+    compared directly, so a pure move is not a change.
+    """
+    head_dir = baseline_dir if head_dir is None else head_dir
+    pathspecs = ["."] + [f":(exclude){path}" for path in NON_API_PATHSPECS]
+    result = _git(
+        repo_root,
+        "diff",
+        "--quiet",
+        f"{baseline}:{baseline_dir}",
+        f"{head}:{head_dir}",
+        "--",
+        *pathspecs,
+    )
     if result.returncode == 0:
         return False
     if result.returncode == 1:
         return True
-    raise RuntimeError(f"git diff failed for {rel_dir}: {result.stderr.strip()}")
+    raise RuntimeError(
+        f"git diff failed for {baseline_dir} -> {head_dir}: {result.stderr.strip()}"
+    )
 
 
 def tree_exists(repo_root: pathlib.Path, rev: str, rel_dir: str) -> bool:
     return _git(repo_root, "cat-file", "-e", f"{rev}:{rel_dir}/Cargo.toml").returncode == 0
+
+
+CRATES_IO_API = "https://crates.io/api/v1/crates/"
+
+
+def crates_io_has_published(name: str) -> bool:
+    """True when crates.io has ever published `name`; network errors fail closed (True)."""
+    request = urllib.request.Request(
+        CRATES_IO_API + name,
+        headers={"User-Agent": "meerkat-semver-breaks (https://github.com/lukacf/meerkat)"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status == 200
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return False
+        return True
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return True
 
 
 def workspace_member_dirs(repo_root: pathlib.Path, rev: str) -> dict[str, str]:
@@ -137,15 +188,17 @@ def workspace_package_fields(repo_root: pathlib.Path, rev: str) -> dict[str, obj
 
 
 def normalize_spec(spec: object) -> object:
-    """Drop the `version` of workspace-member (path) dependencies.
+    """Drop the `version` and `path` of workspace-member (path) dependencies.
 
     A release bumps every member's version in lockstep, so that field changes
     on every release by construction; the member's own API is measured on the
-    member itself. Every other field (features, default-features, registry
-    versions, optional flags) still counts as a spec change.
+    member itself. The `path` is local-only: the published crate depends on the
+    member by version, so moving the member's directory changes nothing a
+    downstream user can observe. Every other field (features, default-features,
+    registry versions, optional flags) still counts as a spec change.
     """
     if isinstance(spec, dict) and "path" in spec:
-        return {key: value for key, value in spec.items() if key != "version"}
+        return {key: value for key, value in spec.items() if key not in ("version", "path")}
     return spec
 
 
@@ -168,9 +221,11 @@ def classify(
     baseline_tag: str,
     head: str,
     release_crates: list[str],
+    registry_has_published: Callable[[str], bool] = crates_io_has_published,
 ) -> Classification:
     result = Classification(baseline_tag=baseline_tag)
     head_dirs = workspace_member_dirs(repo_root, head)
+    baseline_dirs = workspace_member_dirs(repo_root, baseline_tag)
     baseline_deps = workspace_dependency_table(repo_root, baseline_tag)
     head_deps = workspace_dependency_table(repo_root, head)
     package_fields_changed = workspace_package_fields(repo_root, baseline_tag) != (
@@ -183,17 +238,26 @@ def classify(
             result.changed.append(name)
             result.reasons[name] = "not a workspace member at HEAD; measured to fail closed"
             continue
-        if not tree_exists(repo_root, baseline_tag, rel_dir):
-            result.first_publish.append(name)
-            result.reasons[name] = f"no crate directory at {baseline_tag}"
+        baseline_dir = baseline_dirs.get(name)
+        if baseline_dir is None or not tree_exists(repo_root, baseline_tag, baseline_dir):
+            if registry_has_published(name):
+                result.changed.append(name)
+                result.reasons[name] = (
+                    f"published on the registry but not a workspace member at {baseline_tag}; "
+                    "measured to fail closed"
+                )
+            else:
+                result.first_publish.append(name)
+                result.reasons[name] = f"not a workspace member at {baseline_tag}"
             continue
         if package_fields_changed:
             result.changed.append(name)
             result.reasons[name] = "[workspace.package] fields other than version changed"
             continue
-        if tree_changed(repo_root, baseline_tag, head, rel_dir):
+        if tree_changed(repo_root, baseline_tag, head, baseline_dir, rel_dir):
             result.changed.append(name)
-            result.reasons[name] = f"source differs from {baseline_tag}"
+            moved = "" if baseline_dir == rel_dir else f" ({baseline_dir} -> {rel_dir})"
+            result.reasons[name] = f"source differs from {baseline_tag}{moved}"
             continue
         manifest_text = git_show(repo_root, head, f"{rel_dir}/Cargo.toml") or ""
         drifted = sorted(
@@ -206,7 +270,8 @@ def classify(
             result.reasons[name] = "workspace dependency spec changed: " + ", ".join(drifted)
             continue
         result.unchanged.append(name)
-        result.reasons[name] = f"identical source and dependency specs vs {baseline_tag}"
+        moved = "" if baseline_dir == rel_dir else f" (moved {baseline_dir} -> {rel_dir})"
+        result.reasons[name] = f"identical source and dependency specs vs {baseline_tag}{moved}"
     return result
 
 
@@ -221,6 +286,12 @@ def main() -> int:
         default=[],
         help="publishable crate to classify; repeatable, or supply names on stdin",
     )
+    parser.add_argument(
+        "--assume-unpublished",
+        action="store_true",
+        help="skip the crates.io lookup and treat names missing from the baseline "
+        "workspace as first publications (offline use only)",
+    )
     args = parser.parse_args()
     crates = list(args.release_crate)
     if not crates and not sys.stdin.isatty():
@@ -229,7 +300,8 @@ def main() -> int:
         print("error: no release crates supplied", file=sys.stderr)
         return 2
     try:
-        classification = classify(args.repo_root, args.baseline_tag, args.head, crates)
+        registry = (lambda _name: False) if args.assume_unpublished else crates_io_has_published
+        classification = classify(args.repo_root, args.baseline_tag, args.head, crates, registry)
     except RuntimeError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

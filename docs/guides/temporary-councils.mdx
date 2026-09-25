@@ -84,8 +84,9 @@ never creates a mob, a capability, or a turn.
 
 ## Merge-Back Modes
 
-Exactly one policy per council. **No mode merges a transcript, and no mode
-writes into the calling session** — the outcome is returned to you.
+Exactly one policy per council. **No mode merges a transcript into the calling
+session**: the only thing that reaches the caller is the sealed outcome itself
+(see [Agent Tool](#agent-tool)).
 
 | Policy | What it produces |
 |--------|------------------|
@@ -97,8 +98,8 @@ writes into the calling session** — the outcome is returned to you.
 
 <Warning>
 There is no implicit transcript merge. If you want content back, ask for it
-with one of the explicit policies above; a council never appends anything to
-the caller's session.
+with one of the explicit policies above. Beyond its sealed outcome, a council
+appends nothing to the caller's session.
 </Warning>
 
 ## Durability And Crash Cleanup
@@ -177,18 +178,26 @@ resolves each member's current profile and placement, synthesizes the explicit
 temporary `MobDefinition`, derives stable branch identities, and starts the
 council. How the sealed result reaches the caller depends on the host:
 
-- **Detached (hosts that outlive the call).** The call returns at once with
-  `{"status": "running", "council_id": ..., "job_id": ...}`. The council runs
-  as a background operation of the convener's session. When it ends, the
-  convener receives a background-job completion for that `job_id` whose detail
-  is the sealed outcome (`result`, `cleanup`, `replayed`). The council's own
-  `timeout_seconds` bounds it; the agent loop's default tool deadline does not,
-  so a council longer than that deadline still delivers its result.
-- **Blocking (one-shot hosts).** A host that may exit when the turn ends, such
-  as `rkat run` without `--keep-alive`, cannot deliver a later completion. There
-  the call waits for the council and returns the sealed outcome as its ordinary
-  tool result. No default tool deadline applies to the wait; `timeout_seconds`
-  is the bound.
+- **Detached (hosts that outlive the call).** The JSON-RPC, REST, and MCP
+  servers, `rkat run --keep-alive`, and `rkat mob deploy --surface rpc` can
+  deliver a completion after the call returns. There the call returns at once
+  with `{"status": "running", "council_id": ..., "job_id": ...}` and the
+  council runs as a background operation of the convener's session. When it
+  ends, the record `{"tool": "council", "job_id": ..., "outcome": {"result",
+  "cleanup", "replayed"}}` is appended once to the convener's session as an
+  ordinary durable System message ("Background council job `<job_id>`
+  finished:" followed by the record), and the background job then completes
+  with the same record, which wakes the convener. The System message survives
+  later model calls, turns, and reloads and is readable through the convener's
+  session history; the job notice is transient.
+- **Blocking (one-shot hosts).** A host that may exit when the turn ends cannot
+  deliver a later completion: the `rkat` CLI unless it stays alive, such as
+  `rkat run` without `--keep-alive`. There the call waits for the council and
+  returns the sealed outcome as its ordinary tool result.
+
+In both forms the council's own `timeout_seconds` is the only deadline. The
+agent loop's default tool deadline does not cut the call, so a council longer
+than that deadline still delivers its result.
 
 ### Example Tool Call
 
@@ -239,8 +248,8 @@ conflict.
 
 On a detached host, a refusal that the council itself decides after the call
 returned (an over-budget bound, a `council_id` conflict, `capability_unavailable`
-for a durable request on a process-bound store) arrives as a **failed**
-background-job completion whose detail carries the typed error text. On a
+for a durable request on a process-bound store) is recorded with
+`{"error": ...}` as its outcome and the background job **fails**. On a
 blocking host the same refusals are tool errors.
 
 Seating failures, wiring gaps, exhausted budgets, and elapsed deadlines are

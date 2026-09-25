@@ -38,31 +38,46 @@ them.
 ### Breaking
 
 - Behavior-only: `fork_off` is detached (`meerkat-mob-mcp`
-  `AgentMobToolSurface`). Where the host can deliver a later completion, the
-  tool returns once the child is seated and its turn admitted, with
-  `status: "running"`, `mob_id`, `source_member_id`, `agent_identity`,
-  `member_ref`, `fork_session_id`, `cache_inheritance`, `job_id`, and
-  `max_run_secs` when set. It no longer waits for the child and no longer
-  carries `bounded_result`, `usage`, `turns` or `tool_calls`. The child's
-  outcome reaches the forker as a background-job completion for that `job_id`
-  whose detail is a JSON object naming the child with a `status`: `completed`
-  (with `bounded_result`, `usage`, `turns`, `tool_calls`), `failed` (with
-  `error`), `max_run_elapsed` (with `max_run_secs` and any
-  `retirement_error`), or `supervisor_stopped`. There is no default deadline;
-  the new optional `max_run_secs` argument is an opt-in autokill that cancels
-  the child's run and retires it. Prompts and hosts that read `bounded_result`
-  from the tool result must read the completion instead.
+  `AgentMobToolSurface`) on hosts that declare
+  `DetachedCompletionDelivery::Available` (the `MobMcpState` default, so the
+  JSON-RPC, REST and MCP servers; `rkat run --keep-alive`; `rkat mob deploy
+  --surface rpc`). There the tool returns once the child is seated and its
+  turn admitted, with `status: "running"`, `mob_id`, `source_member_id`,
+  `agent_identity`, `member_ref`, `fork_session_id`, `cache_inheritance`,
+  `job_id`, and `max_run_secs` when set. It no longer waits for the child and
+  no longer carries `bounded_result`, `usage`, `turns` or `tool_calls`. When
+  the child's turn ends, the record `{"tool": "fork_off", "job_id", "outcome"}`
+  is appended once to the forker's session as an ordinary durable System
+  message ("Background fork_off job <job_id> finished:", idempotent per job),
+  and the background job for `job_id` then completes or fails with the same
+  record as its detail, which wakes the forker. The `outcome` names the child
+  and has a `status`: `completed` (with `bounded_result`, `usage`, `turns`,
+  `tool_calls`), `failed` (with `error`), `max_run_elapsed` (with
+  `max_run_secs` and any `retirement_error`), or `supervisor_stopped`. The
+  `rkat` CLI declares `Unavailable` unless it stays alive, so `rkat run`
+  without `--keep-alive` and one-shot `rkat mob` commands keep a blocking
+  `fork_off` that returns the completed result directly (a child that does not
+  complete is a tool error carrying the outcome record). Neither form has a
+  default deadline and the agent loop's default tool deadline no longer cuts a
+  blocking call; the new optional `max_run_secs` argument is an opt-in
+  autokill, honored in both forms, that cancels the child's run and retires
+  it. Prompts and hosts that read `bounded_result` from a detached tool result
+  must read the recorded outcome instead.
 - Behavior-only: `fork_off` rejects arguments it does not define. Its arguments
   deserialize with `deny_unknown_fields` and its schema advertises
   `additionalProperties: false`, so an unknown field is an `invalid_arguments`
   error instead of being ignored. A host wrapper that adds its own fields must
   strip them before dispatch (MobKit strips `idle_retire_secs`).
-- Behavior-only: `council` is detached where the host can deliver a later
-  completion. The tool returns `{"status": "running", "council_id", "job_id"}`
-  and the sealed outcome (`result`, `cleanup`, `replayed`) arrives as that
-  job's completion. A refusal the council decides after the call returned (a
-  bound, a `council_id` conflict, `capability_unavailable`) arrives as a failed
-  completion instead of a tool error.
+- Behavior-only: `council` is detached on the same hosts. The tool returns
+  `{"status": "running", "council_id", "job_id"}`; the sealed outcome
+  (`result`, `cleanup`, `replayed`) is recorded as
+  `{"tool": "council", "job_id", "outcome"}` in a durable System message in
+  the convener's session and delivered as that job's completion. A refusal the
+  council decides after the call returned (a bound, a `council_id` conflict,
+  `capability_unavailable`) is recorded as `{"error": ...}` and fails the job
+  instead of being a tool error. One-shot hosts keep the blocking contract.
+  The council's `timeout_seconds` is its only deadline; the agent loop's
+  default tool deadline no longer cuts the call.
 - Behavior-only: forks start with zero usage (`meerkat-core`). `Session::fork`,
   `Session::fork_at`, `Session::fork_replacing`, and
   `Session::fork_at_complete_boundary` (with its `_with_identity` form) return
@@ -88,6 +103,13 @@ them.
   carries the operation's terminal outcome (the result content, or the error or
   reason) as its `detail`, and so as `AgentEvent::BackgroundJobCompleted`'s
   `detail`. It was an empty string before.
+- Behavior-only: `ResolvedToolExecutionPlan::effective_timeout` (new) ignores
+  the `CoreToolDispatch` deadline contributor when the tool's
+  `ToolExecutionContract` declares `CoreDispatchDeadline::ToolOwned`, and the
+  agent loop uses it instead of `deadlines().effective_timeout()`. The
+  resolved `ToolDeadlineChain` is unchanged; other contributors still bound
+  the call. `fork_off` and `council` declare `ToolOwned` in their catalog
+  entries; every other tool keeps the default `Applies`.
 - **Generated `MobMachine` vocabulary (`meerkat-machine-schema`,
   `meerkat-machine-kernels`, `meerkat-mob`):** the machine gains the input
   `ResolveOwnedMemberAdmission { can_manage_mob, caller_owns_member }`, the
@@ -129,11 +151,25 @@ them.
   gate.
 - `meerkat-mob`: `MobHandle::fork_member_then_run_detached` (fork, seat and
   admit the child's turn, then return a `ForkChildRun` without waiting;
-  optional `max_run`), `ForkChildRun`, `ForkChildRunOutcome` (`Completed`,
+  optional `max_run`; dropping the future before it returns retires the seated
+  child), `ForkChildRun`, `ForkChildRunOutcome` (`Completed`,
   `Failed`, `MaxRunElapsed`), `MobHandle::resolve_owned_member_admission`, and
   the durable ownership provenance `RosterEntry::spawned_by` and
   `MemberSpawnedEvent::spawned_by`. Journals written before this release decode
   the field as absent, which grants nothing.
+- `meerkat-core`: `CoreDispatchDeadline` (`Applies`, `ToolOwned`;
+  `#[non_exhaustive]`), `ToolExecutionContract::with_tool_owned_deadline`,
+  `ToolExecutionContract::core_deadline`, and
+  `ResolvedToolExecutionPlan::effective_timeout`. A tool that owns its lifetime
+  bound declares it so the agent loop's default tool deadline does not cut it.
+- `meerkat-mob-mcp`: `DetachedCompletionDelivery` (`Available`,
+  `Unavailable`; `#[non_exhaustive]`) and
+  `MobMcpState::with_detached_completion_delivery`,
+  `MobMcpState::set_detached_completion_delivery`, and
+  `MobMcpState::detached_completion_delivery`. A host declares whether it
+  outlives a tool call long enough to deliver detached completions; the
+  default is `Available`. One-shot hosts declare `Unavailable`, and `fork_off`
+  and `council` block for their result there.
 - `fork_off` accepts `max_run_secs`: an optional autokill that cancels the
   child's run and retires the child once it has run that long. Omitted means no
   limit.
@@ -144,6 +180,10 @@ them.
   durable on `MemberSpawnedEvent` and `RosterEntry`, restored on resume, and
   carried across a respawn that reuses the member's spec. It is never taken
   from tool arguments.
+- A `fork_off` call that ends before its child is handed off (the call is
+  dropped while the child is seated, or the job cannot be handed to its
+  completion task) retires the seated child and rolls the job back, so no
+  child runs unsupervised and no job is left in provisioning.
 - A completed `fork_off` child stays seated until its forker retires it.
   Meerkat adds no retention limit of its own; MobKit applies its
   `idle_retire_secs` policy to fork children.
@@ -195,7 +235,8 @@ them.
   The durable fork preflight now asks the blob store to attest the reference
   (`BlobStore::attest_address`) and re-homes an attested reference to meerkat's
   content address in the child's copy only; realtime hydration accepts attested
-  references. Unattested references still fail closed. Existing MobKit
+  references whose stored media type matches the block's and whose payload is
+  a valid image. Unattested references still fail closed. Existing MobKit
   references are accepted once MobKit's blob adapter implements
   `attest_address`.
 - A fork's first turn reported the source's whole lifetime usage as its own

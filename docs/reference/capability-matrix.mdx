@@ -92,11 +92,13 @@ contracts codes: provider failures -32010, budget exhaustion -32011, hook denial
 and remaining causes -32603.
 
 Temporary councils are agent-internal mob orchestration, not a public wire
-family. Where the host can deliver a later completion, the `council` agent tool
-returns `status: "running"` with a `job_id`, and the structured outcome arrives
-as that background job's completion; on a one-shot host (`rkat run` without
-`--keep-alive`) the call blocks and returns it through the ordinary tool-result
-channel. `fork_off` follows the same split. Cleanup debt is deliberately not a
+family. Where the host can deliver a later completion (the JSON-RPC, REST and
+MCP servers, `rkat run --keep-alive`), the `council` agent tool returns
+`status: "running"` with a `job_id`; the structured outcome is appended to the
+convener's session as a durable System message and delivered as that
+background job's completion. On a one-shot host (`rkat run` without
+`--keep-alive`) the call blocks and returns it through the ordinary
+tool-result channel. `fork_off` follows the same split. Cleanup debt is deliberately not a
 tool failure: a sealed result whose cleanup retained debt carries
 `cleanup.status = "debt"` or `"pending"`. Seating failures, wiring gaps,
 exhausted budgets, and elapsed deadlines remain typed `exit_reason` values on

@@ -1001,8 +1001,8 @@ objective/durable-fork prerequisites:
 | `mob_create` | Create a mob from a definition |
 | `mob_destroy` | Destroy a mob and archive all members |
 | `mob_spawn_member` | Spawn a member into an authorized mob |
-| `fork_off` | Take `member_id` + `task`, fork an exact committed transcript prefix through the durable resume path into a child the caller owns, and run the task; returns `status: "running"` + `job_id` and delivers the outcome as a background-job completion (blocks on one-shot hosts); optional `expected_output` is guidance, not a schema; optional `max_run_secs` is an opt-in autokill; unknown arguments are rejected |
-| `council` | Take a `topic` and existing `{mob_id, member_id, role}` participants; fork them into a bounded temporary discussion mob and clean up; the sealed outcome arrives as a background-job completion (blocks on one-shot hosts) |
+| `fork_off` | Take `member_id` + `task`, fork an exact committed transcript prefix through the durable resume path into a child the caller owns, and run the task; returns `status: "running"` + `job_id`; the outcome is appended to the forker's transcript as a durable System message and delivered as a background-job completion (blocks on one-shot hosts such as `rkat run` without `--keep-alive`); optional `expected_output` is guidance, not a schema; optional `max_run_secs` is an opt-in autokill; unknown arguments are rejected |
+| `council` | Take a `topic` and existing `{mob_id, member_id, role}` participants; fork them into a bounded temporary discussion mob and clean up; the sealed outcome is recorded durably in the convener's transcript and delivered as a background-job completion (blocks on one-shot hosts) |
 | `mob_retire_member` | Archive a member and its session; manage scope, or the caller owns the member (retiring a fork child also retires its own forks) |
 | `mob_check_member` | Check a member's execution status and output; manage scope, or the caller owns the member |
 | `mob_list_members` | List members of a mob; without manage scope, only the caller's own descendants |

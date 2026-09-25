@@ -94,7 +94,8 @@ For recurring teams, use explicit mobs instead of a chain of ad hoc delegates.
 A mob member can also fork itself with `fork_off`. The child starts from the
 member's exact committed transcript, runs one task in the background, and
 belongs to the forker, which can check, list, and retire it (and whatever it
-forks in turn) without manage scope over the mob. The result arrives later as a
+forks in turn) without manage scope over the mob. The result is appended to the
+forker's transcript as a durable System message and wakes the forker as a
 background-job completion; on a one-shot `rkat run` without `--keep-alive` the
 call blocks for it instead. There is no default deadline; `max_run_secs` is an
 opt-in autokill. See [Mob tools](/reference/builtin-tools#fork_off-and-council-delivery)

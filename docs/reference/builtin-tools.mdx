@@ -319,9 +319,12 @@ and workflows.
 
 `fork_off` forks the calling member's committed transcript into a durable child
 member, commits the task (and any `expected_output` guidance) as the child's
-input, and admits the child's one turn. On a host that outlives the call, such
-as a long-lived server or `rkat run --keep-alive`, it then returns without
-waiting for that turn:
+input, and admits the child's one turn. What happens next depends on whether
+the host can deliver a completion after the call returns.
+
+**Detached.** Hosts that outlive the call declare that they can: the JSON-RPC,
+REST, and MCP servers, `rkat run --keep-alive`, and `rkat mob deploy --surface
+rpc`. There `fork_off` returns without waiting for the child's turn:
 
 ```json
 {
@@ -336,9 +339,9 @@ waiting for that turn:
 }
 ```
 
-When the child's turn ends, the forker receives a background-job completion for
-that `job_id`. Its detail is a JSON outcome naming the child (`agent_identity`,
-`member_ref`) with a `status`:
+When the child's turn ends, the outcome is recorded as
+`{"tool": "fork_off", "job_id": ..., "outcome": {...}}`. The `outcome` names the
+child (`agent_identity`, `member_ref`) and carries a `status`:
 
 | `status` | Meaning |
 |----------|---------|
@@ -347,23 +350,50 @@ that `job_id`. Its detail is a JSON outcome naming the child (`agent_identity`,
 | `max_run_elapsed` | The opt-in `max_run_secs` elapsed. The run was cancelled and the child retired; `retirement_error` reports a failed retirement. |
 | `supervisor_stopped` | The runtime supervising the child stopped (mob shutdown) before the turn ended. |
 
-There is no default deadline: the child runs for as long as its task needs.
-`max_run_secs` is an opt-in autokill that cancels the child's run and retires
-the child once it has run that long; omit it for no limit. `fork_off` rejects
-arguments it does not define, so a misspelled or invented field is an argument
-error instead of a silently ignored intent.
+The record reaches the forker in two ways:
 
-`council` follows the same pattern: on a host that outlives the call it returns
-`status: "running"`, the `council_id`, and a `job_id`, and the sealed council
-outcome arrives as that job's completion. See
+- **Durably, in the forker's own transcript.** It is appended once to the
+  forker's session as an ordinary System message ("Background fork_off job
+  `<job_id>` finished:" followed by the record). It stays there across later
+  model calls, turns, and reloads, and it remains readable after the child is
+  retired: in the transcript the model sees, and through the forker's session
+  history (`session/history` over JSON-RPC, `GET /sessions/{id}/history` over
+  REST).
+- **As a wake-up.** The background job for `job_id` then completes (or fails)
+  with the same record as its detail, which wakes an idle forker. That notice
+  is transient; the durable System message is the copy to rely on. If the
+  record cannot be appended, the notice is still delivered.
+
+**Blocking.** A one-shot host may exit when the turn ends and so cannot deliver
+a later completion. The `rkat` CLI is one-shot unless it stays alive: `rkat
+run` without `--keep-alive` and the other one-shot `rkat mob` commands. There
+`fork_off` waits for the child and returns the completed result as its tool
+result (`bounded_result`, `usage`, `turns`, `tool_calls`, and the child's
+identity and sessions). A child that does not complete is a tool error whose
+text carries the same outcome record.
+
+Neither form has a default deadline, and the agent loop's default tool
+deadline does not cut a blocking call: the child runs for as long as its task
+needs. `max_run_secs` is an opt-in autokill, honored in both forms, that
+cancels the child's run and retires the child once it has run that long; omit
+it for no limit. `fork_off` rejects arguments it does not define, so a
+misspelled or invented field is an argument error instead of a silently
+ignored intent.
+
+`council` follows the same split. Detached, it returns `status: "running"`,
+the `council_id`, and a `job_id`, and the sealed outcome (`result`, `cleanup`,
+`replayed`) is recorded and delivered the same way, as
+`{"tool": "council", "job_id": ..., "outcome": {...}}`; a council that fails
+after the call returned records `{"error": ...}` as its outcome. Blocking, it
+returns the sealed outcome as its tool result. Its own `timeout_seconds` is the
+only deadline in both forms. See
 [Temporary Councils](/guides/temporary-councils#agent-tool).
 
-A one-shot host, such as `rkat run` without `--keep-alive`, may exit when the
-turn ends and so cannot deliver a later completion. There both tools block and
-return the outcome as their ordinary tool result: `fork_off` returns the
-child's `bounded_result`, and `council` the sealed outcome. The agent loop's
-default tool deadline does not apply to that wait; `max_run_secs` and the
-council's `timeout_seconds` are the only bounds.
+An embedding host declares the capability on its `MobMcpState`
+(`with_detached_completion_delivery` / `set_detached_completion_delivery` with
+`DetachedCompletionDelivery::Available` or `Unavailable`); the default is
+`Available`. Detached delivery also needs the session's operation registry,
+which runtime-backed sessions bind; without one the tools block.
 
 ### Forked children belong to their forker
 

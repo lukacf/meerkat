@@ -25,8 +25,8 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 
 SEMVER_PASS="PASS Tag releases reuse exact-tree pre-tag semver evidence"
 SEMVER_FAIL="FAIL Tag releases must reuse exact-tree pre-tag semver evidence"
-SLO_PASS="PASS Rust registry publication enforces the 30 minute tag-to-public SLO"
-SLO_FAIL="FAIL Rust registry publication does not enforce the 30 minute tag-to-public SLO"
+SLO_PASS="PASS Rust registry publication reads crates back before the SDKs and enforces the 30 minute publication SLO"
+SLO_FAIL="FAIL Rust registry publication does not read crates back before the SDKs or enforce the 30 minute publication SLO"
 
 fail() {
   echo "release doctor workflow contract violated: $1" >&2
@@ -85,7 +85,14 @@ SLO_LINE = (
     "            --slo-seconds ${{ github.event_name == 'workflow_dispatch'"
     " && '2147483647' || '1800' }}\n"
 )
-SLO_PREVIOUS_LINE = "            --deadline-seconds 900 \\\n"
+SLO_PREVIOUS_LINE = (
+    '            ${tag_pushed_at:+--tag-pushed-at "${tag_pushed_at}"} \\\n'
+)
+
+STEP_BODY = r"(?:        .*\n|          .*\n|\n)*?(?=      - name: |\Z|  [a-z_]+:\n)"
+READBACK_STEP = re.compile(r"      - name: Verify all Rust crates are public\n" + STEP_BODY)
+SLO_STEP = re.compile(r"      - name: Enforce the 30 minute Rust publication SLO\n" + STEP_BODY)
+PYTHON_SDK_STEP = re.compile(r"      - name: Publish Python SDK\n")
 
 if name == "evidence-step-removed":
     match = EVIDENCE_STEP.search(text)
@@ -120,7 +127,10 @@ elif name == "measurement-on-tags":
 elif name == "slo-relaxed":
     replace_once(SLO_LINE, SLO_LINE.replace("'1800'", "'3600'"))
 elif name == "slo-flag-removed":
-    replace_once(SLO_PREVIOUS_LINE + SLO_LINE, "            --deadline-seconds 900\n")
+    replace_once(
+        SLO_PREVIOUS_LINE + SLO_LINE,
+        '            ${tag_pushed_at:+--tag-pushed-at "${tag_pushed_at}"}\n',
+    )
 elif name == "slo-literal":
     replace_once(SLO_LINE, "            --slo-seconds 1800\n")
 elif name == "slo-reflowed":
@@ -132,6 +142,20 @@ elif name == "slo-reflowed":
         "              || '2147483647'\n"
         "            }}\n",
     )
+elif name == "readback-step-removed":
+    match = READBACK_STEP.search(text)
+    if match is None or len(READBACK_STEP.findall(text)) != 1:
+        raise SystemExit("fixture expects exactly one crate readback step")
+    text = text[: match.start()] + text[match.end() :]
+elif name == "slo-before-sdk":
+    slo = SLO_STEP.search(text)
+    sdk = PYTHON_SDK_STEP.search(text)
+    if slo is None or sdk is None:
+        raise SystemExit("fixture expects the SLO step and the Python SDK step")
+    slo_text = slo.group(0)
+    text = text[: slo.start()] + text[slo.end() :]
+    sdk = PYTHON_SDK_STEP.search(text)
+    text = text[: sdk.start()] + slo_text + text[sdk.start() :]
 elif name == "both-defects":
     replace_once(
         MEASUREMENT_STEP_IF,
@@ -213,6 +237,13 @@ expect_fail_named slo-relaxed "${TEST_ROOT}/slo-relaxed.yml" \
 mutate slo-flag-removed "${TEST_ROOT}/slo-flag-removed.yml"
 expect_fail_named slo-flag-removed "${TEST_ROOT}/slo-flag-removed.yml" \
   "without \`--slo-seconds\`" registry-slo
+
+mutate readback-step-removed "${TEST_ROOT}/readback-step-removed.yml"
+expect_fail_named readback-step-removed "${TEST_ROOT}/readback-step-removed.yml" \
+  "no step that reads every crate back" registry-slo
+mutate slo-before-sdk "${TEST_ROOT}/slo-before-sdk.yml"
+expect_fail_named slo-before-sdk "${TEST_ROOT}/slo-before-sdk.yml" \
+  "SDK publication must not wait on the publication SLO" registry-slo
 
 # 4. The doctor itself binds to the checker: its PASS/FAIL lines follow the
 #    workflow it is pointed at. Environment checks (gh, npm) are ignored; only

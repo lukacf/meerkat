@@ -46,6 +46,14 @@ them.
   dependencies, and treats a name missing from the baseline workspace as a first
   publication only when crates.io has never published it. Against v0.8.41 the
   gate now measures 16 crates.
+- Tag releases publish the Python and TypeScript SDK packages without the
+  manual packages recovery lane. The crates.io check is split: a readback step
+  (every crate public, checksummed, not yanked) gates the SDK packages, and the
+  30 minute publication SLO is enforced after they publish, measured from the
+  start of crate publication instead of the tag push, which full-fresh
+  validation precedes by about an hour. The tag-to-public latency is still
+  reported. `scripts/verify-rust-release-public.py` gains `--readback-only`,
+  `--observations-out`, `--observations-in` and `--window-started-at`.
 
 ## [0.8.42] - 2026-09-24
 

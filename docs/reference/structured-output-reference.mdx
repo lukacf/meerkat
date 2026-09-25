@@ -82,6 +82,25 @@ sticky model fallback switches providers mid-request, the retried request
 shows the fallback provider's compiled schema, which is also the one used
 for validation from then on.
 
+## Known limits
+
+- **Changing the schema between turns of one session invalidates the cached
+  prompt prefix.** The section is part of the leading system prompt, so a turn
+  that sets, clears, or swaps `output_schema` sends a different prompt prefix
+  than the turns before it, and the provider's prompt cache misses for that
+  prefix once. Only callers that change the schema from turn to turn are
+  affected: a session with a stable schema (or none) sends a byte-identical
+  prefix on every request, and caching works as usual.
+- **OpenAI Responses `store=true` continuation keeps the section of the stored
+  chain.** With the explicit `store=true` opt-in, follow-up requests continue
+  the conversation the provider stored instead of resending it, so the model
+  still sees the section the earlier requests carried, the same way a stored
+  chain keeps an earlier system prompt. If the schema changed since, the
+  visible reply may follow the old schema. `structured_output` stays correct:
+  validate-first checks the reply against the current schema, a reply shaped by
+  the old one fails, and the extraction request runs with the current schema
+  in the native slot.
+
 ## Result-side fields
 
 | Field | Meaning |

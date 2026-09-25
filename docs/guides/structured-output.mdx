@@ -31,6 +31,8 @@ When `output_schema` is configured on an agent, the execution flow is:
     validation. The section is identical on every request, so prompt caching
     is unaffected. It is added to the request only and is never written into
     the session transcript. Runs without `output_schema` are unchanged.
+    Changing the schema between turns of one session changes the prompt
+    prefix; see [Known limits](/reference/structured-output-reference#known-limits).
   </Step>
   <Step title="Agentic loop runs normally">
     The agent processes the prompt, calls tools, and iterates until no more tool calls remain.

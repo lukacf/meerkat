@@ -416,7 +416,8 @@ before the restart is never recorded twice, and an idle forker is woken to see
 it. A job whose completion was already admitted is finished: the pass leaves
 it and its child alone (no limit, no cancel, no second record), and a
 respawned child carries no job, although its ownership still follows the
-identity. `MobMcpState::relink_restored_fork_children` runs the pass
+identity. A job whose forker no longer exists is reported as owner gone
+instead of retried. `MobMcpState::relink_restored_fork_children` runs the pass
 explicitly.
 
 `council` follows the same split. Detached, it returns `status: "running"`,

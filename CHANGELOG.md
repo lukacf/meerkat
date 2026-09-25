@@ -206,7 +206,8 @@ them.
   `TemporaryCouncilExitReason::is_failure`.
 - `meerkat-mob-mcp`: the `fork_relink` module (`relink_restored_fork_children`,
   `relink_mob_fork_children`, `relink_child`, `ForkRelinkReport`,
-  `ForkRelinkAction` with `Delivered`, `AlreadyDelivered`, `Failed`) and
+  `ForkRelinkAction` with `Delivered`, `AlreadyDelivered`, `OwnerGone`,
+  `Failed`) and
   `MobMcpState::relink_restored_fork_children`, the explicit entry point for
   the post-restore re-link pass.
 - `meerkat-core`: `CoreDispatchDeadline` (`Applies`, `ToolOwned`;
@@ -226,13 +227,14 @@ them.
 - `meerkat-mob-mcp`: the `detached_delivery` module
   (`deliver_detached_completion`, `deliver_detached_completion_to_member`,
   `detached_completion_notice`, `DetachedCompletionDelivered`,
-  `DetachedCompletionError`, `DetachedDeliveryUnavailable` with
+  `DetachedCompletionError` (`Encode`, `Rejected`, `Runtime`, and `OwnerGone`
+  for an owner that no longer exists), `DetachedDeliveryUnavailable` with
   `HostDeclaredUnavailable` and `NoRuntimeAdapter`),
   `MobMcpState::detached_delivery_blocked_because`, the `council_relink` module
   (`relink_detached_councils`, `relink_council`, `CouncilRelinkReport`), and
   `MobMcpState::relink_detached_councils`, `CouncilRelinkAction`
   (`Delivered`, `AlreadyDelivered`, `AwaitingSeal { claim_lease_expires_at }`,
-  `Failed`), `TemporaryCouncilCoordinator::run_detached`,
+  `OwnerGone`, `Failed`), `TemporaryCouncilCoordinator::run_detached`,
   `TemporaryCouncilCoordinator::sweep_unfinished`,
   `TemporaryCouncilRecoverySweep` (`recovered`, `held`), and
   `TemporaryCouncilHeldRecord` (`council_id`, `current_claim_epoch`,
@@ -298,7 +300,9 @@ them.
   sweep, every council from an earlier process whose job is not settled has
   its outcome delivered once: its sealed result, or `coordinator_interrupted`
   once the dead coordinator's claim lease is observed expired. Councils are
-  never re-executed.
+  never re-executed. A job whose owner no longer exists (a convener session
+  that was deleted or archived, or a forker no longer seated) is reported as
+  owner gone and settled, so later restarts do not retry it.
 - A completed `fork_off` child stays seated until its forker retires it.
   Meerkat adds no retention limit of its own; MobKit applies its
   `idle_retire_secs` policy to fork children.

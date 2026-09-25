@@ -218,7 +218,9 @@ sweep, every council from an earlier process whose job is not yet settled has
 its outcome delivered: its sealed result when it finished before the restart,
 or the typed `coordinator_interrupted` outcome once the dead coordinator's
 claim lease is observed expired. Councils are never re-executed, and delivery
-uses the same idempotency key, so the outcome is recorded once.
+uses the same idempotency key, so the outcome is recorded once. A council whose
+convener session no longer exists (deleted or archived) is reported as owner
+gone and settled, so later restarts do not retry it.
 
 ### Example Tool Call
 

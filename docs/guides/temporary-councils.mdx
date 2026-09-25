@@ -195,9 +195,9 @@ council. How the sealed result reaches the caller depends on the host:
   `rkat run` without `--keep-alive`. There the call waits for the council and
   returns the sealed outcome as its ordinary tool result.
 
-In both forms the council's own `timeout_seconds` is the only deadline. The
-agent loop's default tool deadline does not cut the call, so a council longer
-than that deadline still delivers its result.
+In both forms the council's own `timeout_seconds` bounds it. The agent loop's
+default tool deadline does not cut the call, so a council longer than that
+deadline still delivers its result.
 
 ### Example Tool Call
 

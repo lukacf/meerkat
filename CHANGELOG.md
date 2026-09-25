@@ -76,17 +76,17 @@ them.
   council decides after the call returned (a bound, a `council_id` conflict,
   `capability_unavailable`) is recorded as `{"error": ...}` and fails the job
   instead of being a tool error. One-shot hosts keep the blocking contract.
-  The council's `timeout_seconds` is its only deadline; the agent loop's
-  default tool deadline no longer cuts the call.
+  The council's `timeout_seconds` bounds it; the agent loop's default tool
+  deadline no longer cuts the call.
 - Behavior-only: forks start with zero usage (`meerkat-core`). `Session::fork`,
   `Session::fork_at`, `Session::fork_replacing`, and
   `Session::fork_at_complete_boundary` (with its `_with_identity` form) return
   a session whose `total_usage()` is `Usage::default()`; they copied the
   source's lifetime usage before. The source's own usage is unchanged.
 - Behavior-only: `MobHandle::fork_member_then_run_bounded` retires the child
-  when the child's turn fails, and reports a failed retirement as
-  `BoundedMemberRunError::CleanupDebt`. It left the failed child seated before.
-  A child whose turn completes stays seated, as before.
+  (and any member the child spawned) when the child's turn fails, and reports a
+  failed retirement as `BoundedMemberRunError::CleanupDebt`. It left the failed
+  child seated before. A child whose turn completes stays seated, as before.
 - Behavior-only: `MobHandle::spawn_helper` and `MobHandle::fork_helper`, and
   through them `delegate`, RPC `mob/spawn_helper` / `mob/fork_helper`, and the
   REST helper routes, retire a seated helper when the caller's future is
@@ -97,19 +97,23 @@ them.
   `retire_member`, and `force_cancel_member` admit a caller that owns the
   target member instead of returning `access_denied`, and `mob_list_members` /
   `list_members` return only the members the caller owns instead of
-  `access_denied`. A member owns the children it forked with `fork_off`.
+  `access_denied`. Ownership is transitive and never flows upward: a member
+  owns the children it forked with `fork_off`, their forks, and so on.
+- Behavior-only: retirement cascades to spawned descendants.
+  `MobMcpState::mob_retire`, and through it RPC `mob/retire`, MCP
+  `meerkat_mob_retire`, the web runtime's `mob_retire`, the agent tool
+  `mob_retire_member`, and the member operator tool `retire_member`, retires
+  every member the target transitively spawned (durable `spawned_by`
+  provenance), deepest first, then the target. Every retirement is attempted
+  and the first failure is returned. So do the `fork_off` `max_run_secs`
+  autokill and failed-child cleanup. Only members created from a spawner's own
+  turn (`fork_off`) carry that provenance; `MobHandle::retire` still retires
+  one member.
 - Behavior-only: a background-job completion for a detached operation without a
   process-local enrichment record (`fork_off`, `council`, `mob_wait_ready`)
   carries the operation's terminal outcome (the result content, or the error or
   reason) as its `detail`, and so as `AgentEvent::BackgroundJobCompleted`'s
   `detail`. It was an empty string before.
-- Behavior-only: `ResolvedToolExecutionPlan::effective_timeout` (new) ignores
-  the `CoreToolDispatch` deadline contributor when the tool's
-  `ToolExecutionContract` declares `CoreDispatchDeadline::ToolOwned`, and the
-  agent loop uses it instead of `deadlines().effective_timeout()`. The
-  resolved `ToolDeadlineChain` is unchanged; other contributors still bound
-  the call. `fork_off` and `council` declare `ToolOwned` in their catalog
-  entries; every other tool keeps the default `Applies`.
 - **Generated `MobMachine` vocabulary (`meerkat-machine-schema`,
   `meerkat-machine-kernels`, `meerkat-mob`):** the machine gains the input
   `ResolveOwnedMemberAdmission { can_manage_mob, caller_owns_member }`, the
@@ -153,10 +157,11 @@ them.
   admit the child's turn, then return a `ForkChildRun` without waiting;
   optional `max_run`; dropping the future before it returns retires the seated
   child), `ForkChildRun`, `ForkChildRunOutcome` (`Completed`,
-  `Failed`, `MaxRunElapsed`), `MobHandle::resolve_owned_member_admission`, and
-  the durable ownership provenance `RosterEntry::spawned_by` and
-  `MemberSpawnedEvent::spawned_by`. Journals written before this release decode
-  the field as absent, which grants nothing.
+  `Failed`, `MaxRunElapsed`), `MobHandle::resolve_owned_member_admission`,
+  `MobHandle::retire_with_descendants`, `MobHandle::descendants_deepest_first`,
+  and the durable ownership provenance `RosterEntry::spawned_by` and
+  `MemberSpawnedEvent::spawned_by`. Journals written before this release
+  decode the field as absent, which grants nothing.
 - `meerkat-core`: `CoreDispatchDeadline` (`Applies`, `ToolOwned`;
   `#[non_exhaustive]`), `ToolExecutionContract::with_tool_owned_deadline`,
   `ToolExecutionContract::core_deadline`, and
@@ -176,10 +181,19 @@ them.
 
 ### Changed
 
+- The agent loop bounds a tool call by
+  `ResolvedToolExecutionPlan::effective_timeout`, which ignores the
+  `CoreToolDispatch` deadline contributor when the tool's
+  `ToolExecutionContract` declares `CoreDispatchDeadline::ToolOwned`. The
+  resolved `ToolDeadlineChain` is unchanged and other contributors still bound
+  the call. `fork_off` and `council` declare `ToolOwned` in their catalog
+  entries; every other tool keeps the default `Applies` and the same deadline
+  as before.
 - `fork_off` records the forking member as the child's owner. The provenance is
   durable on `MemberSpawnedEvent` and `RosterEntry`, restored on resume, and
-  carried across a respawn that reuses the member's spec. It is never taken
-  from tool arguments.
+  carried across respawn, including `MobHandle::respawn_with_successor_spec`
+  (a successor spec keeps the spawner of the incarnation it replaces). It is
+  never taken from tool arguments.
 - A `fork_off` call that ends before its child is handed off (the call is
   dropped while the child is seated, or the job cannot be handed to its
   completion task) retires the seated child and rolls the job back, so no

@@ -606,16 +606,21 @@ deadline, and the agent loop's default tool deadline does not cut it;
 `max_run_secs` is an opt-in autokill, honored in both forms, that cancels the
 run and retires the child.
 
-The forker owns its child, and transitively every member that child forks.
-Ownership is durable spawn provenance read from the caller's own session
-binding, never from arguments. Without manage scope the forker can still
-observe its descendants with `mob_check_member`, retire them with
-`mob_retire_member` (retiring a child also retires the members it forked),
-and see them, and only them, in `mob_list_members`; the member operator tools
+The forker owns its child, and transitively every member that child forks
+(ownership never flows upward). Ownership is durable spawn provenance
+(`RosterEntry::spawned_by`, kept across resume, respawn and successor-spec
+respawn) checked against the caller's own session binding, never against
+arguments. Without manage scope the forker can still observe its descendants
+with `mob_check_member`, retire them with `mob_retire_member`, and see them,
+and only them, in `mob_list_members`; the member operator tools
 `member_status`, `retire_member`, `force_cancel_member`, and `list_members`
-apply the same rule. A child whose own turn fails is retired automatically; a
-child whose turn completes stays seated until its forker retires it. Meerkat
-adds no retention limit; MobKit applies its `idle_retire_secs` policy.
+apply the same rule. Retirement cascades to descendants, deepest first
+(`MobHandle::retire_with_descendants`): the retire tools, autokill,
+failed-child cleanup, and host `mob/retire` / `meerkat_mob_retire` all use it;
+plain `MobHandle::retire` retires one member. A child whose own turn fails is
+retired automatically; a child whose turn completes stays seated until its
+forker retires it. Meerkat adds no retention limit; MobKit applies its
+`idle_retire_secs` policy.
 
 `council` requires creation authority and scope over each source mob. Supply a
 `topic` and participants with `mob_id`, `member_id`, and discussion `role`;
@@ -628,7 +633,8 @@ completion: the call returns `status: "running"`, the `council_id`, and a
 when it fails after the call returned) is recorded as a durable System message
 in the convener's session and delivered as that job's completion. On a
 one-shot host the call blocks and returns the sealed outcome.
-`timeout_seconds` is the only deadline.
+`timeout_seconds` bounds it; the agent loop's default tool deadline does not.
+
 Visibility alone satisfies none of these per-call prerequisites.
 
 A realm profile store adds five profile-management tools for reusable,

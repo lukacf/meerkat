@@ -372,9 +372,9 @@ result (`bounded_result`, `usage`, `turns`, `tool_calls`, and the child's
 identity and sessions). A child that does not complete is a tool error whose
 text carries the same outcome record.
 
-Neither form has a default deadline, and the agent loop's default tool
-deadline does not cut a blocking call: the child runs for as long as its task
-needs. `max_run_secs` is an opt-in autokill, honored in both forms, that
+Neither form has a default deadline: the child runs for as long as its task
+needs. The agent loop's default tool deadline does not cut a blocking call; a
+deadline the host itself imposes on tool calls still applies. `max_run_secs` is an opt-in autokill, honored in both forms, that
 cancels the child's run and retires the child once it has run that long; omit
 it for no limit. `fork_off` rejects arguments it does not define, so a
 misspelled or invented field is an argument error instead of a silently
@@ -385,8 +385,8 @@ the `council_id`, and a `job_id`, and the sealed outcome (`result`, `cleanup`,
 `replayed`) is recorded and delivered the same way, as
 `{"tool": "council", "job_id": ..., "outcome": {...}}`; a council that fails
 after the call returned records `{"error": ...}` as its outcome. Blocking, it
-returns the sealed outcome as its tool result. Its own `timeout_seconds` is the
-only deadline in both forms. See
+returns the sealed outcome as its tool result. Its own `timeout_seconds` bounds
+it in both forms, and the agent loop's default tool deadline does not. See
 [Temporary Councils](/guides/temporary-councils#agent-tool).
 
 An embedding host declares the capability on its `MobMcpState`
@@ -397,19 +397,28 @@ which runtime-backed sessions bind; without one the tools block.
 
 ### Forked children belong to their forker
 
-A child created by `fork_off` belongs to the member that forked it, and so does
-every member that child forks in turn. Ownership is recorded durably when the
-child is seated and is read from the caller's own session binding, never from
+Ownership follows the process tree. A child created by `fork_off` belongs to
+the member that forked it, and so does every member that child forks in turn;
+ownership never flows upward. The spawner is recorded durably when the child is
+seated, survives resume and respawn (including a respawn with a successor
+spec), and is checked against the caller's own session binding, never against
 tool arguments. Without manage scope over the mob, the forker can still:
 
 - read any of its descendants with `mob_check_member`;
-- retire any of its descendants with `mob_retire_member`, which also retires
-  the members that descendant forked;
+- retire any of its descendants with `mob_retire_member`;
 - list its descendants, and only those, with `mob_list_members`.
 
 A profile's member operator tools (`member_status`, `retire_member`,
 `force_cancel_member`, `list_members`) apply the same rule. With manage scope,
-all of these tools behave as before.
+all of these tools reach every member, as before.
+
+Retirement cascades like a process tree. Retiring a member retires every member
+it transitively spawned, deepest first, through the ordinary retire path; every
+retirement is attempted and the first failure is reported. This applies to
+`mob_retire_member`, `retire_member`, the `max_run_secs` autokill, the
+retirement of a child whose turn failed, and host-side retirement (`mob/retire`
+over JSON-RPC, `meerkat_mob_retire` over MCP). A forker retired through any of
+these paths takes its descendants with it.
 
 A child whose own turn fails is retired automatically. A child whose turn
 completes stays seated, for inspection or further work, until its forker

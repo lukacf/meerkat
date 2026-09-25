@@ -6,6 +6,7 @@
 )]
 
 mod agent_tools;
+pub mod council_relink;
 pub mod detached_delivery;
 pub mod fork_relink;
 #[cfg(all(feature = "openai-live", not(target_arch = "wasm32")))]
@@ -845,6 +846,15 @@ impl MobMcpState {
                         "temporary council recovery sweep failed; records remain unfinished"
                     );
                 }
+            }
+            // After the sweep, so councils it sealed deliver at once.
+            let reports =
+                crate::council_relink::relink_detached_councils(&state, state.created_at_ms).await;
+            if !reports.is_empty() {
+                tracing::info!(
+                    councils = reports.len(),
+                    "council re-link delivered detached outcomes from a previous process"
+                );
             }
         });
     }
@@ -1736,6 +1746,18 @@ impl MobMcpState {
         // Explicit runs ignore the automatic pass's claims; delivery is
         // idempotent per job, so running twice never records twice.
         crate::fork_relink::relink_restored_fork_children(self, self.created_at_ms, false).await
+    }
+
+    /// Deliver the outcome of every detached council from an earlier process
+    /// whose convener is still owed it, and report what was done. Persistent
+    /// restoration runs this automatically after the council recovery sweep;
+    /// a host that shares its state with `Arc::new` and recovers councils by
+    /// calling [`TemporaryCouncilCoordinator::recover_unfinished`] calls this
+    /// after it. Delivery is idempotent per job.
+    pub async fn relink_detached_councils(
+        self: &Arc<Self>,
+    ) -> Vec<crate::council_relink::CouncilRelinkReport> {
+        crate::council_relink::relink_detached_councils(self, self.created_at_ms).await
     }
 
     /// Change signal over the managed-mob handle set: the receiver wakes when

@@ -753,6 +753,42 @@ pub struct TemporaryCouncilResult {
     pub concluded_at: DateTime<Utc>,
 }
 
+/// The detached tool job waiting on a council's outcome.
+///
+/// A convener that runs a council detached gets a job id back and expects
+/// the council's outcome in its transcript when the council ends. The live
+/// process delivers it from a process-local task; this binding is the
+/// durable half, so a restarted host can still deliver the sealed outcome
+/// (or the typed interrupted one) to the convener, once, under the same
+/// idempotency key the live delivery uses.
+///
+/// Sidecar, not lifecycle truth: the council machine never reads it and it is
+/// not part of the request fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemporaryCouncilJobBinding {
+    /// The convener's background job id.
+    pub job_id: String,
+    /// The convener's session, which receives the outcome.
+    pub owner_session_id: SessionId,
+    /// When a restart re-link confirmed the outcome was delivered to the
+    /// convener. Absent while delivery is still owed, or when the live
+    /// process delivered it and no restart has looked since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<DateTime<Utc>>,
+}
+
+impl TemporaryCouncilJobBinding {
+    /// Bind a council to the convener's background job.
+    #[must_use]
+    pub fn new(job_id: impl Into<String>, owner_session_id: SessionId) -> Self {
+        Self {
+            job_id: job_id.into(),
+            owner_session_id,
+            settled_at: None,
+        }
+    }
+}
+
 /// One unpaid cleanup obligation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TemporaryCouncilCleanupDebt {

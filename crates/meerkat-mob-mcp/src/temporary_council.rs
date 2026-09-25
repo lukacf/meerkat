@@ -69,10 +69,11 @@ use meerkat_mob::temporary_council::{
     TemporaryCouncilArtifactClaim, TemporaryCouncilCapabilityProvenance,
     TemporaryCouncilCleanupDebt, TemporaryCouncilCleanupReceipt, TemporaryCouncilCleanupStatus,
     TemporaryCouncilDurability, TemporaryCouncilExchangeOutcome, TemporaryCouncilExchangeReceipt,
-    TemporaryCouncilExitReason, TemporaryCouncilId, TemporaryCouncilMergeOutcome,
-    TemporaryCouncilMergePolicyKind, TemporaryCouncilParticipantCustody,
-    TemporaryCouncilParticipantProvenance, TemporaryCouncilResult,
-    TemporaryCouncilSelectedExchange, TemporaryCouncilStructuredContractIdentity,
+    TemporaryCouncilExitReason, TemporaryCouncilId, TemporaryCouncilJobBinding,
+    TemporaryCouncilMergeOutcome, TemporaryCouncilMergePolicyKind,
+    TemporaryCouncilParticipantCustody, TemporaryCouncilParticipantProvenance,
+    TemporaryCouncilResult, TemporaryCouncilSelectedExchange,
+    TemporaryCouncilStructuredContractIdentity,
 };
 use meerkat_mob::{
     AgentIdentity, MobDefinition, MobError, MobHandle, MobId, MobStoreError, ProfileBinding,
@@ -1155,7 +1156,23 @@ impl TemporaryCouncilCoordinator {
         &self,
         request: TemporaryCouncilRequest,
     ) -> Result<TemporaryCouncilOutcome, TemporaryCouncilError> {
-        self.run_with_host_bootstrap(request, TemporaryCouncilHostBootstrap::none())
+        self.run_with_host_bootstrap(request, TemporaryCouncilHostBootstrap::none(), None)
+            .await
+    }
+
+    /// [`Self::run`] for a convener that runs the council detached and
+    /// expects the outcome as the completion of background job `job`.
+    ///
+    /// A NEW council records `job` durably beside its custody, so a restarted
+    /// host can still deliver the sealed (or typed interrupted) outcome to
+    /// the convener; see [`crate::council_relink`]. A replay or a joined call
+    /// leaves an existing record's binding as it is.
+    pub async fn run_detached(
+        &self,
+        request: TemporaryCouncilRequest,
+        job: TemporaryCouncilJobBinding,
+    ) -> Result<TemporaryCouncilOutcome, TemporaryCouncilError> {
+        self.run_with_host_bootstrap(request, TemporaryCouncilHostBootstrap::none(), Some(job))
             .await
     }
 
@@ -1169,6 +1186,7 @@ impl TemporaryCouncilCoordinator {
         &self,
         request: TemporaryCouncilRequest,
         host_bootstrap: TemporaryCouncilHostBootstrap,
+        detached_job: Option<TemporaryCouncilJobBinding>,
     ) -> Result<TemporaryCouncilOutcome, TemporaryCouncilError> {
         // Shape validation only. Deadline resolution is deliberately NOT done
         // here: a replay of a lost response may legitimately arrive after the
@@ -1205,6 +1223,7 @@ impl TemporaryCouncilCoordinator {
                 .admit_owned(
                     &validated,
                     host_bootstrap,
+                    detached_job,
                     key,
                     owner_tx.clone(),
                     completion.clone(),
@@ -1253,6 +1272,7 @@ impl TemporaryCouncilCoordinator {
         &self,
         validated: &ValidatedRequest,
         host_bootstrap: TemporaryCouncilHostBootstrap,
+        detached_job: Option<TemporaryCouncilJobBinding>,
         key: String,
         tx: tokio::sync::watch::Sender<Option<CouncilPublish>>,
         rx: tokio::sync::watch::Receiver<Option<CouncilPublish>>,
@@ -1292,6 +1312,7 @@ impl TemporaryCouncilCoordinator {
                     exchanges: Vec::new(),
                     result: None,
                     cleanup: None,
+                    detached_job,
                     revision: 0,
                     created_at: now,
                     updated_at: now,
@@ -1537,52 +1558,64 @@ impl TemporaryCouncilCoordinator {
             .map_err(TemporaryCouncilError::store)?;
         let mut reports = Vec::new();
         for record in unfinished {
-            let key = record.council_id.as_str().to_string();
-            let (tx, rx) = tokio::sync::watch::channel(None);
-            if matches!(
-                self.state.temporary_council_reserve_inflight(
-                    key.clone(),
-                    record.request_fingerprint.clone(),
-                    rx,
-                ),
-                InflightReservation::Existing { .. }
-            ) {
-                continue;
-            }
-            let _guard = InflightGuard::new(self.state.clone(), key);
-            match self.recover_record(record).await {
-                Ok(report) => {
-                    let publication = match store
-                        .load(&report.council_id)
-                        .await
-                        .map_err(TemporaryCouncilError::store)
-                    {
-                        Ok(Some(record)) => replay_outcome(record),
-                        Ok(None) => Err(TemporaryCouncilError::CoordinatorUnavailable {
-                            detail: format!(
-                                "council {} disappeared after recovery",
-                                report.council_id
-                            ),
-                        }),
-                        Err(error) => Err(error),
-                    };
-                    let _ = tx.send(Some(Arc::new(publication.clone())));
-                    publication?;
-                    reports.push(report);
-                }
-                Err(error @ TemporaryCouncilError::HeldByAnotherCoordinator { .. }) => {
-                    // A live foreign coordinator owns this record. Its lease
-                    // expiry will admit takeover later; unrelated recovery
-                    // work must continue.
-                    let _ = tx.send(Some(Arc::new(Err(error))));
-                }
-                Err(error) => {
-                    let _ = tx.send(Some(Arc::new(Err(error.clone()))));
-                    return Err(error);
-                }
+            match self.recover_reserved(record).await {
+                Ok(Some(report)) => reports.push(report),
+                // A live task in this process owns the council.
+                Ok(None) => {}
+                // A live foreign coordinator owns this record. Its lease
+                // expiry will admit takeover later; unrelated recovery work
+                // must continue.
+                Err(TemporaryCouncilError::HeldByAnotherCoordinator { .. }) => {}
+                Err(error) => return Err(error),
             }
         }
         Ok(reports)
+    }
+
+    /// Recover one record under this process's single-flight reservation,
+    /// publishing the outcome to any caller that joins it meanwhile.
+    ///
+    /// `Ok(None)` when a live task in this process already owns the council.
+    pub(crate) async fn recover_reserved(
+        &self,
+        record: TemporaryCouncilRecord,
+    ) -> Result<Option<TemporaryCouncilRecoveryReport>, TemporaryCouncilError> {
+        let store = self.store();
+        let key = record.council_id.as_str().to_string();
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        if matches!(
+            self.state.temporary_council_reserve_inflight(
+                key.clone(),
+                record.request_fingerprint.clone(),
+                rx,
+            ),
+            InflightReservation::Existing { .. }
+        ) {
+            return Ok(None);
+        }
+        let _guard = InflightGuard::new(self.state.clone(), key);
+        match self.recover_record(record).await {
+            Ok(report) => {
+                let publication = match store
+                    .load(&report.council_id)
+                    .await
+                    .map_err(TemporaryCouncilError::store)
+                {
+                    Ok(Some(record)) => replay_outcome(record),
+                    Ok(None) => Err(TemporaryCouncilError::CoordinatorUnavailable {
+                        detail: format!("council {} disappeared after recovery", report.council_id),
+                    }),
+                    Err(error) => Err(error),
+                };
+                let _ = tx.send(Some(Arc::new(publication.clone())));
+                publication?;
+                Ok(Some(report))
+            }
+            Err(error) => {
+                let _ = tx.send(Some(Arc::new(Err(error.clone()))));
+                Err(error)
+            }
+        }
     }
 
     async fn recover_record(
@@ -1782,7 +1815,7 @@ enum Admission {
     Join(tokio::sync::watch::Receiver<Option<CouncilPublish>>),
 }
 
-fn replay_outcome(
+pub(crate) fn replay_outcome(
     record: TemporaryCouncilRecord,
 ) -> Result<TemporaryCouncilOutcome, TemporaryCouncilError> {
     let council_id = record.council_id.clone();

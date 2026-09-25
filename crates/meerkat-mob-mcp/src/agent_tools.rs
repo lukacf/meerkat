@@ -57,7 +57,7 @@ const TOOL_MOB_CREATE: &str = "mob_create";
 const TOOL_MOB_DESTROY: &str = "mob_destroy";
 const TOOL_MOB_SPAWN_MEMBER: &str = "mob_spawn_member";
 pub(crate) const TOOL_FORK_OFF: &str = "fork_off";
-const TOOL_COUNCIL: &str = "council";
+pub(crate) const TOOL_COUNCIL: &str = "council";
 const TOOL_MOB_RETIRE_MEMBER: &str = "mob_retire_member";
 const TOOL_MOB_CHECK_MEMBER: &str = "mob_check_member";
 const TOOL_MOB_LIST_MEMBERS: &str = "mob_list_members";
@@ -1570,6 +1570,29 @@ impl AgentMobToolSurface {
         let council_label = request.council_id.as_str().to_string();
         let job_id = uuid::Uuid::new_v4().to_string();
         let council = self.state.temporary_council();
+        // The council's custody records the convener's job, so a restarted
+        // host can still deliver the outcome (see `crate::council_relink`).
+        let job = meerkat_mob::temporary_council::TemporaryCouncilJobBinding::new(
+            job_id.clone(),
+            self.owner_bridge_session_id.clone(),
+        );
+        // The council runs on its own task and hands its outcome over a
+        // channel, so the custodian's future is Send even where the council's
+        // is not (the single-threaded browser runtime).
+        let (outcome_tx, outcome_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let outcome = match council.run_detached(request, job).await {
+                // A council that ran but failed (e.g. participant seating)
+                // is delivered as failed; the record keeps the full typed
+                // outcome either way.
+                Ok(outcome) => (
+                    Ok(council_outcome_json(&outcome)),
+                    outcome.result.exit_reason.is_failure(),
+                ),
+                Err(error) => (Ok(json!({"error": error.to_string()})), true),
+            };
+            let _ = outcome_tx.send(outcome);
+        });
         spawn_detached_completion_custodian(
             runtime,
             self.owner_bridge_session_id.clone(),
@@ -1577,16 +1600,12 @@ impl AgentMobToolSurface {
             job_id.clone(),
             TOOL_COUNCIL,
             async move {
-                match council.run(request).await {
-                    // A council that ran but failed (e.g. participant seating)
-                    // is delivered as failed; the record keeps the full
-                    // typed outcome either way.
-                    Ok(outcome) => (
-                        Ok(council_outcome_json(&outcome)),
-                        outcome.result.exit_reason.is_failure(),
-                    ),
-                    Err(error) => (Ok(json!({"error": error.to_string()})), true),
-                }
+                outcome_rx.await.unwrap_or_else(|_| {
+                    (
+                        Ok(json!({"error": "the council task ended without an outcome"})),
+                        true,
+                    )
+                })
             },
         );
         Self::encode_result(
@@ -3189,7 +3208,7 @@ fn detached_started_note(tool: &'static str, job_id: &str) -> String {
     )
 }
 
-fn council_outcome_json(
+pub(crate) fn council_outcome_json(
     outcome: &crate::temporary_council::TemporaryCouncilOutcome,
 ) -> serde_json::Value {
     json!({

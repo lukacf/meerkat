@@ -213,6 +213,7 @@ async fn relink_rearms_max_run_from_the_original_start() {
     let rearmed_at = tokio::time::Instant::now();
     let action = meerkat_mob_mcp::fork_relink::relink_child(
         fixture.state.session_service(),
+        None,
         &fixture.source_mob_id(),
         &handle,
         &child,

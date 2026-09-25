@@ -40,6 +40,7 @@ const FORK_DONE: &str = "FORK_DONE";
 const FOLLOW_UP_PROMPT: &str = "FOLLOW-UP-9 what did your fork report?";
 const FOLLOW_UP_REPLY: &str = "FOLLOW-UP-ACK";
 const WAIT: Duration = Duration::from_secs(60);
+const WAKE_REPLY: &str = "WAKE-ACK";
 
 // ===========================================================================
 // Scripted provider
@@ -94,6 +95,10 @@ impl ForkOffScript {
         };
         if last_user.contains(CHILD_TASK) {
             return text(CHILD_REPLY);
+        }
+        // The forker woken by its child's completion record.
+        if matches!(request.messages.last(), Some(Message::SystemNotice(_))) {
+            return text(WAKE_REPLY);
         }
         if last_user.contains(FORK_PROMPT) {
             let tool_result_seen =
@@ -284,15 +289,20 @@ fn recorded_fork_off_start(history: &Value) -> Option<Value> {
     })
 }
 
-/// The durable completion entries for `job_id` in the forker's transcript.
+/// The durable completion records for `job_id` in the forker's transcript:
+/// `BackgroundJob` system notices whose block is `persisted` for this job.
 fn recorded_completions(history: &Value, job_id: &str) -> Vec<Value> {
-    let key = format!("fork_off:{job_id}");
     history_messages(history)
         .iter()
         .filter(|message| {
-            message["role"].as_str() == Some("system")
-                && message["identity"]["source"].as_str() == Some("fork_off_completion")
-                && message["identity"]["idempotency_key"].as_str() == Some(key.as_str())
+            message["role"].as_str() == Some("system_notice")
+                && message["kind"].as_str() == Some("background_job")
+                && message["blocks"].as_array().is_some_and(|blocks| {
+                    blocks.iter().any(|block| {
+                        block["job_id"].as_str() == Some(job_id)
+                            && block["persisted"].as_bool() == Some(true)
+                    })
+                })
         })
         .cloned()
         .collect()
@@ -375,11 +385,44 @@ async fn e2e_fast_detached_fork_off_reaches_the_forker_and_its_next_turn() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    let content = completion["content"].as_str().expect("completion content");
+    let content = completion["body"].as_str().expect("completion body");
     assert!(
         content.contains(CHILD_REPLY) && content.contains("completed"),
         "the completion carries the child's completed outcome: {content}"
     );
+
+    // The idle forker is woken by the completion and runs exactly one turn
+    // that sees it.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let wake_turns = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, rendered)| {
+                rendered.contains(&job_id) && !rendered.contains(FOLLOW_UP_PROMPT)
+            })
+            .filter(|(last_user, _)| last_user.contains(FORK_PROMPT))
+            .count();
+        if wake_turns >= 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the idle forker was never woken by its child's completion"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let wake_turns = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(last_user, rendered)| {
+            last_user.contains(FORK_PROMPT) && rendered.contains(&job_id)
+        })
+        .count();
+    assert_eq!(wake_turns, 1, "one wake turn for one completion");
 
     // The forker keeps working after the detached job ended, and its next
     // model request carries the child's outcome.

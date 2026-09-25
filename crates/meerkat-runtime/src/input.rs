@@ -769,6 +769,50 @@ impl ContinuationInput {
             turn_append: None,
         }
     }
+
+    /// Deliver one detached job's durable completion record to its owner.
+    ///
+    /// The record (a `BackgroundJob` system notice with `persisted: true`) is
+    /// the turn append, so it both creates a real pending boundary for an
+    /// idle owner (the owner runs a turn that sees it) and, with `Steer`
+    /// handling, reaches a running owner at its next checkpoint with no
+    /// second turn. `idempotency_key` names the job, so the record is
+    /// admitted and written exactly once however often delivery is retried.
+    /// The input is durable so an admitted delivery survives a restart.
+    pub fn detached_job_completed(
+        idempotency_key: impl Into<String>,
+        notice: meerkat_core::types::SystemNoticeMessage,
+    ) -> Self {
+        Self {
+            header: InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::System,
+                durability: InputDurability::Durable,
+                visibility: InputVisibility {
+                    transcript_eligible: true,
+                    operator_eligible: true,
+                },
+                idempotency_key: Some(IdempotencyKey::new(idempotency_key)),
+                supersession_key: None,
+                correlation_id: None,
+            },
+            reason: "detached_job_completed".to_string(),
+            continuation_kind: ContinuationKind::Ordinary,
+            handling_mode: HandlingMode::Steer,
+            request_id: None,
+            turn_tool_overlay: None,
+            turn_append: Some(ConversationAppend {
+                role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::SystemNotice,
+                content: CoreRenderable::SystemNotice {
+                    kind: notice.kind,
+                    body: notice.body,
+                    blocks: notice.blocks,
+                },
+                identity: None,
+            }),
+        }
+    }
 }
 
 /// Explicit operation/lifecycle input admitted through runtime instead of

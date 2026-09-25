@@ -6,6 +6,7 @@
 )]
 
 mod agent_tools;
+pub mod detached_delivery;
 pub mod fork_relink;
 #[cfg(all(feature = "openai-live", not(target_arch = "wasm32")))]
 pub mod live_delegation;
@@ -19,6 +20,10 @@ pub mod temporary_council;
 mod workgraph_flow;
 pub use agent_tools::{
     AgentMobToolSurface, AgentMobToolSurfaceFactory, archive_session_with_mob_cleanup,
+};
+pub use detached_delivery::{
+    DetachedCompletionDelivered, DetachedCompletionError, DetachedDeliveryUnavailable,
+    deliver_detached_completion, detached_completion_notice,
 };
 pub use public_definition::decode_public_mob_definition;
 pub use public_mcp::{
@@ -648,6 +653,22 @@ impl MobMcpState {
             matches!(delivery, DetachedCompletionDelivery::Available),
             std::sync::atomic::Ordering::Release,
         );
+    }
+
+    /// The runtime that admits detached completions for this host, or why
+    /// detached delivery is unavailable. A host that declares delivery but
+    /// has no runtime is reported, never silently treated as able to deliver.
+    pub(crate) fn detached_delivery_route(
+        &self,
+    ) -> crate::detached_delivery::DetachedDeliveryRoute {
+        if self.detached_completion_delivery() == DetachedCompletionDelivery::Unavailable {
+            return Err(
+                crate::detached_delivery::DetachedDeliveryUnavailable::HostDeclaredUnavailable,
+            );
+        }
+        self.runtime_adapter
+            .clone()
+            .ok_or(crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter)
     }
 
     pub fn detached_completion_delivery(&self) -> DetachedCompletionDelivery {
@@ -1652,10 +1673,12 @@ impl MobMcpState {
         // the fork_off re-link for each restored mob here.
         if self.claim_fork_relink(&mob_id) {
             let service = self.session_service.clone();
+            let runtime = self.runtime_adapter.clone();
             let restored_before_ms = self.created_at_ms;
             tokio::spawn(async move {
                 let reports = crate::fork_relink::relink_mob_fork_children(
                     service,
+                    runtime,
                     &mob_id,
                     &handle,
                     restored_before_ms,
@@ -1670,6 +1693,12 @@ impl MobMcpState {
                 }
             });
         }
+    }
+
+    pub(crate) fn runtime_adapter_for_relink(
+        &self,
+    ) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
+        self.runtime_adapter.clone()
     }
 
     /// Claim the one-time fork_off re-link of `mob_id` for this state.

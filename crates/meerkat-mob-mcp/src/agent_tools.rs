@@ -1312,47 +1312,24 @@ impl AgentMobToolSurface {
             None => None,
         };
 
-        // Detached delivery needs a host that outlives this call and a bound
-        // operation registry for the wake. Otherwise block for the outcome:
+        // Detached delivery needs a host that outlives this call and a
+        // runtime to admit the completion. Otherwise block for the outcome:
         // the tool owns its deadline (max_run_secs), so the core default
         // does not cut the wait.
-        let registry = match (
-            self.state.detached_completion_delivery(),
-            self.ops_registry.clone(),
-        ) {
-            (crate::DetachedCompletionDelivery::Available, Some(registry)) => Some(registry),
-            _ => None,
-        };
-
-        let operation_id = meerkat_core::ops_lifecycle::OperationId::new();
-        let mut unreturned_operation = UnreturnedOperationGuard::disarmed(operation_id.clone());
-        if let Some(registry) = registry.as_ref() {
-            registry
-                .register_operation(meerkat_core::ops_lifecycle::OperationSpec {
-                    id: operation_id.clone(),
-                    kind: meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp,
-                    owner_session_id: self.owner_bridge_session_id.clone(),
-                    display_name: format!("fork_off {}", member.identity),
-                    source_label: TOOL_FORK_OFF.to_string(),
-                    operation_source: None,
-                    child_session_id: None,
-                    expect_peer_channel: false,
-                })
-                .map_err(|error| {
-                    ToolError::execution_failed(format!(
-                        "tool '{}' could not register the child run: {error}",
-                        call.name
-                    ))
-                })?;
-            // Until the custodian owns the job, any exit (including this
-            // future being dropped mid-fork) removes it again.
-            unreturned_operation.arm(Arc::clone(registry));
+        let route = self.state.detached_delivery_route();
+        if let Err(crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter) = route
+        {
+            tracing::warn!(
+                reason = ?crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter,
+                "fork_off falls back to blocking: the host declares detached delivery but has no runtime to admit the completion"
+            );
         }
-
+        let runtime = route.ok();
+        let job_id = uuid::Uuid::new_v4().to_string();
         // A detached child's job is recorded durably with the child so a
         // restarted host can still deliver its outcome.
-        let job = registry.as_ref().map(|_| meerkat_mob::ForkJobBinding {
-            job_id: operation_id.to_string(),
+        let job = runtime.as_ref().map(|_| meerkat_mob::ForkJobBinding {
+            job_id: job_id.clone(),
             owner_session_id: self.owner_bridge_session_id.clone(),
         });
         let handle = audit_handle.clone();
@@ -1360,7 +1337,7 @@ impl AgentMobToolSurface {
         let result_label = args.result_label;
         let max_text_bytes = args.max_text_bytes;
         let message_count = args.message_count;
-        let forked = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+        let (fork, run) = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
             handle
                 .fork_member_then_run_detached(
                     &operation_source,
@@ -1376,16 +1353,12 @@ impl AgentMobToolSurface {
                 )
                 .await
         })
-        .await;
-        let (fork, run) = match forked {
-            Ok(forked) => forked,
-            // The guard removes the never-returned operation.
-            Err(error) => return Err(Self::map_bounded_member_run_error(call, error)),
-        };
+        .await
+        .map_err(|error| Self::map_bounded_member_run_error(call, error))?;
         let identity = fork.agent_identity.to_string();
         let member_ref = meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity);
 
-        let Some(registry) = registry else {
+        let Some(runtime) = runtime else {
             // Blocking: wait for the child's outcome in this call.
             let outcome = run.outcome().await;
             self.record_successful_operator_action_boxed(&audit_handle, call.name)
@@ -1425,25 +1398,12 @@ impl AgentMobToolSurface {
             };
         };
 
-        // Detached. Start the completion custodian before any further await,
-        // so a cancelled dispatch can never leave a running job nobody
-        // completes.
-        if let Err(error) = registry.provisioning_succeeded(&operation_id) {
-            // Nobody could be told about this child: retire it rather than
-            // leave it running unsupervised. The guard removes the job.
-            let retirement = audit_handle.retire(fork.agent_identity.clone()).await;
-            return Err(ToolError::execution_failed(format!(
-                "tool '{}' could not start tracking the child run: {error}; retirement_error={:?}",
-                call.name,
-                retirement.err().map(|error| error.to_string())
-            )));
-        }
-        unreturned_operation.disarm();
+        // Detached. The child's supervisor owns the run; this custodian only
+        // turns its outcome into the owner's one durable completion record.
         spawn_detached_completion_custodian(
-            Arc::clone(&self.state),
+            runtime,
             self.owner_bridge_session_id.clone(),
-            Arc::clone(&registry),
-            operation_id.clone(),
+            job_id.clone(),
             TOOL_FORK_OFF,
             {
                 let identity = identity.clone();
@@ -1466,20 +1426,17 @@ impl AgentMobToolSurface {
             member_ref,
             fork_session_id: fork.session_id.to_string(),
             cache_inheritance: fork.cache_inheritance,
-            job_id: operation_id.to_string(),
+            note: detached_started_note(TOOL_FORK_OFF, &job_id),
+            job_id,
             max_run_secs: args.max_run_secs,
         };
-        let content = serde_json::to_string(&started).map_err(|error| {
+        let value = serde_json::to_value(started).map_err(|error| {
             ToolError::execution_failed(format!(
                 "tool '{}' failed to encode durable fork start: {error}",
                 call.name
             ))
         })?;
-        Ok(meerkat_core::ToolDispatchOutcome::new(
-            meerkat_core::types::ToolResult::new(call.id.to_string(), content, false),
-            vec![meerkat_core::ops::AsyncOpRef::detached(operation_id)],
-            vec![],
-        ))
+        Self::encode_result(call, value)
     }
 
     async fn dispatch_council(
@@ -1590,12 +1547,17 @@ impl AgentMobToolSurface {
         // operation registry the council runs detached: the call returns the
         // council id and a job id, and the sealed outcome arrives as that
         // job's completion. Without one the call keeps the blocking contract.
-        let registry = match (
-            self.state.detached_completion_delivery(),
-            self.ops_registry.clone(),
-        ) {
-            (crate::DetachedCompletionDelivery::Available, Some(registry)) => registry,
-            _ => {
+        let route = self.state.detached_delivery_route();
+        let runtime = match route {
+            Ok(runtime) => runtime,
+            Err(reason) => {
+                if reason == crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter
+                {
+                    tracing::warn!(
+                        ?reason,
+                        "council falls back to blocking: the host declares detached delivery but has no runtime to admit the completion"
+                    );
+                }
                 let outcome = self
                     .state
                     .temporary_council()
@@ -1606,37 +1568,18 @@ impl AgentMobToolSurface {
             }
         };
         let council_label = request.council_id.as_str().to_string();
-        let operation_id = meerkat_core::ops_lifecycle::OperationId::new();
-        registry
-            .register_operation(meerkat_core::ops_lifecycle::OperationSpec {
-                id: operation_id.clone(),
-                kind: meerkat_core::ops_lifecycle::OperationKind::BackgroundToolOp,
-                owner_session_id: self.owner_bridge_session_id.clone(),
-                display_name: format!("council {council_label}"),
-                source_label: TOOL_COUNCIL.to_string(),
-                operation_source: None,
-                child_session_id: None,
-                expect_peer_channel: false,
-            })
-            .and_then(|()| registry.provisioning_succeeded(&operation_id))
-            .map_err(|error| {
-                ToolError::execution_failed(format!(
-                    "tool '{}' could not register the council run: {error}",
-                    call.name
-                ))
-            })?;
+        let job_id = uuid::Uuid::new_v4().to_string();
         let council = self.state.temporary_council();
         spawn_detached_completion_custodian(
-            Arc::clone(&self.state),
+            runtime,
             self.owner_bridge_session_id.clone(),
-            Arc::clone(&registry),
-            operation_id.clone(),
+            job_id.clone(),
             TOOL_COUNCIL,
             async move {
                 match council.run(request).await {
                     // A council that ran but failed (e.g. participant seating)
-                    // completes its job as failed; the durable record keeps
-                    // the full typed outcome either way.
+                    // is delivered as failed; the record keeps the full
+                    // typed outcome either way.
                     Ok(outcome) => (
                         Ok(council_outcome_json(&outcome)),
                         outcome.result.exit_reason.is_failure(),
@@ -1645,17 +1588,15 @@ impl AgentMobToolSurface {
                 }
             },
         );
-        let content = json!({
-            "status": "running",
-            "council_id": council_label,
-            "job_id": operation_id.to_string(),
-        })
-        .to_string();
-        Ok(meerkat_core::ToolDispatchOutcome::new(
-            meerkat_core::types::ToolResult::new(call.id.to_string(), content, false),
-            vec![meerkat_core::ops::AsyncOpRef::detached(operation_id)],
-            vec![],
-        ))
+        Self::encode_result(
+            call,
+            json!({
+                "status": "running",
+                "council_id": council_label,
+                "job_id": job_id,
+                "note": detached_started_note(TOOL_COUNCIL, &job_id),
+            }),
+        )
     }
 
     #[inline(never)]
@@ -3058,6 +2999,8 @@ struct ForkOffStarted {
     job_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_run_secs: Option<u64>,
+    /// Plain-language statement of the contract for the model.
+    note: String,
 }
 
 #[derive(Serialize)]
@@ -3172,81 +3115,13 @@ impl ForkOffCompletion {
     }
 }
 
-/// Removes a registered background job that was never handed to a
-/// completion custodian, on every exit path including cancellation.
-struct UnreturnedOperationGuard {
-    registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
-    operation_id: meerkat_core::ops_lifecycle::OperationId,
-}
-
-impl UnreturnedOperationGuard {
-    fn disarmed(operation_id: meerkat_core::ops_lifecycle::OperationId) -> Self {
-        Self {
-            registry: None,
-            operation_id,
-        }
-    }
-
-    fn arm(&mut self, registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>) {
-        self.registry = Some(registry);
-    }
-
-    fn disarm(&mut self) {
-        self.registry = None;
-    }
-}
-
-impl Drop for UnreturnedOperationGuard {
-    fn drop(&mut self) {
-        if let Some(registry) = self.registry.take()
-            && registry
-                .rollback_unreturned_operation(&self.operation_id)
-                .is_err()
-        {
-            let _ = registry.abort_provisioning(
-                &self.operation_id,
-                Some("the tool call ended before its job was handed off".to_string()),
-            );
-        }
-    }
-}
-
-/// The durable owner-transcript record for one detached tool outcome.
-///
-/// One format and one idempotency key (`{tool}:{job_id}`) for the live
-/// custodian and the post-restart re-link pass, so a second delivery of the
-/// same job is a Duplicate (or, with different content, a Conflict) and is
-/// never recorded twice.
-pub(crate) fn detached_completion_record(
-    tool_name: &str,
-    job_id: &str,
-    outcome: serde_json::Value,
-) -> (String, meerkat_core::service::AppendSystemContextRequest) {
-    let content = json!({
-        "tool": tool_name,
-        "job_id": job_id,
-        "outcome": outcome,
-    })
-    .to_string();
-    let mut append = meerkat_core::service::AppendSystemContextRequest::from_text(format!(
-        "Background {tool_name} job {job_id} finished:\n{content}"
-    ));
-    append.source = Some(format!("{tool_name}_completion"));
-    append.idempotency_key = Some(format!("{tool_name}:{job_id}"));
-    (content, append)
-}
-
-/// Own one detached tool run's completion.
-///
-/// When `outcome` resolves, the typed outcome is first appended to the owner
-/// session as one durable System entry (idempotent per job id), so it stays
-/// in the owner's transcript across later model calls, turns and reloads.
-/// The registered job is then completed or failed, which wakes the owner.
+/// Own one detached tool run's completion: when `outcome` resolves, deliver
+/// the owner's one durable completion record (see
+/// [`crate::detached_delivery`]).
 fn spawn_detached_completion_custodian<F>(
-    state: Arc<MobMcpState>,
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
     owner_session_id: SessionId,
-    registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
-    operation_id: meerkat_core::ops_lifecycle::OperationId,
+    job_id: String,
     tool_name: &'static str,
     outcome: F,
 ) where
@@ -3255,48 +3130,41 @@ fn spawn_detached_completion_custodian<F>(
         + 'static,
 {
     tokio::spawn(async move {
-        let started = std::time::Instant::now();
         let (value, failed) = outcome.await;
-        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let value = match value {
-            Ok(value) => value,
-            Err(error) => {
-                let _ = registry.fail_operation(
-                    &operation_id,
-                    format!("{tool_name} could not encode its outcome: {error}"),
-                );
-                return;
-            }
+        let value = value.unwrap_or_else(|error| {
+            json!({ "error": format!("{tool_name} could not encode its outcome: {error}") })
+        });
+        let status = if failed {
+            meerkat_core::event::BackgroundJobTerminalStatus::Failed
+        } else {
+            meerkat_core::event::BackgroundJobTerminalStatus::Completed
         };
-        let (content, append) =
-            detached_completion_record(tool_name, &operation_id.to_string(), value);
-        if let Err(error) = state
-            .session_service()
-            .append_system_context(&owner_session_id, append)
-            .await
+        if let Err(error) = crate::detached_delivery::deliver_detached_completion(
+            &runtime,
+            &owner_session_id,
+            tool_name,
+            &job_id,
+            status,
+            value,
+        )
+        .await
         {
             tracing::warn!(
                 tool = tool_name,
-                job_id = %operation_id,
+                job_id = %job_id,
                 error = %error,
-                "detached completion could not be recorded durably; delivering the notice only"
+                "detached completion could not be delivered to its owner"
             );
         }
-        let _ = if failed {
-            registry.fail_operation(&operation_id, content)
-        } else {
-            registry.complete_operation(
-                &operation_id,
-                meerkat_core::ops::OperationResult {
-                    id: operation_id.clone(),
-                    content,
-                    is_error: false,
-                    duration_ms,
-                    tokens_used: 0,
-                },
-            )
-        };
     });
+}
+
+/// The plain-language note carried on a detached start result, so a model
+/// that has only the tool contract knows the job is not a blocker.
+fn detached_started_note(tool: &'static str, job_id: &str) -> String {
+    format!(
+        "Running in the background. The result will be added to your conversation later as \"Background {tool} job {job_id} finished\". Nothing is waiting on it: continue with other work. Check or end it with mob_check_member / mob_retire_member."
+    )
 }
 
 fn council_outcome_json(

@@ -11,11 +11,10 @@
 //! - idle without one (the turn did not survive the restart): delivers a
 //!   `restart_interrupted` outcome and leaves the child seated for its forker.
 //!
-//! Delivery is the same durable owner-transcript record the live custodian
-//! writes, under the same idempotency key, so a job that was already
-//! delivered before the restart is never recorded twice. The owner sees a
-//! re-linked outcome on its next turn: a restarted host has no wake channel
-//! for an idle owner (the job's in-memory operation did not survive).
+//! Delivery is the same durable completion record the live custodian admits
+//! ([`crate::detached_delivery`]), under the same idempotency key, so a job
+//! already delivered before the restart is never recorded twice, and an idle
+//! owner is woken to see it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,9 +22,7 @@ use std::time::Duration;
 use meerkat_mob::{AgentIdentity, ForkJobRecord, MemberRunState, MobHandle, MobId};
 
 use crate::MobMcpState;
-use crate::agent_tools::{
-    ForkOffCompletion, ForkOffCompletionStatus, TOOL_FORK_OFF, detached_completion_record,
-};
+use crate::agent_tools::{ForkOffCompletion, ForkOffCompletionStatus, TOOL_FORK_OFF};
 
 /// What the re-link pass did for one child.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +75,7 @@ pub async fn relink_restored_fork_children(
             reports.extend(
                 relink_mob_fork_children(
                     state.session_service(),
+                    state.runtime_adapter_for_relink(),
                     &mob_id,
                     &handle,
                     restored_before_ms,
@@ -92,6 +90,7 @@ pub async fn relink_restored_fork_children(
 /// Re-link the fork children of one mob (see the module docs).
 pub async fn relink_mob_fork_children(
     service: Arc<dyn meerkat_mob::MobSessionService>,
+    runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     mob_id: &MobId,
     handle: &MobHandle,
     restored_before_ms: u64,
@@ -112,10 +111,11 @@ pub async fn relink_mob_fork_children(
     // turn boundary, so one busy child must not hold up the others.
     let tasks = children.into_iter().map(|(child, job)| {
         let service = Arc::clone(&service);
+        let runtime = runtime.clone();
         let mob_id = mob_id.clone();
         let handle = handle.clone();
         tokio::spawn(async move {
-            let action = relink_child(service, &mob_id, &handle, &child, &job).await;
+            let action = relink_child(service, runtime, &mob_id, &handle, &child, &job).await;
             ForkRelinkReport {
                 mob_id,
                 child,
@@ -139,6 +139,7 @@ pub async fn relink_mob_fork_children(
 /// descendants) and delivers `max_run_elapsed`.
 pub async fn relink_child(
     service: Arc<dyn meerkat_mob::MobSessionService>,
+    runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     mob_id: &MobId,
     handle: &MobHandle,
     child: &AgentIdentity,
@@ -161,7 +162,7 @@ pub async fn relink_child(
         let running = match &observed {
             None => {
                 let completion = autokill(mob_id, handle, child, job).await;
-                return deliver(&service, job, completion).await;
+                return deliver(runtime.as_deref(), job, completion).await;
             }
             Some(Ok(snapshot)) => snapshot.progress.as_ref().is_some_and(|progress| {
                 progress.run_state == MemberRunState::RunOpen || progress.in_flight_work > 0
@@ -170,7 +171,7 @@ pub async fn relink_child(
         };
         if !running {
             let completion = settled_outcome(&service, mob_id, handle, child, job).await;
-            return deliver(&service, job, completion).await;
+            return deliver(runtime.as_deref(), job, completion).await;
         }
         tokio::time::sleep(WATCH_INTERVAL).await;
     }
@@ -246,31 +247,42 @@ fn member_ref(mob_id: &MobId, child: &AgentIdentity) -> meerkat_contracts::WireM
 }
 
 async fn deliver(
-    service: &Arc<dyn meerkat_mob::MobSessionService>,
+    runtime: Option<&meerkat_runtime::MeerkatMachine>,
     job: &ForkJobRecord,
     completion: ForkOffCompletion,
 ) -> ForkRelinkAction {
+    let Some(runtime) = runtime else {
+        return ForkRelinkAction::Failed(
+            "no runtime to admit the completion on this host".to_string(),
+        );
+    };
+    let status = match completion.status {
+        ForkOffCompletionStatus::Completed => {
+            meerkat_core::event::BackgroundJobTerminalStatus::Completed
+        }
+        ForkOffCompletionStatus::MaxRunElapsed => {
+            meerkat_core::event::BackgroundJobTerminalStatus::Terminated
+        }
+        _ => meerkat_core::event::BackgroundJobTerminalStatus::Failed,
+    };
     let value = match serde_json::to_value(&completion) {
         Ok(value) => value,
         Err(error) => return ForkRelinkAction::Failed(error.to_string()),
     };
-    let (_content, append) = detached_completion_record(TOOL_FORK_OFF, &job.job_id, value);
-    match service
-        .append_system_context(&job.owner_session_id, append)
-        .await
+    match crate::detached_delivery::deliver_detached_completion(
+        runtime,
+        &job.owner_session_id,
+        TOOL_FORK_OFF,
+        &job.job_id,
+        status,
+        value,
+    )
+    .await
     {
-        Ok(result) => match result.status {
-            meerkat_core::service::AppendSystemContextStatus::Applied => {
-                ForkRelinkAction::Delivered
-            }
-            meerkat_core::service::AppendSystemContextStatus::Duplicate => {
-                ForkRelinkAction::AlreadyDelivered
-            }
-        },
-        // The key already holds this job's earlier record.
-        Err(meerkat_core::service::SessionControlError::Conflict { .. }) => {
-            ForkRelinkAction::AlreadyDelivered
+        Ok(crate::detached_delivery::DetachedCompletionDelivered::Delivered) => {
+            ForkRelinkAction::Delivered
         }
+        Ok(_) => ForkRelinkAction::AlreadyDelivered,
         Err(error) => ForkRelinkAction::Failed(error.to_string()),
     }
 }

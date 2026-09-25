@@ -4702,6 +4702,7 @@ where
                             display_name: Some(entry.display_name.clone()),
                             status: terminal_status,
                             detail: Some(detail),
+                            persisted: false,
                         },
                     ));
                 }

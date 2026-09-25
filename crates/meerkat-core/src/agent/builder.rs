@@ -711,7 +711,6 @@ impl AgentBuilder {
             run_usage_baseline: crate::types::Usage::default(),
             run_request_usage: Vec::new(),
             run_usage_suspended_run: None,
-            run_usage_resume: None,
             compaction_cadence,
             pending_compaction_boundary_index: None,
             pending_compaction_request_pressure: None,

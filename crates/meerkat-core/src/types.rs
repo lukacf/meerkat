@@ -3143,12 +3143,11 @@ pub enum SecurityMode {
 ///   one run. Its `input_tokens` is the saturating sum of each call's
 ///   *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail
 ///   fields and `reasoning_tokens` are provider-normalized sums: every
-///   provider's cache-read and cache-write counts are subsets of that call's
-///   presented input, and reasoning is a subset of output, so on a cumulative
-///   value `cache_read_tokens <= input_tokens`,
-///   `cache_creation_tokens <= input_tokens` and
-///   `reasoning_tokens <= output_tokens` on every provider. A field stays
-///   `None` until some call reports it.
+///   provider's cache-read and cache-write counts are disjoint parts of that
+///   call's presented input, and reasoning is a subset of output, so on a
+///   cumulative value `cache_read_tokens + cache_creation_tokens <=
+///   input_tokens` and `reasoning_tokens <= output_tokens` on every provider.
+///   A field stays `None` until some call reports it.
 ///
 /// # What consumers must not sum
 ///
@@ -3234,6 +3233,16 @@ impl Usage {
         // Per-turn provider/model/convention evidence cannot be promoted to a
         // potentially cross-provider cumulative aggregate.
         self.provider_accounting = None;
+    }
+
+    /// True when every counter is zero; an absent detail counter and
+    /// `Some(0)` both count as zero.
+    pub fn is_zero(&self) -> bool {
+        self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.cache_creation_tokens.unwrap_or(0) == 0
+            && self.cache_read_tokens.unwrap_or(0) == 0
+            && self.reasoning_tokens.unwrap_or(0) == 0
     }
 
     /// Usage accrued between an `earlier` snapshot of the same cumulative
@@ -3404,8 +3413,9 @@ pub struct CumulativeUsage(Usage);
 impl CumulativeUsage {
     /// Wrap a value that is already a cumulative, normalized total (for
     /// example a persisted `Session` total). Detail counters are kept but
-    /// clamped to their parent totals so the subset invariant holds even for
-    /// a malformed input.
+    /// clamped so the invariant holds even for a malformed or pre-0.8.22
+    /// input: cache reads to `input_tokens`, cache writes to what reads leave,
+    /// reasoning to `output_tokens`.
     pub fn from_usage(mut usage: Usage) -> Self {
         let (cache_read, cache_creation) = clamp_cache_counts(
             usage.cache_read_tokens,
@@ -3426,11 +3436,12 @@ impl CumulativeUsage {
     /// The input component accumulates [`TurnUsage::presented_tokens`], the
     /// provider-normalized presented-input total, never the raw per-call
     /// `input_tokens`. The cache-read and cache-write counters accumulate the
-    /// call's cache counters, each clamped to the call's presented tokens:
-    /// every provider convention reports them as subsets of presented input
-    /// (Anthropic as disjoint components of it, OpenAI, Gemini and
-    /// OpenAI-compatible backends as details inside it). Reasoning
-    /// accumulates clamped to the call's output. This is the reference
+    /// call's cache counters, clamped jointly to the call's presented tokens:
+    /// reads to presented, then writes to what reads leave. Every provider
+    /// convention reports them as disjoint parts of presented input
+    /// (Anthropic as components of it, OpenAI, Gemini and OpenAI-compatible
+    /// backends as details inside it), so the clamp only bites on malformed
+    /// counters. Reasoning accumulates clamped to the call's output. This is the reference
     /// aggregation consumers should reproduce; see the worked example in
     /// `docs/reference/usage-accounting.mdx`.
     pub fn add_turn(&mut self, turn: &TurnUsage) {

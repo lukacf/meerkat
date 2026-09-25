@@ -3852,7 +3852,10 @@ where
             )?;
             let attempted_cadence = self.compaction_cadence.clone();
             let mut restored_session = rollback.rollback_session;
-            if retained_usage != crate::types::Usage::default() {
+            // Nothing recorded during the attempt (every counter zero, with
+            // `Some(0)` counting as zero) restores the rollback head byte for
+            // byte, legacy raw counters included.
+            if !retained_usage.is_zero() {
                 restored_session.record_cumulative_usage(retained_usage);
             }
             let mut restored_cadence = rollback.rollback_compaction_cadence;
@@ -4216,12 +4219,15 @@ where
         // park is a separate seam and remains unbounded here.
         self.budget.begin_turn();
         self.extraction_state.reset();
-        // The callback-resume path arms the suspended run's account so calls
-        // made before the suspension stay in this run's usage. Every other
-        // entry starts a fresh account, and a suspension it abandoned is
-        // discarded rather than absorbed.
-        self.run_usage_suspended_run = None;
-        match self.run_usage_resume.take() {
+        // Once a suspended run's staged callback results are applied, the next
+        // run continues its account so calls made before the suspension stay
+        // in that run's usage, whichever entry point starts it. A suspension
+        // whose results were never applied is discarded, not absorbed.
+        match self
+            .run_usage_suspended_run
+            .take()
+            .filter(|suspended| suspended.callback_results_applied)
+        {
             Some(resumed) => {
                 self.run_usage_baseline = resumed.baseline;
                 self.run_request_usage = resumed.rows;
@@ -10027,6 +10033,58 @@ mod tests {
         );
     }
 
+    /// An abort on a pre-0.8.22 session that recorded nothing restores the raw
+    /// head byte for byte: no normalization and no timestamp bump.
+    #[tokio::test]
+    async fn legacy_session_compaction_abort_with_nothing_recorded_keeps_raw_head() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .memory_store(memory_store.clone())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let mut encoded = serde_json::to_value(agent.session()).unwrap();
+        encoded["usage"] = serde_json::json!({
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "cache_creation_tokens": 4000,
+            "cache_read_tokens": 50000
+        });
+        *agent.session_mut() = serde_json::from_value(encoded).unwrap();
+        let rollback_session = agent.session().clone();
+        let raw_head = rollback_session.total_usage();
+        let rollback_updated_at = rollback_session.updated_at();
+        let rollback_last_input_tokens = agent.last_input_tokens;
+        let rollback_compaction_cadence = agent.compaction_cadence.clone();
+        let projection = append_abort_test_projection(agent.session_mut(), "legacy-noop-abort");
+        memory_store.staged.lock().unwrap().push(projection.clone());
+        agent.compaction_transaction = Some(crate::agent::CompactionTransaction {
+            phase: crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(Box::new(
+                crate::agent::CompactionRollbackState {
+                    rollback_session,
+                    rollback_last_input_tokens,
+                    rollback_compaction_cadence,
+                    rollback_durable_row_floor: 0,
+                },
+            )),
+            projections: vec![projection],
+        });
+
+        agent
+            .abort_uncommitted_compaction_projections()
+            .await
+            .expect("a no-op abort succeeds");
+        assert_eq!(
+            agent.session().total_usage(),
+            raw_head,
+            "an abort that recorded nothing restores the raw head byte for byte"
+        );
+        assert_eq!(agent.session().updated_at(), rollback_updated_at);
+    }
+
     #[tokio::test]
     async fn empty_runtime_outbox_keeps_transaction_abortable_after_commit_failure() {
         let memory_store = Arc::new(AbortRetryMemoryStore::new());
@@ -15675,6 +15733,38 @@ mod tests {
         assert_eq!(run_usage.input_tokens, 2500);
         assert_eq!(run_usage.output_tokens, 30);
         assert_eq!(result.usage.input_tokens, 2500);
+    }
+
+    /// A callback resume that arrives with a new prompt (applied results,
+    /// then a content turn) keeps the suspended run's account, like
+    /// `run_pending` does.
+    #[tokio::test]
+    async fn applied_callback_then_content_turn_keeps_the_run_usage_account() {
+        let mut agent = usage_callback_agent().await;
+        let error = agent
+            .run("ask for approval".to_string().into())
+            .await
+            .expect_err("the first entry suspends for the callback");
+        assert!(matches!(error, AgentError::CallbackPending { .. }));
+        agent
+            .apply_pending_callback_tool_results(vec![ToolResult::new(
+                "callback-call".to_string(),
+                "approved".to_string(),
+                false,
+            )])
+            .expect("the callback result applies");
+        let result = agent
+            .run("and also do this".to_string().into())
+            .await
+            .expect("the content turn completes");
+        assert_eq!(
+            result.request_usage.len(),
+            2,
+            "the pre-suspension call stays in the continuing run's rows"
+        );
+        let run_usage = result.run_usage.expect("run usage");
+        assert_eq!(run_usage.input_tokens, 2500);
+        assert_eq!(run_usage.output_tokens, 30);
     }
 
     /// A run that does not resume the callback never absorbs the suspended

@@ -46,7 +46,7 @@ by 0.8.22 through 0.8.42 carry no cumulative detail counters, so theirs start
 from zero and cover only later calls. Sessions saved before 0.8.22 carry raw
 summed cache counters that can exceed the input total. Every reporting surface
 clamps them to the invariant above: the run result, run and compaction
-rollback deltas, session read and list `billing.usage`, and mob run accounting.
+rollback deltas, session read `billing.usage`, and mob run accounting.
 Reads are clamped to input first and writes to what reads leave, so such a
 session's history reads as fully cached. The stored value is untouched until
 the next recorded call normalizes it.
@@ -86,9 +86,10 @@ carries three usage views:
 
 `run_usage` and the sum of `request_usage[*].accounting.presented_tokens` agree
 on input for a run that records every call it makes. A run that suspends for
-callback tool results keeps one account when its staged results are applied
-and it resumes through `run_pending`, so calls made before the suspension
-appear in the resumed run's result. Any other run discards the suspended
+callback tool results keeps one account once its staged results are applied:
+the next run of the agent continues it, whether that is `run_pending` or a
+content turn carrying a new prompt, so calls made before the suspension appear
+in that run's result. A run with no applied results discards the suspended
 account. The carry-over lives in the agent's memory: a resume on an agent
 rebuilt from storage starts a fresh account, and the pre-suspension calls
 appear only in the session total. Compaction summaries written

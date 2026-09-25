@@ -1877,7 +1877,6 @@ where
         let saved_run_usage_baseline = self.run_usage_baseline.clone();
         let saved_run_request_usage = std::mem::take(&mut self.run_request_usage);
         let saved_run_usage_suspended_run = self.run_usage_suspended_run.take();
-        let saved_run_usage_resume = self.run_usage_resume.take();
         let saved_compaction_cadence = self.compaction_cadence.clone();
         let saved_pending_compaction_boundary_index = self.pending_compaction_boundary_index.take();
         let saved_pending_compaction_request_pressure =
@@ -1969,7 +1968,6 @@ where
         self.run_usage_baseline = saved_run_usage_baseline;
         self.run_request_usage = saved_run_request_usage;
         self.run_usage_suspended_run = saved_run_usage_suspended_run;
-        self.run_usage_resume = saved_run_usage_resume;
         self.compaction_cadence = saved_compaction_cadence;
         self.pending_compaction_boundary_index = saved_pending_compaction_boundary_index;
         self.pending_compaction_request_pressure = saved_pending_compaction_request_pressure;
@@ -2452,13 +2450,6 @@ where
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
             );
-        // The callback-resume path is the only one that continues a
-        // suspended run's usage account, and only once that run's staged
-        // callback results were applied.
-        self.run_usage_resume = self
-            .run_usage_suspended_run
-            .take()
-            .filter(|suspended| suspended.callback_results_applied);
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
@@ -2720,7 +2711,6 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             run_usage_baseline: crate::types::Usage::default(),
             run_request_usage: Vec::new(),
             run_usage_suspended_run: None,
-            run_usage_resume: None,
             compaction_cadence: self.compaction_cadence.clone(),
             pending_compaction_boundary_index: None,
             pending_compaction_request_pressure: None,

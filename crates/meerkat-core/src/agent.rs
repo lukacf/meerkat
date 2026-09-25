@@ -2516,13 +2516,12 @@ where
     /// Per-request usage recorded during the current run.
     pub(crate) run_request_usage: Vec<crate::types::TurnUsage>,
     /// Run account of a run that suspended for callback results. Kept only
-    /// until the next run: the callback-resume path continues it, and any
-    /// other run discards it. In-memory only: an agent rebuilt from storage
-    /// starts a fresh account.
+    /// until the next run: once that run's staged callback results are
+    /// applied, the next run continues it whatever entry point starts it
+    /// (`run_pending` or a content turn); a run with no applied results
+    /// discards it. In-memory only: an agent rebuilt from storage starts a
+    /// fresh account.
     pub(crate) run_usage_suspended_run: Option<SuspendedRunUsage>,
-    /// The suspended account armed by the callback-resume path for the
-    /// `run_loop` entry it is about to start. Nothing else sets it.
-    pub(crate) run_usage_resume: Option<SuspendedRunUsage>,
     /// Session-scoped compaction cadence tracked across runs.
     pub(crate) compaction_cadence: SessionCompactionCadence,
     /// Machine-issued compaction check parked until the request has been fully

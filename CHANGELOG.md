@@ -63,9 +63,11 @@ them.
 - Behaviour-only: `Usage::add` and `CumulativeUsage::add_turn` now aggregate
   `cache_read_tokens`, `cache_creation_tokens` and `reasoning_tokens` instead of
   clearing them, and `CumulativeUsage::from_usage` keeps them instead of
-  clearing them. Cache reads are clamped to the input total and cache writes to
-  what reads leave, so reads plus writes never exceed input; reasoning is
-  clamped to output. `Usage::cumulative_delta_since` is new.
+  clearing them. `Usage::add` sums already-normalized totals field by field;
+  `add_turn` (per call) and `from_usage` (per total) clamp cache reads to the
+  input total and cache writes to what reads leave, so reads plus writes never
+  exceed input, and clamp reasoning to output. `Usage::cumulative_delta_since`
+  and `Usage::is_zero` are new.
 - Behaviour-only: `Session::record_cumulative_usage` normalizes the stored total
   before adding, as `record_turn_usage` already did, so a pre-0.8.22 total with
   raw summed cache counters is never mixed with normalized deltas.
@@ -117,14 +119,14 @@ them.
   the run made (tool-loop calls, structured-output extraction and compaction
   summaries made by the model included; curator and mechanical summaries make
   no request and add no row). A run that suspends for callback results keeps
-  one account across the resume. The Python and TypeScript SDK `RunResult`
+  one account: once its staged callback results are applied, the next run
+  continues it, whether that is `run_pending` or a content turn. The Python and TypeScript SDK `RunResult`
   expose them as `run_usage`/`request_usage` and `runUsage`/`requestUsage`,
   the `@rkat/web` `TurnResult` as `run_usage`/`request_usage`, and every SDK
   `Usage` gains `reasoning_tokens`/`reasoningTokens`. The generated
   `WireUsage`/`WireRunResult` twins gain the same fields and a `WireTurnUsage`.
 - `Session::reported_total_usage` returns the session total as every
   reporting surface shows it, normalized, without touching the stored total.
-
 - Extraction outcome events carry `request_usage`, one per-call usage row for
   each extraction request (retries after a failed validation included), so
   structured-output extraction is accounted on the event stream.
@@ -189,15 +191,16 @@ them.
 - Valid UTF-8 shell output longer than the capture buffer is no longer reported
   as invalid UTF-8 when the buffer's edge splits a character.
 - A run that suspends for callback results continues its usage account only
-  when that run's staged callback results are applied and the run resumes
-  through `run_pending`. Any other run discards the suspended account instead
-  of absorbing its calls. The carry-over is in memory, so an agent rebuilt from
-  storage resumes with a fresh account.
-- Pre-0.8.22 sessions report normalized usage everywhere: session read and list
+  after that run's staged callback results are applied; the next run of the
+  agent then continues it, whether `run_pending` or a content turn that carries
+  a new prompt. A run with no applied results discards the suspended account
+  instead of absorbing its calls. The carry-over is in memory, so an agent
+  rebuilt from storage resumes with a fresh account.
+- Pre-0.8.22 sessions report normalized usage everywhere: session read
   `billing.usage`, mob run accounting (`usage_total` and each member), the run
   result, run deltas and compaction rollback. Aborting an uncommitted
-  compaction on such a session no longer moves the reported total.
-
+  compaction on such a session no longer moves the reported total, and an abort
+  that recorded nothing restores the stored total byte for byte.
 - `rkat run --export-atif` records every provider request of the run as an
   ATIF step with its own metrics: each tool-call turn, the answering turn and
   each structured-output extraction request. It used to keep only the final

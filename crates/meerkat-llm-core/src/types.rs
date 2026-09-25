@@ -131,6 +131,8 @@ pub trait LlmClient: Send + Sync {
     ///
     /// Default implementation normalizes the schema without provider-specific lowering.
     /// Provider implementations override this to apply provider-specific transformations.
+    /// The result is the validation schema (see [`CompiledSchema`]); a schema an
+    /// adapter sends in its native structured-output slot may be lowered further.
     fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
         Ok(CompiledSchema {
             schema: output_schema.schema.as_value().clone(),

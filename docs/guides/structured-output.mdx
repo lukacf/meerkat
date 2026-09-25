@@ -285,7 +285,7 @@ fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema,
 
 The default implementation passes through the normalized schema without provider-specific lowering. Provider adapters override this to apply transformations:
 
-- **Anthropic**: may add `additionalProperties: false` to object nodes
+- **Anthropic**: adds `additionalProperties: false` to object nodes that leave it open. The native `output_config.format` slot then gets a lowered copy: keywords Anthropic's slot rejects (numeric bounds such as `minimum`/`maximum`/`multipleOf`, `maxItems`, `uniqueItems`, `minItems` above 1, `contains`, object-size and property-name rules, `not`, string formats outside Anthropic's list) are removed and restated in the field's `description`, and `oneOf` becomes `anyOf`. Only keywords whose removal widens what the slot accepts are lowered, and validation still runs against the full compiled schema, so those constraints are enforced by validation and retry
 - **Gemini**: may strip unsupported JSON Schema keywords
 - **OpenAI**: may apply strict-mode transformations
 

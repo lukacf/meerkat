@@ -6253,6 +6253,107 @@ mod tests {
     // Structured Output Tests
     // =========================================================================
 
+    // =========================================================================
+    // Structured-output schema pins
+    //
+    // Anthropic lowers the schema it sends in its native structured-output
+    // slot. These pins hold this adapter's compiled schema and request slot
+    // byte-identical for schemas that carry keywords Anthropic's slot
+    // rejects (numeric bounds, array and object constraints, `oneOf`, `not`,
+    // unsupported string formats), so that lowering can never leak here.
+    // =========================================================================
+
+    /// The live-matrix review schema (numeric bounds on `number` and `integer`).
+    fn pinned_review_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "verdict": {"type": "string", "enum": ["approve", "request_changes", "comment"]},
+                "inline_comments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "line": {"type": "integer", "minimum": 1},
+                            "category": {"type": "string", "enum": ["bug", "security", "performance", "style", "docs"]},
+                            "message": {"type": "string"},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                        },
+                        "required": ["path", "line", "category", "message", "confidence"],
+                        "additionalProperties": false
+                    }
+                },
+                "general_comments": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["verdict", "inline_comments"],
+            "additionalProperties": false
+        })
+    }
+
+    /// Every keyword family Anthropic's slot lowering touches.
+    fn pinned_constraint_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "score": {"type": "number", "minimum": 0, "maximum": 1, "multipleOf": 0.01, "description": "Score."},
+                "count": {"type": ["integer", "null"], "format": "uint32", "minimum": 0, "exclusiveMaximum": 100},
+                "ids": {"type": "array", "items": {"type": "string", "format": "uuid"}, "minItems": 2, "maxItems": 5, "uniqueItems": true},
+                "choice": {"oneOf": [{"type": "string", "format": "int64"}, {"type": "integer", "minimum": 1}]},
+                "meta": {"type": "object", "properties": {"a": {"type": "string", "minLength": 1, "pattern": "^a"}}, "minProperties": 1, "propertyNames": {"pattern": "^a$"}},
+                "not_x": {"type": "string", "not": {"const": "x"}}
+            },
+            "required": ["score", "count", "ids", "choice", "meta", "not_x"]
+        })
+    }
+
+    const PINNED_OPENAI_RESPONSES: [(&str, bool, &str); 4] = [
+        (
+            "review",
+            false,
+            r#"{"name":"output","schema":{"additionalProperties":false,"properties":{"general_comments":{"items":{"type":"string"},"type":"array"},"inline_comments":{"items":{"additionalProperties":false,"properties":{"category":{"enum":["bug","security","performance","style","docs"],"type":"string"},"confidence":{"maximum":1,"minimum":0,"type":"number"},"line":{"minimum":1,"type":"integer"},"message":{"type":"string"},"path":{"type":"string"}},"required":["path","line","category","message","confidence"],"type":"object"},"type":"array"},"verdict":{"enum":["approve","request_changes","comment"],"type":"string"}},"required":["verdict","inline_comments"],"type":"object"},"strict":false,"type":"json_schema"}"#,
+        ),
+        (
+            "review",
+            true,
+            r#"{"name":"output","schema":{"additionalProperties":false,"properties":{"general_comments":{"items":{"type":"string"},"type":"array"},"inline_comments":{"items":{"additionalProperties":false,"properties":{"category":{"enum":["bug","security","performance","style","docs"],"type":"string"},"confidence":{"maximum":1,"minimum":0,"type":"number"},"line":{"minimum":1,"type":"integer"},"message":{"type":"string"},"path":{"type":"string"}},"required":["path","line","category","message","confidence"],"type":"object"},"type":"array"},"verdict":{"enum":["approve","request_changes","comment"],"type":"string"}},"required":["verdict","inline_comments"],"type":"object"},"strict":true,"type":"json_schema"}"#,
+        ),
+        (
+            "constraints",
+            false,
+            r#"{"name":"output","schema":{"properties":{"choice":{"oneOf":[{"format":"int64","type":"string"},{"minimum":1,"type":"integer"}]},"count":{"exclusiveMaximum":100,"format":"uint32","minimum":0,"type":["integer","null"]},"ids":{"items":{"format":"uuid","type":"string"},"maxItems":5,"minItems":2,"type":"array","uniqueItems":true},"meta":{"minProperties":1,"properties":{"a":{"minLength":1,"pattern":"^a","type":"string"}},"propertyNames":{"pattern":"^a$"},"required":[],"type":"object"},"not_x":{"not":{"const":"x"},"type":"string"},"score":{"description":"Score.","maximum":1,"minimum":0,"multipleOf":0.01,"type":"number"}},"required":["score","count","ids","choice","meta","not_x"],"type":"object"},"strict":false,"type":"json_schema"}"#,
+        ),
+        (
+            "constraints",
+            true,
+            r#"{"name":"output","schema":{"additionalProperties":false,"properties":{"choice":{"oneOf":[{"format":"int64","type":"string"},{"minimum":1,"type":"integer"}]},"count":{"exclusiveMaximum":100,"format":"uint32","minimum":0,"type":["integer","null"]},"ids":{"items":{"format":"uuid","type":"string"},"maxItems":5,"minItems":2,"type":"array","uniqueItems":true},"meta":{"additionalProperties":false,"minProperties":1,"properties":{"a":{"minLength":1,"pattern":"^a","type":"string"}},"propertyNames":{"pattern":"^a$"},"required":[],"type":"object"},"not_x":{"not":{"const":"x"},"type":"string"},"score":{"description":"Score.","maximum":1,"minimum":0,"multipleOf":0.01,"type":"number"}},"required":["score","count","ids","choice","meta","not_x"],"type":"object"},"strict":true,"type":"json_schema"}"#,
+        ),
+    ];
+
+    #[test]
+    fn structured_output_schema_pins_are_byte_identical() {
+        let client = OpenAiClient::new("test-key".to_string());
+        for (name, strict, expected) in PINNED_OPENAI_RESPONSES {
+            let raw = match name {
+                "review" => pinned_review_schema(),
+                _ => pinned_constraint_schema(),
+            };
+            let mut output_schema = OutputSchema::new(raw).expect("valid schema");
+            output_schema.strict = strict;
+            let compiled = client.compile_schema(&output_schema).expect("compile");
+            assert!(compiled.warnings.is_empty());
+            let request = LlmRequest::new(
+                "gpt-5.4",
+                vec![Message::User(UserMessage::text("extract".to_string()))],
+            )
+            .with_openai_tag_merge(|t| t.structured_output = Some(output_schema.clone()));
+            let body = client.build_request_body(&request).expect("build request");
+            let format = &body["text"]["format"];
+            assert_eq!(format["schema"], compiled.schema, "{name} strict={strict}");
+            assert_eq!(format.to_string(), expected, "{name} strict={strict}");
+        }
+    }
+
     #[test]
     fn test_build_request_body_with_structured_output() {
         let client = OpenAiClient::new("test-key".to_string());

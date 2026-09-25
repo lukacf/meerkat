@@ -236,6 +236,24 @@ them.
   overflow OpenAI's routing for a single key. The docs also name the actual
   GPT-5.6 default mode, `explicit`, instead of `implicit`. Behaviour is
   unchanged.
+- Anthropic structured output works with schemas that use JSON Schema keywords
+  Anthropic's native slot rejects. The extraction request sent the full schema
+  in `output_config.format`, so a schema with `minimum`/`maximum` on a number
+  or integer (or `multipleOf`, `exclusiveMinimum`/`exclusiveMaximum`,
+  `maxItems`, `uniqueItems`, `minItems` above 1, `contains`,
+  `minProperties`/`maxProperties`, `propertyNames`, `dependentRequired`,
+  `dependentSchemas`, `dependencies`, `unevaluatedProperties`, `not`,
+  `oneOf`, or a string `format` outside Anthropic's list) failed with HTTP 400
+  and the run ended with `extraction_error` and no `structured_output`. The
+  slot now gets a lowered copy: those keywords are removed (`oneOf` becomes
+  `anyOf`) and restated in the field's `description`, and only where removing
+  them widens what the slot accepts. Validation still runs against the full
+  schema, so a reply that breaks a bound fails validation and is retried as
+  before; `compile_schema` and `schema_warnings` are unchanged. Keywords
+  Anthropic accepts (`minLength`, `maxLength`, `pattern`, supported formats,
+  `minItems` 0 or 1) are sent as before, and a schema without rejected
+  keywords is sent byte-identical. OpenAI, OpenAI-compatible and Gemini
+  requests are unchanged.
 
 ## [0.8.42] - 2026-09-24
 

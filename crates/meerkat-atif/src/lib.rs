@@ -180,6 +180,9 @@ pub enum ExportError {
 
 #[derive(Debug, Clone)]
 struct PendingTurn {
+    /// The loop's turn counter from the `TurnStarted` that opened this turn;
+    /// `None` when a content event arrived with no announced turn.
+    turn_number: Option<u32>,
     timestamp: Option<String>,
     message: String,
     reasoning: String,
@@ -190,12 +193,29 @@ struct PendingTurn {
 impl PendingTurn {
     fn new(timestamp_ms: u64) -> Self {
         Self {
+            turn_number: None,
             timestamp: timestamp(timestamp_ms),
             message: String::new(),
             reasoning: String::new(),
             tool_calls: Vec::new(),
             observations: Vec::new(),
         }
+    }
+
+    fn started(turn_number: u32, timestamp_ms: u64) -> Self {
+        Self {
+            turn_number: Some(turn_number),
+            ..Self::new(timestamp_ms)
+        }
+    }
+
+    /// Whether the turn recorded any output: text, reasoning, a tool call or
+    /// a tool observation.
+    fn recorded_output(&self) -> bool {
+        !self.message.is_empty()
+            || !self.reasoning.is_empty()
+            || !self.tool_calls.is_empty()
+            || !self.observations.is_empty()
     }
 }
 
@@ -277,6 +297,12 @@ impl TrajectoryBuilder {
                 input,
             } => {
                 self.session_id = Some(id.to_string());
+                // A new run opens with no extraction phase in progress, even
+                // when an earlier run's extraction never published an outcome.
+                self.extraction_open = false;
+                // A turn still pending belongs to an earlier run that ended
+                // without a terminal event. It precedes this run's input.
+                close_unfinished_turn(steps, pending.take());
                 if let RunInput::Content { content } = input {
                     steps.push(Step {
                         step_id: next_id(steps),
@@ -295,17 +321,24 @@ impl TrajectoryBuilder {
                     });
                 }
             }
-            AgentEvent::TurnStarted { .. } => {
-                // Every provider request is a step. A turn still pending here
-                // never published `TurnCompleted`: logs written before
-                // tool-loop turns published their completion carry one such
-                // turn per tool round. It is kept as an unmetered step rather
-                // than overwritten, which used to reduce a tool-using run to
-                // its final answer.
-                if let Some(turn) = pending.take() {
-                    append_agent_step(steps, turn, None);
+            AgentEvent::TurnStarted { turn_number } => {
+                match pending.take() {
+                    // The loop re-announces the turn it is already in when a
+                    // compaction boundary sends it back to rebuild the request
+                    // (`CallingLlmGate::Repoll` does not advance the turn
+                    // counter). The earlier announcement produced no committed
+                    // response, so the re-entered request replaces it instead
+                    // of becoming an empty, unmetered step.
+                    Some(turn) if turn.turn_number == Some(*turn_number) => {}
+                    // Every other provider request is a step. A turn still
+                    // pending here never published `TurnCompleted`: logs
+                    // written before tool-loop turns published their
+                    // completion carry one such turn per tool round. It is
+                    // kept as an unmetered step rather than overwritten, which
+                    // used to reduce a tool-using run to its final answer.
+                    turn => close_unfinished_turn(steps, turn),
                 }
-                *pending = Some(PendingTurn::new(envelope.timestamp_ms));
+                *pending = Some(PendingTurn::started(*turn_number, envelope.timestamp_ms));
             }
             AgentEvent::ReasoningDelta { delta } => pending
                 .get_or_insert_with(|| PendingTurn::new(envelope.timestamp_ms))
@@ -409,6 +442,10 @@ impl TrajectoryBuilder {
                 }
             }
             AgentEvent::RunFailed { error_report, .. } => {
+                // A run can fail inside its extraction phase (after
+                // `RunCompleted { extraction_required: true }`) without an
+                // extraction outcome event. The phase ends with the run.
+                self.extraction_open = false;
                 self.terminal_status = Some("failed");
                 self.failure_detail = Some(error_report.message.clone());
                 flush_failed_turn(steps, pending, error_report.message.clone());
@@ -702,6 +739,16 @@ fn step_metrics(usage: &TurnUsage) -> Metrics {
         prompt_token_ids: None,
         completion_token_ids: None,
         extra: (!extra.is_empty()).then_some(extra),
+    }
+}
+
+/// Export a turn that ended without `TurnCompleted` as an unmetered step. A
+/// turn that recorded no output is not evidence of an answered provider
+/// request, so it is dropped rather than exported as an empty step that claims
+/// one LLM call.
+fn close_unfinished_turn(steps: &mut Vec<Step>, turn: Option<PendingTurn>) {
+    if let Some(turn) = turn.filter(PendingTurn::recorded_output) {
+        append_agent_step(steps, turn, None);
     }
 }
 
@@ -1417,6 +1464,240 @@ mod tests {
             trajectory.extra.as_ref().unwrap().get("terminal_status"),
             Some(&Value::String("failed".into()))
         );
+    }
+
+    fn envelopes(id: &SessionId, events: Vec<AgentEvent>) -> Vec<EventEnvelope<AgentEvent>> {
+        events
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| envelope(id, index as u64 + 1, event))
+            .collect()
+    }
+
+    fn run_started(id: &SessionId, text: &str) -> AgentEvent {
+        AgentEvent::RunStarted {
+            session_id: id.clone(),
+            input: RunInput::Content {
+                content: ContentInput::Text(text.into()),
+            },
+        }
+    }
+
+    fn run_completed(id: &SessionId, result: &str, extraction_required: bool) -> AgentEvent {
+        AgentEvent::RunCompleted {
+            session_id: id.clone(),
+            result: result.into(),
+            structured_output: None,
+            extraction_required,
+            usage: Usage::default().into(),
+            terminal_cause_kind: None,
+        }
+    }
+
+    fn agent_steps(trajectory: &Trajectory) -> Vec<&Step> {
+        trajectory
+            .steps
+            .iter()
+            .filter(|step| step.source == StepSource::Agent)
+            .collect()
+    }
+
+    /// A compaction boundary sends the loop back to rebuild its request
+    /// without advancing the turn counter, so the same turn is announced twice
+    /// (the sequence captured from the real loop with a curator compactor:
+    /// `turn_started`, `compaction_started`, `compaction_completed`,
+    /// `turn_started`, ...). The second announcement replaces the first
+    /// instead of leaving an empty, unmetered step behind that claims an LLM
+    /// call nobody made. The retry path's repoll can follow an attempt that
+    /// streamed partial text before it failed; that text is superseded too.
+    #[test]
+    fn a_compaction_repoll_that_reannounces_the_turn_adds_no_step() {
+        let id = SessionId::new();
+        for first_attempt_streamed in [false, true] {
+            let mut events = vec![
+                run_started(&id, "summarize"),
+                AgentEvent::TurnStarted { turn_number: 0 },
+            ];
+            if first_attempt_streamed {
+                events.push(AgentEvent::TextDelta {
+                    delta: "partial".into(),
+                });
+            }
+            events.extend([
+                AgentEvent::CompactionStarted {
+                    input_tokens: 90_000,
+                    estimated_history_tokens: 95_000,
+                    message_count: 40,
+                },
+                AgentEvent::CompactionCompleted {
+                    summary_tokens: 800,
+                    messages_before: 40,
+                    messages_after: 3,
+                },
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TextDelta {
+                    delta: "answer".into(),
+                },
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    usage: Some(openai_usage(3000, 40, 0, 0)),
+                },
+                run_completed(&id, "answer", false),
+            ]);
+            let trajectory = trajectory_from_events(&envelopes(&id, events), test_agent()).unwrap();
+            let steps = agent_steps(&trajectory);
+            assert_eq!(
+                steps.len(),
+                1,
+                "one provider request answered (first attempt streamed: {first_attempt_streamed})"
+            );
+            assert_eq!(steps[0].message, AtifContent::Text("answer".into()));
+            assert_eq!(
+                steps[0].metrics.as_ref().and_then(|m| m.prompt_tokens),
+                Some(3000)
+            );
+            let totals = trajectory.final_metrics.as_ref().unwrap();
+            assert_eq!(totals.total_steps, 2, "the user step and the answer");
+            assert_eq!(totals.total_prompt_tokens, Some(3000));
+        }
+    }
+
+    /// A tool-loop turn that published no completion is still a step when the
+    /// next turn has a new number, and a turn announced without any output
+    /// before the next turn is not one.
+    #[test]
+    fn an_unfinished_turn_is_a_step_only_when_it_recorded_output() {
+        let id = SessionId::new();
+        let events = vec![
+            run_started(&id, "go"),
+            AgentEvent::TurnStarted { turn_number: 0 },
+            AgentEvent::TurnStarted { turn_number: 1 },
+            AgentEvent::ReasoningComplete {
+                content: "look first".into(),
+            },
+            AgentEvent::TurnStarted { turn_number: 2 },
+            AgentEvent::TextComplete {
+                content: "done".into(),
+            },
+            run_completed(&id, "done", false),
+        ];
+        let trajectory = trajectory_from_events(&envelopes(&id, events), test_agent()).unwrap();
+        let steps = agent_steps(&trajectory);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].reasoning_content.as_deref(), Some("look first"));
+        assert_eq!(steps[1].message, AtifContent::Text("done".into()));
+    }
+
+    /// Each run restarts the loop's turn counter. A turn left pending by a run
+    /// that ended without a terminal event is exported before the next run's
+    /// input, and the next run's first `TurnStarted` (same number, new run) is
+    /// not mistaken for a re-announcement of it.
+    #[test]
+    fn a_turn_left_pending_by_an_interrupted_run_precedes_the_next_run() {
+        let id = SessionId::new();
+        let events = vec![
+            run_started(&id, "first"),
+            AgentEvent::TurnStarted { turn_number: 0 },
+            AgentEvent::ToolCallRequested {
+                id: "call-1".into(),
+                name: "shell".into(),
+                args: meerkat_core::event::ToolCallArguments::from_value(
+                    serde_json::json!({"command": "ls"}),
+                )
+                .unwrap(),
+            },
+            run_started(&id, "second"),
+            AgentEvent::TurnStarted { turn_number: 0 },
+            AgentEvent::TextComplete {
+                content: "second answer".into(),
+            },
+            AgentEvent::TurnCompleted {
+                stop_reason: meerkat_core::StopReason::EndTurn,
+                usage: Some(openai_usage(500, 5, 0, 0)),
+            },
+            run_completed(&id, "second answer", false),
+        ];
+        let trajectory = trajectory_from_events(&envelopes(&id, events), test_agent()).unwrap();
+        let sources = trajectory
+            .steps
+            .iter()
+            .map(|step| step.source)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sources,
+            vec![
+                StepSource::User,
+                StepSource::Agent,
+                StepSource::User,
+                StepSource::Agent
+            ]
+        );
+        assert_eq!(trajectory.steps[1].tool_calls[0].function_name, "shell");
+        assert!(trajectory.steps[1].metrics.is_none());
+        assert_eq!(
+            trajectory.steps[3].message,
+            AtifContent::Text("second answer".into())
+        );
+    }
+
+    /// An extraction phase that ends without an outcome event (the run fails
+    /// inside it, or the log simply moves on to the next run) must not keep
+    /// swallowing text and reasoning: the next run's answer is exported.
+    #[test]
+    fn an_extraction_phase_without_an_outcome_does_not_hide_later_runs() {
+        let id = SessionId::new();
+        for fails_inside_extraction in [true, false] {
+            let mut events = vec![
+                run_started(&id, "first"),
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TextComplete {
+                    content: "first answer".into(),
+                },
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    usage: Some(openai_usage(100, 5, 0, 0)),
+                },
+                run_completed(&id, "first answer", true),
+                AgentEvent::TextDelta {
+                    delta: r#"{"partial": "#.into(),
+                },
+            ];
+            if fails_inside_extraction {
+                events.push(AgentEvent::RunFailed {
+                    session_id: id.clone(),
+                    error_report: meerkat_core::AgentErrorReport::from_agent_error(
+                        &meerkat_core::AgentError::InternalError(
+                            "max tokens reached during extraction".into(),
+                        ),
+                    ),
+                    terminal_cause_kind: None,
+                });
+            }
+            events.extend([
+                run_started(&id, "second"),
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::ReasoningComplete {
+                    content: "thinking".into(),
+                },
+                AgentEvent::TextComplete {
+                    content: "second answer".into(),
+                },
+                AgentEvent::TurnCompleted {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                    usage: Some(openai_usage(200, 6, 0, 0)),
+                },
+            ]);
+            let trajectory = trajectory_from_events(&envelopes(&id, events), test_agent()).unwrap();
+            let steps = agent_steps(&trajectory);
+            assert_eq!(
+                steps.len(),
+                2,
+                "the extraction deltas are not a step (run failed: {fails_inside_extraction})"
+            );
+            let last = steps[1];
+            assert_eq!(last.message, AtifContent::Text("second answer".into()));
+            assert_eq!(last.reasoning_content.as_deref(), Some("thinking"));
+        }
     }
 
     /// Embedded member trajectories get the document identity ATIF refs use.

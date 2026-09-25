@@ -12109,19 +12109,38 @@ mod tests {
         );
 
         let mut saw_completed = false;
+        let mut turns_started = Vec::new();
+        let mut turns_completed = 0usize;
         while let Ok(event) = rx.try_recv() {
-            if let crate::event::AgentEvent::CompactionCompleted { summary_tokens, .. } = event {
-                assert_eq!(
-                    summary_tokens, 0,
-                    "curated summaries consume no LLM tokens; summary usage must be zero"
-                );
-                saw_completed = true;
+            match event {
+                crate::event::AgentEvent::CompactionCompleted { summary_tokens, .. } => {
+                    assert_eq!(
+                        summary_tokens, 0,
+                        "curated summaries consume no LLM tokens; summary usage must be zero"
+                    );
+                    saw_completed = true;
+                }
+                crate::event::AgentEvent::TurnStarted { turn_number } => {
+                    turns_started.push(turn_number);
+                }
+                crate::event::AgentEvent::TurnCompleted { .. } => turns_completed += 1,
+                _ => {}
             }
         }
         assert!(
             saw_completed,
             "curator-produced compaction should complete via the normal commit path"
         );
+        // The compaction boundary sends the loop back to rebuild the request
+        // without advancing the turn counter, so the one call's turn is
+        // announced twice with the same number. docs/reference/usage-accounting.mdx
+        // documents this, and the ATIF exporter folds the repeat into one step.
+        assert_eq!(
+            turns_started,
+            vec![0, 0],
+            "a compaction repoll re-announces the turn it is already in"
+        );
+        assert_eq!(turns_completed, 1, "one provider call, one turn_completed");
         assert_eq!(
             client.seen_last_user_messages(),
             vec!["first".to_string(), "second".to_string()],

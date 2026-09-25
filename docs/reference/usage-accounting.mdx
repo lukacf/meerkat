@@ -106,11 +106,13 @@ only calls recorded before its emission.
 | A call whose turn fails after the provider answered (a denied hook, an exhausted budget) | none | yes |
 | A host-appended or realtime assistant turn | `turn_completed` | yes |
 
-`turn_completed` pairs with the `turn_started` of the same call. Extraction
-publishes no `turn_completed`: its rows ride the extraction outcome event, and
-an attempt that fails validation still publishes its row there. Event logs
-written by earlier releases carry `turn_completed` only for the call that closed
-each run.
+`turn_completed` pairs with the `turn_started` of the same call. When a
+compaction boundary sends the loop back to rebuild a request, the loop announces
+the same `turn_number` again before the call, so pair a `turn_completed` with
+the latest `turn_started`. Extraction publishes no `turn_completed`: its rows
+ride the extraction outcome event, and an attempt that fails validation still
+publishes its row there. Event logs written by earlier releases carry
+`turn_completed` only for the call that closed each run.
 
 Measured compaction summary usage is recorded once `run_compaction` returns an outcome,
 even if the subsequent rewrite handoff or projection fails. A measured summary

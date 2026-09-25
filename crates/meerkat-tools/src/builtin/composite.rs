@@ -669,6 +669,11 @@ impl CompositeDispatcher {
                 async_ops,
                 vec![],
             )),
+            ToolOutput::JsonRenderedAsText { text, .. } => Ok(ToolDispatchOutcome::new(
+                ToolResult::with_blocks(call.id.to_string(), ContentBlock::text_vec(text), false),
+                async_ops,
+                vec![],
+            )),
         }
     }
 

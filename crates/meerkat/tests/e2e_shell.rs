@@ -43,6 +43,7 @@ fn create_sh_config(temp_dir: &TempDir) -> ShellConfig {
         security_mode: Default::default(), // Unrestricted for e2e tests
         security_patterns: vec![],
         env_vars: std::collections::HashMap::new(),
+        max_output_chars: 40_000,
     }
 }
 

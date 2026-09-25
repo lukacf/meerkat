@@ -76,6 +76,14 @@ pub enum ToolOutput {
     },
     /// Multimodal content blocks (e.g., images from view_image).
     Blocks(Vec<ContentBlock>),
+    /// A typed JSON value for Rust callers ([`ToolOutput::into_json`]) that the
+    /// model and transcript see as the compact `text` rendering instead of the
+    /// serialized JSON. Use it when the JSON envelope would cost the model
+    /// more tokens than the information it carries (shell results).
+    JsonRenderedAsText {
+        value: serde_json::Value,
+        text: String,
+    },
 }
 
 impl ToolOutput {
@@ -84,7 +92,9 @@ impl ToolOutput {
     /// Returns `None` if this is a `Blocks` variant.
     pub fn into_json(self) -> Option<serde_json::Value> {
         match self {
-            Self::Json(v) | Self::JsonWithEffects { value: v, .. } => Some(v),
+            Self::Json(v)
+            | Self::JsonWithEffects { value: v, .. }
+            | Self::JsonRenderedAsText { value: v, .. } => Some(v),
             Self::Blocks(_) => None,
         }
     }

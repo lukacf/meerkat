@@ -639,24 +639,32 @@ Execute a shell command. Uses POSIX-style parsing for policy checks; runs via Nu
 </ParamField>
 
 <ParamField body="timeout_secs" type="u64" default="Config default (30)">
-  Timeout in seconds.
+  Timeout in seconds, at least 1.
 </ParamField>
 
 <ParamField body="background" type="bool" default="false">
   If `true`, durably submit a non-resumable shell job and return its stable job
-  ID. Requires persistent realm job and blob stores. Job truth survives restart;
-  a lost subprocess is classified as `worker_lost`, not replayed.
+  ID. Requires persistent realm job and blob stores, and is advertised to the
+  model only when they are bound. Job truth survives restart; a lost subprocess
+  is classified as `worker_lost`, not replayed.
 </ParamField>
 
+A foreground result reaches the model as compact text: one status line, then
+stdout as is, then stderr under a `[stderr]` line only when it is non-empty.
+Flags such as invalid UTF-8 appear only when set. Rust callers of
+`ShellTool` still get the typed `ShellOutput` through `ToolOutput::into_json`.
+
+stdout is capped at `[shell] max_output_chars` characters (default 40000, about
+10K tokens), and stderr at half of that. Longer output keeps its first and last
+halves with a marker between them that names the total size and suggests a
+narrower command (`sed -n`, `head`, `tail`, `grep -n`) to page the middle.
+
 <CodeGroup>
-```json Returns (foreground)
-{
-  "exit_code": 0,
-  "stdout": "...",
-  "stderr": "...",
-  "timed_out": false,
-  "duration_secs": 1.23
-}
+```text Returns (foreground)
+exit code 0 (1.2s)
+...stdout...
+[stderr]
+...stderr...
 ```
 
 ```json Returns (background)

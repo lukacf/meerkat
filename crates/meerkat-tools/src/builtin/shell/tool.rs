@@ -45,40 +45,82 @@ impl std::fmt::Debug for ForegroundProcessGroupTestConfig {
     }
 }
 
-/// Maximum number of characters to keep in output before truncation.
-/// This is measured in Unicode characters, not bytes.
-const MAX_OUTPUT_CHARS: usize = 100_000;
-const MAX_OUTPUT_BYTES: usize = MAX_OUTPUT_CHARS * 4;
 const DETACHED_SUBMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Truncate output to keep the tail (most recent output).
-///
-/// When output exceeds `max_chars`, this function keeps the last `max_chars`
-/// characters and prepends a truncation indicator. This is more useful than
-/// keeping the head because recent output (like error messages or final results)
-/// is typically more important.
-///
-/// # Arguments
-///
-/// * `s` - The string to potentially truncate
-/// * `max_chars` - Maximum number of characters to keep (not bytes)
-///
-/// # Returns
-///
-/// The original string if within limit, or a truncated version with indicator
-fn truncate_to_tail(s: &str, max_chars: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        return s.to_string();
+/// Bytes captured per side of a stream for a character cap: a UTF-8
+/// character is at most four bytes.
+fn capture_bytes_for_chars(max_chars: usize) -> usize {
+    max_chars.saturating_mul(4)
+}
+
+/// One stream's output as captured: the first bytes, the last bytes, and the
+/// total length. When the stream fit in `head`, `tail` is empty.
+#[derive(Default)]
+struct CapturedStream {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    total_bytes: u64,
+}
+
+impl CapturedStream {
+    fn lossy(&self) -> bool {
+        std::str::from_utf8(&self.head).is_err()
+            || std::str::from_utf8(skip_utf8_continuation(&self.tail)).is_err()
     }
+}
 
-    // Calculate how many chars to skip
-    let skip_count = char_count - max_chars;
+/// Drop leading UTF-8 continuation bytes so a tail cut mid-character decodes
+/// cleanly.
+fn skip_utf8_continuation(bytes: &[u8]) -> &[u8] {
+    let skip = bytes
+        .iter()
+        .take(3)
+        .take_while(|byte| (**byte & 0b1100_0000) == 0b1000_0000)
+        .count();
+    &bytes[skip..]
+}
 
-    // Skip the first `skip_count` characters and collect the rest
-    let tail: String = s.chars().skip(skip_count).collect();
-
-    format!("[truncated {skip_count} chars]...{tail}")
+/// Bound captured output to `max_chars`, keeping the head and the tail.
+///
+/// Output within the cap is returned whole. Longer output keeps its first
+/// half and last half and names what was omitted in a marker between them,
+/// with a hint to re-run a narrower command. Losing the head of a diff or a
+/// file is as harmful as losing its tail, so neither end is dropped.
+fn bound_head_tail(captured: &CapturedStream, max_chars: usize) -> String {
+    let head_text = String::from_utf8_lossy(&captured.head);
+    let whole_fits_in_head = captured.tail.is_empty();
+    if whole_fits_in_head && head_text.chars().count() <= max_chars {
+        return head_text.into_owned();
+    }
+    let head_chars = max_chars / 2;
+    let tail_chars = max_chars - head_chars;
+    let (head, tail): (String, String) = if whole_fits_in_head {
+        let total = head_text.chars().count();
+        (
+            head_text.chars().take(head_chars).collect(),
+            head_text
+                .chars()
+                .skip(total.saturating_sub(tail_chars).max(head_chars))
+                .collect(),
+        )
+    } else {
+        let tail_text = String::from_utf8_lossy(skip_utf8_continuation(&captured.tail));
+        let tail_total = tail_text.chars().count();
+        (
+            head_text.chars().take(head_chars).collect(),
+            tail_text
+                .chars()
+                .skip(tail_total.saturating_sub(tail_chars))
+                .collect(),
+        )
+    };
+    let shown = head.chars().count() + tail.chars().count();
+    format!(
+        "{head}\n[... output truncated: showing the first {} and last {} of the output's characters ({shown} shown, {} bytes in total). Re-run a narrower command to see the omitted middle, for example `sed -n 'START,ENDp' FILE`, `head -n N`, `tail -n N` or `grep -n PATTERN FILE`. ...]\n{tail}",
+        head.chars().count(),
+        tail.chars().count(),
+        captured.total_bytes,
+    )
 }
 
 struct TailBuffer {
@@ -118,11 +160,18 @@ impl TailBuffer {
     }
 }
 
-async fn read_stream_tail<R>(mut reader: R, max_bytes: usize) -> std::io::Result<Vec<u8>>
+/// Read a stream to its end, keeping its first and last `side_bytes` bytes
+/// and its total length.
+async fn read_stream_head_tail<R>(
+    mut reader: R,
+    side_bytes: usize,
+) -> std::io::Result<CapturedStream>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut buffer = TailBuffer::new(max_bytes);
+    let mut head = Vec::new();
+    let mut tail = TailBuffer::new(side_bytes);
+    let mut total_bytes: u64 = 0;
     let mut chunk = [0u8; 8192];
 
     loop {
@@ -130,10 +179,25 @@ where
         if n == 0 {
             break;
         }
-        buffer.extend(&chunk[..n]);
+        total_bytes = total_bytes.saturating_add(n as u64);
+        let data = &chunk[..n];
+        let head_room = side_bytes.saturating_sub(head.len());
+        head.extend_from_slice(&data[..head_room.min(data.len())]);
+        // The tail sees every byte, so it always holds the stream's last
+        // `side_bytes`, even where they overlap the head.
+        tail.extend(data);
     }
 
-    Ok(buffer.into_vec())
+    let fits_in_head = total_bytes <= head.len() as u64;
+    Ok(CapturedStream {
+        head,
+        tail: if fits_in_head {
+            Vec::new()
+        } else {
+            tail.into_vec()
+        },
+        total_bytes,
+    })
 }
 
 /// Shell tool for executing shell commands
@@ -229,6 +293,19 @@ impl ShellTool {
         let mut tasks = self.foreground_containment_tasks.lock().await;
         tasks.retain(|task| !task.is_finished());
         tasks.len()
+    }
+
+    /// The argument schema advertised to the model. `background` is offered
+    /// only when this tool can actually submit durable background jobs, so
+    /// the model is never shown a mode that the execution plan then rejects.
+    fn input_schema(&self) -> Value {
+        let mut schema = crate::schema::schema_for::<ShellInput>();
+        if !self.job_manager.exports_canonical_async_ops()
+            && let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut)
+        {
+            properties.remove("background");
+        }
+        schema
     }
 
     fn validated_timeout_secs(&self, input: &ShellInput) -> Result<u64, String> {
@@ -348,19 +425,23 @@ impl ShellTool {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
+        let stdout_max_chars = self.config.max_output_chars.max(1);
+        let stderr_max_chars = (stdout_max_chars / 2).max(1);
+        let stdout_side_bytes = capture_bytes_for_chars(stdout_max_chars);
+        let stderr_side_bytes = capture_bytes_for_chars(stderr_max_chars);
         let stdout_handle = tokio::spawn(async move {
             if let Some(out) = stdout {
-                read_stream_tail(out, MAX_OUTPUT_BYTES).await
+                read_stream_head_tail(out, stdout_side_bytes).await
             } else {
-                Ok(Vec::new())
+                Ok(CapturedStream::default())
             }
         });
 
         let stderr_handle = tokio::spawn(async move {
             if let Some(err) = stderr {
-                read_stream_tail(err, MAX_OUTPUT_BYTES).await
+                read_stream_head_tail(err, stderr_side_bytes).await
             } else {
-                Ok(Vec::new())
+                Ok(CapturedStream::default())
             }
         });
 
@@ -414,20 +495,14 @@ impl ShellTool {
             return Err(ShellError::Io(err));
         }
 
-        let stdout_lossy = String::from_utf8(stdout_bytes.clone()).is_err();
-        let stderr_lossy = String::from_utf8(stderr_bytes.clone()).is_err();
-
-        let stdout_raw = String::from_utf8_lossy(&stdout_bytes).into_owned();
-        let stderr_raw = String::from_utf8_lossy(&stderr_bytes).into_owned();
-
         Ok(ShellOutput {
             exit_code,
-            stdout: truncate_to_tail(&stdout_raw, MAX_OUTPUT_CHARS),
-            stderr: truncate_to_tail(&stderr_raw, MAX_OUTPUT_CHARS),
+            stdout: bound_head_tail(&stdout_bytes, stdout_max_chars),
+            stderr: bound_head_tail(&stderr_bytes, stderr_max_chars),
             timed_out,
             duration_secs,
-            stdout_lossy,
-            stderr_lossy,
+            stdout_lossy: stdout_bytes.lossy(),
+            stderr_lossy: stderr_bytes.lossy(),
             placement: Some(placement),
         })
     }
@@ -505,9 +580,10 @@ impl ShellTool {
                 warn!(%error, "Command execution failed");
                 BuiltinToolError::execution_failed(error.to_string())
             })?;
-        Ok(ToolOutput::Json(serde_json::to_value(output).map_err(
-            |error| BuiltinToolError::execution_failed(error.to_string()),
-        )?))
+        let text = output.render_for_model();
+        let value = serde_json::to_value(output)
+            .map_err(|error| BuiltinToolError::execution_failed(error.to_string()))?;
+        Ok(ToolOutput::JsonRenderedAsText { value, text })
     }
 }
 
@@ -539,6 +615,50 @@ pub struct ShellOutput {
     pub placement: Option<ExecutionPlacement>,
 }
 
+impl ShellOutput {
+    /// The compact text the model sees for this result.
+    ///
+    /// One status line (exit code or timeout, and wall time), then stdout as
+    /// is, then stderr under a `[stderr]` line only when it is non-empty.
+    /// Flags appear only when set. The JSON envelope with escaped streams and
+    /// absolute placement paths costs the model tokens on every later request
+    /// without telling it more; this keeps the same facts.
+    pub fn render_for_model(&self) -> String {
+        let mut text = if self.timed_out {
+            format!(
+                "timed out after {:.1}s; the process was terminated",
+                self.duration_secs
+            )
+        } else {
+            match self.exit_code {
+                Some(code) => format!("exit code {code} ({:.1}s)", self.duration_secs),
+                None => format!(
+                    "terminated by a signal, no exit code ({:.1}s)",
+                    self.duration_secs
+                ),
+            }
+        };
+        if self.stdout.is_empty() && self.stderr.is_empty() {
+            text.push_str("\n(no output)");
+        }
+        if !self.stdout.is_empty() {
+            text.push('\n');
+            text.push_str(self.stdout.trim_end_matches('\n'));
+        }
+        if !self.stderr.is_empty() {
+            text.push_str("\n[stderr]\n");
+            text.push_str(self.stderr.trim_end_matches('\n'));
+        }
+        if self.stdout_lossy {
+            text.push_str("\n[stdout had invalid UTF-8, shown as U+FFFD]");
+        }
+        if self.stderr_lossy {
+            text.push_str("\n[stderr had invalid UTF-8, shown as U+FFFD]");
+        }
+        text
+    }
+}
+
 /// Input arguments for the shell tool
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 struct ShellInput {
@@ -549,7 +669,10 @@ struct ShellInput {
     #[schemars(description = "Working directory (relative to project root)")]
     working_dir: Option<String>,
     /// Timeout in seconds (optional, uses config default)
-    #[schemars(description = "Timeout in seconds (uses config default if not specified)")]
+    #[schemars(
+        description = "Timeout in seconds, at least 1 (uses config default if not specified)",
+        range(min = 1)
+    )]
     timeout_secs: Option<u64>,
     /// Run in background (optional, default false)
     #[serde(default)]
@@ -571,7 +694,7 @@ impl BuiltinTool for ShellTool {
             description:
                 "Execute a shell command (POSIX-style parsing for policy checks; runs via Nushell or fallback shell). Do not use shell scripts or drawing libraries to satisfy image-generation requests when generate_image is available; use generate_image and blob_save_file instead."
                     .into(),
-            input_schema: crate::schema::schema_for::<ShellInput>(),
+            input_schema: self.input_schema(),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Shell,
                 source_id: "shell".into(),
@@ -677,7 +800,9 @@ impl BuiltinTool for ShellTool {
                 // and do not block the turn boundary.
                 .map(meerkat_core::ops::AsyncOpRef::detached)
                 .collect(),
-            ToolOutput::Blocks(_) | ToolOutput::JsonWithEffects { .. } => Vec::new(),
+            ToolOutput::Blocks(_)
+            | ToolOutput::JsonWithEffects { .. }
+            | ToolOutput::JsonRenderedAsText { .. } => Vec::new(),
         }
     }
 }
@@ -821,7 +946,10 @@ mod tests {
         assert!(props.get("command").is_some());
         assert!(props.get("working_dir").is_some());
         assert!(props.get("timeout_secs").is_some());
-        assert!(props.get("background").is_some());
+        assert_eq!(props["timeout_secs"]["minimum"], 1);
+        // Without a durable job binding the tool cannot run background jobs,
+        // so it must not offer the model a mode the execution plan rejects.
+        assert!(props.get("background").is_none());
 
         // Check required fields
         let required = schema["required"].as_array().unwrap();
@@ -1794,137 +1922,132 @@ mod tests {
 
     // ==================== Truncation Tests ====================
 
-    #[test]
-    fn test_truncate_to_tail_no_truncation() {
-        // Short strings should not be truncated
-        let short = "hello world";
-        assert_eq!(truncate_to_tail(short, 100), short);
-
-        // Exactly at limit should not be truncated
-        let exact = "a".repeat(100);
-        assert_eq!(truncate_to_tail(&exact, 100), exact);
+    fn numbered_lines(range: std::ops::Range<usize>, line: impl Fn(usize) -> String) -> String {
+        range.map(line).collect::<Vec<_>>().concat()
     }
 
     #[test]
-    fn test_truncate_to_tail_truncates() {
-        // Create a string with known content
-        let long = "abcdefghij"; // 10 chars
-
-        // Truncate to 5 chars, keeping the tail "fghij"
-        let result = truncate_to_tail(long, 5);
-
-        // Should have truncation indicator and tail
-        assert!(result.contains("[truncated 5 chars]"));
-        assert!(result.ends_with("fghij"));
+    fn head_tail_keeps_output_within_the_cap_whole() {
+        let captured = CapturedStream {
+            head: b"short output\n".to_vec(),
+            tail: Vec::new(),
+            total_bytes: 13,
+        };
+        assert_eq!(bound_head_tail(&captured, 100), "short output\n");
+        assert_eq!(bound_head_tail(&CapturedStream::default(), 100), "");
     }
 
     #[test]
-    fn test_truncate_to_tail_keeps_tail() {
-        // The most important part: recent output (tail) is preserved
-        let mut lines = String::new();
-        for i in 1..=100 {
-            use std::fmt::Write;
-            let _ = writeln!(lines, "Line {i}");
+    fn head_tail_keeps_both_ends_of_long_output_and_names_the_total() {
+        let text = numbered_lines(0..1000, |i| format!("line {i}\n"));
+        let captured = CapturedStream {
+            head: text.clone().into_bytes(),
+            tail: Vec::new(),
+            total_bytes: text.len() as u64,
+        };
+        let bounded = bound_head_tail(&captured, 200);
+        assert!(bounded.starts_with("line 0\nline 1\n"), "{bounded}");
+        assert!(bounded.ends_with("line 999\n"), "{bounded}");
+        assert!(bounded.contains("output truncated"));
+        assert!(bounded.contains(&format!("{} bytes in total", text.len())));
+        assert!(bounded.contains("sed -n"));
+    }
+
+    #[tokio::test]
+    async fn head_tail_capture_keeps_head_and_tail_of_a_stream_larger_than_both() {
+        let text = numbered_lines(0..20_000, |i| format!("row {i}\n"));
+        let captured = read_stream_head_tail(text.as_bytes(), 400).await.unwrap();
+        assert_eq!(captured.total_bytes, text.len() as u64);
+        assert_eq!(captured.head.len(), 400);
+        assert_eq!(captured.tail.len(), 400);
+        let bounded = bound_head_tail(&captured, 100);
+        assert!(bounded.starts_with("row 0\n"), "{bounded}");
+        assert!(bounded.ends_with("row 19999\n"), "{bounded}");
+        assert!(bounded.contains(&format!("{} bytes in total", text.len())));
+    }
+
+    #[tokio::test]
+    async fn head_tail_capture_fills_the_tail_when_the_stream_barely_exceeds_the_head() {
+        // Regression: the tail used to receive only bytes past the head, so a
+        // stream just over the cap showed a short tail.
+        let text = numbered_lines(0..3000, |i| format!("{i:05}\n"));
+        let captured = read_stream_head_tail(text.as_bytes(), 16_000)
+            .await
+            .unwrap();
+        assert_eq!(captured.tail.len(), 16_000);
+        let bounded = bound_head_tail(&captured, 4_000);
+        let marker = bounded.find("[... output truncated").unwrap();
+        let after = &bounded[marker..];
+        let tail = &after[after.find("...]\n").unwrap() + 5..];
+        assert_eq!(tail.chars().count(), 2_000, "tail must get its full half");
+        assert!(tail.ends_with("02999\n"));
+    }
+
+    #[tokio::test]
+    async fn head_tail_capture_leaves_tail_empty_when_the_stream_fits() {
+        let captured = read_stream_head_tail(&b"small"[..], 16).await.unwrap();
+        assert!(captured.tail.is_empty());
+        assert_eq!(bound_head_tail(&captured, 100), "small");
+    }
+
+    #[test]
+    fn head_tail_never_splits_multibyte_characters() {
+        let text = "🎉".repeat(500);
+        for max_chars in [1, 2, 3, 10, 99] {
+            let captured = CapturedStream {
+                head: text.clone().into_bytes(),
+                tail: Vec::new(),
+                total_bytes: text.len() as u64,
+            };
+            let bounded = bound_head_tail(&captured, max_chars);
+            assert!(!bounded.contains('\u{FFFD}'), "{bounded}");
         }
+        // A tail captured mid-character drops the partial prefix.
+        let bytes = text.as_bytes();
+        let captured = CapturedStream {
+            head: bytes[..8].to_vec(),
+            tail: bytes[bytes.len() - 9..].to_vec(),
+            total_bytes: bytes.len() as u64,
+        };
+        assert!(!captured.lossy());
+        assert!(!bound_head_tail(&captured, 4).contains('\u{FFFD}'));
+    }
 
-        // Truncate to a smaller size
-        let result = truncate_to_tail(&lines, 50);
-
-        // Should contain recent lines (tail), not early lines (head)
-        assert!(
-            result.contains("Line 100"),
-            "Should contain most recent line: {result}"
-        );
-        assert!(
-            !result.contains("Line 1\n"),
-            "Should not contain early line: {result}"
-        );
+    fn rendered(exit_code: Option<i32>, stdout: &str, stderr: &str, timed_out: bool) -> String {
+        ShellOutput {
+            exit_code,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            timed_out,
+            duration_secs: 0.25,
+            stdout_lossy: false,
+            stderr_lossy: false,
+            placement: None,
+        }
+        .render_for_model()
     }
 
     #[test]
-    fn test_truncate_to_tail_unicode() {
-        // Test with Unicode characters (important: chars not bytes!)
-        let unicode = "Hello, \u{4e16}\u{754c}! \u{1f600}"; // "Hello, 世界! 😀" - mixed ASCII and Unicode
-
-        let char_count = unicode.chars().count();
-        assert!(char_count > 5);
-
-        // Truncate to 5 chars - should keep last 5 Unicode code points
-        let result = truncate_to_tail(unicode, 5);
-
-        // Last 5 chars of "Hello, 世界! 😀" are "界! 😀" (界, !, space, 😀)
-        // Wait, let me verify: H e l l o , space 世 界 ! space 😀 = 12 chars
-        // Last 5: 界 ! space 😀 - but that's only 4 grapheme clusters
-        // In Rust chars(): 界 is 1 char, ! is 1, space is 1, 😀 is 1 = the last 5 chars would be "! 世界! 😀"
-        // Actually: H(1) e(2) l(3) l(4) o(5) ,(6) (7) 世(8) 界(9) !(10) (11) 😀(12)
-        // Last 5 chars at positions 8-12: "世界! 😀"
-        assert!(result.contains("😀"), "Should contain emoji: {result}");
-        assert!(result.contains("[truncated"));
-    }
-
-    #[test]
-    fn test_truncate_to_tail_empty() {
-        let empty = "";
-        assert_eq!(truncate_to_tail(empty, 100), "");
-    }
-
-    // ==================== Regression Tests for Bug Fixes ====================
-
-    /// Regression test: truncate_to_tail handles multi-byte UTF-8 correctly
-    ///
-    /// Verifies that truncation works at character boundaries (not byte boundaries)
-    /// so we never split a multi-byte UTF-8 character. This would panic with
-    /// byte-based slicing like `&output[skip..]`.
-    #[test]
-    fn test_truncate_multibyte_utf8() {
-        // Test with emoji (4 bytes each in UTF-8)
-        let emoji_str = "Hello 🎉🎊🎈 World";
-
-        // Truncate at various sizes - should never panic
-        for max_chars in 1..emoji_str.chars().count() + 5 {
-            let result = truncate_to_tail(emoji_str, max_chars);
-            // Verify result is valid UTF-8 (implicitly checked by being a String)
-            // and has reasonable content
-            assert!(
-                result.is_empty() || result.chars().count() > 0,
-                "Result should be valid: {result}"
-            );
-        }
-
-        // Test with Chinese characters (3 bytes each in UTF-8)
-        let chinese = "你好世界Hello";
-        for max_chars in 1..chinese.chars().count() + 5 {
-            let result = truncate_to_tail(chinese, max_chars);
-            assert!(
-                result.is_empty() || result.chars().count() > 0,
-                "Result should be valid for Chinese: {result}"
-            );
-        }
-
-        // Test specific case: truncate to exactly 1 char
-        let result = truncate_to_tail("🎉🎊🎈", 1);
-        assert!(
-            result.contains("🎈"),
-            "Should keep last emoji when truncating to 1: {result}"
+    fn render_for_model_is_compact_text() {
+        assert_eq!(
+            rendered(Some(0), "a \"quoted\" line\n", "", false),
+            "exit code 0 (0.2s)\na \"quoted\" line"
         );
-
-        // Test edge case: max_chars = 0
-        let result = truncate_to_tail("Hello 🎉", 0);
-        // With 0 max chars, we expect empty or truncation indicator only
-        assert!(
-            result.contains("[truncated") || result.is_empty(),
-            "Should handle max_chars=0: {result}"
+        assert_eq!(
+            rendered(Some(0), "", "", false),
+            "exit code 0 (0.2s)\n(no output)"
         );
-
-        // Test mixed multi-byte sequences don't split
-        let mixed = "a🎉b世c界d";
-        for max_chars in 1..=mixed.chars().count() {
-            let result = truncate_to_tail(mixed, max_chars);
-            // Each character in result should be valid
-            for c in result.chars() {
-                assert!(c.len_utf8() >= 1, "Character should be valid UTF-8: {c:?}");
-            }
-        }
+        assert_eq!(
+            rendered(Some(127), "", "sh: 1: rg: not found\n", false),
+            "exit code 127 (0.2s)\n[stderr]\nsh: 1: rg: not found"
+        );
+        assert_eq!(
+            rendered(None, "partial\n", "", true),
+            "timed out after 0.2s; the process was terminated\npartial"
+        );
+        let text = rendered(Some(1), "out", "err", false);
+        assert!(!text.contains("placement"));
+        assert!(!text.contains("duration_secs"));
     }
 
     // ==================== Regression Tests for Task #11: Shell Detection ====================

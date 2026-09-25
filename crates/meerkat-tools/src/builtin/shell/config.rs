@@ -114,6 +114,12 @@ pub struct ShellConfig {
     /// Redacted from Debug output to avoid leaking secrets.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env_vars: HashMap<String, String>,
+
+    /// Cap, in characters, on foreground stdout returned to the model
+    /// (stderr gets half of it). Longer output keeps its first and last
+    /// halves with an omission marker naming the total size.
+    #[serde(default = "default_max_output_chars")]
+    pub max_output_chars: usize,
 }
 
 impl fmt::Debug for ShellConfig {
@@ -131,12 +137,17 @@ impl fmt::Debug for ShellConfig {
             .field("security_mode", &self.security_mode)
             .field("security_patterns", &self.security_patterns)
             .field("env_vars", &format_args!("<{} vars>", self.env_vars.len()))
+            .field("max_output_chars", &self.max_output_chars)
             .finish()
     }
 }
 
 fn default_max_completed_jobs() -> usize {
     100
+}
+
+fn default_max_output_chars() -> usize {
+    meerkat_core::config::DEFAULT_SHELL_MAX_OUTPUT_CHARS
 }
 
 fn default_completed_job_ttl_secs() -> u64 {
@@ -167,6 +178,7 @@ impl Default for ShellConfig {
             security_mode: defaults.security_mode,
             security_patterns: defaults.security_patterns,
             env_vars: HashMap::new(),
+            max_output_chars: defaults.max_output_chars,
         }
     }
 }
@@ -232,6 +244,7 @@ impl ShellConfig {
             shell: defaults.program.clone(),
             security_mode: defaults.security_mode,
             security_patterns: defaults.security_patterns.clone(),
+            max_output_chars: defaults.max_output_chars,
             project_root,
             ..Default::default()
         }
@@ -497,6 +510,7 @@ mod tests {
             security_mode: SecurityMode::AllowList,
             security_patterns: vec!["echo".to_string(), "cat".to_string()],
             env_vars: HashMap::new(),
+            max_output_chars: 40_000,
         };
 
         assert!(config.enabled);
@@ -523,9 +537,14 @@ mod tests {
             timeout_secs: 999,
             security_mode: SecurityMode::AllowList,
             security_patterns: vec!["echo *".to_string()],
+            max_output_chars: 1234,
         };
 
         let config = ShellConfig::from_defaults(&defaults, PathBuf::from("/tmp/project"));
+        assert_eq!(
+            config.max_output_chars, 1234,
+            "output cap must be projected"
+        );
 
         assert!(config.enabled, "from_defaults must enable the shell tool");
         assert_eq!(config.shell, "sh", "configured program must be projected");
@@ -605,6 +624,7 @@ mod tests {
             security_mode: SecurityMode::AllowList,
             security_patterns: vec!["ls".to_string(), "cat".to_string()],
             env_vars: HashMap::new(),
+            max_output_chars: 40_000,
         };
 
         // Serialize to JSON

@@ -35,7 +35,33 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_tools::builtin::ToolOutput` gains the variant
+  `JsonRenderedAsText { value, text }`; exhaustive matches must handle it.
+  `meerkat_tools::builtin::shell::ShellConfig` and `meerkat_core::ShellDefaults`
+  gain the public field `max_output_chars: usize` (serde-defaulted to 40000).
+
+### Changed
+
+- Foreground `shell` results reach the model as compact text instead of JSON:
+  a status line (`exit code N (Xs)`, or the timeout), stdout as is, and stderr
+  under `[stderr]` only when non-empty. The JSON envelope escaped every stream
+  and carried absolute placement paths and `false` flags, and it was re-sent on
+  every later request. Rust callers still get `ShellOutput` through
+  `ToolOutput::into_json`; event streams and transcripts carry the text.
+- Long shell output keeps its head and its tail. stdout is capped at
+  `[shell] max_output_chars` characters (default 40000, about 10K tokens;
+  stderr gets half) with a marker naming the total size and suggesting a
+  narrower command. It used to keep only the last 100000 characters, which
+  dropped the start of long diffs and file listings.
+
 ### Fixed
+
+- The `shell` schema no longer advertises values the tool rejects:
+  `timeout_secs` declares a minimum of 1, and `background` is offered only when
+  durable background jobs are available, instead of failing with "requested
+  tool execution mode Detached is not supported".
 
 - The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)
   and 033 (the office demo) pass again and run in pull-request CI. A new

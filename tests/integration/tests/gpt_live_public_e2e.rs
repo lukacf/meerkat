@@ -349,35 +349,28 @@ fn successful_working_directory_result(
                         )
                     })
                 });
-                let shell_output = match &result.content {
-                    WireToolResultContent::Text(content) =>
-                        serde_json::from_str::<meerkat_tools::builtin::shell::ShellOutput>(content),
+                // The shell result reaches the model as compact text: a status
+                // line ("exit code N (Xs)") and then stdout.
+                let shell_text = match &result.content {
+                    WireToolResultContent::Text(content) => Some(content.clone()),
                     WireToolResultContent::Blocks(blocks) => match blocks.as_slice() {
-                        [meerkat_contracts::WireContentBlock::Structured { data }] =>
-                            serde_json::from_value(data.clone()),
-                        [meerkat_contracts::WireContentBlock::Text { text }] =>
-                            serde_json::from_str(text),
-                        _ => {
-                            println!("GPT_LIVE_PUBLIC_TOOL_CHECK linked_pwd={invoked_pwd} structured_shell_result=false");
-                            return false;
-                        }
+                        [meerkat_contracts::WireContentBlock::Text { text }] => Some(text.clone()),
+                        _ => None,
                     },
                 };
-                if let Ok(output) = &shell_output {
-                    println!("GPT_LIVE_PUBLIC_TOOL_CHECK linked_pwd={invoked_pwd} exit_code={:?} timed_out={} absolute_stdout={} expected_directory={}",
-                        output.exit_code, output.timed_out, std::path::Path::new(output.stdout.trim()).is_absolute(),
-                        std::path::Path::new(output.stdout.trim()).canonicalize().is_ok_and(|path| path == expected_directory));
-                } else {
-                    println!("GPT_LIVE_PUBLIC_TOOL_CHECK linked_pwd={invoked_pwd} shell_output=false");
-                }
-                invoked_pwd && shell_output.is_ok_and(|output| {
-                            output.exit_code == Some(0)
-                                && !output.timed_out
-                                && std::path::Path::new(output.stdout.trim()).is_absolute()
-                                && std::path::Path::new(output.stdout.trim())
-                                    .canonicalize()
-                                    .is_ok_and(|directory| directory == expected_directory)
-                        })
+                let Some(shell_text) = shell_text else {
+                    println!("GPT_LIVE_PUBLIC_TOOL_CHECK linked_pwd={invoked_pwd} text_shell_result=false");
+                    return false;
+                };
+                let mut lines = shell_text.lines();
+                let exited_zero = lines.next().is_some_and(|status| status.starts_with("exit code 0 "));
+                let stdout = lines.next().unwrap_or_default().trim().to_string();
+                let absolute_stdout = std::path::Path::new(&stdout).is_absolute();
+                let expected = std::path::Path::new(&stdout)
+                    .canonicalize()
+                    .is_ok_and(|directory| directory == expected_directory);
+                println!("GPT_LIVE_PUBLIC_TOOL_CHECK linked_pwd={invoked_pwd} exited_zero={exited_zero} absolute_stdout={absolute_stdout} expected_directory={expected}");
+                invoked_pwd && exited_zero && absolute_stdout && expected
             })
             .then_some(index)
     })

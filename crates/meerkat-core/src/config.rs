@@ -1245,6 +1245,10 @@ pub const DEFAULT_SHELL_PROGRAM: &str = "nu";
 pub const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 30;
 /// Default shell security mode
 pub const DEFAULT_SHELL_SECURITY_MODE: SecurityMode = SecurityMode::Unrestricted;
+/// Default per-stream cap, in characters, on shell output returned to the
+/// model: about 10K tokens of code or log text. Output beyond it keeps its
+/// head and tail with an omission marker in the middle.
+pub const DEFAULT_SHELL_MAX_OUTPUT_CHARS: usize = 40_000;
 
 /// Shell defaults configured at the config layer.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -1256,6 +1260,10 @@ pub struct ShellDefaults {
     pub security_mode: SecurityMode,
     /// Patterns for allow/deny lists (glob format)
     pub security_patterns: Vec<String>,
+    /// Per-stream cap, in characters, on foreground shell output returned to
+    /// the model. Longer output keeps its first and last halves with an
+    /// omission marker between them.
+    pub max_output_chars: usize,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1263,6 +1271,7 @@ pub struct ShellDefaults {
 struct ShellDefaultsSeed {
     program: Option<String>,
     timeout_secs: Option<u64>,
+    max_output_chars: Option<usize>,
     security_mode: Option<SecurityMode>,
     security_patterns: Option<Vec<String>>,
     #[serde(alias = "allowlist")]
@@ -1282,6 +1291,9 @@ impl<'de> Deserialize<'de> for ShellDefaults {
         }
         if let Some(timeout_secs) = seed.timeout_secs {
             defaults.timeout_secs = timeout_secs;
+        }
+        if let Some(max_output_chars) = seed.max_output_chars {
+            defaults.max_output_chars = max_output_chars;
         }
         if let Some(security_mode) = seed.security_mode {
             defaults.security_mode = security_mode;
@@ -1315,6 +1327,9 @@ impl Default for ShellDefaults {
             security_patterns: shell
                 .and_then(|cfg| cfg.security_patterns.clone())
                 .unwrap_or_default(),
+            max_output_chars: shell
+                .and_then(|cfg| cfg.max_output_chars)
+                .unwrap_or(DEFAULT_SHELL_MAX_OUTPUT_CHARS),
         }
     }
 }
@@ -1334,6 +1349,7 @@ struct TemplateShellDefaults {
     timeout_secs: Option<u64>,
     security_mode: Option<SecurityMode>,
     security_patterns: Option<Vec<String>>,
+    max_output_chars: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

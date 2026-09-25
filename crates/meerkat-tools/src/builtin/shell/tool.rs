@@ -9,12 +9,10 @@ use meerkat_core::{ExecutionPlacement, ToolCallView, ToolDef};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -23,6 +21,10 @@ use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
 use super::config::{ShellConfig, ShellError};
+use super::output::{
+    CapturedStream, OutputCaps, capture_bytes_for_chars, exit_status_phrase, push_streams,
+    read_stream_head_tail,
+};
 use super::process_lifecycle::{OwnedProcessGroup, join_output_bounded};
 use super::types::JobId;
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
@@ -46,159 +48,6 @@ impl std::fmt::Debug for ForegroundProcessGroupTestConfig {
 }
 
 const DETACHED_SUBMISSION_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Bytes captured per side of a stream for a character cap: a UTF-8
-/// character is at most four bytes.
-fn capture_bytes_for_chars(max_chars: usize) -> usize {
-    max_chars.saturating_mul(4)
-}
-
-/// One stream's output as captured: the first bytes, the last bytes, and the
-/// total length. When the stream fit in `head`, `tail` is empty.
-#[derive(Default)]
-struct CapturedStream {
-    head: Vec<u8>,
-    tail: Vec<u8>,
-    total_bytes: u64,
-}
-
-impl CapturedStream {
-    fn lossy(&self) -> bool {
-        std::str::from_utf8(&self.head).is_err()
-            || std::str::from_utf8(skip_utf8_continuation(&self.tail)).is_err()
-    }
-}
-
-/// Drop leading UTF-8 continuation bytes so a tail cut mid-character decodes
-/// cleanly.
-fn skip_utf8_continuation(bytes: &[u8]) -> &[u8] {
-    let skip = bytes
-        .iter()
-        .take(3)
-        .take_while(|byte| (**byte & 0b1100_0000) == 0b1000_0000)
-        .count();
-    &bytes[skip..]
-}
-
-/// Bound captured output to `max_chars`, keeping the head and the tail.
-///
-/// Output within the cap is returned whole. Longer output keeps its first
-/// half and last half and names what was omitted in a marker between them,
-/// with a hint to re-run a narrower command. Losing the head of a diff or a
-/// file is as harmful as losing its tail, so neither end is dropped.
-fn bound_head_tail(captured: &CapturedStream, max_chars: usize) -> String {
-    let head_text = String::from_utf8_lossy(&captured.head);
-    let whole_fits_in_head = captured.tail.is_empty();
-    if whole_fits_in_head && head_text.chars().count() <= max_chars {
-        return head_text.into_owned();
-    }
-    let head_chars = max_chars / 2;
-    let tail_chars = max_chars - head_chars;
-    let (head, tail): (String, String) = if whole_fits_in_head {
-        let total = head_text.chars().count();
-        (
-            head_text.chars().take(head_chars).collect(),
-            head_text
-                .chars()
-                .skip(total.saturating_sub(tail_chars).max(head_chars))
-                .collect(),
-        )
-    } else {
-        let tail_text = String::from_utf8_lossy(skip_utf8_continuation(&captured.tail));
-        let tail_total = tail_text.chars().count();
-        (
-            head_text.chars().take(head_chars).collect(),
-            tail_text
-                .chars()
-                .skip(tail_total.saturating_sub(tail_chars))
-                .collect(),
-        )
-    };
-    let shown = head.chars().count() + tail.chars().count();
-    format!(
-        "{head}\n[... output truncated: showing the first {} and last {} of the output's characters ({shown} shown, {} bytes in total). Re-run a narrower command to see the omitted middle, for example `sed -n 'START,ENDp' FILE`, `head -n N`, `tail -n N` or `grep -n PATTERN FILE`. ...]\n{tail}",
-        head.chars().count(),
-        tail.chars().count(),
-        captured.total_bytes,
-    )
-}
-
-struct TailBuffer {
-    buffer: VecDeque<u8>,
-    max_bytes: usize,
-}
-
-impl TailBuffer {
-    fn new(max_bytes: usize) -> Self {
-        Self {
-            buffer: VecDeque::new(),
-            max_bytes,
-        }
-    }
-
-    fn extend(&mut self, data: &[u8]) {
-        if self.max_bytes == 0 {
-            return;
-        }
-
-        if data.len() >= self.max_bytes {
-            self.buffer.clear();
-            self.buffer
-                .extend(data[data.len() - self.max_bytes..].iter().copied());
-            return;
-        }
-
-        let overflow = (self.buffer.len() + data.len()).saturating_sub(self.max_bytes);
-        if overflow > 0 {
-            self.buffer.drain(0..overflow);
-        }
-        self.buffer.extend(data.iter().copied());
-    }
-
-    fn into_vec(self) -> Vec<u8> {
-        self.buffer.into_iter().collect()
-    }
-}
-
-/// Read a stream to its end, keeping its first and last `side_bytes` bytes
-/// and its total length.
-async fn read_stream_head_tail<R>(
-    mut reader: R,
-    side_bytes: usize,
-) -> std::io::Result<CapturedStream>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut head = Vec::new();
-    let mut tail = TailBuffer::new(side_bytes);
-    let mut total_bytes: u64 = 0;
-    let mut chunk = [0u8; 8192];
-
-    loop {
-        let n = reader.read(&mut chunk).await?;
-        if n == 0 {
-            break;
-        }
-        total_bytes = total_bytes.saturating_add(n as u64);
-        let data = &chunk[..n];
-        let head_room = side_bytes.saturating_sub(head.len());
-        head.extend_from_slice(&data[..head_room.min(data.len())]);
-        // The tail sees every byte, so it always holds the stream's last
-        // `side_bytes`, even where they overlap the head.
-        tail.extend(data);
-    }
-
-    let fits_in_head = total_bytes <= head.len() as u64;
-    Ok(CapturedStream {
-        head,
-        tail: if fits_in_head {
-            Vec::new()
-        } else {
-            tail.into_vec()
-        },
-        total_bytes,
-    })
-}
 
 /// Shell tool for executing shell commands
 ///
@@ -425,10 +274,9 @@ impl ShellTool {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
-        let stdout_max_chars = self.config.max_output_chars.max(1);
-        let stderr_max_chars = (stdout_max_chars / 2).max(1);
-        let stdout_side_bytes = capture_bytes_for_chars(stdout_max_chars);
-        let stderr_side_bytes = capture_bytes_for_chars(stderr_max_chars);
+        let caps = OutputCaps::from_max_output_chars(self.config.max_output_chars);
+        let stdout_side_bytes = capture_bytes_for_chars(caps.stdout_chars);
+        let stderr_side_bytes = capture_bytes_for_chars(caps.stderr_chars);
         let stdout_handle = tokio::spawn(async move {
             if let Some(out) = stdout {
                 read_stream_head_tail(out, stdout_side_bytes).await
@@ -497,8 +345,8 @@ impl ShellTool {
 
         Ok(ShellOutput {
             exit_code,
-            stdout: bound_head_tail(&stdout_bytes, stdout_max_chars),
-            stderr: bound_head_tail(&stderr_bytes, stderr_max_chars),
+            stdout: stdout_bytes.bounded_text(caps.stdout_chars),
+            stderr: stderr_bytes.bounded_text(caps.stderr_chars),
             timed_out,
             duration_secs,
             stdout_lossy: stdout_bytes.lossy(),
@@ -630,25 +478,9 @@ impl ShellOutput {
                 self.duration_secs
             )
         } else {
-            match self.exit_code {
-                Some(code) => format!("exit code {code} ({:.1}s)", self.duration_secs),
-                None => format!(
-                    "terminated by a signal, no exit code ({:.1}s)",
-                    self.duration_secs
-                ),
-            }
+            exit_status_phrase(self.exit_code, self.duration_secs)
         };
-        if self.stdout.is_empty() && self.stderr.is_empty() {
-            text.push_str("\n(no output)");
-        }
-        if !self.stdout.is_empty() {
-            text.push('\n');
-            text.push_str(self.stdout.trim_end_matches('\n'));
-        }
-        if !self.stderr.is_empty() {
-            text.push_str("\n[stderr]\n");
-            text.push_str(self.stderr.trim_end_matches('\n'));
-        }
+        push_streams(&mut text, &self.stdout, &self.stderr);
         if self.stdout_lossy {
             text.push_str("\n[stdout had invalid UTF-8, shown as U+FFFD]");
         }
@@ -1921,96 +1753,113 @@ mod tests {
     }
 
     // ==================== Truncation Tests ====================
+    // Capture and bounding are unit-tested in `super::super::output`; these
+    // run real commands through the tool.
 
-    fn numbered_lines(range: std::ops::Range<usize>, line: impl Fn(usize) -> String) -> String {
-        range.map(line).collect::<Vec<_>>().concat()
+    #[cfg(unix)]
+    fn sh_tool_with_cap(project_root: &Path, max_output_chars: usize) -> ShellTool {
+        ShellTool::new(ShellConfig {
+            enabled: true,
+            default_timeout_secs: 30,
+            restrict_to_project: false,
+            shell: "sh".to_string(),
+            shell_path: Some(PathBuf::from("/bin/sh")),
+            project_root: project_root.to_path_buf(),
+            security_mode: SecurityMode::Unrestricted,
+            max_output_chars,
+            ..Default::default()
+        })
     }
 
-    #[test]
-    fn head_tail_keeps_output_within_the_cap_whole() {
-        let captured = CapturedStream {
-            head: b"short output\n".to_vec(),
-            tail: Vec::new(),
-            total_bytes: 13,
-        };
-        assert_eq!(bound_head_tail(&captured, 100), "short output\n");
-        assert_eq!(bound_head_tail(&CapturedStream::default(), 100), "");
+    /// The number after `prefix` in `text`.
+    #[cfg(unix)]
+    fn number_after(text: &str, prefix: &str) -> usize {
+        let start = text.find(prefix).expect("marker names the line") + prefix.len();
+        text[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap()
     }
 
-    #[test]
-    fn head_tail_keeps_both_ends_of_long_output_and_names_the_total() {
-        let text = numbered_lines(0..1000, |i| format!("line {i}\n"));
-        let captured = CapturedStream {
-            head: text.clone().into_bytes(),
-            tail: Vec::new(),
-            total_bytes: text.len() as u64,
-        };
-        let bounded = bound_head_tail(&captured, 200);
-        assert!(bounded.starts_with("line 0\nline 1\n"), "{bounded}");
-        assert!(bounded.ends_with("line 999\n"), "{bounded}");
-        assert!(bounded.contains("output truncated"));
-        assert!(bounded.contains(&format!("{} bytes in total", text.len())));
-        assert!(bounded.contains("sed -n"));
-    }
-
+    #[cfg(unix)]
     #[tokio::test]
-    async fn head_tail_capture_keeps_head_and_tail_of_a_stream_larger_than_both() {
-        let text = numbered_lines(0..20_000, |i| format!("row {i}\n"));
-        let captured = read_stream_head_tail(text.as_bytes(), 400).await.unwrap();
-        assert_eq!(captured.total_bytes, text.len() as u64);
-        assert_eq!(captured.head.len(), 400);
-        assert_eq!(captured.tail.len(), 400);
-        let bounded = bound_head_tail(&captured, 100);
-        assert!(bounded.starts_with("row 0\n"), "{bounded}");
-        assert!(bounded.ends_with("row 19999\n"), "{bounded}");
-        assert!(bounded.contains(&format!("{} bytes in total", text.len())));
-    }
-
-    #[tokio::test]
-    async fn head_tail_capture_fills_the_tail_when_the_stream_barely_exceeds_the_head() {
-        // Regression: the tail used to receive only bytes past the head, so a
-        // stream just over the cap showed a short tail.
-        let text = numbered_lines(0..3000, |i| format!("{i:05}\n"));
-        let captured = read_stream_head_tail(text.as_bytes(), 16_000)
+    async fn valid_utf8_output_longer_than_the_head_capture_is_not_flagged_lossy() {
+        // Regression: the head capture is cut at 4 * max_output_chars bytes,
+        // here inside a three-byte box-drawing character, and valid output
+        // was reported as invalid UTF-8.
+        let temp_dir = TempDir::new().unwrap();
+        let file = temp_dir.path().join("tree.txt");
+        std::fs::write(
+            &file,
+            "\u{251c}\u{2500}\u{2500} dep v1.0.0\n".repeat(20_000),
+        )
+        .unwrap();
+        let tool = sh_tool_with_cap(temp_dir.path(), 40_000);
+        let output = tool
+            .execute_command("cat tree.txt", None, 30)
             .await
             .unwrap();
-        assert_eq!(captured.tail.len(), 16_000);
-        let bounded = bound_head_tail(&captured, 4_000);
-        let marker = bounded.find("[... output truncated").unwrap();
-        let after = &bounded[marker..];
-        let tail = &after[after.find("...]\n").unwrap() + 5..];
-        assert_eq!(tail.chars().count(), 2_000, "tail must get its full half");
-        assert!(tail.ends_with("02999\n"));
+        assert_eq!(output.exit_code, Some(0));
+        assert!(
+            !output.stdout_lossy,
+            "valid UTF-8 must not be flagged lossy"
+        );
+        assert!(!output.stdout.contains('\u{FFFD}'));
+        assert!(!output.render_for_model().contains("invalid UTF-8"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn head_tail_capture_leaves_tail_empty_when_the_stream_fits() {
-        let captured = read_stream_head_tail(&b"small"[..], 16).await.unwrap();
-        assert!(captured.tail.is_empty());
-        assert_eq!(bound_head_tail(&captured, 100), "small");
-    }
+    async fn truncation_marker_line_numbers_page_the_omitted_middle() {
+        let temp_dir = TempDir::new().unwrap();
+        let tool = sh_tool_with_cap(temp_dir.path(), 1_000);
+        // Line N of the output is the number N.
+        let command = "i=1; while [ $i -le 5000 ]; do echo $i; i=$((i+1)); done";
+        let output = tool.execute_command(command, None, 30).await.unwrap();
+        let stdout = output.stdout;
+        let marker_at = stdout.find("\n[... ").unwrap();
+        let head_lines: Vec<&str> = stdout[..marker_at].lines().collect();
+        let after_marker = &stdout[marker_at + 1..];
+        let tail_lines: Vec<&str> = after_marker[after_marker.find("...]\n").unwrap() + 5..]
+            .lines()
+            .collect();
 
-    #[test]
-    fn head_tail_never_splits_multibyte_characters() {
-        let text = "🎉".repeat(500);
-        for max_chars in [1, 2, 3, 10, 99] {
-            let captured = CapturedStream {
-                head: text.clone().into_bytes(),
-                tail: Vec::new(),
-                total_bytes: text.len() as u64,
-            };
-            let bounded = bound_head_tail(&captured, max_chars);
-            assert!(!bounded.contains('\u{FFFD}'), "{bounded}");
-        }
-        // A tail captured mid-character drops the partial prefix.
-        let bytes = text.as_bytes();
-        let captured = CapturedStream {
-            head: bytes[..8].to_vec(),
-            tail: bytes[bytes.len() - 9..].to_vec(),
-            total_bytes: bytes.len() as u64,
-        };
-        assert!(!captured.lossy());
-        assert!(!bound_head_tail(&captured, 4).contains('\u{FFFD}'));
+        // The example marker in docs/reference/builtin-tools.mdx.
+        assert!(
+            stdout.contains(
+                "[... lines 153-4900 of 5000 omitted (4748 lines, 22893 of 23893 characters); \
+                 the head ends at line 152 and the tail starts at line 4901. \
+                 To see them, re-run the command piped through `sed -n '153,4900p'`, \
+                 or narrow it with `grep -n`. ...]"
+            ),
+            "{stdout}"
+        );
+        let head_end = number_after(&stdout, "the head ends at line ");
+        let tail_start = number_after(&stdout, "the tail starts at line ");
+        assert_eq!(head_lines.first(), Some(&"1"));
+        assert_eq!(head_lines.last(), Some(&head_end.to_string().as_str()));
+        assert_eq!(tail_lines.first(), Some(&tail_start.to_string().as_str()));
+        assert_eq!(tail_lines.last(), Some(&"5000"));
+        assert!(stdout.contains(&format!(
+            "[... lines {}-{} of 5000 omitted ({} lines,",
+            head_end + 1,
+            tail_start - 1,
+            tail_start - head_end - 1
+        )));
+
+        // The suggested command pages exactly the omitted lines.
+        let from = number_after(&stdout, "sed -n '");
+        let to = number_after(&stdout, &format!("sed -n '{from},"));
+        assert_eq!((from, to), (head_end + 1, tail_start - 1));
+        let paged = tool
+            .execute_command(&format!("{command} | sed -n '{from},{to}p'"), None, 30)
+            .await
+            .unwrap()
+            .stdout;
+        assert!(paged.starts_with(&format!("{from}\n")), "{paged}");
+        assert!(paged.ends_with(&format!("\n{to}\n")), "{paged}");
     }
 
     fn rendered(exit_code: Option<i32>, stdout: &str, stderr: &str, timed_out: bool) -> String {

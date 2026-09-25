@@ -5,6 +5,8 @@
 use meerkat_core::ExecutionPlacement;
 use serde::{Deserialize, Serialize};
 
+use super::output::{exit_status_phrase, push_streams};
+
 /// Unique identifier for background jobs
 ///
 /// Format: "job_" + UUID v7 (36 chars)
@@ -94,6 +96,55 @@ pub enum JobStatus {
     },
 }
 
+impl JobStatus {
+    /// The compact text the model sees for this status: the state, and for a
+    /// completed job its exit status and output.
+    pub(super) fn render_for_model(&self) -> String {
+        match self {
+            Self::Queued => "queued".to_string(),
+            Self::Running { started_at_unix } => {
+                format!("running (started at unix time {started_at_unix})")
+            }
+            Self::Completed { .. } => format!("completed: {}", self.render_completion_detail()),
+            Self::Failed {
+                error,
+                duration_secs,
+            } => format!("failed after {duration_secs:.1}s: {error}"),
+            Self::Cancelled { duration_secs } => format!("cancelled after {duration_secs:.1}s"),
+            Self::WorkerLost { error } => format!("worker lost: {error}"),
+            Self::NeedsAttention { error } => format!("needs attention: {error}"),
+        }
+    }
+
+    /// The detail a background-job completion notice appends after the
+    /// terminal state it already names: the exit status and output of a
+    /// completed job, otherwise the reason or duration.
+    pub(super) fn render_completion_detail(&self) -> String {
+        match self {
+            Self::Completed {
+                exit_code,
+                stdout,
+                stderr,
+                duration_secs,
+            } => {
+                let mut text = exit_status_phrase(*exit_code, *duration_secs);
+                push_streams(&mut text, stdout, stderr);
+                text
+            }
+            Self::Failed {
+                error,
+                duration_secs,
+            } => format!("{error} (after {duration_secs:.1}s)"),
+            Self::Cancelled { duration_secs } => format!("after {duration_secs:.1}s"),
+            Self::WorkerLost { error } | Self::NeedsAttention { error } => error.clone(),
+            Self::Queued => "queued".to_string(),
+            Self::Running { started_at_unix } => {
+                format!("running (started at unix time {started_at_unix})")
+            }
+        }
+    }
+}
+
 /// Lightweight lifecycle status for job list summaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -147,6 +198,15 @@ pub struct BackgroundJob {
     pub started_at_unix: u64,
     /// Current status of the job
     pub status: JobStatus,
+}
+
+impl BackgroundJob {
+    /// The compact text `shell_job_status` returns to the model: the job id
+    /// and its status, and for a completed job its exit status and output.
+    /// Placement paths, timeouts and timestamps stay in the typed value.
+    pub(super) fn render_for_model(&self) -> String {
+        format!("job {} {}", self.id, self.status.render_for_model())
+    }
 }
 
 /// Lightweight job info for listing
@@ -224,6 +284,98 @@ mod tests {
         let id = JobId::default();
         assert!(id.0.starts_with("job_"));
         assert_eq!(id.0.len(), 40);
+    }
+
+    // ==================== Model Rendering Tests ====================
+
+    fn job(status: JobStatus) -> BackgroundJob {
+        BackgroundJob {
+            id: JobId::from_string("job_1"),
+            command: "make".to_string(),
+            working_dir: Some("/abs/project".to_string()),
+            placement: None,
+            timeout_secs: 30,
+            started_at_unix: 1_700_000_000,
+            status,
+        }
+    }
+
+    #[test]
+    fn background_job_renders_compact_text_for_the_model() {
+        let completed = job(JobStatus::Completed {
+            exit_code: Some(2),
+            stdout: "built\n".to_string(),
+            stderr: "warning: x\n".to_string(),
+            duration_secs: 1.25,
+        });
+        assert_eq!(
+            completed.render_for_model(),
+            "job job_1 completed: exit code 2 (1.2s)\nbuilt\n[stderr]\nwarning: x"
+        );
+        let silent = job(JobStatus::Completed {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration_secs: 0.5,
+        });
+        assert_eq!(
+            silent.render_for_model(),
+            "job job_1 completed: terminated by a signal, no exit code (0.5s)\n(no output)"
+        );
+        assert_eq!(
+            job(JobStatus::Queued).render_for_model(),
+            "job job_1 queued"
+        );
+        assert_eq!(
+            job(JobStatus::Running {
+                started_at_unix: 1_700_000_000
+            })
+            .render_for_model(),
+            "job job_1 running (started at unix time 1700000000)"
+        );
+        assert_eq!(
+            job(JobStatus::Failed {
+                error: "background job timed out".to_string(),
+                duration_secs: 30.0,
+            })
+            .render_for_model(),
+            "job job_1 failed after 30.0s: background job timed out"
+        );
+        assert_eq!(
+            job(JobStatus::Cancelled { duration_secs: 2.0 }).render_for_model(),
+            "job job_1 cancelled after 2.0s"
+        );
+        let text = completed.render_for_model();
+        assert!(!text.contains("/abs/project") && !text.contains("timeout_secs"));
+    }
+
+    #[test]
+    fn completion_detail_omits_the_state_the_notice_already_names() {
+        let completed = JobStatus::Completed {
+            exit_code: Some(0),
+            stdout: "ok\n".to_string(),
+            stderr: String::new(),
+            duration_secs: 0.04,
+        };
+        assert_eq!(
+            completed.render_completion_detail(),
+            "exit code 0 (0.0s)\nok"
+        );
+        assert_eq!(
+            JobStatus::Failed {
+                error: "shell_wait_failed".to_string(),
+                duration_secs: 1.0,
+            }
+            .render_completion_detail(),
+            "shell_wait_failed (after 1.0s)"
+        );
+        assert_eq!(
+            JobStatus::WorkerLost {
+                error: "lost".to_string()
+            }
+            .render_completion_detail(),
+            "lost"
+        );
     }
 
     // ==================== JobStatus Tests ====================

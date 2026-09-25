@@ -50,10 +50,19 @@ them.
   and carried absolute placement paths and `false` flags, and it was re-sent on
   every later request. Rust callers still get `ShellOutput` through
   `ToolOutput::into_json`; event streams and transcripts carry the text.
-- Long shell output keeps its head and its tail. stdout is capped at
-  `[shell] max_output_chars` characters (default 40000, about 10K tokens;
-  stderr gets half) with a marker naming the total size and suggesting a
-  narrower command. It used to keep only the last 100000 characters, which
+- `shell_job_status` results reach the model as the same compact text: the job
+  ID and state, then the exit status and output of a completed job. Rust
+  callers still get `BackgroundJob` through `ToolOutput::into_json`. The detail
+  of a background-job completion notice (and of the `background_job_completed`
+  event) is now that exit status and output instead of a Rust debug dump of the
+  job status.
+- Long shell output keeps its head and its tail, in foreground calls and
+  background jobs. stdout is capped at `[shell] max_output_chars` characters
+  (default 40000, about 10K tokens; stderr gets half). A cut moves to a line
+  boundary when the line it lands in fits the cap, and the marker names the
+  omitted lines, the line where the head ends and the line where the tail
+  starts, with a `sed -n` range that pages them. Foreground calls used to keep
+  only the last 100000 characters and background jobs the last 1 MiB, which
   dropped the start of long diffs and file listings.
 
 ### Fixed
@@ -62,6 +71,8 @@ them.
   `timeout_secs` declares a minimum of 1, and `background` is offered only when
   durable background jobs are available, instead of failing with "requested
   tool execution mode Detached is not supported".
+- Valid UTF-8 shell output longer than the capture buffer is no longer reported
+  as invalid UTF-8 when the buffer's edge splits a character.
 
 - The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)
   and 033 (the office demo) pass again and run in pull-request CI. A new

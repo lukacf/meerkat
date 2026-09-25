@@ -7515,15 +7515,18 @@ mod config_tests {
     #[test]
     fn working_directory_proof_rejects_failed_unlinked_or_wrong_output() {
         let directory = tempfile::tempdir().unwrap();
-        let output = serde_json::json!({
-            "exit_code":0,"stdout":format!("{}\n", directory.path().display()),
-            "stderr":"","timed_out":false,"duration_secs":0.01,
-        });
+        // The shell result reaches the model as compact text: a status line,
+        // then stdout.
+        let shell_text = |status: &str, stdout: &str| format!("{status}\n{stdout}\n");
+        let output = shell_text(
+            "exit code 0 (0.0s)",
+            &directory.path().display().to_string(),
+        );
         let fixture = serde_json::json!([
             {"role":"block_assistant","created_at":"2026-01-01T00:00:00Z",
              "blocks":[{"block_type":"tool_use","data":{"id":"pwd-call","name":"shell","args":{"command":"pwd"}}}]},
             {"role":"tool_results","created_at":"2026-01-01T00:00:00Z",
-             "results":[{"tool_use_id":"pwd-call","content":output.to_string(),"is_error":false}]}
+             "results":[{"tool_use_id":"pwd-call","content":output,"is_error":false}]}
         ]);
         let messages =
             serde_json::from_value::<Vec<meerkat_contracts::WireSessionMessage>>(fixture.clone())
@@ -7532,27 +7535,27 @@ mod config_tests {
             super::successful_working_directory_result(&messages, directory.path()),
             Some(1)
         );
-        let mut structured = messages.clone();
-        let meerkat_contracts::WireSessionMessage::ToolResults { results, .. } = &mut structured[1]
+        let mut blocks = messages.clone();
+        let meerkat_contracts::WireSessionMessage::ToolResults { results, .. } = &mut blocks[1]
         else {
             panic!("fixture tool result");
         };
         results[0].content = meerkat_contracts::WireToolResultContent::Blocks(vec![
-            meerkat_contracts::WireContentBlock::Structured {
-                data: output.clone(),
+            meerkat_contracts::WireContentBlock::Text {
+                text: output.clone(),
             },
         ]);
         assert_eq!(
-            super::successful_working_directory_result(&structured, directory.path()),
+            super::successful_working_directory_result(&blocks, directory.path()),
             Some(1)
         );
-        let meerkat_contracts::WireSessionMessage::ToolResults { results, .. } = &mut structured[1]
+        let meerkat_contracts::WireSessionMessage::ToolResults { results, .. } = &mut blocks[1]
         else {
             panic!("fixture tool result");
         };
         results[0].is_error = true;
         assert_eq!(
-            super::successful_working_directory_result(&structured, directory.path()),
+            super::successful_working_directory_result(&blocks, directory.path()),
             None
         );
         for (pointer, invalid) in [
@@ -7578,21 +7581,40 @@ mod config_tests {
                 "{pointer}"
             );
         }
-        for (field, invalid) in [
-            ("exit_code", serde_json::json!(1)),
-            ("timed_out", serde_json::json!(true)),
-            ("stdout", serde_json::json!("/nonexistent-pwd-proof")),
+        let directory_text = directory.path().display().to_string();
+        for (case, invalid_output) in [
+            (
+                "nonzero exit",
+                shell_text("exit code 1 (0.0s)", &directory_text),
+            ),
+            (
+                "timed out",
+                shell_text(
+                    "timed out after 30.0s; the process was terminated",
+                    &directory_text,
+                ),
+            ),
+            (
+                "wrong directory",
+                shell_text("exit code 0 (0.0s)", "/nonexistent-pwd-proof"),
+            ),
+            (
+                "JSON envelope",
+                serde_json::json!({
+                    "exit_code": 0,
+                    "stdout": format!("{directory_text}\n"),
+                })
+                .to_string(),
+            ),
         ] {
-            let mut invalid_output = output.clone();
-            invalid_output[field] = invalid;
             let mut negative = fixture.clone();
-            negative[1]["results"][0]["content"] = serde_json::json!(invalid_output.to_string());
+            negative[1]["results"][0]["content"] = serde_json::json!(invalid_output);
             let messages: Vec<meerkat_contracts::WireSessionMessage> =
                 serde_json::from_value(negative).unwrap();
             assert_eq!(
                 super::successful_working_directory_result(&messages, directory.path()),
                 None,
-                "{field}"
+                "{case}"
             );
         }
     }

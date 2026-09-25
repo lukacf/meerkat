@@ -488,7 +488,9 @@ fn test_shell_tool_schema() {
     assert!(schema["properties"]["command"].is_object());
     assert!(schema["properties"]["working_dir"].is_object());
     assert!(schema["properties"]["timeout_secs"].is_object());
-    assert!(schema["properties"]["background"].is_object());
+    // Without durable job stores the tool cannot run background jobs, so it
+    // does not offer the model that mode.
+    assert!(schema["properties"].get("background").is_none());
 
     // Verify 'command' is required
     let required = schema["required"].as_array().unwrap();
@@ -856,14 +858,14 @@ async fn integration_real_regression_non_utf8_output() {
     // The output may contain replacement characters, which is correct behavior
 }
 
-/// Regression: Long output should preserve the tail
+/// Regression: Long output keeps both its head and its tail
 ///
-/// When output exceeds buffer limits, truncation should keep the END of output,
-/// not the beginning, since the end usually contains the most important info
-/// (errors, final results).
+/// When output exceeds the cap, truncation keeps the start (the head of a
+/// diff or listing) and the end (errors, final results) around a marker that
+/// names the omitted lines.
 #[tokio::test]
 #[ignore = "lane:e2e-system"]
-async fn integration_real_regression_truncation_keeps_tail() {
+async fn integration_real_regression_truncation_keeps_head_and_tail() {
     let temp_dir = TempDir::new().unwrap();
     let config = create_sh_config(&temp_dir);
     let tool = ShellTool::new(config);
@@ -887,13 +889,19 @@ async fn integration_real_regression_truncation_keeps_tail() {
 
     let output: ShellOutput = serde_json::from_value(result.unwrap().into_json().unwrap()).unwrap();
 
-    // The end marker should always be present (tail preserved)
     assert!(
-        output.stdout.contains("END_MARKER"),
-        "Output should contain END_MARKER (tail preserved)"
+        output.stdout.starts_with("START_MARKER\n"),
+        "Output should start with START_MARKER (head preserved)"
     );
-
-    // Note: Whether START_MARKER is present depends on truncation threshold
+    assert!(
+        output.stdout.ends_with("END_MARKER\n"),
+        "Output should end with END_MARKER (tail preserved)"
+    );
+    assert!(
+        output.stdout.contains(" of 10002 omitted ("),
+        "the marker names the omitted lines: {}",
+        output.stdout
+    );
 }
 
 /// Regression: Concurrent job spawning should produce unique IDs

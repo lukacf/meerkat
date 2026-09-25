@@ -5563,8 +5563,25 @@ async fn maybe_inject_feed_wake(
         return FeedWakeOutcome::FeedGap(gap);
     }
 
+    // A completion the owner's own turn already applied (AgentApplied is
+    // advanced only after its boundary put the notice into the model's
+    // context) is delivered: waking the idle owner for it again would run an
+    // empty resume and retire the executor for nothing.
+    let agent_applied = match registry
+        .completion_cursor(meerkat_core::ops_lifecycle::CompletionCursorConsumer::AgentApplied)
+    {
+        Ok(cursor) => cursor.unwrap_or(0),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "runtime loop refused completion feed wake from poisoned agent cursor authority"
+            );
+            return FeedWakeOutcome::StaleAuthority;
+        }
+    };
+    let delivered_through = (*last_injected_seq).max(agent_applied);
     let has_new_wake_completion =
-        match batch_has_generated_wake_completion(&batch, *last_injected_seq, registry) {
+        match batch_has_generated_wake_completion(&batch, delivered_through, registry) {
             Ok(has_wake_completion) => has_wake_completion,
             Err(outcome) => return outcome,
         };
@@ -11472,6 +11489,87 @@ mod tests {
         );
         let guard = applied_driver.lock().await;
         assert!(guard.as_driver().active_input_ids().is_empty());
+    }
+
+    /// A detached completion the owner's own turn already applied must not
+    /// wake the idle owner again: the empty resume would retire its executor
+    /// (the fork_off forker churn found on #1190). A completion the agent has
+    /// NOT applied still wakes it.
+    #[tokio::test]
+    async fn maybe_inject_feed_wake_skips_completions_the_agent_already_applied() {
+        let registry = crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new();
+        let spec = background_spec("feed-applied-in-turn");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+        registry
+            .complete_operation(&op_id, op_result(&op_id, "done"))
+            .unwrap();
+        let feed = registry.completion_feed_handle();
+        // The owner's turn applied the notice at its CallingLlm boundary.
+        registry
+            .advance_completion_cursor(
+                meerkat_core::ops_lifecycle::CompletionCursorConsumer::AgentApplied,
+                feed.watermark(),
+                None,
+            )
+            .expect("agent applied the completion in-turn");
+
+        let driver = make_shared_ephemeral_driver("feed-applied-in-turn");
+        let mut observed_seq = 0;
+        let mut last_injected_seq = 0;
+        let binding = RuntimeLoopAuthorityBinding::detached_for_test();
+        assert_eq!(
+            maybe_inject_feed_wake(
+                &driver,
+                Some(feed.as_ref()),
+                &mut observed_seq,
+                &mut last_injected_seq,
+                None,
+                Some(&registry),
+                &binding,
+            )
+            .await,
+            FeedWakeOutcome::Noop,
+            "an already-applied completion must not inject a second wake"
+        );
+        assert!(
+            driver
+                .lock()
+                .await
+                .as_driver()
+                .active_input_ids()
+                .is_empty()
+        );
+        assert_eq!(
+            observed_seq,
+            feed.watermark(),
+            "the observed cursor catches up"
+        );
+
+        // A later completion the agent has not applied still wakes the owner.
+        let spec = background_spec("feed-not-yet-applied");
+        let later = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&later).unwrap();
+        registry
+            .complete_operation(&later, op_result(&later, "later"))
+            .unwrap();
+        let wake_driver = make_shared_ephemeral_driver("feed-not-yet-applied");
+        assert_eq!(
+            maybe_inject_feed_wake(
+                &wake_driver,
+                Some(feed.as_ref()),
+                &mut observed_seq,
+                &mut last_injected_seq,
+                None,
+                Some(&registry),
+                &binding,
+            )
+            .await,
+            FeedWakeOutcome::Injected,
+            "an unapplied completion must still wake the owner"
+        );
     }
 
     #[tokio::test]

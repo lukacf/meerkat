@@ -1292,6 +1292,10 @@ impl AgentMobToolSurface {
         let mut member = SpawnMemberSpec::new(source_entry.role, args.member_id);
         member.initial_message = Some(ContentInput::Text(child_input));
         member.override_profile = source_entry.effective_profile_override;
+        // The child runs exactly one tracked turn for its forker, which only a
+        // turn-driven member supports. Like delegate helpers, it is turn-driven
+        // regardless of the role profile's default runtime mode.
+        member.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
         member.model_override = source_entry.effective_model_override;
         member.objective_id = objective_id;
         member.tool_access_policy = self

@@ -25,8 +25,9 @@ const CHILD_REPLY: &str = "FORKED-RESULT-7Q";
 fn forker_authority(mob_id: &str) -> meerkat_core::service::MobToolAuthorityContext {
     let authority = meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
         .expect("generated authority");
-    let authority = meerkat_runtime::mob_operator_authority::set_create_authority(&authority, false)
-        .expect("no create scope");
+    let authority =
+        meerkat_runtime::mob_operator_authority::set_create_authority(&authority, false)
+            .expect("no create scope");
     meerkat_runtime::mob_operator_authority::grant_spawn_profile_in_mob(
         &authority,
         mob_id,
@@ -90,7 +91,10 @@ async fn call(
     Ok(serde_json::from_str(&outcome.result.text_content()).expect("json tool result"))
 }
 
-async fn owner_transcript_text(fixture: &CouncilFixture, session: &meerkat_core::SessionId) -> String {
+async fn owner_transcript_text(
+    fixture: &CouncilFixture,
+    session: &meerkat_core::SessionId,
+) -> String {
     let persisted = <meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session(
         fixture.service.as_ref(),
         session,
@@ -134,7 +138,10 @@ async fn detached_fork_off_delivers_a_durable_completion_to_the_forker() {
         {
             break format!("{operation:?}");
         }
-        assert!(tokio::time::Instant::now() < deadline, "fork job never completed");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "fork job never completed"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     assert!(content.contains(&job_id));
@@ -148,7 +155,11 @@ async fn detached_fork_off_delivers_a_durable_completion_to_the_forker() {
     );
 
     // The completed child stays seated and belongs to the forker.
-    let handle = fixture.state.handle_for(&fixture.source_mob_id()).await.unwrap();
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
     let child = handle
         .get_member(&AgentIdentity::from("surface-child"))
         .await
@@ -235,11 +246,17 @@ async fn forker_checks_lists_and_retires_its_own_children_on_the_agent_surface()
     )
     .await
     .expect("the forker retires its own child");
-    let handle = fixture.state.handle_for(&fixture.source_mob_id()).await.unwrap();
-    assert!(handle
-        .get_member(&AgentIdentity::from("owned-child"))
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
         .await
-        .unwrap()
-        .is_none());
+        .unwrap();
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from("owned-child"))
+            .await
+            .unwrap()
+            .is_none()
+    );
     fixture.teardown().await;
 }

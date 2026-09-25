@@ -319,8 +319,9 @@ and workflows.
 
 `fork_off` forks the calling member's committed transcript into a durable child
 member, commits the task (and any `expected_output` guidance) as the child's
-input, and admits the child's one turn. What happens next depends on whether
-the host can deliver a completion after the call returns.
+input, and admits the child's one turn. The child runs turn-driven whatever
+its role's default runtime mode, like a `delegate` helper. What happens next
+depends on whether the host can deliver a completion after the call returns.
 
 **Detached.** Hosts that outlive the call declare that they can: the JSON-RPC,
 REST, and MCP servers, `rkat run --keep-alive`, and `rkat mob deploy --surface

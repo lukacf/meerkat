@@ -253,6 +253,11 @@ them.
   a valid image. Unattested references still fail closed. Existing MobKit
   references are accepted once MobKit's blob adapter implements
   `attest_address`.
+- `fork_off` failed outright in mobs whose role profile defaults to the
+  `autonomous_host` runtime mode: the child was seated with that default and
+  its one tracked turn was refused ("tracked turn completion is not supported
+  by autonomous inbox delivery"). The child now runs turn-driven regardless of
+  the role default, like `delegate` helpers.
 - A fork's first turn reported the source's whole lifetime usage as its own
   (HomeCore saw 1.76e9 input tokens on a one-word reply).
 - A member without manage scope could not check, list or retire the children

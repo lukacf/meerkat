@@ -579,7 +579,8 @@ With generated authority, `AgentMobToolSurface`
 lead principal. `fork_off` requires the caller to be a durable mob member with
 spawn authority; supply `member_id` and `task`, optionally `message_count`,
 `expected_output` (prompt guidance, not a validated schema), `result_label`,
-`max_text_bytes`, and `max_run_secs`. Unknown arguments are rejected. This
+`max_text_bytes`, and `max_run_secs`. Unknown arguments are rejected. The
+child runs turn-driven whatever its role's default runtime mode. This
 durable transcript fork is distinct from `MemberLaunchMode::Fork` /
 `fork_helper`, which seed a fresh session's prompt with rendered history;
 low-level `Session::fork()` / `fork_at()` / `fork_replacing()` are separate

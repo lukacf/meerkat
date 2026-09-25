@@ -497,6 +497,45 @@ fn test_shell_tool_schema() {
     assert!(required.contains(&json!("command")));
 }
 
+struct NoopShellJobDelivery;
+
+#[async_trait::async_trait]
+impl meerkat_tools::builtin::shell::ShellJobDeliveryProjector for NoopShellJobDelivery {
+    async fn project_job(&self, _job_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// E2E: With durable job stores bound, the schema offers `background`.
+#[test]
+fn test_shell_tool_schema_offers_background_with_durable_jobs() {
+    let temp_dir = TempDir::new().unwrap();
+    let config = create_sh_config(&temp_dir);
+    let session_id = SessionId::new();
+    let job_store: Arc<dyn meerkat_jobs::DetachedJobStore> = Arc::new(
+        meerkat_jobs::SqliteDetachedJobStore::open(temp_dir.path().join("jobs.db")).unwrap(),
+    );
+    let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(meerkat_store::FsBlobStore::new(
+        temp_dir.path().join("blobs"),
+    ));
+    let durable = meerkat_tools::builtin::shell::DurableShellJobRuntime::new(
+        "e2e-realm",
+        session_id.clone(),
+        job_store,
+        blob_store,
+        Arc::new(NoopShellJobDelivery),
+    )
+    .unwrap();
+    let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+    let job_manager = JobManager::new(config.clone())
+        .bind_canonical_async_ops(session_id, registry)
+        .with_durable_job_runtime(durable);
+    let tool = ShellTool::with_job_manager(config, Arc::new(job_manager));
+
+    let schema = tool.def().input_schema;
+    assert_eq!(schema["properties"]["background"]["type"], "boolean");
+}
+
 /// E2E: ShellToolSet provides all five tools
 #[test]
 fn test_shell_tool_set() {

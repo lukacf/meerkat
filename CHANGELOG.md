@@ -41,12 +41,17 @@ them.
   `JsonRenderedAsText { value, text }`; exhaustive matches must handle it.
   `meerkat_tools::builtin::shell::ShellConfig` and `meerkat_core::ShellDefaults`
   gain the public field `max_output_chars: usize` (serde-defaulted to 40000).
-- Dispatched `shell` and `shell_job_status` results are now a `Text` content
-  block instead of a `Structured` JSON block, in transcripts, tool events
-  (`tool_execution_completed`, `tool_result_received`) and every surface
-  (REST, RPC, MCP, SDKs). Hosts that read `exit_code`, `timed_out`, the lossy
-  flags or `placement` from the result content no longer find them there. Only
-  code that calls the tool directly (`BuiltinTool::call`) still gets the typed
+- Dispatched `shell` and `shell_job_status` results are now one `Text` content
+  block instead of one `Structured` JSON block. This applies to the transcript
+  `tool_results` content, the `tool_result_received` and
+  `tool_execution_completed` event `content`, and every surface that carries
+  them (REST, RPC, MCP, SDKs). A `shell` result no longer carries the
+  `exit_code`, `stdout`, `stderr`, `timed_out`, `duration_secs`,
+  `stdout_lossy`, `stderr_lossy` and `placement` fields; a `shell_job_status`
+  result no longer carries the `BackgroundJob` fields (`id`, `command`,
+  `working_dir`, `placement`, `timeout_secs`, `started_at_unix`, `status`).
+  Exit status, streams and job state appear only inside the text. Code that
+  calls the tool directly (`BuiltinTool::call`) still gets the typed
   `ShellOutput` or `BackgroundJob` through `ToolOutput::into_json`.
 - `meerkat_core::Usage` gains the public field `reasoning_tokens:
   Option<u64>`, and `meerkat_contracts::WireUsage` gains the same field.

@@ -463,6 +463,7 @@ class RunResult:
     text: str = ""
     turns: int = 0
     tool_calls: int = 0
+    #: Session-cumulative usage. Take the latest value; never sum across runs.
     usage: Usage = field(default_factory=Usage)
     terminal_cause_kind: str | None = None
     session_ref: str | None = None
@@ -470,6 +471,11 @@ class RunResult:
     extraction_error: ExtractionError | None = None
     schema_warnings: list[SchemaWarning] | None = None
     skill_diagnostics: SkillRuntimeDiagnostics | None = None
+    #: Usage of this run alone: the session total's change over the run.
+    run_usage: Usage | None = None
+    #: One row per provider request this run made, in order, each with its
+    #: ``accounting`` (tool-loop calls, extraction and compaction summaries).
+    request_usage: list[Usage] | None = None
 
 
 HelpExecutionMode = Literal["explain_only", "plan_execution"]

@@ -342,6 +342,37 @@ async fn turn_rows_cover_one_call_while_the_run_total_is_session_cumulative() {
     assert_eq!(second_total.total_tokens(), 18_920);
     assert_eq!(second.usage.total_tokens(), 18_920);
 
+    // ---- Run-scoped views: every provider call, and only this run's. -------
+    let first_run = first.run_usage.as_ref().expect("first run usage");
+    assert_eq!(
+        first_run.input_tokens, 13_720,
+        "a fresh session's run usage is its total"
+    );
+    assert_eq!(first_run.output_tokens, 440);
+    assert_eq!(first_run.cache_creation_tokens, Some(4_000));
+    assert_eq!(first_run.cache_read_tokens, Some(8_300));
+    assert_eq!(
+        first.request_usage.len(),
+        3,
+        "request_usage has a row per provider call, tool-loop calls included"
+    );
+    assert_eq!(
+        first
+            .request_usage
+            .iter()
+            .map(TurnUsage::presented_tokens)
+            .sum::<u64>(),
+        first_run.input_tokens,
+        "the request rows reconcile with the run's own usage"
+    );
+    let second_run = second.run_usage.as_ref().expect("second run usage");
+    assert_eq!(second_run.input_tokens, 4_700, "only the second run's call");
+    assert_eq!(second_run.output_tokens, 60);
+    assert_eq!(second_run.cache_read_tokens, Some(4_500));
+    assert_eq!(second.request_usage.len(), 1);
+    assert_eq!(second.request_usage[0].presented_tokens(), 4_700);
+    assert_eq!(second_total.cache_read_tokens, Some(12_800));
+
     // ---- The documented aggregations, right and wrong. --------------------
     let attributed_input = first_row.presented_tokens() + second_row.presented_tokens();
     let attributed_output = first_row.output_tokens + second_row.output_tokens;
@@ -377,4 +408,49 @@ async fn turn_rows_cover_one_call_while_the_run_total_is_session_cumulative() {
         naive_run_total_sum > second_total.total_tokens(),
         "the wrong aggregation must stay observably wrong"
     );
+}
+
+/// Sessions saved before 0.8.22 summed raw per-call cache counters into the
+/// stored total, so cache reads can exceed the input total. Loaded through the
+/// real serde path, the normalized total must honour the subset invariant and
+/// stay monotone across the next recorded turn, so run deltas and compaction
+/// rollback deltas never go backwards.
+#[test]
+fn legacy_session_totals_normalize_to_the_invariant_and_stay_monotone() {
+    let mut encoded = serde_json::to_value(crate::Session::new()).expect("serialize session");
+    encoded["usage"] = serde_json::json!({
+        "input_tokens": 1000,
+        "output_tokens": 50,
+        "cache_creation_tokens": 4000,
+        "cache_read_tokens": 50000
+    });
+    let mut session: crate::Session =
+        serde_json::from_value(encoded).expect("legacy session loads");
+    assert_eq!(
+        session.total_usage().cache_read_tokens,
+        Some(50_000),
+        "the stored value is left untouched"
+    );
+    let baseline = crate::CumulativeUsage::from_usage(session.total_usage()).into_inner();
+    assert_eq!(baseline.cache_read_tokens, Some(1000));
+    assert_eq!(baseline.cache_creation_tokens, Some(1000));
+
+    session.record_turn_usage(&TurnUsage::new(
+        Usage {
+            input_tokens: 300,
+            output_tokens: 10,
+            cache_creation_tokens: Some(0),
+            cache_read_tokens: Some(4000),
+            ..Default::default()
+        },
+        crate::ProviderTokenAccounting::anthropic("claude-opus-5", 300, 0, 4000),
+    ));
+    let live = crate::CumulativeUsage::from_usage(session.total_usage()).into_inner();
+    let delta = live
+        .cumulative_delta_since(&baseline)
+        .expect("normalized legacy totals stay monotone");
+    assert_eq!(delta.input_tokens, 4300);
+    assert_eq!(delta.cache_read_tokens, Some(4000));
+    assert_eq!(delta.cache_creation_tokens, Some(0));
+    assert!(live.cache_read_tokens.unwrap() <= live.input_tokens);
 }

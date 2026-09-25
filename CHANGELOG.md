@@ -49,6 +49,16 @@ them.
   clearing them, and `CumulativeUsage::from_usage` keeps them (clamped to their
   parent totals) instead of clearing them. `Usage::cumulative_delta_since` is
   new.
+- `meerkat_core::agent::compact::CompactionOutcome` gains the public field
+  `summary_source: CompactionSummarySource` (new enum: `ProviderCall`,
+  `HostCurator`, `MechanicalFallback`).
+- `meerkat_live::host::ObservationOutcome::UserContentCommitted` now holds
+  `observation: Box<LiveAdapterObservation>` instead of the observation by
+  value; the larger `Usage` pushed the enum over the large-variant limit.
+- Gemini `output_tokens` now counts thinking tokens as well as candidates,
+  matching how Gemini bills them. Output totals rise on Gemini thinking models,
+  and `max_tokens` budgets now charge thinking, so a Gemini run can reach
+  `budget_exhausted` earlier than before.
 
 ### Added
 
@@ -66,13 +76,14 @@ them.
 - Run results carry `run_usage`, the usage of that run alone, beside the
   session-cumulative `usage`, and `request_usage`, one row per provider request
   the run made (tool-loop calls, structured-output extraction and compaction
-  summaries included).
-
-### Changed
-
-- Gemini `output_tokens` now counts thinking tokens as well as candidates,
-  matching how Gemini bills them, so Gemini output totals rise on thinking
-  models.
+  summaries made by the model included; curator and mechanical summaries make
+  no request and add no row). A run that suspends for callback results keeps
+  one account across the resume. The Python and TypeScript SDK `RunResult`
+  expose them as `run_usage`/`request_usage` and `runUsage`/`requestUsage`,
+  and every SDK `Usage` gains `reasoning_tokens`/`reasoningTokens`.
+- Chat Completions backends that report reasoning beside `completion_tokens`
+  (xAI) are detected from the row's exact arithmetic (`total_tokens` equals
+  prompt plus completion plus reasoning), and their output counts reasoning.
 
 ### Fixed
 

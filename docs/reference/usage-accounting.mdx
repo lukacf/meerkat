@@ -42,9 +42,11 @@ cache_creation_tokens <= input_tokens
 reasoning_tokens      <= output_tokens
 ```
 
-A detail counter is absent until some recorded call reports it. Sessions
-persisted before these counters were aggregated start from zero for them, so
-their cumulative cache and reasoning numbers cover only later calls.
+A detail counter is absent until some recorded call reports it. Sessions saved
+by 0.8.22 through 0.8.42 carry no cumulative detail counters, so theirs start
+from zero and cover only later calls. Sessions saved before 0.8.22 carry raw
+summed cache counters that can exceed the input total; reported totals and run
+deltas clamp them to the invariant above, while the stored value is untouched.
 
 Reasoning is the provider's thinking-token count: OpenAI Responses
 `output_tokens_details.reasoning_tokens`, Chat Completions
@@ -83,8 +85,7 @@ on input for a run that records every call it makes. A run that suspends for
 callback tool results and then resumes keeps one account, so calls made before
 the suspension appear in the resumed run's result. Compaction summaries written
 by a host curator or the mechanical capacity fallback make no provider request
-and add no row. Legacy sessions saved before 0.8.22 summed raw cache counters;
-their reported totals are clamped so the subset invariant holds. On a fresh session
+and add no row. Legacy totals are clamped as described above. On a fresh session
 `run_usage` equals `usage`. A harness that runs several turns on one session
 should read `run_usage`, never sum `usage`.
 

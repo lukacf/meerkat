@@ -2173,6 +2173,60 @@ describe("Type Guards", () => {
 // ---------------------------------------------------------------------------
 
 describe("RunResult parsing", () => {
+  it("carries cache, reasoning, run and per-request usage", () => {
+    const raw = {
+      session_id: "s1",
+      text: "ok",
+      turns: 2,
+      tool_calls: 1,
+      usage: {
+        input_tokens: 31062,
+        output_tokens: 89,
+        total_tokens: 31151,
+        cache_creation_tokens: 17795,
+        cache_read_tokens: 13261,
+        reasoning_tokens: 11,
+      },
+      run_usage: { input_tokens: 17798, output_tokens: 41, total_tokens: 17839, cache_read_tokens: 13261 },
+      request_usage: [
+        {
+          input_tokens: 13264,
+          output_tokens: 48,
+          total_tokens: 13312,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 13261,
+          reasoning_tokens: 11,
+          accounting: {
+            provider: "openai",
+            model: "gpt-5.6-luna",
+            presented_tokens: 13264,
+            convention: "open_ai_input_includes_cached_subset",
+            aggregation: "provider_inclusive_input_total",
+          },
+        },
+      ],
+    };
+    const result = MeerkatClient.parseRunResult(raw);
+    assert.equal(result.usage.cacheReadTokens, 13261);
+    assert.equal(result.usage.reasoningTokens, 11);
+    assert.equal(result.runUsage?.inputTokens, 17798);
+    assert.equal(result.runUsage?.cacheReadTokens, 13261);
+    assert.equal(result.requestUsage?.length, 1);
+    assert.equal(result.requestUsage?.[0].reasoningTokens, 11);
+    assert.equal(result.requestUsage?.[0].accounting?.presentedTokens, 13264);
+
+    const bare = MeerkatClient.parseRunResult({
+      session_id: "s1",
+      text: "ok",
+      turns: 1,
+      tool_calls: 0,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    assert.equal(bare.runUsage, undefined);
+    assert.equal(bare.requestUsage, undefined);
+    assert.equal(bare.usage.reasoningTokens, undefined);
+  });
+
   it("should convert wire format to camelCase", () => {
     const raw = {
       session_id: "s1",

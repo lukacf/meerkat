@@ -184,7 +184,13 @@ export interface RunResult {
   readonly text: string;
   readonly turns: number;
   readonly toolCalls: number;
+  /** Session-cumulative usage. Take the latest value; never sum across runs. */
   readonly usage: Usage;
+  /** Usage of this run alone: the session total's change over the run. */
+  readonly runUsage?: Usage;
+  /** One row per provider request this run made, in order, each with its
+   * `accounting` (tool-loop calls, extraction and compaction summaries). */
+  readonly requestUsage?: readonly Usage[];
   readonly terminalCauseKind?: TurnTerminalCauseKind;
   readonly structuredOutput?: unknown;
   readonly extractionError?: ExtractionError;

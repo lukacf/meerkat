@@ -22317,66 +22317,129 @@ async fn fork_member_then_run_bounded_retires_child_when_its_turn_fails() {
     );
 }
 
-/// Regression (HomeCore fork_off, calls a and i): the agent loop's tool
-/// deadline drops the fork_off future while the child's turn is still
-/// running. Nothing after the await ran, so the child stayed seated forever.
-/// Dropping the composition now retires the child.
+/// Regression (HomeCore fork_off, calls a and i): the agent loop's default
+/// tool deadline ended the forker's wait and left the child in limbo. A
+/// detached fork returns once the child's turn is admitted, and nothing the
+/// caller does with the run handle affects the child: there is no implicit
+/// deadline, and the forker owns the child.
 #[tokio::test]
-async fn fork_member_then_run_bounded_retires_child_when_caller_stops_waiting() {
+async fn fork_member_then_run_detached_returns_promptly_and_child_outlives_the_caller() {
     let (handle, service) = create_test_mob(sample_definition()).await;
-    let source_identity = AgentIdentity::from("bounded-fork-abandoned-source");
+    let source_identity = AgentIdentity::from("detached-fork-source");
     spawn_bounded_fork_source(&handle, &source_identity).await;
-    let turns_before_child = service.start_turn_call_count();
     service.set_start_turn_delay_ms(600_000);
 
-    let child_identity = AgentIdentity::from("bounded-fork-abandoned-child");
-    let run = {
-        let handle = handle.clone();
-        let source_identity = source_identity.clone();
-        let child = bounded_fork_child_spec(&child_identity);
-        tokio::spawn(async move {
-            handle
-                .fork_member_then_run_bounded(
-                    &source_identity,
-                    child,
-                    None,
-                    "fork_child_result",
-                    256,
-                    meerkat_core::DurableForkSourceAdmission::Quiescent,
-                )
-                .await
-        })
-    };
-
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while handle.get_member(&child_identity).await.unwrap().is_none() {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the fork child must be seated while its turn runs");
-    // Abandon the composition while it waits on the child's exact turn.
-    wait_for_start_turn_call_count(
-        service.as_ref(),
-        turns_before_child + 1,
-        "the fork child's exact turn should reach the provider call",
+    let child_identity = AgentIdentity::from("detached-fork-child");
+    let (fork, run) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        handle.fork_member_then_run_detached(
+            &source_identity,
+            bounded_fork_child_spec(&child_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+        ),
     )
-    .await;
-
-    // The caller stops waiting, exactly as a tool deadline drops the future.
-    run.abort();
-    assert!(run.await.expect_err("aborted").is_cancelled());
-
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while handle.get_member(&child_identity).await.unwrap().is_some() {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
     .await
-    .expect("an abandoned fork child must be retired, not left running unobserved");
+    .expect("a detached fork must not wait for the child's turn")
+    .expect("detached fork admits the child's turn");
+    assert_eq!(fork.agent_identity, child_identity);
+
+    drop(run);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert!(
-        handle.get_member(&source_identity).await.unwrap().is_some(),
-        "cleaning up the child must not touch the source"
+        handle.get_member(&child_identity).await.unwrap().is_some(),
+        "the caller dropping its run handle must not retire the forker's child"
+    );
+}
+
+/// Opt-in autokill: with `max_run`, the runtime cancels the child's run and
+/// retires the child when the limit elapses, independent of any caller.
+#[tokio::test]
+async fn fork_member_then_run_detached_autokill_cancels_and_retires_the_child() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_identity = AgentIdentity::from("autokill-fork-source");
+    spawn_bounded_fork_source(&handle, &source_identity).await;
+    service.set_start_turn_delay_ms(600_000);
+
+    let child_identity = AgentIdentity::from("autokill-fork-child");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &source_identity,
+            bounded_fork_child_spec(&child_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            Some(std::time::Duration::from_millis(200)),
+        )
+        .await
+        .expect("detached fork admits the child's turn");
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), run.outcome())
+        .await
+        .expect("autokill must resolve the run")
+        .expect("the supervisor reports an outcome");
+    assert!(
+        matches!(
+            outcome,
+            ForkChildRunOutcome::MaxRunElapsed {
+                retirement_error: None,
+                ..
+            }
+        ),
+        "max_run must end the run by autokill: {outcome:?}"
+    );
+    assert!(
+        handle.get_member(&child_identity).await.unwrap().is_none(),
+        "an autokilled child must be retired"
+    );
+}
+
+/// A detached fork reports the child's exact result and keeps the child, and
+/// a fork requested from the source's own turn records the source as the
+/// child's spawner.
+#[tokio::test]
+async fn fork_member_then_run_detached_reports_completion_and_records_the_spawner() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let source_identity = AgentIdentity::from("completing-fork-source");
+    spawn_bounded_fork_source(&handle, &source_identity).await;
+
+    let child_identity = AgentIdentity::from("completing-fork-child");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &source_identity,
+            bounded_fork_child_spec(&child_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+        )
+        .await
+        .expect("detached fork admits the child's turn");
+
+    match tokio::time::timeout(std::time::Duration::from_secs(10), run.outcome())
+        .await
+        .expect("the child's turn completes")
+    {
+        Some(ForkChildRunOutcome::Completed(turn)) => {
+            assert_eq!(turn.result().result().text(), "exact child task");
+        }
+        other => panic!("expected a completed child turn, got {other:?}"),
+    }
+    let child = handle
+        .get_member(&child_identity)
+        .await
+        .unwrap()
+        .expect("a completed fork child stays seated");
+    assert_eq!(
+        child.spawned_by,
+        Some(source_identity),
+        "a caller-turn fork records its source as the child's owner"
     );
 }
 

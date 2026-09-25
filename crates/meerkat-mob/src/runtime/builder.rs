@@ -8419,6 +8419,7 @@ impl MobBuilder {
             restore_spec.labels = Some(entry.labels.clone());
             restore_spec.override_profile = entry.effective_profile_override.clone();
             restore_spec.model_override = entry.effective_model_override.clone();
+            restore_spec.spawned_by = entry.spawned_by.clone();
             if let Some(customizer) = spawn_member_customizer.as_ref() {
                 let ctx = super::SpawnCustomizationContext {
                     mob_id: definition.id.clone(),

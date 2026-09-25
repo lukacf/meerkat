@@ -166,6 +166,7 @@ mod tests {
                 kickoff: None,
                 effective_profile_override: None,
                 effective_model_override: None,
+                spawned_by: None,
                 direct_member_fence: None,
             },
             retiring_comms: None,

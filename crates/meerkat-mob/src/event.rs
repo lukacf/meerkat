@@ -963,6 +963,12 @@ pub struct MemberSpawnedEvent {
     /// Typed continuity evidence emitted at spawn finalization.
     #[serde(default, skip_serializing_if = "crate::event::is_ephemeral_continuity")]
     pub continuity_intent: crate::runtime::SpawnContinuityIntent,
+    /// The member whose own turn created this one (the `fork_off` source).
+    /// Durable ownership provenance: the spawner may observe and retire this
+    /// member without manage scope over the mob. Journals written before this
+    /// field decode it as absent, which grants nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by: Option<AgentIdentity>,
     /// Bridge-internal member reference needed for event replay.
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
@@ -1014,6 +1020,7 @@ impl MemberSpawnedEvent {
             effective_profile_override: None,
             effective_model_override: None,
             continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
+            spawned_by: None,
             bridge_member_ref: None,
             identity_intent_authority_digest: None,
             placed_spawn_id: None,

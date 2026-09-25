@@ -2946,6 +2946,7 @@ mod tests {
             labels: BTreeMap::new(),
             effective_profile_override: None,
             effective_model_override: None,
+            spawned_by: None,
         });
         roster
     }

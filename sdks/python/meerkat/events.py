@@ -97,9 +97,11 @@ class Usage:
 
     Do not sum the cumulative value with anything - take the latest one - and do
     not sum per-call ``input_tokens`` (that undercounts on cache-heavy Anthropic
-    sessions); sum ``accounting.presented_tokens`` instead. The per-call rows
-    cover only the calls that closed a run, so they do not reconcile with the
-    cumulative total. See ``docs/reference/usage-accounting.mdx``.
+    sessions); sum ``accounting.presented_tokens`` instead. Every committed
+    agent-loop call publishes a ``turn_completed`` row; extraction requests,
+    compaction summaries and turns that fail after the provider answered do
+    not, so the rows need not reconcile with the cumulative total. See
+    ``docs/reference/usage-accounting.mdx``.
     """
 
     input_tokens: int = 0

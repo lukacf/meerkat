@@ -31,14 +31,14 @@ TYPES_TEST_MODULE = "usage_aggregation_semantics"
 # (run, call, uncached input, cache creation, cache read, presented, output,
 #  emits a turn_completed row).
 EXPECTED_TABLE_ROWS = (
-    (1, 1, 1000, 4000, 0, 5000, 200, "no"),
-    (1, 2, 300, 0, 4000, 4300, 150, "no"),
+    (1, 1, 1000, 4000, 0, 5000, 200, "yes"),
+    (1, 2, 300, 0, 4000, 4300, 150, "yes"),
     (1, 3, 120, 0, 4300, 4420, 90, "yes"),
     (2, 4, 200, 0, 4500, 4700, 60, "yes"),
 )
 
-# Numbers the page derives from that table: the two observed run totals, the
-# attributed subtotals, and the two documented wrong numbers.
+# Numbers the page derives from that table: the two observed run totals (which
+# every call's turn row also folds to), and the documented wrong numbers.
 EXPECTED_DERIVED_NUMBERS = (
     13720,  # run 1 cumulative input
     440,  # run 1 cumulative output
@@ -46,12 +46,7 @@ EXPECTED_DERIVED_NUMBERS = (
     18420,  # session cumulative input after run 2
     500,  # session cumulative output after run 2
     18920,  # session cumulative total after run 2
-    9120,  # presented input the turn rows attribute
-    150,  # output the turn rows attribute
-    9270,  # total the turn rows attribute
-    9650,  # session total no turn row attributes
-    9300,  # run 1 input no turn row accounts for
-    320,  # summing raw per-call input_tokens (wrong)
+    1620,  # summing raw per-call input_tokens (wrong)
     33080,  # summing the two observed run totals (wrong)
     4510,  # comparable per-call total for the run-closing call
     210,  # raw per-call total for the same call

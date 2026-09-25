@@ -368,6 +368,7 @@ Once provider schema compilation succeeds, event subscribers see
 `run_completed` for the main output with `extraction_required: true`, followed
 by exactly one `extraction_succeeded` or `extraction_failed` event. Extraction
 attempts do not stream as ordinary assistant text and do not publish extra
-`turn_completed` events. A schema-compilation failure emits
+`turn_completed` events; their per-request usage rides the outcome event's
+`request_usage`. A schema-compilation failure emits
 `extraction_failed` directly, without a preceding success-shaped
 `turn_completed` or `run_completed` event.

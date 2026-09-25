@@ -131,7 +131,7 @@ rkat run --yolo --param temperature=0.2 "take the gloves off"
 - `-s, --stream`
 - `--no-stream`
 - `--no-web-search`
-- `--export-atif` (write an ATIF trajectory to the realm `trajectories/` directory after the turn; default off)
+- `--export-atif` (write an ATIF trajectory to the realm `trajectories/` directory after the turn, with one metered step per provider request: each tool-call turn, the answer, and each structured-output extraction request; default off)
 - `--resume[=<SESSION>]`
 - `--skill <BUILTIN_ID>` repeatable
 - `-d, --max-duration <DURATION>`
@@ -141,6 +141,14 @@ rkat run --yolo --param temperature=0.2 "take the gloves off"
 - `--wait-for-mcp`
 - `--mcp-auth <stored|interactive>`
 - `-v, --verbose`
+
+With `--stream` or `--verbose`, `rkat run` prints one token line per provider
+request (`N tokens (I in / O out, C cached, R reasoning)`, extraction requests
+labelled `extraction:`) and closes with `total:`, the run's own `run_usage`.
+Input counts are presented input, so cached input is included on every
+provider. Before exiting, `rkat run` waits for the session event log
+(`.rkat/sessions/<id>/events.jsonl` and the realm event store) to finish
+writing and warns on stderr if it cannot.
 
 For the full advanced set, use:
 

@@ -640,6 +640,12 @@ const nativeE2eSystemTests = [
   },
   {
     packageKey: "meerkat-cli",
+    cargoTestTarget: "system_cli_export_atif",
+    name: "e2e_system_cli_run_output_fidelity_bazel_test",
+    testName: "integration_real_cli_run_output_fidelity",
+  },
+  {
+    packageKey: "meerkat-cli",
     cargoTestTarget: "system_mob_host_daemon",
     name: "e2e_system_mob_host_daemon_lifecycle_bazel_test",
     testName: "integration_real_mob_host_daemon_lifecycle",

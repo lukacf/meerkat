@@ -49964,6 +49964,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
                     last_output: "runtime terminal before commit".to_string(),
                     attempts: 1,
                     reason: "injected extraction failure".to_string(),
+                    request_usage: Vec::new(),
                 }
             } else {
                 AgentEvent::RunCompleted {

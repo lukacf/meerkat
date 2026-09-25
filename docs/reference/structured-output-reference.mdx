@@ -55,7 +55,9 @@ terminal observability stages:
    `schema_warnings`, or `extraction_failed` with `last_output`, `attempts`,
    and `reason`.
 
-Extraction does not emit ordinary text or `turn_completed` events. Extraction
+Extraction does not emit ordinary text or `turn_completed` events. Both
+outcome events carry `request_usage`: one per-call usage row for each answered
+extraction request, including attempts that failed validation. Extraction
 failure does not emit `run_failed`; the main run already completed, and the
 returned `RunResult` carries `extraction_error`.
 

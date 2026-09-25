@@ -102,10 +102,12 @@ the session so it keeps growing across turns, and `accounting` is `None` because
 a session may span models.
 
 Do not sum the cumulative value with anything - take the latest one - and sum
-`accounting.presented_tokens` rather than per-call `input_tokens`. The per-call
-rows cover only the calls that closed a run, so they do not reconcile with the
-cumulative total. See [Usage accounting](/reference/usage-accounting) for the
-worked example.
+`accounting.presented_tokens` rather than per-call `input_tokens`. Every
+committed agent-loop call publishes a `turn_completed` row; extraction requests
+publish theirs on the extraction outcome event, and compaction summaries and
+turns that fail after the provider answered publish none, so the
+`turn_completed` rows need not reconcile with the cumulative total. See
+[Usage accounting](/reference/usage-accounting) for the worked example.
 
 `TurnCompleted.usage` is `Usage | None`. `None` is honest unmeasured
 accounting, not a zero-token call. Skip the row; the paired

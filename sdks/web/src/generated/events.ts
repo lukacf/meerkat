@@ -805,6 +805,7 @@ export interface RunCompletedEvent {
 }
 
 export interface ExtractionSucceededEvent {
+  request_usage?: TurnUsage[];
   schema_warnings?: SchemaWarning[] | null;
   session_id: SessionId;
   structured_output: unknown;
@@ -815,6 +816,7 @@ export interface ExtractionFailedEvent {
   attempts: number;
   last_output: string;
   reason: string;
+  request_usage?: TurnUsage[];
   session_id: SessionId;
   type: "extraction_failed";
 }

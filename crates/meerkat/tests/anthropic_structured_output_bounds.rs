@@ -9,6 +9,12 @@
 //! - the extraction requests carry the lowered slot (no bounds), and
 //! - a reply that honors the slot but breaks a bound fails meerkat's
 //!   validation and goes through the existing retry path.
+//!
+//! They also pin what the lowering leaves in the slot: a string `format`
+//! outside Anthropic's list stays (the reply validator does not assert
+//! `format`, so removing it would leave it enforced nowhere), while a pydantic
+//! discriminated union loses its `discriminator` annotation and has `oneOf`
+//! widened to `anyOf`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -168,6 +174,14 @@ async fn run_review(
     replies: Vec<&str>,
     retries: u32,
 ) -> (meerkat::RunResult, Vec<Value>, tokio::task::JoinHandle<()>) {
+    run_with_schema(review_schema(), replies, retries).await
+}
+
+async fn run_with_schema(
+    schema: Value,
+    replies: Vec<&str>,
+    retries: u32,
+) -> (meerkat::RunResult, Vec<Value>, tokio::task::JoinHandle<()>) {
     let (base_url, requests, server) =
         spawn_messages_stub(replies.into_iter().map(str::to_string).collect()).await;
     let client = AnthropicClient::builder("test-key".to_string())
@@ -186,7 +200,7 @@ async fn run_review(
     let mut agent = AgentBuilder::new()
         .model(MODEL)
         .max_tokens_per_turn(256)
-        .output_schema(OutputSchema::new(review_schema()).expect("schema"))
+        .output_schema(OutputSchema::new(schema).expect("schema"))
         .structured_output_retries(retries)
         .build(llm_adapter, tools, store_adapter)
         .await
@@ -279,4 +293,72 @@ async fn out_of_bounds_replies_exhaust_retries_with_an_extraction_error() {
     for request in &requests[1..] {
         assert_eq!(slot_schema(request), Some(&expected_slot_schema()));
     }
+}
+
+/// A pydantic discriminated union (`oneOf` over `$ref`s with an OpenAPI
+/// `discriminator` beside it) plus a string `format` outside Anthropic's list.
+fn union_and_pointer_schema() -> Value {
+    json!({
+        "$defs": {
+            "Cat": {"properties": {"kind": {"const": "cat", "title": "Kind", "type": "string"},
+                                   "meows": {"title": "Meows", "type": "integer"}},
+                    "required": ["kind", "meows"], "title": "Cat", "type": "object"},
+            "Dog": {"properties": {"kind": {"const": "dog", "title": "Kind", "type": "string"},
+                                   "barks": {"title": "Barks", "type": "integer"}},
+                    "required": ["kind", "barks"], "title": "Dog", "type": "object"}
+        },
+        "properties": {
+            "pet": {
+                "discriminator": {"mapping": {"cat": "#/$defs/Cat", "dog": "#/$defs/Dog"},
+                                  "propertyName": "kind"},
+                "oneOf": [{"$ref": "#/$defs/Cat"}, {"$ref": "#/$defs/Dog"}],
+                "title": "Pet"
+            },
+            "ptr": {"type": "string", "format": "json-pointer"}
+        },
+        "required": ["pet", "ptr"],
+        "title": "M",
+        "type": "object"
+    })
+}
+
+#[tokio::test]
+async fn unsupported_format_stays_in_the_slot_and_discriminated_unions_are_lowered() {
+    let reply = r#"{"pet":{"kind":"cat","meows":3},"ptr":"/a/b"}"#;
+    let (result, requests, server) =
+        run_with_schema(union_and_pointer_schema(), vec!["Done.", reply], 0).await;
+    server.abort();
+
+    assert_eq!(
+        result.structured_output,
+        Some(serde_json::from_str::<Value>(reply).unwrap())
+    );
+    assert_eq!(requests.len(), 2, "main turn and one extraction");
+    let closed = |mut def: Value| {
+        def["additionalProperties"] = json!(false);
+        def
+    };
+    let defs = &union_and_pointer_schema()["$defs"];
+    assert_eq!(
+        slot_schema(&requests[1]),
+        Some(&json!({
+            "$defs": {"Cat": closed(defs["Cat"].clone()), "Dog": closed(defs["Dog"].clone())},
+            "properties": {
+                "pet": {
+                    "anyOf": [{"$ref": "#/$defs/Cat"}, {"$ref": "#/$defs/Dog"}],
+                    "title": "Pet",
+                    "description": "Constraints (JSON Schema): {\"discriminator\":{\"mapping\":{\"cat\":\"#/$defs/Cat\",\"dog\":\"#/$defs/Dog\"},\"propertyName\":\"kind\"}}"
+                },
+                // The reply validator does not assert `format`, so the slot
+                // keeps it and Anthropic rejects it loudly rather than
+                // leaving it enforced nowhere.
+                "ptr": {"type": "string", "format": "json-pointer"}
+            },
+            "required": ["pet", "ptr"],
+            "title": "M",
+            "type": "object",
+            "additionalProperties": false
+        })),
+        "discriminator removed and restated, oneOf widened to anyOf, format kept"
+    );
 }

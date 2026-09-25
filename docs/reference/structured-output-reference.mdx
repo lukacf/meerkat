@@ -15,7 +15,7 @@ Use this page when you need exact structured-output terminology and types rather
 | `SchemaCompat` | `Lossy` drops provider-unsupported schema features with warnings; `Strict` rejects them. |
 | `SchemaFormat` | Currently `MeerkatV1`. |
 | `SchemaWarning` | Provider, JSON path, and explanation for a lossy lowering decision. |
-| `CompiledSchema` | Provider-lowered validation schema plus warnings. Local validation runs against it. An adapter whose native schema slot rejects some keywords (Anthropic `output_config.format`) sends a further-lowered copy in that slot only. |
+| `CompiledSchema` | Provider-lowered validation schema plus warnings. Local validation runs against it. An adapter whose native schema slot rejects some keywords (Anthropic `output_config.format`) sends a further-lowered copy in that slot only. That copy drops only keywords local validation still enforces (plus annotations such as `discriminator`), so it adds no warnings and `Strict` does not reject them. |
 
 ## Request-side controls
 

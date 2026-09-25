@@ -3521,6 +3521,10 @@ mod tests {
             "properties": {
                 "name": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Z]"},
                 "born": {"type": "string", "format": "date"},
+                // Outside Anthropic's format list, so the provider rejects it
+                // loudly. It is never lowered: the reply validator does not
+                // assert `format`, so nothing else would enforce it.
+                "pointer": {"type": "string", "format": "json-pointer"},
                 "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                 "kind": {"anyOf": [{"type": "string", "enum": ["a", "b"]}, {"type": "null"}]}
             },

@@ -7095,12 +7095,11 @@ struct ExactRemoteTurnResidency<'a> {
 /// answers while the member's turn is running.
 #[cfg(feature = "runtime-adapter")]
 async fn observe_member_runtime_run_state(
-    session_service: &dyn super::session_service::MobSessionService,
+    runtime: &meerkat_runtime::MeerkatMachine,
     session_id: &SessionId,
 ) -> Option<super::handle::MemberRunState> {
     use meerkat_runtime::SessionServiceRuntimeExt as _;
 
-    let runtime = session_service.runtime_adapter()?;
     let state = tokio::time::timeout(
         MEMBER_PROGRESS_OBSERVATION_TIMEOUT,
         runtime.runtime_state(session_id),
@@ -7119,7 +7118,7 @@ async fn observe_member_runtime_run_state(
 
 #[cfg(not(feature = "runtime-adapter"))]
 async fn observe_member_runtime_run_state(
-    _session_service: &dyn super::session_service::MobSessionService,
+    _runtime: &meerkat_runtime::MeerkatMachine,
     _session_id: &SessionId,
 ) -> Option<super::handle::MemberRunState> {
     None
@@ -12472,6 +12471,7 @@ impl MobActor {
 
     pub(super) async fn observe_member_status_session(
         session_service: Arc<dyn MobSessionService>,
+        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
         agent_identity: AgentIdentity,
         bridge_session_id: Option<SessionId>,
         include_local_session_details: bool,
@@ -12498,14 +12498,14 @@ impl MobActor {
                 },
                 (false, _) | (true, None) => (None, false),
             };
-        // The runtime machine's own phase says whether the busy member has a
-        // run open; that read never queues behind the turn.
+        // The runtime machine the mob's members run on says whether the busy
+        // member has a run open; that read never queues behind the turn.
         let busy = snapshot_timed_out;
-        let runtime_run_state = match bridge_session_id.as_ref() {
-            Some(session_id) if busy => {
-                observe_member_runtime_run_state(session_service.as_ref(), session_id).await
+        let runtime_run_state = match (bridge_session_id.as_ref(), runtime_adapter.as_deref()) {
+            (Some(session_id), Some(runtime)) if busy => {
+                observe_member_runtime_run_state(runtime, session_id).await
             }
-            Some(_) | None => None,
+            _ => None,
         };
         let (output_preview, tokens_used, genuinely_absent) = match bridge_session_id.as_ref() {
             Some(bridge_session_id) if include_local_session_details && busy => {
@@ -12641,6 +12641,10 @@ impl MobActor {
             }
         };
         let session_service = Arc::clone(&self.session_service);
+        #[cfg(feature = "runtime-adapter")]
+        let runtime_adapter = self.runtime_adapter.clone();
+        #[cfg(not(feature = "runtime-adapter"))]
+        let runtime_adapter = None;
         let command_tx = self.command_tx.clone();
         self.actor_io_tasks.spawn(async move {
             let observation = tokio::select! {
@@ -12648,6 +12652,7 @@ impl MobActor {
                 () = reply_tx.closed() => return,
                 observation = Self::observe_member_status_session(
                     session_service,
+                    runtime_adapter,
                     agent_identity.clone(),
                     expected_target.bridge_session_id.clone(),
                     expected_target.include_local_session_details,

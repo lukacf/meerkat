@@ -1198,8 +1198,9 @@ pub enum ForkSourceUnavailableCause {
     /// The source member has no session (peer-only external source —
     /// unchanged semantics, now typed).
     NoSession,
-    /// The source owns an active runtime turn or live actor admission. The
-    /// persistent fork owner refuses to observe and copy it concurrently.
+    /// The source owes work: a turn in flight, an admitted input that has
+    /// not started, or a committed turn not yet answered. The persistent
+    /// fork owner refuses to observe and copy it concurrently.
     Running,
     /// The source is placed on a member host; the proxied fork-context
     /// history read lands in phase 6 (§19.L2). Typed from birth so the

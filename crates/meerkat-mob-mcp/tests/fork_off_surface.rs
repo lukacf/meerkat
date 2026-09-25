@@ -1564,3 +1564,49 @@ async fn a_fork_off_call_dropped_mid_handoff_still_delivers_its_child() {
     }
     fixture.teardown().await;
 }
+
+/// Observation must not wait for the child's turn: the forker checks a child
+/// that is still mid-turn and gets its status back promptly. (mob_check_member
+/// is how the fork_off description tells the forker to watch a running child.)
+#[tokio::test(flavor = "multi_thread")]
+async fn forker_observes_a_running_child_without_waiting_for_its_turn() {
+    let gate = TurnGate::new();
+    let _release_on_exit = OpenOnDrop(gate.clone());
+    let fixture = CouncilFixture::new_runtime_backed(routed_script(
+        RequestLog::default(),
+        vec![(CHILD_TASK, ChildReply::Gated(gate.clone(), CHILD_REPLY))],
+    ));
+    fixture.seed_source_mob(&["forker"]).await;
+    let mob_id = fixture.source_mob_id().to_string();
+    let forker = member_surface(&fixture, "forker").await;
+    start_detached_fork(&forker, "busy-child", fork_args("busy-child", CHILD_TASK)).await;
+    gate.wait_entered(1).await;
+
+    let checked = tokio::time::timeout(
+        Duration::from_secs(10),
+        call(
+            &forker.surface,
+            "mob_check_member",
+            json!({"mob_id": mob_id, "member_id": "busy-child"}),
+        ),
+    )
+    .await
+    .expect("mob_check_member must not wait for the child's running turn")
+    .expect("the forker checks its running child");
+    assert_eq!(checked["is_final"], false, "{checked}");
+    assert_ne!(
+        checked["output_preview"], CHILD_REPLY,
+        "the child has not replied yet: {checked}"
+    );
+    // The read says, typed, that the child is mid-turn, and in plain words
+    // which fields are as of its last completed turn.
+    assert_eq!(checked["progress"]["run_state"], "run_open", "{checked}");
+    assert!(
+        checked["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("still running")),
+        "{checked}"
+    );
+    gate.open();
+    fixture.teardown().await;
+}

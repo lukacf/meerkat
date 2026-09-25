@@ -37,8 +37,9 @@ pub use surface::wire_mob_tools;
 pub use temporary_council::{
     MergeBackPolicy, TEMPORARY_COUNCIL_CLAIM_LEASE, TEMPORARY_COUNCIL_CLEANUP_BUDGET,
     TemporaryCouncilBounds, TemporaryCouncilCoordinator, TemporaryCouncilDeadline,
-    TemporaryCouncilError, TemporaryCouncilOutcome, TemporaryCouncilParticipantSpec,
-    TemporaryCouncilRecoveryReport, TemporaryCouncilRequest, TemporaryCouncilStructuredContract,
+    TemporaryCouncilError, TemporaryCouncilHeldRecord, TemporaryCouncilOutcome,
+    TemporaryCouncilParticipantSpec, TemporaryCouncilRecoveryReport, TemporaryCouncilRecoverySweep,
+    TemporaryCouncilRequest, TemporaryCouncilStructuredContract,
 };
 pub use workgraph_flow::{
     AbandonUncertainWorkGraphFlowRequest, LaunchWorkGraphFlowRequest, WorkGraphFlowAbandonResult,
@@ -458,6 +459,9 @@ pub struct MobMcpState {
     /// makes. Zero in production; the only way to move it is the explicit
     /// test-clock seam below, which no surface exposes.
     temporary_council_clock_offset_ms: std::sync::atomic::AtomicI64,
+    /// Signals every change of the offset above, so a sweep waiting for a
+    /// claim lease re-reads the clock instead of sleeping past a moved one.
+    temporary_council_clock_changes: tokio::sync::watch::Sender<i64>,
     /// Set once the automatic post-restore recovery sweep has been scheduled.
     /// Also what keeps the sweep from re-entering `ensure_restored`.
     temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool,
@@ -553,6 +557,7 @@ impl MobMcpState {
             self_weak: std::sync::OnceLock::new(),
             coordinator_id: uuid::Uuid::new_v4().simple().to_string(),
             temporary_council_clock_offset_ms: std::sync::atomic::AtomicI64::new(0),
+            temporary_council_clock_changes: tokio::sync::watch::channel(0).0,
             temporary_council_cleanup_budget_ms: std::sync::atomic::AtomicU64::new(
                 u64::try_from(temporary_council::TEMPORARY_COUNCIL_CLEANUP_BUDGET.as_millis())
                     .unwrap_or(30_000),
@@ -779,6 +784,13 @@ impl MobMcpState {
             offset.num_milliseconds(),
             std::sync::atomic::Ordering::SeqCst,
         );
+        self.temporary_council_clock_changes
+            .send_replace(offset.num_milliseconds());
+    }
+
+    /// Wakes when the coordinator's clock offset changes.
+    pub(crate) fn temporary_council_clock_changes(&self) -> tokio::sync::watch::Receiver<i64> {
+        self.temporary_council_clock_changes.subscribe()
     }
 
     /// Adjust the bounded cleanup budget on a live state.
@@ -806,13 +818,21 @@ impl MobMcpState {
         TemporaryCouncilCoordinator::new(self.clone())
     }
 
-    /// Schedule the automatic post-restore council recovery sweep.
+    /// Schedule the automatic post-restore council sweep: recovery, the
+    /// detached-council re-link, and a retry after the lease of every record
+    /// a previous process's claim still held (see [`crate::council_relink`]).
     ///
     /// Runs at most once per state and always on its OWN task, so it can call
     /// back into `ensure_restored`/`handle_for` without re-entering the
-    /// restore lock that is held while restoration completes.
+    /// restore lock that is held while restoration completes. Only a durable
+    /// council store has anything from a previous process to converge.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn schedule_temporary_council_recovery(&self) {
+        if self.temporary_council_store().durability()
+            != meerkat_mob::temporary_council::TemporaryCouncilStoreDurability::Durable
+        {
+            return;
+        }
         use std::sync::atomic::Ordering;
         if self
             .temporary_council_recovery_scheduled
@@ -828,35 +848,7 @@ impl MobMcpState {
                 .store(false, Ordering::SeqCst);
             return;
         };
-        tokio::spawn(async move {
-            let Some(state) = weak.upgrade() else {
-                return;
-            };
-            match state.temporary_council().recover_unfinished().await {
-                Ok(reports) if !reports.is_empty() => {
-                    tracing::info!(
-                        recovered = reports.len(),
-                        "temporary council recovery sweep converged unfinished records"
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "temporary council recovery sweep failed; records remain unfinished"
-                    );
-                }
-            }
-            // After the sweep, so councils it sealed deliver at once.
-            let reports =
-                crate::council_relink::relink_detached_councils(&state, state.created_at_ms).await;
-            if !reports.is_empty() {
-                tracing::info!(
-                    councils = reports.len(),
-                    "council re-link delivered detached outcomes from a previous process"
-                );
-            }
-        });
+        tokio::spawn(crate::council_relink::restore_sweep(weak));
     }
 
     /// Override the local capability sweep cadence for deterministic tests.
@@ -1480,6 +1472,10 @@ impl MobMcpState {
 
     async fn ensure_restored(&self) -> Result<(), MobError> {
         if self.persistent_storage_root.is_none() {
+            // A host may still supply a durable council store without a
+            // persistent root (MobKit does): its councils need the same
+            // post-restart convergence.
+            self.schedule_temporary_council_recovery();
             self.schedule_local_forked_participant_sweeper();
             return Ok(());
         }
@@ -1698,7 +1694,9 @@ impl MobMcpState {
         );
         self.note_mob_set_changed();
         // A host that restores mobs by inserting their handles (MobKit) gets
-        // the fork_off re-link for each restored mob here.
+        // the council sweep (when its council store is durable) and the
+        // fork_off re-link for each restored mob here.
+        self.schedule_temporary_council_recovery();
         if self.claim_fork_relink(&mob_id) {
             let service = self.session_service.clone();
             let runtime = self.runtime_adapter.clone();

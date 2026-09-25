@@ -15,7 +15,7 @@ use std::time::Duration;
 use meerkat_mob::AgentIdentity;
 use meerkat_mob::ProfileName;
 use meerkat_mob::temporary_council::{TemporaryCouncilDurability, TemporaryCouncilJobBinding};
-use meerkat_mob_mcp::fork_relink::ForkRelinkAction;
+use meerkat_mob_mcp::council_relink::CouncilRelinkAction;
 use meerkat_mob_mcp::temporary_council::{
     MergeBackPolicy, TemporaryCouncilBounds, TemporaryCouncilParticipantSpec,
     TemporaryCouncilRequest,
@@ -162,7 +162,7 @@ async fn relink_delivers_a_council_sealed_before_the_restart_exactly_once() {
         .find(|report| report.council_id == fixture.council_id("relink-sealed"))
         .expect("the council is visited");
     assert_eq!(report.job_id, job_id);
-    assert_eq!(report.action, ForkRelinkAction::Delivered);
+    assert_eq!(report.action, CouncilRelinkAction::Delivered);
 
     let delivered = await_completion_records(&fixture, &owner, job_id).await;
     assert_eq!(delivered.len(), 1, "the re-link delivers exactly once");
@@ -190,32 +190,22 @@ async fn relink_delivers_a_council_sealed_before_the_restart_exactly_once() {
     fixture.teardown().await;
 }
 
-/// The process died mid-council. Restoration alone arms the re-link.
-/// Councils are never re-executed, so it waits for the dead coordinator's
-/// claim lease to expire, lets the ordinary recovery seal a typed
-/// `coordinator_interrupted` outcome, and delivers that to the convener once.
-#[tokio::test(flavor = "multi_thread")]
-async fn restoration_delivers_an_interrupted_council_once_its_lease_expires() {
+/// Write the record of a council whose coordinator died before sealing:
+/// created by the previous process, bound to the convener's detached job,
+/// with the dead coordinator's claim lease running for another ten minutes.
+async fn write_interrupted_council(
+    store: &std::sync::Arc<dyn meerkat_mob::store::TemporaryCouncilStore>,
+    council_id: &meerkat_mob::temporary_council::TemporaryCouncilId,
+    job_id: &str,
+    owner: &meerkat_core::SessionId,
+) -> chrono::DateTime<chrono::Utc> {
     use meerkat_mob::machines::temporary_council_lifecycle::{
         TemporaryCouncilLifecycleInput, TemporaryCouncilLifecycleMachineAuthority,
         TemporaryCouncilLifecycleMachineMutator,
     };
     use meerkat_mob::store::TemporaryCouncilRecord;
 
-    let fixture = CouncilFixture::new(|_| ScriptedTurn::Text("unused".to_string()));
-    fixture.seed_source_mob(&["convener"]).await;
-    let owner = member_session(&fixture, "convener").await;
-    let job_id = "council-job-interrupted";
-    // Quiesce this process's mob actors before another process opens the
-    // same durable stores; a real restart would have destroyed them.
-    if let Ok(handle) = fixture.state.handle_for(&fixture.source_mob_id()).await {
-        handle.shutdown().await.expect("quiesce the source mob");
-    }
-
-    let restarted = fixture.restart_state();
-    let store = restarted.temporary_council_store_for_tests();
-    let council_id = fixture.council_id("relink-interrupted");
-    let fingerprint = "tcf1:sha256:relink-interrupted".to_string();
+    let fingerprint = format!("tcf1:sha256:{council_id}");
     let mut authority = TemporaryCouncilLifecycleMachineAuthority::new();
     TemporaryCouncilLifecycleMachineMutator::apply(
         &mut authority,
@@ -232,9 +222,8 @@ async fn restoration_delivers_an_interrupted_council_once_its_lease_expires() {
         },
     )
     .expect("the previous process's coordinator claims it");
-    // The record of a council whose coordinator died before sealing, created
-    // by the previous process, with its claim lease still running.
     let created = chrono::Utc::now() - chrono::Duration::seconds(5);
+    let lease = chrono::Utc::now() + chrono::Duration::seconds(600);
     store
         .insert_new(&TemporaryCouncilRecord {
             council_id: council_id.clone(),
@@ -243,7 +232,7 @@ async fn restoration_delivers_an_interrupted_council_once_its_lease_expires() {
             deadline: created + chrono::Duration::seconds(600),
             machine_state: authority.state().clone(),
             durability: TemporaryCouncilDurability::Durable,
-            claim_lease_expires_at: chrono::Utc::now() + chrono::Duration::seconds(600),
+            claim_lease_expires_at: lease,
             participants: Vec::new(),
             exchanges: Vec::new(),
             result: None,
@@ -255,6 +244,50 @@ async fn restoration_delivers_an_interrupted_council_once_its_lease_expires() {
         })
         .await
         .expect("write the crashed council record");
+    lease
+}
+
+/// Wait until the council's detached job is settled and return its record.
+async fn await_settled(
+    store: &std::sync::Arc<dyn meerkat_mob::store::TemporaryCouncilStore>,
+    council_id: &meerkat_mob::temporary_council::TemporaryCouncilId,
+) -> meerkat_mob::store::TemporaryCouncilRecord {
+    for _ in 0..600 {
+        let record = store.load(council_id).await.unwrap().unwrap();
+        if record
+            .detached_job
+            .as_ref()
+            .is_some_and(|job| job.settled_at.is_some())
+        {
+            return record;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the council's detached job was never settled");
+}
+
+/// The process died mid-council and the host restarted INSIDE the dead
+/// coordinator's claim lease (the common case). Restoration alone arms the
+/// sweep: its first pass must skip the held record (reported, not silent),
+/// and the sweep retries once the lease expires. Councils are never
+/// re-executed, so the retry seals a typed `coordinator_interrupted` outcome
+/// and the re-link delivers it to the convener once.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_inside_the_lease_retries_and_delivers_the_interrupted_council() {
+    let fixture = CouncilFixture::new(|_| ScriptedTurn::Text("unused".to_string()));
+    fixture.seed_source_mob(&["convener"]).await;
+    let owner = member_session(&fixture, "convener").await;
+    let job_id = "council-job-interrupted";
+    // Quiesce this process's mob actors before another process opens the
+    // same durable stores; a real restart would have destroyed them.
+    if let Ok(handle) = fixture.state.handle_for(&fixture.source_mob_id()).await {
+        handle.shutdown().await.expect("quiesce the source mob");
+    }
+
+    let restarted = fixture.restart_state();
+    let store = restarted.temporary_council_store_for_tests();
+    let council_id = fixture.council_id("relink-interrupted");
+    let lease = write_interrupted_council(&store, &council_id, job_id, &owner).await;
 
     // Any ordinary mob verb restores the state; no re-link verb is called.
     let _ = restarted.mob_handles_snapshot().await;
@@ -275,22 +308,23 @@ async fn restoration_delivers_an_interrupted_council_once_its_lease_expires() {
             .result
             .is_none()
     );
+    // A sweep reports the held record with the lease it waits for.
+    let sweep = restarted
+        .temporary_council()
+        .sweep_unfinished()
+        .await
+        .expect("sweep");
+    assert!(sweep.recovered.is_empty());
+    let held = sweep
+        .held
+        .iter()
+        .find(|held| held.council_id == council_id)
+        .expect("the held record is reported");
+    assert_eq!(held.claim_lease_expires_at, lease);
 
-    fixture.expire_claim_lease(&store, &council_id).await;
-    let mut marked = None;
-    for _ in 0..600 {
-        let record = store.load(&council_id).await.unwrap().unwrap();
-        if record
-            .detached_job
-            .as_ref()
-            .is_some_and(|job| job.settled_at.is_some())
-        {
-            marked = Some(record);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let record = marked.expect("the re-link delivers once the lease expires");
+    // The lease expires: the sweep's follow-up pass takes over.
+    restarted.set_temporary_council_clock_offset(chrono::Duration::seconds(700));
+    let record = await_settled(&store, &council_id).await;
     assert_eq!(
         record.result.expect("sealed").exit_reason,
         meerkat_mob::temporary_council::TemporaryCouncilExitReason::CoordinatorInterrupted
@@ -306,5 +340,67 @@ async fn restoration_delivers_an_interrupted_council_once_its_lease_expires() {
     // Running it again records nothing more.
     assert!(restarted.relink_detached_councils().await.is_empty());
     assert_eq!(completion_records(&fixture, &owner, job_id).await.len(), 1);
+    fixture.teardown().await;
+}
+
+/// A host built like MobKit: no persistent root, a durable council store it
+/// supplies itself, `into_shared`, and mobs restored by inserting their
+/// handles. That alone runs the council sweep after restore, including the
+/// retry after a held lease and the detached-council re-link.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mobkit_style_host_recovers_and_relinks_councils_after_restore() {
+    let fixture = CouncilFixture::new(|_| ScriptedTurn::Text("unused".to_string()));
+    fixture.seed_source_mob(&["convener"]).await;
+    let owner = member_session(&fixture, "convener").await;
+    let job_id = "council-job-mobkit";
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .expect("source mob handle");
+
+    let council_store: std::sync::Arc<dyn meerkat_mob::store::TemporaryCouncilStore> =
+        std::sync::Arc::new(
+            meerkat_mob::store::SqliteTemporaryCouncilStore::open(
+                &meerkat_mob_mcp::MobMcpState::persistent_forked_participant_store_path(
+                    &fixture.root.join("state"),
+                ),
+            )
+            .expect("open the durable council store"),
+        );
+    let council_id = fixture.council_id("relink-mobkit");
+    write_interrupted_council(&council_store, &council_id, job_id, &owner).await;
+
+    // The restarted host: no persistent root, only the durable council store.
+    let restarted = meerkat_mob_mcp::MobMcpState::new(
+        fixture.service.clone(),
+        meerkat_mob::MobControlPrincipal::Owner,
+    )
+    .with_temporary_council_store(council_store.clone())
+    .into_shared();
+    restarted
+        .mob_insert_handle(fixture.source_mob_id(), handle)
+        .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        council_store
+            .load(&council_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .result
+            .is_none(),
+        "the dead coordinator's lease still holds the record"
+    );
+
+    restarted.set_temporary_council_clock_offset(chrono::Duration::seconds(700));
+    let record = await_settled(&council_store, &council_id).await;
+    assert_eq!(
+        record.result.expect("sealed").exit_reason,
+        meerkat_mob::temporary_council::TemporaryCouncilExitReason::CoordinatorInterrupted
+    );
+    let delivered = await_completion_records(&fixture, &owner, job_id).await;
+    assert_eq!(delivered.len(), 1);
+    assert!(delivered[0].contains("coordinator_interrupted"));
     fixture.teardown().await;
 }

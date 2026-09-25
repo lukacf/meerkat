@@ -3517,6 +3517,60 @@ impl<R> std::fmt::Display for BoundedTurnWaitError<R> {
 
 impl<R: std::fmt::Debug> std::error::Error for BoundedTurnWaitError<R> {}
 
+/// Retires a provisioned child when the future that owns its bounded run is
+/// dropped before the run reached an outcome.
+///
+/// Spawn/fork -> exact-turn compositions seat a member and then wait for its
+/// turn. If the caller stops waiting (the agent loop's tool deadline, a
+/// cancelled turn), the composition future is dropped mid-await and no code
+/// after the await runs. Without this guard the seated child keeps running
+/// with no one observing it and is never retired. Dropping an armed guard
+/// hands retirement to a detached task on the current runtime; the success
+/// and error paths disarm it and settle the child themselves.
+struct ProvisionedChildRetireOnDrop {
+    handle: Option<MobHandle>,
+    identity: AgentIdentity,
+}
+
+impl ProvisionedChildRetireOnDrop {
+    fn arm(handle: MobHandle, identity: AgentIdentity) -> Self {
+        Self {
+            handle: Some(handle),
+            identity,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.handle = None;
+    }
+}
+
+impl Drop for ProvisionedChildRetireOnDrop {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let identity = self.identity.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    if let Err(error) = handle.retire(identity.clone()).await {
+                        tracing::warn!(
+                            member = %identity,
+                            error = %error,
+                            "abandoned bounded child retirement failed; the member remains until retired"
+                        );
+                    }
+                });
+            }
+            Err(_) => tracing::warn!(
+                member = %identity,
+                "abandoned bounded child could not be retired: no async runtime at drop"
+            ),
+        }
+    }
+}
+
 /// Failure from a spawn/fork -> exact turn composition.
 ///
 /// Admission/provisioning failures and post-admission turn failures remain
@@ -12811,12 +12865,27 @@ impl MobHandle {
                 source_admission,
             )
             .await?;
+        // From here the child is a seated roster member running work on the
+        // caller's behalf. The caller only learns its outcome through this
+        // future, so a child whose run fails, or whose caller stops waiting
+        // (a tool deadline, a cancelled turn), is retired rather than left
+        // running unobserved. A successful run keeps the child: retaining it
+        // is this composition's contract.
+        let cleanup_authority = self.clone().with_command_authority(
+            crate::control_policy::CommandAuthority::principal(
+                crate::control_policy::MobControlPrincipal::Owner,
+            ),
+        );
+        let retire_on_drop = ProvisionedChildRetireOnDrop::arm(
+            cleanup_authority.clone(),
+            fork.agent_identity.clone(),
+        );
         let mut work = WorkSpec::new(task, WorkOrigin::Internal);
         if let Some(objective_id) = objective_id {
             work = work.with_objective_id(objective_id);
         }
-        let turn = self
-            .start_work_for_identity_bounded(
+        let run = async {
+            self.start_work_for_identity_bounded(
                 fork.agent_identity.clone(),
                 work,
                 HandlingMode::Queue,
@@ -12824,8 +12893,20 @@ impl MobHandle {
             )
             .await?
             .wait_bounded(result_spec)
-            .await?;
-        Ok(ForkMemberBoundedRunOutcome { fork, turn })
+            .await
+            .map_err(BoundedMemberRunError::from)
+        }
+        .await;
+        retire_on_drop.disarm();
+        match run {
+            Ok(turn) => Ok(ForkMemberBoundedRunOutcome { fork, turn }),
+            Err(operation) => Err(
+                match cleanup_authority.retire(fork.agent_identity.clone()).await {
+                    Ok(()) => operation,
+                    Err(retirement_error) => operation.with_cleanup_debt(retirement_error),
+                },
+            ),
+        }
     }
 
     /// Read one completed worker result from canonical session authority and
@@ -13017,6 +13098,9 @@ impl MobHandle {
                 crate::control_policy::MobControlPrincipal::Owner,
             ),
         );
+        // The helper is already seated. If the caller stops waiting before an
+        // outcome, retire it instead of leaving it running unobserved.
+        let retire_on_drop = ProvisionedChildRetireOnDrop::arm(admitted.clone(), identity.clone());
         let (runtime_id, fence_token) = match admitted
             .resolve_submit_work_runtime_binding(
                 &identity,
@@ -13027,6 +13111,7 @@ impl MobHandle {
         {
             Ok(binding) => binding,
             Err(error) => {
+                retire_on_drop.disarm();
                 let operation = BoundedMemberRunError::from(error);
                 return Err(match admitted.retire(identity.clone()).await {
                     Ok(()) => operation,
@@ -13051,6 +13136,7 @@ impl MobHandle {
         {
             Ok(turn) => turn,
             Err(error) => {
+                retire_on_drop.disarm();
                 let operation = BoundedMemberRunError::from(error);
                 return Err(match admitted.retire(identity.clone()).await {
                     Ok(()) => operation,
@@ -13061,6 +13147,7 @@ impl MobHandle {
         let turn = match turn_handle.wait_bounded(result_spec).await {
             Ok(turn) => turn,
             Err(error) => {
+                retire_on_drop.disarm();
                 let operation = BoundedMemberRunError::from(error);
                 return Err(match admitted.retire(identity.clone()).await {
                     Ok(()) => operation,
@@ -13069,6 +13156,7 @@ impl MobHandle {
             }
         };
 
+        retire_on_drop.disarm();
         // Capture every exact result fact before cleanup begins. Retirement is
         // best-effort physical cleanup and cannot revoke a committed result.
         let receipt = turn.receipt();

@@ -2455,7 +2455,12 @@ struct DelegateArgs {
     tooling: Option<meerkat_mob::SpawnTooling>,
 }
 
+// Unknown fields fail closed. A misspelled or invented argument (a model
+// passing a field this tool does not define) must be an argument error the
+// model can correct, not a silently ignored intent. Host wrappers that add
+// their own fields (MobKit's `idle_retire_secs`) strip them before dispatch.
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ForkOffArgs {
     /// Stable identity for the child fork. The surface never allocates one.
     member_id: String,
@@ -3169,6 +3174,41 @@ mod tests {
         assert_eq!(args.max_text_bytes, 16 * 1024);
         assert_eq!(args.message_count, None);
         assert_eq!(args.expected_output, None);
+    }
+
+    #[test]
+    fn fork_off_rejects_unknown_arguments_instead_of_ignoring_them() {
+        // Regression: HomeCore's calendar member passed a field fork_off does
+        // not define and the call proceeded as if it had been honoured.
+        let raw = serde_json::value::RawValue::from_string(
+            serde_json::json!({
+                "member_id": "analysis-fork",
+                "task": "Inspect the ledger",
+                "retire_after_secs": 300
+            })
+            .to_string(),
+        )
+        .expect("raw args");
+        let call = ToolCallView {
+            id: "fork-unknown-arg",
+            name: "fork_off",
+            args: &raw,
+        };
+        let error = call
+            .parse_args::<ForkOffArgs>()
+            .err()
+            .expect("an unknown fork_off argument must be rejected");
+        assert!(
+            error.to_string().contains("retire_after_secs"),
+            "the rejection must name the unknown field so the model can correct it: {error}"
+        );
+
+        let schema = serde_json::to_value(schemars::schema_for!(ForkOffArgs)).expect("schema");
+        assert_eq!(
+            schema["additionalProperties"],
+            serde_json::Value::Bool(false),
+            "the advertised schema must match the parser and refuse extra fields"
+        );
     }
 
     #[test]

@@ -22262,6 +22262,178 @@ async fn fork_member_then_run_bounded_keeps_bare_fork_provisioning_only_and_resu
     );
 }
 
+async fn spawn_bounded_fork_source(handle: &MobHandle, source_identity: &AgentIdentity) {
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            source_identity.clone(),
+            Some(ContentInput::Text("source context".to_string())),
+        )
+        .await
+        .expect("spawn bounded fork source");
+}
+
+fn bounded_fork_child_spec(child_identity: &AgentIdentity) -> SpawnMemberSpec {
+    let mut child = SpawnMemberSpec::new(ProfileName::from("worker"), child_identity.clone());
+    child.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    child.initial_message = Some(ContentInput::Text("exact child task".to_string()));
+    child
+}
+
+/// Regression (HomeCore fork_off): a fork child whose exact turn fails was
+/// left seated and running with no one observing it. The failed run now
+/// retires the child before the error reaches the caller.
+#[tokio::test]
+async fn fork_member_then_run_bounded_retires_child_when_its_turn_fails() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_identity = AgentIdentity::from("bounded-fork-failing-source");
+    spawn_bounded_fork_source(&handle, &source_identity).await;
+    service.set_fail_start_turn(true);
+
+    let child_identity = AgentIdentity::from("bounded-fork-failing-child");
+    let error = handle
+        .fork_member_then_run_bounded(
+            &source_identity,
+            bounded_fork_child_spec(&child_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+        )
+        .await
+        .expect_err("the child's exact turn must fail");
+
+    assert!(
+        !matches!(error, BoundedMemberRunError::CleanupDebt { .. }),
+        "retiring the failed child must succeed: {error}"
+    );
+    assert!(
+        handle.get_member(&child_identity).await.unwrap().is_none(),
+        "a fork child whose exact turn failed must be retired, not left seated"
+    );
+    assert!(
+        handle.get_member(&source_identity).await.unwrap().is_some(),
+        "cleaning up the child must not touch the source"
+    );
+}
+
+/// Regression (HomeCore fork_off, calls a and i): the agent loop's tool
+/// deadline drops the fork_off future while the child's turn is still
+/// running. Nothing after the await ran, so the child stayed seated forever.
+/// Dropping the composition now retires the child.
+#[tokio::test]
+async fn fork_member_then_run_bounded_retires_child_when_caller_stops_waiting() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let source_identity = AgentIdentity::from("bounded-fork-abandoned-source");
+    spawn_bounded_fork_source(&handle, &source_identity).await;
+    let turns_before_child = service.start_turn_call_count();
+    service.set_start_turn_delay_ms(600_000);
+
+    let child_identity = AgentIdentity::from("bounded-fork-abandoned-child");
+    let run = {
+        let handle = handle.clone();
+        let source_identity = source_identity.clone();
+        let child = bounded_fork_child_spec(&child_identity);
+        tokio::spawn(async move {
+            handle
+                .fork_member_then_run_bounded(
+                    &source_identity,
+                    child,
+                    None,
+                    "fork_child_result",
+                    256,
+                    meerkat_core::DurableForkSourceAdmission::Quiescent,
+                )
+                .await
+        })
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while handle.get_member(&child_identity).await.unwrap().is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the fork child must be seated while its turn runs");
+    // Abandon the composition while it waits on the child's exact turn.
+    wait_for_start_turn_call_count(
+        service.as_ref(),
+        turns_before_child + 1,
+        "the fork child's exact turn should reach the provider call",
+    )
+    .await;
+
+    // The caller stops waiting, exactly as a tool deadline drops the future.
+    run.abort();
+    assert!(run.await.expect_err("aborted").is_cancelled());
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while handle.get_member(&child_identity).await.unwrap().is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("an abandoned fork child must be retired, not left running unobserved");
+    assert!(
+        handle.get_member(&source_identity).await.unwrap().is_some(),
+        "cleaning up the child must not touch the source"
+    );
+}
+
+/// Same deadline hazard for `delegate`: a helper whose caller stops waiting
+/// mid-turn is retired instead of staying seated and unobserved.
+#[tokio::test]
+async fn spawn_helper_retires_helper_when_caller_stops_waiting() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_start_turn_delay_ms(600_000);
+    let helper_id = AgentIdentity::from("abandoned-helper");
+    let run = {
+        let handle = handle.clone();
+        let helper_id = helper_id.clone();
+        tokio::spawn(async move {
+            handle
+                .spawn_helper(
+                    helper_id,
+                    "summarize this",
+                    HelperOptions {
+                        role_name: Some(ProfileName::from("worker")),
+                        runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                        ..HelperOptions::default()
+                    },
+                    "abandoned-helper-result",
+                    256,
+                )
+                .await
+        })
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while handle.get_member(&helper_id).await.unwrap().is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the helper must be seated while its turn runs");
+    // Let the composition reach its exact-turn wait before abandoning it.
+    wait_for_start_turn_call_count(
+        service.as_ref(),
+        1,
+        "the helper's exact turn should reach the provider call",
+    )
+    .await;
+
+    run.abort();
+    assert!(run.await.expect_err("aborted").is_cancelled());
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while handle.get_member(&helper_id).await.unwrap().is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("an abandoned helper must be retired, not left running unobserved");
+}
+
 /// Ask 6 spawn-site threading: an explicit `tool_access_policy` on the spawn
 /// spec must ride `SpawnMemberSpec` -> actor -> `BuildAgentConfigParams` ->
 /// `AgentBuildConfig` -> `SessionBuildOptions` and land in the member

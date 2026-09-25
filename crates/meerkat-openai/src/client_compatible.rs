@@ -1025,6 +1025,10 @@ impl LlmClient for OpenAiCompatibleClient {
                                         .prompt_tokens_details
                                         .as_ref()
                                         .and_then(|details| details.cached_tokens),
+                                    reasoning_tokens: event_usage
+                                        .completion_tokens_details
+                                        .as_ref()
+                                        .and_then(|details| details.reasoning_tokens),
                                     provider_accounting: Some(
                                         meerkat_core::ProviderTokenAccounting::openai_compatible_for(
                                             self.provider,
@@ -1361,6 +1365,14 @@ struct ChatUsage {
     completion_tokens: Option<u64>,
     #[serde(default)]
     prompt_tokens_details: Option<ChatPromptTokensDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<ChatCompletionTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

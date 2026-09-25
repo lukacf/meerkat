@@ -2190,9 +2190,16 @@ impl LlmClient for GeminiClient {
                             yield LlmEvent::UsageUpdate {
                                 usage: meerkat_core::TurnUsage::try_from_usage(Usage {
                                     input_tokens: usage.prompt_token_count.unwrap_or(0),
-                                    output_tokens: usage.candidates_token_count.unwrap_or(0),
+                                    // Gemini bills thinking separately from
+                                    // candidates; output covers both so
+                                    // reasoning stays a subset of output.
+                                    output_tokens: usage
+                                        .candidates_token_count
+                                        .unwrap_or(0)
+                                        .saturating_add(usage.thoughts_token_count.unwrap_or(0)),
                                     cache_creation_tokens: None,
                                     cache_read_tokens: usage.cached_content_token_count,
+                                    reasoning_tokens: usage.thoughts_token_count,
                                     provider_accounting: Some(
                                         meerkat_core::ProviderTokenAccounting::gemini(
                                             &request.model,
@@ -2385,6 +2392,8 @@ struct GeminiUsage {
     prompt_token_count: Option<u64>,
     cached_content_token_count: Option<u64>,
     candidates_token_count: Option<u64>,
+    #[serde(default)]
+    thoughts_token_count: Option<u64>,
 }
 
 #[cfg(test)]

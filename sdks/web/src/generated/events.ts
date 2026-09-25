@@ -771,6 +771,7 @@ export type TurnUsage = {
   input_tokens: number;
   output_tokens: number;
   provider_accounting?: ProviderTokenAccounting | null;
+  reasoning_tokens?: number | null;
 };
 
 export interface UnmeasuredTurnUsageAccounting {
@@ -784,6 +785,7 @@ export type Usage = {
   input_tokens: number;
   output_tokens: number;
   provider_accounting?: ProviderTokenAccounting | null;
+  reasoning_tokens?: number | null;
 };
 
 export interface RunStartedEvent {

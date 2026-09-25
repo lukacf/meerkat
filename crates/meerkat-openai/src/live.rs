@@ -3988,6 +3988,7 @@ fn openai_response_usage(
         output_tokens: u64::from(usage.output_tokens),
         cache_creation_tokens: None,
         cache_read_tokens: usage.cached_tokens.map(u64::from),
+        reasoning_tokens: None,
         provider_accounting: None,
     };
     Ok(TurnUsage::new(

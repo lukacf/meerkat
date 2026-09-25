@@ -5586,6 +5586,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                     extraction_error: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
+                    run_usage: None,
+                    request_usage: Vec::new(),
                 },
                 actor_witness,
             ));
@@ -8025,6 +8027,8 @@ mod runtime_turn_metadata_tests {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             }),
             machine_terminal_failure: Ok(Some(meerkat_core::TurnErrorMetadata::terminal(
                 meerkat_core::TurnTerminalCauseKind::ToolFailure,
@@ -8181,6 +8185,8 @@ mod runtime_turn_metadata_tests {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 
@@ -8372,6 +8378,8 @@ mod runtime_turn_metadata_tests {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 
@@ -8844,6 +8852,8 @@ mod injected_context_turn_tests {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             }
         }
     }
@@ -9480,6 +9490,8 @@ mod admission_window_tests {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 
@@ -9959,6 +9971,8 @@ mod archive_shutdown_drain_tests {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 
@@ -10778,6 +10792,8 @@ mod inline_video_admission_tests {
                 extraction_error: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
             })
         }
 

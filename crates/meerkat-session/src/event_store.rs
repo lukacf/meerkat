@@ -6702,6 +6702,7 @@ mod tests {
                 output_tokens: 150,
                 cache_creation_tokens: Some(0),
                 cache_read_tokens: Some(4000),
+                reasoning_tokens: None,
                 provider_accounting: None,
             },
             meerkat_core::ProviderTokenAccounting::anthropic("claude-opus-5", 300, 0, 4000),

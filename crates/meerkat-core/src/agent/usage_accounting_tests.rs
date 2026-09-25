@@ -66,6 +66,7 @@ impl DocumentedCall {
                 output_tokens: self.output,
                 cache_creation_tokens: Some(self.cache_creation_input),
                 cache_read_tokens: Some(self.cache_read_input),
+                reasoning_tokens: None,
                 provider_accounting: None,
             },
             ProviderTokenAccounting::anthropic(

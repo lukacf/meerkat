@@ -1452,6 +1452,8 @@ fn run_result(session_id: SessionId, text: &str) -> RunResult {
         extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
+        run_usage: None,
+        request_usage: Vec::new(),
     }
 }
 

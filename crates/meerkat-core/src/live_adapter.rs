@@ -1673,6 +1673,7 @@ mod tests {
                 output_tokens: 5,
                 cache_creation_tokens: None,
                 cache_read_tokens: None,
+                reasoning_tokens: None,
                 provider_accounting: None,
             },
         };
@@ -1712,6 +1713,7 @@ mod tests {
                 output_tokens: 1,
                 cache_creation_tokens: None,
                 cache_read_tokens: None,
+                reasoning_tokens: None,
                 provider_accounting: None,
             },
         };

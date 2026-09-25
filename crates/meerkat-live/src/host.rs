@@ -456,7 +456,9 @@ pub enum ObservationOutcome {
     },
     /// Public receipt synthesized from the reducer result only after the
     /// projection sink has durably committed canonical user content.
-    UserContentCommitted { observation: LiveAdapterObservation },
+    UserContentCommitted {
+        observation: Box<LiveAdapterObservation>,
+    },
 }
 
 /// Public-safe, channel-scoped address of one assistant output. `output_id`
@@ -2849,13 +2851,13 @@ impl LiveAdapterHost {
                     Some(RealtimeUserContentApplyOutcome::Committed(identity))
                     | Some(RealtimeUserContentApplyOutcome::AlreadyCommitted(identity)) => {
                         Ok(ObservationOutcome::UserContentCommitted {
-                            observation: LiveAdapterObservation::UserContentCommitted {
+                            observation: Box::new(LiveAdapterObservation::UserContentCommitted {
                                 idempotency_key: identity.idempotency_key,
                                 item_id: identity.item_id,
                                 previous_item_id: identity.previous_item_id,
                                 content_index: identity.content_index,
                                 media_type: identity.media_type,
-                            },
+                            }),
                         })
                     }
                     Some(RealtimeUserContentApplyOutcome::RejectedInvalidIdentity {

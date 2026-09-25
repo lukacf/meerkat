@@ -2909,6 +2909,7 @@ where
                             // can silently refund usage.
                             self.session.record_turn_usage(&outcome.summary_usage);
                             self.budget.record_turn_usage(&outcome.summary_usage);
+                            self.run_request_usage.push(outcome.summary_usage.clone());
                             // The summary call's accounting identity is routed,
                             // not repaired: the counters above are charged as
                             // reported and the disagreement is published.
@@ -3808,19 +3809,10 @@ where
         live: &crate::types::Usage,
         rollback: &crate::types::Usage,
     ) -> Result<crate::types::Usage, AgentError> {
-        fn delta(live: u64, rollback: u64, field: &str) -> Result<u64, AgentError> {
-            live.checked_sub(rollback).ok_or_else(|| {
-                AgentError::InternalError(format!(
-                    "compaction rollback observed non-monotonic {field} usage ({live} < {rollback})"
-                ))
-            })
-        }
-        Ok(crate::types::Usage {
-            input_tokens: delta(live.input_tokens, rollback.input_tokens, "input-token")?,
-            output_tokens: delta(live.output_tokens, rollback.output_tokens, "output-token")?,
-            cache_creation_tokens: None,
-            cache_read_tokens: None,
-            provider_accounting: None,
+        live.cumulative_delta_since(rollback).ok_or_else(|| {
+            AgentError::InternalError(format!(
+                "compaction rollback observed non-monotonic usage (live {live:?} < rollback {rollback:?})"
+            ))
         })
     }
 
@@ -4096,6 +4088,8 @@ where
             text: extraction_error.last_output.clone(),
             session_id: self.session.id().clone(),
             usage: self.session.total_usage(),
+            run_usage: self.run_usage_delta(),
+            request_usage: self.run_request_usage.clone(),
             turns: turn_count + 1,
             tool_calls: tool_call_count,
             terminal_cause_kind: None,
@@ -4151,6 +4145,13 @@ where
         Ok(())
     }
 
+    /// Usage accrued since the current `run_loop` entry began.
+    fn run_usage_delta(&self) -> Option<crate::types::Usage> {
+        self.session
+            .total_usage()
+            .cumulative_delta_since(&self.run_usage_baseline)
+    }
+
     /// The main agent loop
     #[allow(unused_assignments)]
     pub(super) async fn run_loop(
@@ -4193,6 +4194,8 @@ where
         // park is a separate seam and remains unbounded here.
         self.budget.begin_turn();
         self.extraction_state.reset();
+        self.run_usage_baseline = self.session.total_usage();
+        self.run_request_usage.clear();
         // RuntimeStore holds the pre-run Session snapshot until an explicit
         // sticky-fallback CAS advances its control projection. Seal that exact
         // parent once; CallingLlm visibility promotion/catalog refreshes mutate
@@ -5884,6 +5887,7 @@ where
             self.budget.record_turn_usage(turn_usage);
             self.last_input_tokens = turn_usage.presented_tokens();
             self.session.record_turn_usage(turn_usage);
+            self.run_request_usage.push(turn_usage.clone());
         }
         if let Some(exceeded) = self.budget.observe().exceeded() {
             emit_phase_event!(self, ctx, budget_warning_event(exceeded));
@@ -6760,6 +6764,8 @@ where
                     text: extraction_error.last_output.clone(),
                     session_id: self.session.id().clone(),
                     usage: self.session.total_usage(),
+                    run_usage: self.run_usage_delta(),
+                    request_usage: self.run_request_usage.clone(),
                     turns: ctx.turn_count + 1,
                     tool_calls: ctx.tool_call_count,
                     terminal_cause_kind: None,
@@ -6788,6 +6794,8 @@ where
                 .to_string(),
             session_id: self.session.id().clone(),
             usage: self.session.total_usage(),
+            run_usage: self.run_usage_delta(),
+            request_usage: self.run_request_usage.clone(),
             turns: ctx.turn_count + 1,
             tool_calls: ctx.tool_call_count,
             terminal_cause_kind: None,
@@ -6892,6 +6900,8 @@ where
                 text: final_text.clone(),
                 session_id: self.session.id().clone(),
                 usage: self.session.total_usage(),
+                run_usage: self.run_usage_delta(),
+                request_usage: self.run_request_usage.clone(),
                 turns: ctx.turn_count + 1,
                 tool_calls: ctx.tool_call_count,
                 terminal_cause_kind: None,
@@ -6952,6 +6962,8 @@ where
             text: final_text,
             session_id: self.session.id().clone(),
             usage: self.session.total_usage(),
+            run_usage: self.run_usage_delta(),
+            request_usage: self.run_request_usage.clone(),
             turns: ctx.turn_count + 1,
             tool_calls: ctx.tool_call_count,
             terminal_cause_kind: None,
@@ -7000,6 +7012,8 @@ where
                 text: self.session.last_assistant_text().unwrap_or_default(),
                 session_id: self.session.id().clone(),
                 usage: self.session.total_usage(),
+                run_usage: self.run_usage_delta(),
+                request_usage: self.run_request_usage.clone(),
                 turns,
                 tool_calls,
                 terminal_cause_kind: public_terminal_cause_kind(cause_kind),
@@ -9429,6 +9443,7 @@ mod tests {
                                 output_tokens: 4,
                                 cache_creation_tokens: Some(6),
                                 cache_read_tokens: Some(9),
+                                reasoning_tokens: None,
                                 provider_accounting: None,
                             },
                         ),
@@ -9702,6 +9717,7 @@ mod tests {
             output_tokens: 4,
             cache_creation_tokens: Some(6),
             cache_read_tokens: Some(9),
+            reasoning_tokens: None,
             provider_accounting: None,
         });
         assert_eq!(agent.session().total_usage(), expected);
@@ -9750,6 +9766,7 @@ mod tests {
             output_tokens: 4,
             cache_creation_tokens: Some(6),
             cache_read_tokens: Some(9),
+            reasoning_tokens: None,
             provider_accounting: None,
         });
         assert_eq!(agent.session().total_usage(), expected);
@@ -9893,6 +9910,7 @@ mod tests {
             output_tokens: 7,
             cache_creation_tokens: Some(5),
             cache_read_tokens: Some(3),
+            reasoning_tokens: None,
             provider_accounting: None,
         };
         agent
@@ -18003,6 +18021,7 @@ mod tests {
                         output_tokens: 500,
                         cache_creation_tokens: None,
                         cache_read_tokens: None,
+                        reasoning_tokens: None,
                         provider_accounting: None,
                     },
                 ),

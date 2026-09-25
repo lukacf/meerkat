@@ -708,6 +708,8 @@ impl AgentBuilder {
             compactor: self.compactor,
             compaction_curator: self.compaction_curator,
             last_input_tokens: 0,
+            run_usage_baseline: crate::types::Usage::default(),
+            run_request_usage: Vec::new(),
             compaction_cadence,
             pending_compaction_boundary_index: None,
             pending_compaction_request_pressure: None,

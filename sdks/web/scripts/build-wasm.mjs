@@ -38,6 +38,17 @@ const BUILD_PROFILE = (() => {
     `invalid MEERKAT_WEB_WASM_PROFILE=${value}; expected release, dev, or profiling`,
   );
 })();
+// MEERKAT_WEB_WASM_OPT=0 skips the wasm-opt pass. The release profile builds
+// at opt-level 0 with 256 codegen units, and wasm-opt then spends many
+// minutes on that binary; the browser suites that only need a working
+// runtime (the example web suites in CI) skip it.
+const WASM_OPT = (() => {
+  const value = process.env.MEERKAT_WEB_WASM_OPT ?? "1";
+  if (value === "0" || value === "1") {
+    return value === "1";
+  }
+  throw new Error(`invalid MEERKAT_WEB_WASM_OPT=${value}; expected 0 or 1`);
+})();
 const WASM_RUSTFLAGS = [
   process.env.CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS,
   '--cfg getrandom_backend="wasm_js"',
@@ -304,6 +315,9 @@ async function computeSourceHash() {
   hash.update("meerkat-web-runtime-wasm-v1\n");
   hash.update(`rustflags=${WASM_RUSTFLAGS}\n`);
   hash.update(`profile=${BUILD_PROFILE}\n`);
+  if (!WASM_OPT) {
+    hash.update("wasm-opt=0\n");
+  }
   for (const [key, value] of Object.entries(RELEASE_CARGO_PROFILE_ENV).sort()) {
     hash.update(`${key}=${value}\n`);
   }
@@ -361,6 +375,7 @@ async function run() {
           "--out-dir",
           OUT_DIR,
           ...profileArgs,
+          ...(WASM_OPT ? [] : ["--no-opt"]),
         ],
         {
           cwd: SDK_DIR,

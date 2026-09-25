@@ -223,6 +223,7 @@ the release tag carry the rest):
 | `closure-check`: `cargo check --all-features` (lib and bin targets) over the reverse-dependency closure | yes | yes | - | - |
 | `wasm-check` | deferred | yes | browser contract suite | Bazel wasm-check |
 | `sdk-host`: Python + TypeScript SDK suites | deferred | yes | yes, plus Web SDK | Bazel SDK suites |
+| `example-web`: build the `sdks/web` wasm runtime once (wasm-pack 0.13.1, no wasm-opt), then run examples 031, 032 and 033 in Playwright Chromium | when `sdks/web/`, `crates/meerkat-web-runtime/`, `crates/meerkat-contracts/` or those examples change | yes | - | - |
 | integration-fast, `e2e-fast`, dense Mob topology, bounded TLC, feature matrices, minimal builds, audit, `e2e-system`, release packaging | - | - | yes | BuildBuddy `full-fresh` graph |
 | `gate` (`CI gate`): fail-closed aggregate; 1200-second budget from run creation on pull requests; schema-4 attestation on `main` | yes | yes (no budget) | - | consumed by `require_ci_green` |
 

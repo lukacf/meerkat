@@ -173,6 +173,13 @@ class CDP {
 }
 
 async function main() {
+  // The --offline real-WASM checks load the built page and its synced
+  // runtime. Without them the page 404s and only surfaces later as "Page
+  // failed to start".
+  if (process.argv.includes("--offline")) for (const built of ["dist/index.html", "dist/meerkat-pkg/meerkat_web_runtime.js", "dist/meerkat-pkg/meerkat_web_runtime_bg.wasm"]) {
+    assert(fs.existsSync(path.join(base, built)),
+      `${built} is missing; build the sdks/web runtime (cd sdks/web && npm run build), then run 'npm run build' here before 'npm run test:offline'`);
+  }
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, "http://localhost").pathname;
     if (pathname === "/fixture") { res.setHeader("Content-Type", "text/html"); res.end(harness); return; }
@@ -218,6 +225,7 @@ async function main() {
     async function page(route = "/fixture", provider = null) {
       const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" })).json();
       const p = await CDP.connect(target.webSocketDebuggerUrl);
+      p.targetId = target.id;
       pages.push(p);
       p.console = [];
       p.networkErrors = [];
@@ -264,7 +272,11 @@ async function main() {
       const p = await page();
       await p.eval(`(async()=>{${body};check(trace.rejections.length===0,"Unhandled rejection");})()`);
       console.log("PASS", name);
-      await p.send("Page.close"); p.ws.close();
+      // Close through the browser connection: a page session's own
+      // Page.close reply can be lost when the target tears down its socket
+      // first, which left the suite waiting forever under load.
+      p.ws.close();
+      await browser.send("Target.closeTarget", { targetId: p.targetId });
     }
 
     if (!process.argv.includes("--offline")) {

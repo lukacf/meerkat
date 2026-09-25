@@ -230,6 +230,26 @@ function isExamplesBrowserPath(path) {
   return path.startsWith("examples/") && !/\.(md|mdx)$/.test(path);
 }
 
+// Example web suites: examples 031, 032 and 033 execute the sdks/web wasm
+// runtime in Chromium, so the runtime build and its inputs select them along
+// with the example sources. Markdown is not an input.
+const EXAMPLE_WEB_DIRS = [
+  "examples/031-wasm-mini-diplomacy-sh/",
+  "examples/032-wasm-webcm-agent/",
+  "examples/033-the-office-demo-sh/",
+];
+function isExampleWebPath(path) {
+  if (isLaneDefinitionPath(path)) return true;
+  if (
+    path.startsWith("sdks/web/") ||
+    path.startsWith("crates/meerkat-web-runtime/") ||
+    path.startsWith("crates/meerkat-contracts/")
+  ) {
+    return true;
+  }
+  return EXAMPLE_WEB_DIRS.some((dir) => path.startsWith(dir)) && !/\.(md|mdx)$/.test(path);
+}
+
 // Paths whose change alters the compile graph of every package.
 function isGlobalPath(path) {
   if (
@@ -386,6 +406,7 @@ function plan(args) {
     sdk_host: false,
     bazel_graph: false,
     examples_browser: false,
+    example_web: false,
     docs_only: false,
   };
 
@@ -449,6 +470,7 @@ function plan(args) {
     result.bazel_graph =
       changed.some(isBazelGraphPath) || removed.some((path) => path.endsWith(".rs"));
     result.examples_browser = changed.some(isExamplesBrowserPath);
+    result.example_web = changed.some(isExampleWebPath);
   } else {
     result.generated_contract = true;
     result.machine_authority = true;
@@ -456,6 +478,7 @@ function plan(args) {
     result.wasm = true;
     result.bazel_graph = true;
     result.examples_browser = true;
+    result.example_web = true;
   }
 
   // Estimated lane cost per package: Rust lines (the lib-test binary
@@ -609,6 +632,7 @@ function githubOutput(result) {
   scalar("sdk_host", String(result.sdk_host));
   scalar("bazel_graph", String(result.bazel_graph));
   scalar("examples_browser", String(result.examples_browser));
+  scalar("example_web", String(result.example_web));
   scalar("docs_only", String(result.docs_only));
   scalar("package_count", String(result.packages.length));
   scalar("closure_count", String(result.closure.length));

@@ -7,8 +7,8 @@
 //!
 //! - an idle owner gets a real pending boundary and runs one turn that sees
 //!   the outcome;
-//! - a running owner gets it steered in at its next checkpoint, with no
-//!   second turn;
+//! - a running owner gets exactly one follow-up turn after its current turn
+//!   ends, and that turn sees the outcome;
 //! - the input's idempotency key names the job (`{tool}:{job_id}`), so the
 //!   record is admitted and written exactly once however often delivery runs.
 //!

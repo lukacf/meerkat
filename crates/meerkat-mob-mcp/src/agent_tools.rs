@@ -1443,7 +1443,11 @@ impl AgentMobToolSurface {
             member_ref,
             fork_session_id: fork.session_id.to_string(),
             cache_inheritance: fork.cache_inheritance,
-            note: detached_started_note(TOOL_FORK_OFF, &job_id),
+            note: detached_started_note(
+                TOOL_FORK_OFF,
+                &job_id,
+                "Check or end it with mob_check_member / mob_retire_member.",
+            ),
             job_id,
             max_run_secs: args.max_run_secs,
         };
@@ -1633,7 +1637,11 @@ impl AgentMobToolSurface {
                 "status": "running",
                 "council_id": council_label,
                 "job_id": job_id,
-                "note": detached_started_note(TOOL_COUNCIL, &job_id),
+                "note": detached_started_note(
+                    TOOL_COUNCIL,
+                    &job_id,
+                    "The council ends by itself within its timeout_seconds.",
+                ),
             }),
         )
     }
@@ -1783,12 +1791,22 @@ impl AgentMobToolSurface {
 
         let member_ref =
             meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), identity.as_str());
-        let result = snapshot.to_member_status_result(member_ref).map_err(|e| {
+        let status = snapshot.to_member_status_result(member_ref).map_err(|e| {
             ToolError::invalid_arguments(
                 call.name,
                 format!("failed to project mob member status: {e}"),
             )
         })?;
+        let running = status.progress.as_ref().is_some_and(|progress| {
+            matches!(
+                progress.run_state,
+                meerkat_contracts::WireMemberRunState::RunOpen
+            )
+        });
+        let result = CheckMemberResult {
+            status,
+            note: running.then_some(MEMBER_TURN_RUNNING_NOTE),
+        };
         Self::encode_result(call, json!(result))
     }
 
@@ -2507,7 +2525,7 @@ fn build_tool_defs_with_profile_support(
         tool_def(
             TOOL_FORK_OFF,
             "Fork yourself into a durable child that runs one task from your committed transcript.\n\n\
-             Usually the call returns at once with status \"running\", the child's agent_identity and a job_id, and the child works in the background. When it finishes, its outcome (bounded final text, or the error) is written into your transcript as a System entry \"Background fork_off job <job_id> finished\", which you can refer back to on later turns. On hosts that cannot deliver later (one-shot runs) the call instead waits and returns the result directly.\n\n\
+             Usually the call returns at once with status \"running\", the child's agent_identity and a job_id, and the child works in the background. When it finishes, its outcome (bounded final text, or the error) is written into your transcript as a System entry \"Background fork_off job <job_id> finished\", which you can refer back to on later turns. If you are mid-turn at that point it arrives right after your current turn ends; if you are idle you get a new turn with it. On hosts that cannot deliver later (one-shot runs) the call instead waits and returns the result directly.\n\n\
              There is no default deadline; set max_run_secs to have the child's run cancelled and the child retired after that long. The child and anything it forks belong to you: check them with mob_check_member, list them with mob_list_members, and end them with mob_retire_member (retiring a member retires its descendants). A child whose turn fails is retired automatically; a finished child stays seated until you retire it, so retire children you no longer need.",
             typed_schema::<ForkOffArgs>(),
         ),
@@ -2527,7 +2545,9 @@ fn build_tool_defs_with_profile_support(
              idempotency key across retries. Usually the call returns at once with status \
              \"running\", the council_id and a job_id, and the sealed result is written into \
              your transcript as a System entry \"Background council job <job_id> finished\" when \
-             the council ends; on one-shot hosts the call waits and returns the result directly. \
+             the council ends: right after your current turn if you are mid-turn then, or in a \
+             new turn if you are idle. On one-shot hosts the call waits and returns the result \
+             directly. \
              timeout_seconds is the council's own deadline.",
             typed_schema::<CouncilArgs>(),
         ),
@@ -2536,8 +2556,9 @@ fn build_tool_defs_with_profile_support(
             "Retire a mob member and archive its session.\n\n\
              Retirement is graceful: the member's session is archived (preserving its history) \
              and it is removed from the mob roster. The member can no longer receive messages \
-             or run turns after retirement. Use mob_check_member first if you need the member's \
-             final output before retiring it.\n\n\
+             or run turns after retirement. Retiring a member also retires every member it \
+             forked (its fork_off children and their descendants), deepest first. Use \
+             mob_check_member first if you need the member's final output before retiring it.\n\n\
              Retired members cannot be re-spawned. To replace a retired member, spawn a new \
              one with a different member_id using the same profile.",
             typed_schema::<MemberArgs>(),
@@ -2559,7 +2580,9 @@ fn build_tool_defs_with_profile_support(
              token usage information that comms messages do not include.\n\n\
              COST/PERFORMANCE:\n\
              This call is lightweight (reads from local state, no LLM calls). Safe to call \
-             frequently, but unnecessary polling wastes your own turns.",
+             frequently, but unnecessary polling wastes your own turns. It never waits for \
+             the member's running turn: while the member is mid-turn, progress.run_state is \
+             \"run_open\" and output_preview and tokens_used are from its last completed turn.",
             typed_schema::<MemberArgs>(),
         ),
         tool_def(
@@ -2567,7 +2590,9 @@ fn build_tool_defs_with_profile_support(
             "List all members of a mob with their status and session info.\n\n\
              Returns each member's id, profile, status (running/completed/failed), runtime_mode, \
              and session metadata. More efficient than calling mob_check_member on each member \
-             individually when you need a status overview of the whole mob.",
+             individually when you need a status overview of the whole mob.\n\n\
+             Without manage scope over the mob, you see only the members you own: the members \
+             you forked and, transitively, the members they forked.",
             typed_schema::<MobIdArgs>(),
         ),
         tool_def(
@@ -3027,6 +3052,20 @@ struct ForkOffResult {
     blocked_because: Option<crate::detached_delivery::DetachedDeliveryUnavailable>,
 }
 
+/// `mob_check_member` result. The status read never waits for the member's
+/// running turn, so while that turn is open the note says which fields are
+/// current.
+#[derive(Serialize)]
+struct CheckMemberResult {
+    #[serde(flatten)]
+    status: meerkat_contracts::MobMemberStatusResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<&'static str>,
+}
+
+const MEMBER_TURN_RUNNING_NOTE: &str = "The member's turn is still running. output_preview \
+     and tokens_used are from its last completed turn.";
+
 /// Immediate `fork_off` result: the child is seated and its turn admitted.
 #[derive(Serialize)]
 struct ForkOffStarted {
@@ -3221,9 +3260,11 @@ fn spawn_detached_completion_custodian<F>(
 
 /// The plain-language note carried on a detached start result, so a model
 /// that has only the tool contract knows the job is not a blocker.
-fn detached_started_note(tool: &'static str, job_id: &str) -> String {
+/// Plain-language contract of a detached start. `control` says how the
+/// caller can check on or end the job.
+fn detached_started_note(tool: &'static str, job_id: &str, control: &str) -> String {
     format!(
-        "Running in the background. The result will be added to your conversation later as \"Background {tool} job {job_id} finished\". Nothing is waiting on it: continue with other work. Check or end it with mob_check_member / mob_retire_member."
+        "Running in the background. When it ends, the result is added to your conversation as \"Background {tool} job {job_id} finished\": right after your current turn if you are mid-turn, or in a new turn if you are idle. Nothing is waiting on it: continue with other work. {control}"
     )
 }
 

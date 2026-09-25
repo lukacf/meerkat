@@ -7090,6 +7090,41 @@ struct ExactRemoteTurnResidency<'a> {
     fence_token: u64,
 }
 
+/// Read the member's run phase from the runtime machine. This is a
+/// machine-owned read that does not go through the session actor, so it
+/// answers while the member's turn is running.
+#[cfg(feature = "runtime-adapter")]
+async fn observe_member_runtime_run_state(
+    session_service: &dyn super::session_service::MobSessionService,
+    session_id: &SessionId,
+) -> Option<super::handle::MemberRunState> {
+    use meerkat_runtime::SessionServiceRuntimeExt as _;
+
+    let runtime = session_service.runtime_adapter()?;
+    let state = tokio::time::timeout(
+        MEMBER_PROGRESS_OBSERVATION_TIMEOUT,
+        runtime.runtime_state(session_id),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    match state {
+        meerkat_runtime::RuntimeState::Running => Some(super::handle::MemberRunState::RunOpen),
+        meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached => {
+            Some(super::handle::MemberRunState::Idle)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "runtime-adapter"))]
+async fn observe_member_runtime_run_state(
+    _session_service: &dyn super::session_service::MobSessionService,
+    _session_id: &SessionId,
+) -> Option<super::handle::MemberRunState> {
+    None
+}
+
 pub(super) fn unavailable_member_progress(
     include_local_session_details: bool,
 ) -> Option<super::handle::MemberProgressSnapshot> {
@@ -12442,7 +12477,67 @@ impl MobActor {
         include_local_session_details: bool,
         observed_at_ms: u64,
     ) -> super::state::MemberStatusSessionObservation {
+        // Status reads never queue behind the member's running turn (steer,
+        // not queue). The bounded execution snapshot answers only while the
+        // session actor is free. When it times out the member is busy: its
+        // run state comes from the runtime machine, and its preview and token
+        // count from the durable committed transcript instead of the session
+        // actor's command lane. The run state is then the typed "mid-turn"
+        // marker and the other fields are as of the last commit.
+        let (execution_snapshot, snapshot_timed_out) =
+            match (include_local_session_details, bridge_session_id.as_ref()) {
+                (true, Some(session_id)) => match tokio::time::timeout(
+                    MEMBER_PROGRESS_OBSERVATION_TIMEOUT,
+                    session_service.execution_snapshot(session_id),
+                )
+                .await
+                {
+                    Ok(Ok(snapshot)) => (snapshot, false),
+                    Ok(Err(_)) => (None, false),
+                    Err(_) => (None, true),
+                },
+                (false, _) | (true, None) => (None, false),
+            };
+        // The runtime machine's own phase says whether the busy member has a
+        // run open; that read never queues behind the turn.
+        let busy = snapshot_timed_out;
+        let runtime_run_state = match bridge_session_id.as_ref() {
+            Some(session_id) if busy => {
+                observe_member_runtime_run_state(session_service.as_ref(), session_id).await
+            }
+            Some(_) | None => None,
+        };
         let (output_preview, tokens_used, genuinely_absent) = match bridge_session_id.as_ref() {
+            Some(bridge_session_id) if include_local_session_details && busy => {
+                if session_service.supports_persistent_sessions() {
+                    match session_service
+                        .load_persisted_session(bridge_session_id)
+                        .await
+                    {
+                        Ok(Some(session)) => (
+                            session
+                                .messages()
+                                .iter()
+                                .rev()
+                                .find_map(|message| match message {
+                                    meerkat_core::types::Message::BlockAssistant(assistant) => {
+                                        let text = assistant.to_string();
+                                        (!text.is_empty()).then_some(text)
+                                    }
+                                    _ => None,
+                                }),
+                            session.total_tokens(),
+                            false,
+                        ),
+                        Ok(None) | Err(_) => (None, 0, false),
+                    }
+                } else {
+                    // An in-memory session is readable only through its
+                    // actor, which is busy with the turn: report the run
+                    // state without waiting for it.
+                    (None, 0, false)
+                }
+            }
             Some(bridge_session_id) if include_local_session_details => {
                 match session_service.read(bridge_session_id).await {
                     Ok(view) => (
@@ -12477,23 +12572,12 @@ impl MobActor {
             }
             Some(_) | None => (None, 0, false),
         };
-        let execution_snapshot = match (include_local_session_details, bridge_session_id.as_ref()) {
-            (true, Some(session_id)) => match tokio::time::timeout(
-                MEMBER_PROGRESS_OBSERVATION_TIMEOUT,
-                session_service.execution_snapshot(session_id),
-            )
-            .await
-            {
-                Ok(Ok(snapshot)) => snapshot,
-                Ok(Err(_)) | Err(_) => None,
-            },
-            (false, _) | (true, None) => None,
-        };
         super::state::MemberStatusSessionObservation {
             output_preview,
             tokens_used,
             genuinely_absent,
             execution_snapshot,
+            runtime_run_state,
             observed_at_ms,
         }
     }
@@ -12726,7 +12810,30 @@ impl MobActor {
                     health,
                 })
             }
-            None => unavailable_member_progress(include_local_session_details),
+            None => match observation.runtime_run_state {
+                // Busy member: the run state is current, the progress
+                // fields are as of the last snapshot the member answered,
+                // and health cannot be reclassified without a new one.
+                Some(run_state) if include_local_session_details => {
+                    let state = self.dsl_authority.state();
+                    Some(super::handle::MemberProgressSnapshot {
+                        run_state,
+                        in_flight_work: state
+                            .member_in_flight_work
+                            .get(&dsl_identity)
+                            .copied()
+                            .unwrap_or(0),
+                        last_progress_at_ms: state
+                            .member_last_progress_at_ms
+                            .get(&dsl_identity)
+                            .copied()
+                            .unwrap_or(0),
+                        last_progress_event: super::handle::MemberProgressEvent::Unchanged,
+                        health: super::handle::MemberHealthClass::Unknown,
+                    })
+                }
+                Some(_) | None => unavailable_member_progress(include_local_session_details),
+            },
         };
 
         Ok(MobMemberLifecycleProjection::materialize(

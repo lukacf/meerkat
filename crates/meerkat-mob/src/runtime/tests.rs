@@ -56640,12 +56640,14 @@ async fn test_busy_member_execution_snapshot_cannot_block_mob_lifecycle_commands
         .expect("member status should return an observation");
     assert!(
         status_started_at.elapsed() < Duration::from_secs(1),
-        "member status must degrade to unknown instead of awaiting the busy session turn"
+        "member status must not await the busy session turn"
     );
+    // The busy session cannot answer, so the run state comes from the
+    // runtime machine, which still has the worker's kickoff run open.
     assert_eq!(
         snapshot.progress.map(|progress| progress.run_state),
-        Some(crate::runtime::handle::MemberRunState::Unknown),
-        "a timed-out execution observation must be represented truthfully as unknown"
+        Some(crate::runtime::handle::MemberRunState::RunOpen),
+        "a timed-out execution observation reports the runtime machine's run state"
     );
 }
 
@@ -56992,6 +56994,7 @@ async fn test_member_status_completion_cancels_while_mailbox_is_full() {
             tokens_used: 0,
             genuinely_absent: false,
             execution_snapshot: None,
+            runtime_run_state: None,
             observed_at_ms: 1,
         },
         observation_permit,

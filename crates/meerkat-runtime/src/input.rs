@@ -348,10 +348,10 @@ impl PromptInput {
     ///
     /// The record (a `BackgroundJob` system notice with `persisted: true`) is
     /// the turn's only content, carried as a typed runtime append with no user
-    /// text. An idle owner therefore runs one real turn that sees it; with
-    /// `Steer` handling a running owner receives it at its next checkpoint
-    /// with no second turn. The append is committed to the transcript with
-    /// the run, like any turn content. `idempotency_key` names the job, so
+    /// text. An idle owner therefore runs one real turn that sees it; a
+    /// running owner gets exactly one follow-up turn after its current turn
+    /// ends. The append is committed to the transcript with the run, like any
+    /// turn content. `idempotency_key` names the job, so
     /// the record is admitted and written exactly once however often delivery
     /// is retried, and the durable input survives a restart once admitted.
     pub fn detached_job_completed(

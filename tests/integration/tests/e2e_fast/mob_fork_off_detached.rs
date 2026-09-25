@@ -289,6 +289,21 @@ fn recorded_fork_off_start(history: &Value) -> Option<Value> {
     })
 }
 
+/// The structured result of tool call `tool_use_id` in a transcript.
+fn recorded_tool_result(history: &Value, tool_use_id: &str) -> Option<Value> {
+    history_messages(history).iter().find_map(|message| {
+        message["results"].as_array()?.iter().find_map(|result| {
+            if result["tool_use_id"].as_str() != Some(tool_use_id) {
+                return None;
+            }
+            result["content"]
+                .as_array()?
+                .iter()
+                .find_map(|block| block.get("data").cloned())
+        })
+    })
+}
+
 /// The durable completion records for `job_id` in the forker's transcript:
 /// `BackgroundJob` system notices whose block is `persisted` for this job.
 fn recorded_completions(history: &Value, job_id: &str) -> Vec<Value> {
@@ -690,9 +705,11 @@ fn request_stage(rendered: &str) -> usize {
 
 /// A completion that arrives while the forker's turn is still running is not
 /// lost and not duplicated: it is recorded once and the forker runs exactly
-/// one follow-up turn that sees it right after its current turn ends. (A
-/// non-live session has no mid-turn runtime input drain, so the running
-/// turn's own later model calls do not see it.)
+/// one follow-up turn that sees it right after its current turn ends. (The
+/// running turn's own later model calls do not see it: the input's main
+/// text is empty and its only content is the typed append, which the
+/// request-only mid-turn steer lane does not carry, so admission queues it
+/// for the next run.)
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_fast_detached_completion_during_a_running_turn_is_delivered_once_after_it() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -1164,4 +1181,200 @@ async fn e2e_fast_external_fork_of_an_idle_member_is_accepted() {
     .await;
 
     let _ = lane.mob_state.mob_destroy(&lane.mob_id).await;
+}
+
+const CHECK_PROMPT: &str = "CHECK-CHILD-7Q check on your child in mob=";
+const CHECK_DONE: &str = "CHECK_DONE";
+
+/// Like [`ForkOffScript`], but the child's turn is held open until released.
+struct GatedChildScript {
+    inner: ForkOffScript,
+    release: Arc<tokio::sync::Notify>,
+    child_started: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl GatedChildScript {
+    /// The forker's check turn: one `mob_check_member` call on its child,
+    /// then done.
+    fn check_events(request: &LlmRequest, mob_id: &str) -> Vec<LlmEvent> {
+        if matches!(request.messages.last(), Some(Message::ToolResults { .. })) {
+            return scripted_text(&request.model, CHECK_DONE);
+        }
+        scripted_tool_call(
+            &request.model,
+            "toolu_check_member",
+            "mob_check_member",
+            json!({"mob_id": mob_id, "member_id": CHILD}),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for GatedChildScript {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        let last_user = last_user_text(request);
+        if let Some(mob_id) = last_user.strip_prefix(CHECK_PROMPT) {
+            let events = Self::check_events(request, mob_id);
+            return Box::pin(futures::stream::iter(events.into_iter().map(Ok)));
+        }
+        let events = self.inner.events(request);
+        let is_child = last_user.contains(CHILD_TASK);
+        let release = Arc::clone(&self.release);
+        let child_started = Arc::clone(&self.child_started);
+        Box::pin(futures::StreamExt::flat_map(
+            futures::stream::once(async move {
+                if is_child {
+                    child_started.store(true, std::sync::atomic::Ordering::SeqCst);
+                    release.notified().await;
+                }
+                events
+            }),
+            |events| futures::stream::iter(events.into_iter().map(Ok)),
+        ))
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+}
+
+/// Observing and controlling a running child is steer, not queue:
+/// member_status answers at once while the child's turn is open, with a typed
+/// open run state, the owner's member list and ownership check answer too,
+/// and force-cancel is accepted while the turn runs and applies to that turn
+/// at its next boundary (it does not wait for the turn, and the turn does
+/// not complete normally). The cancelled child's outcome reaches the forker
+/// once.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_forker_observes_a_running_child_without_waiting_for_its_turn() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let child_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let client: Arc<dyn LlmClient> = Arc::new(GatedChildScript {
+        inner: ForkOffScript {
+            requests: Arc::new(Mutex::new(Vec::new())),
+        },
+        release: Arc::clone(&release),
+        child_started: Arc::clone(&child_started),
+    });
+    let (router, mob_state) = make_stack(temp.path(), client).await;
+    let mob_id = format!("observe-running-{}", uuid::Uuid::new_v4().simple());
+    let mob_id = mob_state
+        .mob_create_definition(mob_definition(&mob_id))
+        .await
+        .expect("create mob");
+    let handle = mob_state.handle_for(&mob_id).await.expect("mob handle");
+    handle
+        .spawn_spec(SpawnMemberSpec::new("keeper", AgentIdentity::from(PARENT)))
+        .await
+        .expect("spawn forker");
+    let parent_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from(PARENT))
+        .await
+        .expect("forker session");
+    assert_eq!(bounded_turn(&handle, PARENT, FORK_PROMPT).await, FORK_DONE);
+    let history = session_history(&router, &parent_session).await;
+    let started = recorded_fork_off_start(&history)
+        .unwrap_or_else(|| panic!("the forker's transcript holds no fork_off result: {history}"));
+    let job_id = started["job_id"].as_str().expect("job id").to_string();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !child_started.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child never started"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let observed = tokio::time::timeout(
+        Duration::from_secs(5),
+        handle.member_status(&AgentIdentity::from(CHILD)),
+    )
+    .await
+    .expect("member_status must not wait for the running child's turn")
+    .expect("member_status succeeds for a busy child");
+    assert_eq!(
+        observed
+            .progress
+            .as_ref()
+            .map(|progress| progress.run_state),
+        Some(meerkat_mob::MemberRunState::RunOpen),
+        "the status says the child is mid-turn"
+    );
+
+    // The forker's own mob_check_member call answers within its turn, with
+    // the typed run state and the plain note.
+    assert_eq!(
+        bounded_turn(&handle, PARENT, &format!("{CHECK_PROMPT}{mob_id}")).await,
+        CHECK_DONE
+    );
+    let history = session_history(&router, &parent_session).await;
+    let checked = recorded_tool_result(&history, "toolu_check_member")
+        .unwrap_or_else(|| panic!("no mob_check_member result: {history}"));
+    assert_eq!(checked["progress"]["run_state"], "run_open", "{checked}");
+    assert!(
+        checked["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("still running")),
+        "{checked}"
+    );
+
+    let members = tokio::time::timeout(
+        Duration::from_secs(5),
+        handle.list_members_including_retiring(),
+    )
+    .await
+    .expect("the member list must not wait for the running child's turn");
+    assert!(
+        members
+            .iter()
+            .any(|member| member.agent_identity.as_str() == CHILD),
+        "the running child is listed"
+    );
+    let admission = tokio::time::timeout(
+        Duration::from_secs(5),
+        handle.resolve_owned_member_admission(
+            false,
+            Some(&AgentIdentity::from(PARENT)),
+            &AgentIdentity::from(CHILD),
+        ),
+    )
+    .await
+    .expect("the ownership check must not wait for the running child's turn")
+    .expect("ownership check");
+    assert!(
+        matches!(admission, meerkat_mob::CurrentMobAdmission::Allowed),
+        "the forker owns its running child"
+    );
+
+    // The child's provider call is still gated while force-cancel runs.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        handle.force_cancel_member(AgentIdentity::from(CHILD)),
+    )
+    .await
+    .expect("force-cancel must not wait for the running child's turn")
+    .expect("force-cancel a running child");
+    release.notify_waiters();
+    wait_for_single_record(&router, &parent_session, &job_id).await;
+    let history = session_history(&router, &parent_session).await;
+    let completion = recorded_completions(&history, &job_id)
+        .into_iter()
+        .next()
+        .expect("one completion");
+    let body = completion["body"].as_str().expect("completion body");
+    assert!(
+        body.contains("(failed)"),
+        "the cancel applied to the running turn: {body}"
+    );
+
+    let _ = mob_state.mob_destroy(&mob_id).await;
 }

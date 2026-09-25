@@ -91,6 +91,7 @@ pub mod storage_diagnostics;
 pub mod storage_durability;
 pub mod storage_layout;
 pub mod streaming_tool;
+pub mod structured_output;
 pub mod surface_metadata;
 pub mod time_compat;
 pub mod tool_catalog;

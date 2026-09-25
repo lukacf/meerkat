@@ -34,6 +34,8 @@ pub mod public_live;
 pub(crate) mod request_support;
 mod responses_output;
 pub mod runtime;
+#[cfg(test)]
+mod structured_output_request_tests;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod text_adapter;
 pub mod tool_schema;

@@ -165,6 +165,27 @@ them.
   `ToolDef.input_schema` is unchanged. Behavior-only:
   `meerkat_openai::normalize_openai_tool_parameters_schema` removes both root
   keys.
+- Structured output (`--schema`, `output_schema`) shows the model the schema
+  up front and skips the extraction request when it is not needed. Every
+  request of a schema-bearing run carries a delimited `<structured_output>`
+  section, appended to the system prompt, stating that the final reply must be
+  a single JSON value matching the schema and including the schema as the
+  provider compiles it for validation. The section is byte-identical across
+  the run's requests, so prompt caching is unaffected, and it is request-only:
+  it is never written into the session transcript. Runs without a schema are
+  unchanged. When the final reply of the tool loop already validates (after
+  the existing code-fence and named-wrapper normalization), it becomes
+  `structured_output` and no extraction request is sent; `RunResult`, the
+  `run_completed` then `extraction_succeeded` events, and the RPC, REST and
+  SDK result shapes are the same as for a successful extraction, and
+  `RunResult.text` is that reply. Any other final reply runs the extraction
+  path exactly as before: same prompt, temperature 0, no tools, the native
+  schema slot with unchanged `strict` defaults, and the same retry and attempt
+  accounting. Requests that reference Gemini cached content are not given the
+  section, and provider-authored cache breakpoints over a request carrying it
+  are not recorded as durable cache evidence, since they describe a system
+  prompt the transcript does not contain. Behaviour-only; no public signature
+  changed. `meerkat_core::structured_output` is new public API.
 
 ### Fixed
 

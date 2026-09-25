@@ -5760,9 +5760,20 @@ where
         in_extraction: bool,
         result: LlmStreamResult,
     ) -> Result<CallingLlmGate<CallingLlmAssistantTurn>, AgentError> {
+        // A request carrying the structured-output instruction projection has
+        // a leading system prompt the canonical transcript does not contain,
+        // so a breakpoint the provider authored over it is evidence about that
+        // request only. It can never bind to the transcript, and reporting it
+        // as a discarded anchor on every turn would describe a fault that does
+        // not exist. Such claims are therefore not promoted at all.
+        let turn_cache_breakpoint_claims = if self.requests_carry_output_schema_projection() {
+            &[][..]
+        } else {
+            result.cache_breakpoint_claims()
+        };
         let (authored_cache_breakpoints, mut cache_breakpoint_discards) =
             promote_cache_breakpoint_claims(
-                result.cache_breakpoint_claims(),
+                turn_cache_breakpoint_claims,
                 self.client.provider(),
                 self.client.model(),
             );
@@ -6831,13 +6842,28 @@ where
                 self.save_session_best_effort(ctx.run_id).await?;
                 self.emit_extraction_failed_event(&extraction_error, ctx.event_tx.as_ref())
                     .await;
-                return Ok(CallingLlmStep::Done(Ok(result)));
+                Ok(CallingLlmStep::Done(Ok(result)))
             }
             super::extraction::ExtractionValidation::Passed(normalized) => {
-                self.extraction_state.record_success(normalized);
+                self.complete_extraction_validation_passed(ctx, normalized)
+                    .await
             }
         }
-
+    }
+    /// Complete a run whose structured output validated.
+    ///
+    /// The one success terminal for structured output, shared by the
+    /// extraction phase and by validate-first (the primary final reply already
+    /// validated, so no extraction request was sent). Both therefore produce
+    /// the same `RunResult` shape, the same authority transition out of
+    /// `Extracting`, the same checkpoint, and the same `ExtractionSucceeded`
+    /// event. The caller must already have entered `Extracting`.
+    async fn complete_extraction_validation_passed(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        normalized: serde_json::Value,
+    ) -> Result<CallingLlmStep, AgentError> {
+        self.extraction_state.record_success(normalized);
         let structured_output = self.extraction_state.take_result();
         let schema_warnings = self.extraction_state.take_schema_warnings();
         let result = RunResult {
@@ -6858,7 +6884,7 @@ where
             schema_warnings,
             skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
         };
-        // Validation passed — complete via authority
+        // Validation passed - complete via authority
         let t = self.apply_turn_input(TurnExecutionInput::ExtractionValidationPassed {
             run_id: ctx.run_id.clone(),
         })?;
@@ -6977,6 +7003,32 @@ where
 
             self.extraction_state
                 .set_schema_warnings(compiled.warnings.clone());
+
+            // Validate-first: the model was shown the schema up front, so its
+            // final reply may already be the structured output. When it
+            // validates (after the same code-fence and named-wrapper
+            // normalization the extraction phase applies), accept it and skip
+            // the extraction request. Anything else - invalid JSON, a schema
+            // mismatch, or a validator fault - falls through to the unchanged
+            // extraction path below, which reproduces and reports that fault
+            // exactly as before. No extraction attempt is consumed here.
+            if let Ok(super::extraction::ExtractionValidation::Passed(normalized)) =
+                super::extraction::validate_response_text(
+                    &final_text,
+                    &output_schema,
+                    &compiled.schema,
+                )
+            {
+                // Authority: DrainingBoundary -> Extracting -> Completed,
+                // the same completion the extraction phase takes.
+                self.apply_turn_input(TurnExecutionInput::EnterExtraction {
+                    run_id: ctx.run_id.clone(),
+                    max_retries: self.config.structured_output_retries,
+                })?;
+                return self
+                    .complete_extraction_validation_passed(ctx, normalized)
+                    .await;
+            }
 
             // Push extraction prompt as user message
             let prompt = self

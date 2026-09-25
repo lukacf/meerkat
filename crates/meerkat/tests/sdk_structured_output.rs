@@ -455,3 +455,201 @@ async fn sdk_structured_output_unwraps_named_envelope() -> Result<(), Box<dyn st
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Schema visibility and validate-first through the public SDK path
+// ---------------------------------------------------------------------------
+
+/// Records every `LlmRequest` the facade adapter lowers and replies from a
+/// script of final texts, one per call.
+struct RecordingScriptedLlmClient {
+    replies: Vec<&'static str>,
+    requests: Arc<std::sync::Mutex<Vec<LlmRequest>>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl RecordingScriptedLlmClient {
+    fn new(replies: Vec<&'static str>) -> Self {
+        Self {
+            replies,
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClient for RecordingScriptedLlmClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<LlmEvent, meerkat_client::LlmError>> + Send + 'a>,
+    > {
+        self.requests.lock().unwrap().push(request.clone());
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        let reply = self.replies[call_index.min(self.replies.len() - 1)];
+        Box::pin(stream::iter(vec![
+            Ok(LlmEvent::TextDelta {
+                delta: reply.to_string(),
+                meta: None,
+            }),
+            Ok(normalized_anthropic_usage(request)),
+            Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: meerkat::StopReason::EndTurn,
+                },
+            }),
+        ]))
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
+    }
+
+    async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+        Ok(())
+    }
+}
+
+async fn run_recorded(
+    replies: Vec<&'static str>,
+) -> Result<(meerkat::RunResult, Vec<LlmRequest>), Box<dyn std::error::Error>> {
+    let factory = AgentFactory::new(".rkat/sessions");
+    let client = Arc::new(RecordingScriptedLlmClient::new(replies));
+    let requests = Arc::clone(&client.requests);
+    let llm_adapter = Arc::new(factory.build_llm_adapter(client, "claude-sonnet-4-6").await);
+    let store_adapter = Arc::new(
+        factory
+            .build_store_adapter(Arc::new(TestSessionStore::new()))
+            .await,
+    );
+    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(EmptyDispatcher);
+    let mut agent = AgentBuilder::new()
+        .model("claude-sonnet-4-6")
+        .max_tokens_per_turn(64)
+        .system_prompt("You describe people.")
+        .output_schema(OutputSchema::new(person_schema())?)
+        .build(llm_adapter, tools, store_adapter)
+        .await?;
+    let result = agent
+        .run("Tell me about a person.".to_string().into())
+        .await?;
+    let requests = requests.lock().unwrap().clone();
+    Ok((result, requests))
+}
+
+fn leading_system_text(request: &LlmRequest) -> String {
+    match request.messages.first() {
+        Some(meerkat_core::Message::System(system)) => system.content.clone(),
+        other => panic!("request must lead with the system prompt, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn sdk_structured_output_accepts_a_valid_final_reply_without_extraction()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (result, requests) = run_recorded(vec![r#"{"name": "Ada", "age": 36}"#]).await?;
+
+    assert_eq!(requests.len(), 1, "no extraction request is sent");
+    let person: Person = serde_json::from_value(result.structured_output.clone().unwrap())?;
+    assert_eq!(
+        person,
+        Person {
+            name: "Ada".to_string(),
+            age: 36
+        }
+    );
+    assert!(result.extraction_error.is_none());
+
+    let system = leading_system_text(&requests[0]);
+    let section =
+        meerkat_core::structured_output::render_output_schema_instructions(&person_schema());
+    assert_eq!(system, format!("You describe people.\n\n{section}"));
+    assert!(
+        requests[0]
+            .provider_params
+            .as_ref()
+            .is_none_or(|params| !matches!(
+                params,
+                meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(tag)
+                    if tag.structured_output.is_some()
+            )),
+        "the main turn carries no native schema slot"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sdk_structured_output_fallback_extraction_request_is_unchanged()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (result, requests) = run_recorded(vec![
+        "Ada is a mathematician.",
+        r#"{"name": "Ada", "age": 36}"#,
+    ])
+    .await?;
+
+    assert_eq!(
+        requests.len(),
+        2,
+        "prose falls back to one extraction request"
+    );
+    assert_eq!(result.text, "Ada is a mathematician.");
+    assert!(result.structured_output.is_some());
+
+    let (main, extraction) = (&requests[0], &requests[1]);
+    assert_eq!(
+        leading_system_text(main),
+        leading_system_text(extraction),
+        "the section is byte-identical on the extraction request"
+    );
+    assert!(extraction.tools.is_empty());
+    assert_eq!(extraction.temperature, Some(0.0));
+    match extraction.provider_params.as_ref() {
+        Some(meerkat_core::lifecycle::run_primitive::ProviderTag::Anthropic(tag)) => {
+            let slot = tag.structured_output.as_ref().expect("native schema slot");
+            assert_eq!(slot.schema.as_value(), &person_schema());
+            assert!(!slot.strict);
+        }
+        other => panic!("expected the Anthropic native schema slot, got {other:?}"),
+    }
+    match extraction.messages.last() {
+        Some(meerkat_core::Message::User(user)) => assert_eq!(
+            user.text_content(),
+            "Provide the final output as valid JSON matching the required schema. \
+             Output ONLY the JSON, no additional text or markdown formatting."
+        ),
+        other => panic!("expected the extraction prompt, got {other:?}"),
+    }
+    Ok(())
+}
+
+/// Validate-first and extraction produce the same public `RunResult` shape.
+#[tokio::test]
+async fn sdk_structured_output_result_shape_is_the_same_on_both_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (validated, _) = run_recorded(vec![r#"{"name": "Ada", "age": 36}"#]).await?;
+    let (extracted, _) = run_recorded(vec!["prose", r#"{"name": "Ada", "age": 36}"#]).await?;
+
+    let keys = |result: &meerkat::RunResult| -> Vec<String> {
+        let mut keys: Vec<String> = serde_json::to_value(result)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(keys(&validated), keys(&extracted));
+    assert_eq!(validated.structured_output, extracted.structured_output);
+    Ok(())
+}

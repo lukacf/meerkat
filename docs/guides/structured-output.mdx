@@ -4,7 +4,7 @@ description: "Force agents to produce validated JSON conforming to a user-provid
 icon: "square-code"
 ---
 
-Structured output forces the agent to produce validated JSON conforming to a schema you provide. The extraction runs as a separate turn after agentic work completes, with automatic retry on validation failure. Schemas are normalized across providers -- the same schema works with Anthropic, OpenAI, and Gemini, with provider-specific lowering handled transparently.
+Structured output forces the agent to produce validated JSON conforming to a schema you provide. The model sees the schema from the first request, and when its final reply already validates, that reply is the structured output. Otherwise an extraction turn runs after agentic work completes, with automatic retry on validation failure. Schemas are normalized across providers -- the same schema works with Anthropic, OpenAI, and Gemini, with provider-specific lowering handled transparently.
 
 <Note>
 This page is the task-first guide. For the low-level schema/type inventory, see [Structured output reference](/reference/structured-output-reference).
@@ -23,12 +23,28 @@ Use this guide when you want to:
 When `output_schema` is configured on an agent, the execution flow is:
 
 <Steps>
+  <Step title="The schema is visible from the first request">
+    Every request of the run carries a `<structured_output>` section appended
+    to the system prompt. It tells the model that its final reply (the reply
+    in which it calls no tools) must be a single JSON value matching the
+    schema, and it includes the schema as the provider compiles it for
+    validation. The section is identical on every request, so prompt caching
+    is unaffected. It is added to the request only and is never written into
+    the session transcript. Runs without `output_schema` are unchanged.
+  </Step>
   <Step title="Agentic loop runs normally">
     The agent processes the prompt, calls tools, and iterates until no more tool calls remain.
   </Step>
-  <Step title="Extraction turn fires">
-    An additional LLM call is made with no tools and a prompt asking for valid
-    JSON matching the schema. Extraction requests temperature `0.0` where the
+  <Step title="Validate-first">
+    The final reply is parsed and validated against the schema (after the same
+    code-fence and named-wrapper normalization extraction uses). When it
+    validates, it becomes `RunResult.structured_output` and no extraction
+    request is sent.
+  </Step>
+  <Step title="Extraction turn fires when needed">
+    Otherwise an additional LLM call is made with no tools and a prompt asking
+    for valid JSON matching the schema, with the provider's native schema
+    slot attached. Extraction requests temperature `0.0` where the
     provider/model supports it; lowering may omit unsupported parameters.
     This does not guarantee deterministic output.
   </Step>
@@ -59,7 +75,9 @@ main turn is accepted, Meerkat emits:
 }
 ```
 
-It then emits exactly one extraction terminal:
+It then emits exactly one extraction terminal. A run whose final reply
+already validated emits `extraction_succeeded` the same way, without an
+extraction request:
 
 ```json
 {

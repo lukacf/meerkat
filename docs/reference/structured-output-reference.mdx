@@ -21,22 +21,57 @@ Use this page when you need exact structured-output terminology and types rather
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `output_schema` | `None` | Declared extraction schema. When absent, there is no extraction phase. |
-| `structured_output_retries` | `2` | Validation retries after the first attempt, for at most three extraction calls by default. |
+| `output_schema` | `None` | Declared output schema. When absent, requests carry no schema section and there is no extraction phase. |
+| `structured_output_retries` | `2` | Validation retries after the first extraction attempt, for at most three extraction calls by default. Validate-first does not consume an attempt. |
 
 Provider adapters compile the normalized schema before extraction. Strictness
 is a provider-lowering request; local JSON Schema validation still runs before
 Meerkat accepts the result.
 
+## Schema visibility
+
+When `output_schema` is set, every request of the run (main turns and
+extraction turns) carries this section, appended to the leading system prompt
+after a blank line, or as the system prompt when the session has none:
+
+```text
+<structured_output>
+Your final reply (the reply in which you call no tools) is parsed as structured output. It must be a single JSON value that validates against the JSON Schema below, with no other text and no markdown code fences. Replies that call tools are not affected.
+JSON Schema:
+{"type":"object",...}
+</structured_output>
+```
+
+The schema is the one the active provider compiles for validation, as compact
+JSON (Anthropic, for example, shows `additionalProperties: false` on every
+object). The optional schema `name` is not shown. The section is a pure
+function of the compiled schema, so it is byte-identical across the requests
+of a run and prompt caching is unaffected. It is added to requests only and
+never written into the session transcript. Requests that reference Gemini
+cached content (`cached_content_name`) are left unchanged, because the cached
+content owns their system instruction. Provider-authored cache breakpoints
+over a request carrying the section describe a system prompt the transcript
+does not contain, so they are not recorded as durable cache evidence.
+
+## Validate-first
+
+When the agentic loop ends, the final reply is validated first, with the same
+code-fence stripping and named-wrapper unwrapping extraction applies. A reply
+that validates becomes `RunResult.structured_output` and no extraction request
+is sent. Anything else (prose, invalid JSON, a schema mismatch, or a validator
+fault) runs the extraction phase exactly as described below: the same prompt,
+temperature `0.0`, no tools, the provider's native schema slot, and the same
+retry accounting.
+
 ## Result-side fields
 
 | Field | Meaning |
 |-------|---------|
-| `RunResult.text` | Committed main-turn assistant output after provider schema compilation succeeds. Extraction does not replace it. |
-| `RunResult.structured_output` | Validated JSON value on success. |
+| `RunResult.text` | Committed main-turn assistant output after provider schema compilation succeeds. Extraction does not replace it. When validate-first accepts the final reply, `text` is that reply as written. |
+| `RunResult.structured_output` | Validated JSON value on success, from validate-first or extraction. |
 | `RunResult.extraction_error` | Main output, attempts, and reason when the post-main extraction phase fails. |
 | `RunResult.schema_warnings` | Lossy provider-compilation warnings, when any. |
-| `RunResult.turns` | Includes extraction attempts. |
+| `RunResult.turns` | Includes extraction attempts, if any ran. |
 
 Provider schema compilation happens before the main output is saved into the
 result. A compilation failure can therefore return the typed extraction failure
@@ -53,7 +88,8 @@ terminal observability stages:
 2. Extraction emits exactly one follow-up terminal event:
    `extraction_succeeded` with `structured_output` and optional
    `schema_warnings`, or `extraction_failed` with `last_output`, `attempts`,
-   and `reason`.
+   and `reason`. When validate-first accepts the final reply,
+   `extraction_succeeded` follows `run_completed` directly.
 
 Extraction does not emit ordinary text or `turn_completed` events. Both
 outcome events carry `request_usage`: one per-call usage row for each answered

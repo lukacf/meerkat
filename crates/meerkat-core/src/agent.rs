@@ -15,6 +15,8 @@ mod runner;
 pub mod skills;
 mod state;
 #[cfg(test)]
+mod structured_output_tests;
+#[cfg(test)]
 #[doc(hidden)]
 pub(crate) mod test_turn_state_handle;
 #[cfg(test)]

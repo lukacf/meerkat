@@ -123,6 +123,8 @@ jobs:
       machine_authority: ${{ steps.plan.outputs.machine_authority }}
       wasm: ${{ steps.plan.outputs.wasm }}
       sdk_host: ${{ steps.plan.outputs.sdk_host }}
+      bazel_graph: ${{ steps.plan.outputs.bazel_graph }}
+      examples_browser: ${{ steps.plan.outputs.examples_browser }}
       package_count: ${{ steps.plan.outputs.package_count }}
       closure_count: ${{ steps.plan.outputs.closure_count }}
       closure_flags: ${{ steps.plan.outputs.closure_flags }}
@@ -686,8 +688,12 @@ jobs:
   sdk-host:
     name: Python + TypeScript SDK suites
     needs: changes
-    # Post-merge only (13 min measured); pull requests defer it.
-    if: ${{ github.event_name == 'push' && (needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.sdk_host == 'true') }}
+    # The Python + TypeScript SDK suites are post-merge only (13 min
+    # measured); pull requests defer them. The Node example suites
+    # (examples/037-live-webrtc-web in Playwright Chromium and the examples
+    # SDK suite) also run on pull requests that touch their inputs, without
+    # the Rust build.
+    if: ${{ (github.event_name == 'push' && (needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.sdk_host == 'true' || needs.changes.outputs.examples_browser == 'true')) || (github.event_name != 'push' && needs.changes.outputs.examples_browser == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -697,6 +703,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Setup Rust
+        if: ${{ github.event_name == 'push' }}
         uses: ./.github/actions/setup-rust-ci
 
       - name: Setup Python
@@ -710,6 +717,7 @@ jobs:
           node-version: "22"
 
       - name: Setup sccache
+        if: ${{ github.event_name == 'push' }}
         uses: ./.github/actions/setup-sccache-ci
         with:
           bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
@@ -719,9 +727,11 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
+        if: ${{ github.event_name == 'push' }}
         uses: rui314/setup-mold@v1
 
       - name: Cache cargo registry
+        if: ${{ github.event_name == 'push' }}
         uses: Swatinem/rust-cache@v2
         with:
           # Registry index and crate sources only, one key for every lane.
@@ -736,10 +746,72 @@ jobs:
           cache-on-failure: true
 
       - name: Build RPC binary for SDK smoke tests
+        if: ${{ github.event_name == 'push' }}
         run: ./scripts/repo-cargo build -p meerkat-rpc
 
       - name: Python + TypeScript SDK tests
+        if: ${{ github.event_name == 'push' }}
         run: make -j2 test-sdk-python test-sdk-typescript
+
+      - name: Build TypeScript SDK for the examples
+        working-directory: sdks/typescript
+        # The SDK has no lockfile; the examples link it through file:.
+        run: |
+          npm install --no-fund --no-audit
+          npm run build
+
+      - name: Install example dependencies
+        run: |
+          npm ci --no-fund --no-audit --prefix examples
+          npm ci --no-fund --no-audit --prefix examples/037-live-webrtc-web
+
+      - name: Install Playwright Chromium
+        working-directory: examples/037-live-webrtc-web
+        run: npx playwright install --with-deps chromium
+
+      - name: Live WebRTC example browser tests
+        working-directory: examples/037-live-webrtc-web
+        run: npm test
+
+      - name: Examples SDK suite
+        working-directory: examples
+        run: npm run test:sdk
+
+  bazel-graph:
+    name: Bazel graph check
+    needs: changes
+    # Proves the Bazel graph loads and analyses (plain local Bazel, no
+    # remote execution, nothing is compiled). Pull requests run it when the
+    # classifier sees a Bazel-relevant path: BUILD/Starlark/module inputs,
+    # the BUILD generator, the tools/ Bazel and remote-execution configs,
+    # any Cargo manifest, or a moved or deleted Rust file. Every main push
+    # runs it.
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.bazel_graph == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Bazelisk
+        # Bazelisk downloads the Bazel release pinned in .bazelversion.
+        uses: bazelbuild/setup-bazelisk@v3
+
+      - name: Cache Bazel repository and disk caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel-repo
+            ~/.cache/bazel-disk
+          key: bazel-graph-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock') }}
+          restore-keys: |
+            bazel-graph-${{ runner.os }}-
+
+      - name: Bazel query
+        run: bazel query //... --repository_cache="${HOME}/.cache/bazel-repo" >/dev/null
+
+      - name: Bazel analysis
+        run: bazel build --nobuild //... --repository_cache="${HOME}/.cache/bazel-repo" --disk_cache="${HOME}/.cache/bazel-disk"
 
   gate:
     name: CI gate
@@ -756,6 +828,7 @@ jobs:
       - closure-check
       - wasm-check
       - sdk-host
+      - bazel-graph
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -771,9 +844,12 @@ jobs:
           CLOSURE_CHECK_RESULT: ${{ needs.closure-check.result }}
           WASM_CHECK_RESULT: ${{ needs.wasm-check.result }}
           SDK_HOST_RESULT: ${{ needs.sdk-host.result }}
+          BAZEL_GRAPH_RESULT: ${{ needs.bazel-graph.result }}
           RUST_CHANGED: ${{ needs.changes.outputs.rust_changed }}
           IS_MAIN_PUSH: ${{ github.event_name == 'push' }}
           SDK_HOST: ${{ needs.changes.outputs.sdk_host }}
+          BAZEL_GRAPH: ${{ needs.changes.outputs.bazel_graph }}
+          EXAMPLES_BROWSER: ${{ needs.changes.outputs.examples_browser }}
           MODE: ${{ needs.changes.outputs.mode }}
           REASON: ${{ needs.changes.outputs.reason }}
           SHARD_COUNT: ${{ needs.changes.outputs.shard_count }}
@@ -789,7 +865,7 @@ jobs:
             echo "::notice::unit tests deferred to the push-to-main run (meerkat-mob compile chain): ${UNIT_DEFERRED}"
           fi
           echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ratchets=${RATCHETS_RESULT}"
-          echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT}"
+          echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
           failed=0
           require_success() {
             local lane="$1" result="$2"
@@ -855,15 +931,29 @@ jobs:
             echo "no Rust-relevant change: no unit lanes required on this main push."
             forbid_failure "Main unit tests" "${MAIN_UNIT_RESULT}"
             forbid_failure "wasm32 check" "${WASM_CHECK_RESULT}"
-            if [[ "${SDK_HOST}" == "true" ]]; then
+            if [[ "${SDK_HOST}" == "true" || "${EXAMPLES_BROWSER}" == "true" ]]; then
               require_ran "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
             else
               forbid_failure "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
             fi
           else
-            for lane in "Main unit tests":"${MAIN_UNIT_RESULT}" "wasm32 check":"${WASM_CHECK_RESULT}" "Python + TypeScript SDK suites":"${SDK_HOST_RESULT}"; do
+            for lane in "Main unit tests":"${MAIN_UNIT_RESULT}" "wasm32 check":"${WASM_CHECK_RESULT}"; do
               forbid_failure "${lane%%:*}" "${lane##*:}"
             done
+            # Pull requests run the Node example suites of the SDK lane when
+            # their inputs changed.
+            if [[ "${EXAMPLES_BROWSER}" == "true" ]]; then
+              require_ran "Python + TypeScript SDK suites (example suites)" "${SDK_HOST_RESULT}"
+            else
+              forbid_failure "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+            fi
+          fi
+          # Bazel graph check: every main push, and pull requests with a
+          # Bazel-relevant change.
+          if [[ "${IS_MAIN_PUSH}" == "true" || "${BAZEL_GRAPH}" == "true" ]]; then
+            require_ran "Bazel graph check" "${BAZEL_GRAPH_RESULT}"
+          else
+            forbid_failure "Bazel graph check" "${BAZEL_GRAPH_RESULT}"
           fi
           if (( failed )); then
             exit 1
@@ -915,6 +1005,7 @@ jobs:
           CLOSURE_CHECK_RESULT: ${{ needs.closure-check.result }}
           WASM_CHECK_RESULT: ${{ needs.wasm-check.result }}
           SDK_HOST_RESULT: ${{ needs.sdk-host.result }}
+          BAZEL_GRAPH_RESULT: ${{ needs.bazel-graph.result }}
           MODE: ${{ needs.changes.outputs.mode }}
           PACKAGE_COUNT: ${{ needs.changes.outputs.package_count }}
           CLOSURE_COUNT: ${{ needs.changes.outputs.closure_count }}
@@ -944,6 +1035,7 @@ jobs:
             --arg closure_check "${CLOSURE_CHECK_RESULT}" \
             --arg wasm_check "${WASM_CHECK_RESULT}" \
             --arg sdk_host "${SDK_HOST_RESULT}" \
+            --arg bazel_graph "${BAZEL_GRAPH_RESULT}" \
             --arg mode "${MODE}" \
             --argjson package_count "${PACKAGE_COUNT:-0}" \
             --argjson closure_count "${CLOSURE_COUNT:-0}" \
@@ -979,7 +1071,8 @@ jobs:
                 main_unit: $main_unit,
                 closure_check: $closure_check,
                 wasm_check: $wasm_check,
-                sdk_host: $sdk_host
+                sdk_host: $sdk_host,
+                bazel_graph: $bazel_graph
               }
             }' > "${destination}/attestation.json"
           echo "tree_sha=${tree_sha}"

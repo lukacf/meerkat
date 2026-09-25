@@ -293,6 +293,8 @@ for (const path of [
     "machine_authority",
     "wasm",
     "sdk_host",
+    "bazel_graph",
+    "examples_browser",
     "docs_only",
     "package_count",
     "closure_count",
@@ -337,6 +339,63 @@ for (const path of [
   const plan = planFor(["CHANGELOG.md"]);
   assert.equal(plan.rust_changed, false);
   assert.deepEqual(plan.main_unit_shards, [], "a CHANGELOG-only merge yields no main unit lanes");
+}
+
+// Bazel graph check selection: Bazel-relevant paths, any Cargo manifest, and
+// moved or deleted Rust files select it; documentation does not.
+{
+  const plan = planFor(["crates/meerkat-core/BUILD.bazel"]);
+  assert.equal(plan.bazel_graph, true, "a BUILD-only diff selects the Bazel graph check");
+  assert.equal(plan.examples_browser, false);
+}
+{
+  for (const path of ["MODULE.bazel", "MODULE.bazel.lock", ".bazelrc", ".bazelversion", "tools/bazel/defs.bzl", "tools/buildbuddy/README.md", "scripts/generate-bazel-rust-builds.mjs", "Cargo.lock"]) {
+    assert.equal(planFor([path]).bazel_graph, true, `${path} selects the Bazel graph check`);
+  }
+}
+{
+  const plan = planFor(["docs/index.mdx", "README.md"]);
+  assert.equal(plan.bazel_graph, false, "a docs-only diff does not select the Bazel graph check");
+  assert.equal(plan.examples_browser, false, "a docs-only diff does not select the example suites");
+}
+{
+  const plan = planFor(["crates/meerkat-core/Cargo.toml"]);
+  assert.equal(plan.bazel_graph, true, "a Cargo.toml change selects the Bazel graph check");
+}
+{
+  const plan = planFor(["crates/meerkat-core/src/lib.rs"]);
+  assert.equal(plan.bazel_graph, false, "an in-place Rust edit leaves the graph unchanged");
+}
+{
+  // A rename inside crates/: the old path no longer exists, the new one does.
+  const plan = planFor(["crates/meerkat-core/src/renamed_away_for_selftest.rs", "crates/meerkat-core/src/lib.rs"]);
+  assert.equal(plan.bazel_graph, true, "a crates/ rename selects the Bazel graph check");
+  assert.deepEqual(plan.removed_paths, ["crates/meerkat-core/src/renamed_away_for_selftest.rs"]);
+}
+{
+  const result = run(["--format", "github", "--", "crates/meerkat-core/BUILD.bazel"]);
+  const lines = Object.fromEntries(result.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  assert.equal(lines.bazel_graph, "true");
+  assert.equal(lines.examples_browser, "false");
+}
+
+// Example suites selection: the TypeScript and Python SDKs and example
+// sources select them; example documentation does not.
+{
+  for (const path of ["sdks/typescript/src/index.ts", "sdks/python/meerkat/__init__.py", "examples/037-live-webrtc-web/app.js", "examples/tests/sdk-examples.test.mjs", "examples/package-lock.json"]) {
+    assert.equal(planFor([path]).examples_browser, true, `${path} selects the example suites`);
+  }
+  assert.equal(planFor(["examples/037-live-webrtc-web/README.md"]).examples_browser, false);
+  assert.equal(planFor(["crates/meerkat-core/src/lib.rs"]).examples_browser, false);
+}
+
+// A change to the lane definitions runs the lanes they define.
+{
+  for (const path of [".github/workflows/ci.yml", "scripts/ci-cargo-lanes.mjs", "scripts/ci-cargo-lanes-selftest.mjs"]) {
+    const plan = planFor([path]);
+    assert.equal(plan.bazel_graph, true, `${path} selects the Bazel graph check`);
+    assert.equal(plan.examples_browser, true, `${path} selects the example suites`);
+  }
 }
 
 // Bad arguments fail loudly.

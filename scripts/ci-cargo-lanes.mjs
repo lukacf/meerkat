@@ -141,10 +141,11 @@ function collectChangedPaths(args) {
   if (args.pathsFromStdin) {
     const text = readFileSync(0, "utf8");
     const paths = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    return { paths: [...paths, ...args.paths], reason: "explicit path list" };
+    const all = [...paths, ...args.paths];
+    return { paths: all, removed: explicitRemoved(all), reason: "explicit path list" };
   }
   if (args.explicitPaths) {
-    return { paths: args.paths, reason: "explicit path list" };
+    return { paths: args.paths, removed: explicitRemoved(args.paths), reason: "explicit path list" };
   }
   if (!args.base || args.base === NULL_SHA) {
     return { paths: null, reason: "no diff base supplied" };
@@ -162,10 +163,71 @@ function collectChangedPaths(args) {
     return { paths: null, reason: `diff head ${args.head} is not available` };
   }
   const output = git(["diff", "--name-only", "--diff-filter=ACMRD", args.base, args.head, "--"]);
+  // Deleted paths and the old side of renames: a moved or removed source file
+  // changes the generated Bazel data dependencies even when no BUILD file is
+  // in the diff.
+  const statusOutput = git(["diff", "--name-status", "--find-renames", "--diff-filter=RD", args.base, args.head, "--"]);
+  const removed = [];
+  for (const line of statusOutput.split(/\r?\n/)) {
+    const fields = line.split("\t");
+    if (fields.length >= 2 && fields[0].startsWith("D")) removed.push(fields[1].trim());
+    if (fields.length >= 3 && fields[0].startsWith("R")) removed.push(fields[1].trim());
+  }
   return {
     paths: output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
+    removed,
     reason: `git diff ${args.base}..${args.head}`,
   };
+}
+
+// For an explicit path list (self-test fixtures, local dry runs) a listed path
+// that no longer exists in the working tree is a deletion or the old side of a
+// move.
+function explicitRemoved(paths) {
+  return paths.filter((path) => !existsSync(resolve(root, path)));
+}
+
+// The CI workflow and its classifier define every lane, so a change to them
+// runs every lane they define, as the Rust lanes do through isGlobalPath.
+function isLaneDefinitionPath(path) {
+  return (
+    path === ".github/workflows/ci.yml" ||
+    path === "scripts/ci-cargo-lanes.mjs" ||
+    path === "scripts/ci-cargo-lanes-selftest.mjs"
+  );
+}
+
+// Paths whose change can alter the Bazel graph without touching Rust code:
+// generated or hand-written BUILD files, Starlark, module and lock inputs,
+// the BUILD generator, the Bazel toolchain and lane definitions, and every
+// Cargo manifest and the lockfile (crate_universe reads them).
+function isBazelGraphPath(path) {
+  const base = path.split("/").pop();
+  return (
+    isLaneDefinitionPath(path) ||
+    base === "BUILD.bazel" ||
+    base === "BUILD" ||
+    path.endsWith(".bzl") ||
+    path === "MODULE.bazel" ||
+    path === "MODULE.bazel.lock" ||
+    path === ".bazelrc" ||
+    path === ".bazelversion" ||
+    path === ".bazelignore" ||
+    path === "Cargo.lock" ||
+    base === "Cargo.toml" ||
+    path === "scripts/generate-bazel-rust-builds.mjs" ||
+    path.startsWith("tools/bazel/") ||
+    path.startsWith("tools/buildbuddy/")
+  );
+}
+
+// Node-only example suites: examples/037-live-webrtc-web (Playwright
+// Chromium) and the examples SDK suite, which links sdks/typescript and runs
+// the Python SDK examples against a fake host. Markdown is not an input.
+function isExamplesBrowserPath(path) {
+  if (isLaneDefinitionPath(path)) return true;
+  if (path.startsWith("sdks/typescript/") || path.startsWith("sdks/python/")) return true;
+  return path.startsWith("examples/") && !/\.(md|mdx)$/.test(path);
 }
 
 // Paths whose change alters the compile graph of every package.
@@ -304,7 +366,7 @@ function plan(args) {
     }
   }
 
-  const { paths: rawPaths, reason: pathReason } = collectChangedPaths(args);
+  const { paths: rawPaths, removed: rawRemoved = [], reason: pathReason } = collectChangedPaths(args);
   const changed = rawPaths === null ? null : [...new Set(rawPaths.map(normalizePath))].sort();
 
   const result = {
@@ -322,6 +384,8 @@ function plan(args) {
     machine_authority: false,
     wasm: false,
     sdk_host: false,
+    bazel_graph: false,
+    examples_browser: false,
     docs_only: false,
   };
 
@@ -380,11 +444,18 @@ function plan(args) {
         path.startsWith("crates/meerkat-contracts/") ||
         path.startsWith("crates/meerkat-cli/src/web_runtime_template/"),
     );
+    const removed = rawRemoved.map(normalizePath);
+    result.removed_paths = removed;
+    result.bazel_graph =
+      changed.some(isBazelGraphPath) || removed.some((path) => path.endsWith(".rs"));
+    result.examples_browser = changed.some(isExamplesBrowserPath);
   } else {
     result.generated_contract = true;
     result.machine_authority = true;
     result.sdk_host = true;
     result.wasm = true;
+    result.bazel_graph = true;
+    result.examples_browser = true;
   }
 
   // Estimated lane cost per package: Rust lines (the lib-test binary
@@ -536,6 +607,8 @@ function githubOutput(result) {
   scalar("machine_authority", String(result.machine_authority));
   scalar("wasm", String(result.wasm));
   scalar("sdk_host", String(result.sdk_host));
+  scalar("bazel_graph", String(result.bazel_graph));
+  scalar("examples_browser", String(result.examples_browser));
   scalar("docs_only", String(result.docs_only));
   scalar("package_count", String(result.packages.length));
   scalar("closure_count", String(result.closure.length));

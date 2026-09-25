@@ -3222,7 +3222,13 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    output_tokens: int = 0\n"
     types_content += "    total_tokens: int = 0\n"
     types_content += "    cache_creation_tokens: Optional[int] = None\n"
-    types_content += "    cache_read_tokens: Optional[int] = None\n\n\n"
+    types_content += "    cache_read_tokens: Optional[int] = None\n"
+    types_content += "    reasoning_tokens: Optional[int] = None\n\n\n"
+
+    # WireTurnUsage
+    types_content += "@dataclass\nclass WireTurnUsage(WireUsage):\n"
+    types_content += '    """Usage of one provider request, with its accounting."""\n'
+    types_content += "    accounting: Optional[dict[str, Any]] = None\n\n\n"
 
     # WireRunResult
     types_content += "@dataclass\nclass WireRunResult:\n"
@@ -3233,6 +3239,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    turns: int = 0\n"
     types_content += "    tool_calls: int = 0\n"
     types_content += "    usage: Optional[WireUsage] = None\n"
+    types_content += "    run_usage: Optional[WireUsage] = None\n"
+    types_content += "    request_usage: Optional[list[WireTurnUsage]] = None\n"
     types_content += "    terminal_cause_kind: Optional[str] = None\n"
     types_content += "    structured_output: Optional[Any] = None\n"
     types_content += "    extraction_error: Optional[dict[str, Any]] = None\n"
@@ -4074,6 +4082,17 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  total_tokens: number;\n"
     types_content += "  cache_creation_tokens?: number;\n"
     types_content += "  cache_read_tokens?: number;\n"
+    types_content += "  reasoning_tokens?: number;\n"
+    types_content += "}\n\n"
+
+    types_content += "export interface WireTurnUsage extends WireUsage {\n"
+    types_content += "  accounting: {\n"
+    types_content += "    provider: string;\n"
+    types_content += "    model: string;\n"
+    types_content += "    presented_tokens: number;\n"
+    types_content += "    convention: string;\n"
+    types_content += "    aggregation: string;\n"
+    types_content += "  };\n"
     types_content += "}\n\n"
 
     types_content += "export interface WireRunResult {\n"
@@ -4083,6 +4102,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  turns: number;\n"
     types_content += "  tool_calls: number;\n"
     types_content += "  usage: WireUsage;\n"
+    types_content += "  run_usage?: WireUsage;\n"
+    types_content += "  request_usage?: WireTurnUsage[];\n"
     types_content += "  terminal_cause_kind?: string;\n"
     types_content += "  structured_output?: unknown;\n"
     types_content += "  extraction_error?: { last_output: string; attempts: number; reason: string };\n"
@@ -5567,7 +5588,7 @@ export function parseInitResult(json: string): InitResult {
 
 WEB_SESSION_TYPES_CONTENT = """// Generated session façade contracts for @rkat/web
 // Source: tools/sdk-codegen/generate.py (generate_web_session_types)
-import type { SchemaWarning, SessionId, TurnTerminalCauseKind, Usage } from './events.js';
+import type { SchemaWarning, SessionId, TurnTerminalCauseKind, TurnUsage, Usage } from './events.js';
 
 /**
  * Canonical run-result wire envelope (mirrors `meerkat_contracts::WireRunResult`,
@@ -5580,7 +5601,12 @@ export interface WireRunResult {
   text: string;
   turns: number;
   tool_calls: number;
+  /** Session-cumulative usage; take the latest value, never sum across turns. */
   usage: Usage;
+  /** Usage of this turn's run alone. */
+  run_usage?: Usage | null;
+  /** One row per provider request this run made, in order. */
+  request_usage?: TurnUsage[] | null;
   structured_output?: unknown;
   extraction_error?: { last_output: string; attempts: number; reason: string } | null;
   schema_warnings?: SchemaWarning[] | null;

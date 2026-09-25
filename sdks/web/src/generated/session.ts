@@ -1,6 +1,6 @@
 // Generated session façade contracts for @rkat/web
 // Source: tools/sdk-codegen/generate.py (generate_web_session_types)
-import type { SchemaWarning, SessionId, TurnTerminalCauseKind, Usage } from './events.js';
+import type { SchemaWarning, SessionId, TurnTerminalCauseKind, TurnUsage, Usage } from './events.js';
 
 /**
  * Canonical run-result wire envelope (mirrors `meerkat_contracts::WireRunResult`,
@@ -13,7 +13,12 @@ export interface WireRunResult {
   text: string;
   turns: number;
   tool_calls: number;
+  /** Session-cumulative usage; take the latest value, never sum across turns. */
   usage: Usage;
+  /** Usage of this turn's run alone. */
+  run_usage?: Usage | null;
+  /** One row per provider request this run made, in order. */
+  request_usage?: TurnUsage[] | null;
   structured_output?: unknown;
   extraction_error?: { last_output: string; attempts: number; reason: string } | null;
   schema_warnings?: SchemaWarning[] | null;

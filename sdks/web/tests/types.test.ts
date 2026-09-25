@@ -627,3 +627,14 @@ void forkedHelperResult;
 void flowStatusResult;
 void memberSubscription;
 void mobSubscription;
+
+// TurnResult carries the run-scoped and per-request usage views the WASM
+// start_turn JSON returns.
+import type { TurnResult as UsageTurnResult } from '../src/types.js';
+function turnResultUsageViews(result: UsageTurnResult): number {
+  const run = result.run_usage?.input_tokens ?? 0;
+  const rows = result.request_usage?.map((row) => row.accounting.presented_tokens) ?? [];
+  const reasoning = result.usage.reasoning_tokens ?? 0;
+  return run + rows.length + reasoning;
+}
+void turnResultUsageViews;

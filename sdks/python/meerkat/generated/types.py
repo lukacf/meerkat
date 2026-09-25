@@ -25,6 +25,13 @@ class WireUsage:
     total_tokens: int = 0
     cache_creation_tokens: Optional[int] = None
     cache_read_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+
+
+@dataclass
+class WireTurnUsage(WireUsage):
+    """Usage of one provider request, with its accounting."""
+    accounting: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -36,6 +43,8 @@ class WireRunResult:
     turns: int = 0
     tool_calls: int = 0
     usage: Optional[WireUsage] = None
+    run_usage: Optional[WireUsage] = None
+    request_usage: Optional[list[WireTurnUsage]] = None
     terminal_cause_kind: Optional[str] = None
     structured_output: Optional[Any] = None
     extraction_error: Optional[dict[str, Any]] = None

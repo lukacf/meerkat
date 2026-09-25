@@ -2591,7 +2591,7 @@ fn view_from_authoritative_session(session: &Session) -> SessionView {
         },
         billing: SessionUsage {
             total_tokens: session.total_tokens(),
-            usage: session.total_usage(),
+            usage: session.reported_total_usage(),
         },
     }
 }
@@ -13841,6 +13841,25 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Session read and list report a pre-0.8.22 session's raw summed cache
+    /// counters normalized, and leave the stored total untouched.
+    #[test]
+    fn session_view_reports_legacy_usage_normalized() {
+        let mut encoded = serde_json::to_value(Session::new()).unwrap();
+        encoded["usage"] = serde_json::json!({
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "cache_creation_tokens": 4000,
+            "cache_read_tokens": 50000
+        });
+        let session: Session = serde_json::from_value(encoded).unwrap();
+        let view = view_from_authoritative_session(&session);
+        assert_eq!(view.billing.usage.input_tokens, 1000);
+        assert_eq!(view.billing.usage.cache_read_tokens, Some(1000));
+        assert_eq!(view.billing.usage.cache_creation_tokens, Some(0));
+        assert_eq!(session.total_usage().cache_read_tokens, Some(50_000));
+    }
     use crate::ephemeral::{
         EphemeralSessionService, HeadCanonicalRuntimeBoundaryAcknowledgeOutcome,
         HeadCanonicalRuntimeBoundaryPrepareRequest, ObservedSessionTailKind,

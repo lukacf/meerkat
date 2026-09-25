@@ -450,7 +450,11 @@ fn legacy_session_totals_normalize_to_the_invariant_and_stay_monotone() {
     );
     let baseline = crate::CumulativeUsage::from_usage(session.total_usage()).into_inner();
     assert_eq!(baseline.cache_read_tokens, Some(1000));
-    assert_eq!(baseline.cache_creation_tokens, Some(1000));
+    assert_eq!(
+        baseline.cache_creation_tokens,
+        Some(0),
+        "reads and writes are clamped jointly to disjoint parts of input"
+    );
 
     session.record_turn_usage(&TurnUsage::new(
         Usage {
@@ -638,5 +642,53 @@ async fn every_request_of_a_structured_output_run_publishes_one_usage_row() {
         result.request_usage.len(),
         turn_rows.len() + extraction_rows.len(),
         "the event rows and the result rows describe the same requests"
+    );
+}
+
+/// Guards the agent's normalized run baseline: on a pre-0.8.22 session the
+/// first run's `run_usage` is that run's calls, not `None` and not the legacy
+/// raw sums.
+#[tokio::test]
+async fn legacy_session_first_run_reports_its_own_run_usage() {
+    let client = Arc::new(ScriptedAnthropicClient::new(vec![DocumentedCall {
+        uncached_input: 300,
+        cache_creation_input: 0,
+        cache_read_input: 4000,
+        output: 10,
+        requests_tool: false,
+    }]));
+    let mut agent = AgentBuilder::new()
+        .with_turn_state_handle(Arc::new(
+            crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+        ))
+        .build_standalone(client, Arc::new(LookupTool), Arc::new(NoopStore))
+        .await;
+    // Load a pre-0.8.22 raw summed usage total into the agent's own session.
+    let mut encoded = serde_json::to_value(agent.session()).expect("serialize session");
+    encoded["usage"] = serde_json::json!({
+        "input_tokens": 1000,
+        "output_tokens": 50,
+        "cache_creation_tokens": 4000,
+        "cache_read_tokens": 50000
+    });
+    *agent.session_mut() = serde_json::from_value(encoded).expect("legacy session loads");
+
+    let result = agent
+        .run("resume".to_string().into())
+        .await
+        .expect("run on a legacy session");
+    let run_usage = result
+        .run_usage
+        .expect("a legacy session's first run still reports its own usage");
+    assert_eq!(run_usage.input_tokens, 4300);
+    assert_eq!(run_usage.output_tokens, 10);
+    assert_eq!(run_usage.cache_read_tokens, Some(4000));
+    assert_eq!(run_usage.cache_creation_tokens, Some(0));
+    assert_eq!(result.usage.input_tokens, 5300);
+    assert_eq!(result.usage.cache_read_tokens, Some(5000));
+    assert!(
+        result.usage.cache_read_tokens.unwrap() + result.usage.cache_creation_tokens.unwrap()
+            <= result.usage.input_tokens,
+        "the reported total keeps reads and writes disjoint parts of input"
     );
 }

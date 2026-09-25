@@ -3852,7 +3852,10 @@ where
             )?;
             let attempted_cadence = self.compaction_cadence.clone();
             let mut restored_session = rollback.rollback_session;
-            if retained_usage != crate::types::Usage::default() {
+            // Nothing recorded during the attempt (every counter zero, with
+            // `Some(0)` counting as zero) restores the rollback head byte for
+            // byte, legacy raw counters included.
+            if !retained_usage.is_zero() {
                 restored_session.record_cumulative_usage(retained_usage);
             }
             let mut restored_cadence = rollback.rollback_compaction_cadence;
@@ -4165,7 +4168,7 @@ where
     /// Sessions saved before 0.8.22 summed raw per-call cache counters, which
     /// can exceed the input total; the stored value is left untouched.
     fn reported_session_usage(&self) -> crate::types::Usage {
-        crate::types::CumulativeUsage::from_usage(self.session.total_usage()).into_inner()
+        self.session.reported_total_usage()
     }
 
     /// Usage accrued since the current run began.
@@ -4216,12 +4219,23 @@ where
         // park is a separate seam and remains unbounded here.
         self.budget.begin_turn();
         self.extraction_state.reset();
-        // A run that suspended for callback results continues in this entry:
-        // keep its baseline and rows so calls made before the suspension stay
-        // in this run's usage. Every other entry starts a fresh run account.
-        if !std::mem::take(&mut self.run_usage_suspended_for_callback) {
-            self.run_usage_baseline = self.reported_session_usage();
-            self.run_request_usage.clear();
+        // Once a suspended run's staged callback results are applied, the next
+        // run continues its account so calls made before the suspension stay
+        // in that run's usage, whichever entry point starts it. A suspension
+        // whose results were never applied is discarded, not absorbed.
+        match self
+            .run_usage_suspended_run
+            .take()
+            .filter(|suspended| suspended.callback_results_applied)
+        {
+            Some(resumed) => {
+                self.run_usage_baseline = resumed.baseline;
+                self.run_request_usage = resumed.rows;
+            }
+            None => {
+                self.run_usage_baseline = self.reported_session_usage();
+                self.run_request_usage.clear();
+            }
         }
         // RuntimeStore holds the pre-run Session snapshot until an explicit
         // sticky-fallback CAS advances its control projection. Seal that exact
@@ -6638,7 +6652,12 @@ where
             })?;
             self.execute_turn_effects(&transition, ctx.turn_count, ctx.event_tx)
                 .await?;
-            self.run_usage_suspended_for_callback = true;
+            self.run_usage_suspended_run = Some(crate::agent::SuspendedRunUsage {
+                run_id: ctx.run_id.clone(),
+                baseline: self.run_usage_baseline.clone(),
+                rows: self.run_request_usage.clone(),
+                callback_results_applied: false,
+            });
             if callback_pending.len() == 1 {
                 let (tool_use_id, tool_name, args) = callback_pending.remove(0);
                 return Err(AgentError::CallbackPending {
@@ -9495,7 +9514,7 @@ mod tests {
                             Usage {
                                 input_tokens: 11,
                                 output_tokens: 4,
-                                cache_creation_tokens: Some(6),
+                                cache_creation_tokens: Some(2),
                                 cache_read_tokens: Some(9),
                                 reasoning_tokens: None,
                                 provider_accounting: None,
@@ -9769,7 +9788,7 @@ mod tests {
         expected.add(&Usage {
             input_tokens: 11,
             output_tokens: 4,
-            cache_creation_tokens: Some(6),
+            cache_creation_tokens: Some(2),
             cache_read_tokens: Some(9),
             reasoning_tokens: None,
             provider_accounting: None,
@@ -9818,7 +9837,7 @@ mod tests {
         expected.add(&Usage {
             input_tokens: 11,
             output_tokens: 4,
-            cache_creation_tokens: Some(6),
+            cache_creation_tokens: Some(2),
             cache_read_tokens: Some(9),
             reasoning_tokens: None,
             provider_accounting: None,
@@ -9937,6 +9956,133 @@ mod tests {
             })
             .unwrap();
         projection
+    }
+
+    /// Guards the normalized compaction rollback: aborting an uncommitted
+    /// compaction on a pre-0.8.22 session keeps the summary call charged and
+    /// leaves the reported total where it was, instead of mixing a normalized
+    /// delta into the raw legacy head.
+    #[tokio::test]
+    async fn legacy_session_compaction_abort_keeps_reported_usage_consistent() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .memory_store(memory_store.clone())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let mut encoded = serde_json::to_value(agent.session()).unwrap();
+        encoded["usage"] = serde_json::json!({
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "cache_creation_tokens": 4000,
+            "cache_read_tokens": 50000
+        });
+        *agent.session_mut() = serde_json::from_value(encoded).unwrap();
+        let rollback_session = agent.session().clone();
+        let rollback_last_input_tokens = agent.last_input_tokens;
+        let rollback_compaction_cadence = agent.compaction_cadence.clone();
+        let projection = append_abort_test_projection(agent.session_mut(), "legacy-abort");
+        // The compaction summary call: 300 uncached plus 4000 cache-read.
+        agent
+            .session_mut()
+            .record_turn_usage(&crate::TurnUsage::new(
+                Usage {
+                    input_tokens: 300,
+                    output_tokens: 10,
+                    cache_creation_tokens: Some(0),
+                    cache_read_tokens: Some(4000),
+                    ..Default::default()
+                },
+                crate::ProviderTokenAccounting::anthropic("mock-model", 300, 0, 4000),
+            ));
+        let reported_before_abort = agent.session().reported_total_usage();
+        assert_eq!(reported_before_abort.input_tokens, 5300);
+        assert_eq!(reported_before_abort.cache_read_tokens, Some(5000));
+        assert_eq!(reported_before_abort.cache_creation_tokens, Some(0));
+        memory_store.staged.lock().unwrap().push(projection.clone());
+        agent.compaction_transaction = Some(crate::agent::CompactionTransaction {
+            phase: crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(Box::new(
+                crate::agent::CompactionRollbackState {
+                    rollback_session,
+                    rollback_last_input_tokens,
+                    rollback_compaction_cadence,
+                    rollback_durable_row_floor: 0,
+                },
+            )),
+            projections: vec![projection],
+        });
+
+        agent
+            .abort_uncommitted_compaction_projections()
+            .await
+            .expect("a legacy session's uncommitted compaction aborts cleanly");
+        assert!(agent.compaction_transaction.is_none());
+        assert_eq!(
+            agent.session().reported_total_usage(),
+            reported_before_abort,
+            "the abort keeps the summary call charged and moves no counter"
+        );
+        let stored = agent.session().total_usage();
+        assert_eq!(
+            stored,
+            agent.session().reported_total_usage(),
+            "the restored head is normalized like any recorded call"
+        );
+    }
+
+    /// An abort on a pre-0.8.22 session that recorded nothing restores the raw
+    /// head byte for byte: no normalization and no timestamp bump.
+    #[tokio::test]
+    async fn legacy_session_compaction_abort_with_nothing_recorded_keeps_raw_head() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .memory_store(memory_store.clone())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let mut encoded = serde_json::to_value(agent.session()).unwrap();
+        encoded["usage"] = serde_json::json!({
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "cache_creation_tokens": 4000,
+            "cache_read_tokens": 50000
+        });
+        *agent.session_mut() = serde_json::from_value(encoded).unwrap();
+        let rollback_session = agent.session().clone();
+        let raw_head = rollback_session.total_usage();
+        let rollback_updated_at = rollback_session.updated_at();
+        let rollback_last_input_tokens = agent.last_input_tokens;
+        let rollback_compaction_cadence = agent.compaction_cadence.clone();
+        let projection = append_abort_test_projection(agent.session_mut(), "legacy-noop-abort");
+        memory_store.staged.lock().unwrap().push(projection.clone());
+        agent.compaction_transaction = Some(crate::agent::CompactionTransaction {
+            phase: crate::agent::CompactionTransactionPhase::AwaitingRuntimeCommit(Box::new(
+                crate::agent::CompactionRollbackState {
+                    rollback_session,
+                    rollback_last_input_tokens,
+                    rollback_compaction_cadence,
+                    rollback_durable_row_floor: 0,
+                },
+            )),
+            projections: vec![projection],
+        });
+
+        agent
+            .abort_uncommitted_compaction_projections()
+            .await
+            .expect("a no-op abort succeeds");
+        assert_eq!(
+            agent.session().total_usage(),
+            raw_head,
+            "an abort that recorded nothing restores the raw head byte for byte"
+        );
+        assert_eq!(agent.session().updated_at(), rollback_updated_at);
     }
 
     #[tokio::test]
@@ -11279,10 +11425,21 @@ mod tests {
 
         agent.run("first".into()).await.unwrap();
         let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(128);
-        agent
+        let second = agent
             .run_with_events("second".into(), tx)
             .await
             .expect("capacity-overflow compaction must make progress and continue the turn");
+        assert_eq!(
+            second.request_usage.len(),
+            1,
+            "the mechanical fallback summary makes no provider request and adds no row"
+        );
+        assert!(
+            second
+                .request_usage
+                .iter()
+                .all(|row| row.accounting().model != "mechanical-compaction-fallback")
+        );
 
         let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
         assert!(
@@ -11326,7 +11483,12 @@ mod tests {
             .await;
 
         agent.run("first".into()).await.unwrap();
-        agent.run("second".into()).await.unwrap();
+        let second = agent.run("second".into()).await.unwrap();
+        assert_eq!(
+            second.request_usage.len(),
+            2,
+            "a committed provider-backed compaction summary is exactly one request row, beside the turn"
+        );
 
         let indexed = memory_store.contents();
         assert!(
@@ -15432,92 +15594,92 @@ mod tests {
         );
     }
 
-    /// Calls made before a callback suspension stay in the resumed run's
-    /// run_usage and request_usage.
-    #[tokio::test]
-    async fn callback_resume_keeps_the_run_usage_account() {
-        struct CallbackPendingDispatcher {
-            tools: Arc<[Arc<ToolDef>]>,
+    struct UsageCallbackDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for UsageCallbackDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
         }
 
-        #[async_trait]
-        impl AgentToolDispatcher for CallbackPendingDispatcher {
-            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-                Arc::clone(&self.tools)
-            }
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::callback_pending(
+                call.name,
+                serde_json::json!({ "question": "approve?" }),
+            ))
+        }
+    }
 
-            async fn dispatch(
-                &self,
-                call: ToolCallView<'_>,
-            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
-                Err(ToolError::callback_pending(
-                    call.name,
-                    serde_json::json!({ "question": "approve?" }),
-                ))
-            }
+    /// First call requests the callback tool (1000 in, 10 out); every later
+    /// call answers (1500 in, 20 out).
+    struct UsageCallbackClient {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AgentLlmClient for UsageCallbackClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let usage = |input: u64, output: u64| {
+                normalized_test_usage(
+                    self,
+                    Usage {
+                        input_tokens: input,
+                        output_tokens: output,
+                        ..Default::default()
+                    },
+                )
+            };
+            Ok(if call == 0 {
+                super::LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "callback-call".to_string(),
+                        name: "ask_user".into(),
+                        args: serde_json::value::RawValue::from_string(
+                            r#"{"question":"approve?"}"#.to_string(),
+                        )
+                        .expect("static callback arguments should parse"),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    usage(1000, 10),
+                )
+            } else {
+                super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "done".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    usage(1500, 20),
+                )
+            })
         }
 
-        struct TwoStepClient {
-            calls: std::sync::atomic::AtomicUsize,
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::Other
         }
 
-        #[async_trait]
-        impl AgentLlmClient for TwoStepClient {
-            async fn stream_response(
-                &self,
-                _messages: &[Message],
-                _tools: &[Arc<ToolDef>],
-                _max_tokens: u32,
-                _temperature: Option<f32>,
-                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
-            ) -> Result<super::LlmStreamResult, AgentError> {
-                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let usage = |input: u64, output: u64| {
-                    normalized_test_usage(
-                        self,
-                        Usage {
-                            input_tokens: input,
-                            output_tokens: output,
-                            ..Default::default()
-                        },
-                    )
-                };
-                Ok(if call == 0 {
-                    super::LlmStreamResult::new(
-                        vec![AssistantBlock::ToolUse {
-                            id: "callback-call".to_string(),
-                            name: "ask_user".into(),
-                            args: serde_json::value::RawValue::from_string(
-                                r#"{"question":"approve?"}"#.to_string(),
-                            )
-                            .expect("static callback arguments should parse"),
-                            meta: None,
-                        }],
-                        StopReason::ToolUse,
-                        usage(1000, 10),
-                    )
-                } else {
-                    super::LlmStreamResult::new(
-                        vec![AssistantBlock::Text {
-                            text: "approved, done".to_string(),
-                            meta: None,
-                        }],
-                        StopReason::EndTurn,
-                        usage(1500, 20),
-                    )
-                })
-            }
-
-            fn provider(&self) -> crate::provider::Provider {
-                crate::provider::Provider::Other
-            }
-
-            fn model(&self) -> &'static str {
-                "mock-model"
-            }
+        fn model(&self) -> &'static str {
+            "mock-model"
         }
+    }
 
-        let mut agent = AgentBuilder::new()
+    async fn usage_callback_agent()
+    -> crate::agent::Agent<UsageCallbackClient, UsageCallbackDispatcher, NoopStore> {
+        AgentBuilder::new()
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
@@ -15525,10 +15687,10 @@ mod tests {
                 crate::lifecycle::RuntimeExecutionKind::ContentTurn,
             )
             .build_standalone(
-                Arc::new(TwoStepClient {
+                Arc::new(UsageCallbackClient {
                     calls: std::sync::atomic::AtomicUsize::new(0),
                 }),
-                Arc::new(CallbackPendingDispatcher {
+                Arc::new(UsageCallbackDispatcher {
                     tools: Arc::from([Arc::new(ToolDef::new(
                         "ask_user",
                         "waits for an external callback",
@@ -15537,8 +15699,14 @@ mod tests {
                 }),
                 Arc::new(NoopStore),
             )
-            .await;
+            .await
+    }
 
+    /// Calls made before a callback suspension stay in the resumed run's
+    /// run_usage and request_usage.
+    #[tokio::test]
+    async fn callback_resume_keeps_the_run_usage_account() {
+        let mut agent = usage_callback_agent().await;
         let error = agent
             .run("ask for approval".to_string().into())
             .await
@@ -15565,6 +15733,67 @@ mod tests {
         assert_eq!(run_usage.input_tokens, 2500);
         assert_eq!(run_usage.output_tokens, 30);
         assert_eq!(result.usage.input_tokens, 2500);
+    }
+
+    /// A callback resume that arrives with a new prompt (applied results,
+    /// then a content turn) keeps the suspended run's account, like
+    /// `run_pending` does.
+    #[tokio::test]
+    async fn applied_callback_then_content_turn_keeps_the_run_usage_account() {
+        let mut agent = usage_callback_agent().await;
+        let error = agent
+            .run("ask for approval".to_string().into())
+            .await
+            .expect_err("the first entry suspends for the callback");
+        assert!(matches!(error, AgentError::CallbackPending { .. }));
+        agent
+            .apply_pending_callback_tool_results(vec![ToolResult::new(
+                "callback-call".to_string(),
+                "approved".to_string(),
+                false,
+            )])
+            .expect("the callback result applies");
+        let result = agent
+            .run("and also do this".to_string().into())
+            .await
+            .expect("the content turn completes");
+        assert_eq!(
+            result.request_usage.len(),
+            2,
+            "the pre-suspension call stays in the continuing run's rows"
+        );
+        let run_usage = result.run_usage.expect("run usage");
+        assert_eq!(run_usage.input_tokens, 2500);
+        assert_eq!(run_usage.output_tokens, 30);
+    }
+
+    /// A run that does not resume the callback never absorbs the suspended
+    /// run's account: the host abandoned the callback and started over.
+    #[tokio::test]
+    async fn abandoned_callback_does_not_leak_into_the_next_run() {
+        let mut agent = usage_callback_agent().await;
+        let error = agent
+            .run("ask for approval".to_string().into())
+            .await
+            .expect_err("the first entry suspends for the callback");
+        assert!(matches!(error, AgentError::CallbackPending { .. }));
+
+        let fresh = agent
+            .run("a fresh unrelated prompt".to_string().into())
+            .await
+            .expect("an unrelated run is admitted");
+        assert_eq!(
+            fresh.request_usage.len(),
+            1,
+            "only the unrelated run's own call is its row"
+        );
+        let run_usage = fresh.run_usage.expect("run usage");
+        assert_eq!(run_usage.input_tokens, 1500);
+        assert_eq!(run_usage.output_tokens, 20);
+        assert_eq!(
+            fresh.usage.input_tokens, 2500,
+            "the session total keeps both"
+        );
     }
 
     #[tokio::test]

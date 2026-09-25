@@ -2471,6 +2471,18 @@ impl ObservedCommsSender {
     }
 }
 
+/// The usage account of a run that suspended for callback results.
+#[derive(Debug, Clone)]
+pub(crate) struct SuspendedRunUsage {
+    /// The suspended run. Only callback results staged for this run admit
+    /// the account to continue.
+    pub(crate) run_id: RunId,
+    pub(crate) baseline: crate::types::Usage,
+    pub(crate) rows: Vec<crate::types::TurnUsage>,
+    /// Set once this run's staged callback results are applied.
+    pub(crate) callback_results_applied: bool,
+}
+
 /// The main Agent struct
 pub struct Agent<C, T, S>
 where
@@ -2503,10 +2515,13 @@ where
     pub(crate) run_usage_baseline: crate::types::Usage,
     /// Per-request usage recorded during the current run.
     pub(crate) run_request_usage: Vec<crate::types::TurnUsage>,
-    /// Set when the current run suspended for callback results, so the
-    /// resuming `run_loop` entry continues the same run account. In-memory
-    /// only: an agent rebuilt from storage starts a fresh account.
-    pub(crate) run_usage_suspended_for_callback: bool,
+    /// Run account of a run that suspended for callback results. Kept only
+    /// until the next run: once that run's staged callback results are
+    /// applied, the next run continues it whatever entry point starts it
+    /// (`run_pending` or a content turn); a run with no applied results
+    /// discards it. In-memory only: an agent rebuilt from storage starts a
+    /// fresh account.
+    pub(crate) run_usage_suspended_run: Option<SuspendedRunUsage>,
     /// Session-scoped compaction cadence tracked across runs.
     pub(crate) compaction_cadence: SessionCompactionCadence,
     /// Machine-issued compaction check parked until the request has been fully

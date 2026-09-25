@@ -3143,12 +3143,11 @@ pub enum SecurityMode {
 ///   one run. Its `input_tokens` is the saturating sum of each call's
 ///   *presented* tokens (see [`CumulativeUsage::add_turn`]). Its cache detail
 ///   fields and `reasoning_tokens` are provider-normalized sums: every
-///   provider's cache-read and cache-write counts are subsets of that call's
-///   presented input, and reasoning is a subset of output, so on a cumulative
-///   value `cache_read_tokens <= input_tokens`,
-///   `cache_creation_tokens <= input_tokens` and
-///   `reasoning_tokens <= output_tokens` on every provider. A field stays
-///   `None` until some call reports it.
+///   provider's cache-read and cache-write counts are disjoint parts of that
+///   call's presented input, and reasoning is a subset of output, so on a
+///   cumulative value `cache_read_tokens + cache_creation_tokens <=
+///   input_tokens` and `reasoning_tokens <= output_tokens` on every provider.
+///   A field stays `None` until some call reports it.
 ///
 /// # What consumers must not sum
 ///
@@ -3236,6 +3235,16 @@ impl Usage {
         self.provider_accounting = None;
     }
 
+    /// True when every counter is zero; an absent detail counter and
+    /// `Some(0)` both count as zero.
+    pub fn is_zero(&self) -> bool {
+        self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.cache_creation_tokens.unwrap_or(0) == 0
+            && self.cache_read_tokens.unwrap_or(0) == 0
+            && self.reasoning_tokens.unwrap_or(0) == 0
+    }
+
     /// Usage accrued between an `earlier` snapshot of the same cumulative
     /// account and this one.
     ///
@@ -3269,6 +3278,20 @@ impl Usage {
             provider_accounting: None,
         })
     }
+}
+
+/// Clamp cache reads and writes to disjoint subsets of `input`: reads to
+/// `input`, then writes to what reads leave. Every provider reports them as
+/// disjoint parts of the presented input, so a clamp only ever bites on
+/// malformed or pre-0.8.22 summed counters.
+fn clamp_cache_counts(
+    cache_read: Option<u64>,
+    cache_creation: Option<u64>,
+    input: u64,
+) -> (Option<u64>, Option<u64>) {
+    let cache_read = cache_read.map(|count| count.min(input));
+    let remaining = input.saturating_sub(cache_read.unwrap_or(0));
+    (cache_read, cache_creation.map(|count| count.min(remaining)))
 }
 
 /// Sum two optional counters, treating a missing side as zero, and keep
@@ -3390,15 +3413,17 @@ pub struct CumulativeUsage(Usage);
 impl CumulativeUsage {
     /// Wrap a value that is already a cumulative, normalized total (for
     /// example a persisted `Session` total). Detail counters are kept but
-    /// clamped to their parent totals so the subset invariant holds even for
-    /// a malformed input.
+    /// clamped so the invariant holds even for a malformed or pre-0.8.22
+    /// input: cache reads to `input_tokens`, cache writes to what reads leave,
+    /// reasoning to `output_tokens`.
     pub fn from_usage(mut usage: Usage) -> Self {
-        usage.cache_creation_tokens = usage
-            .cache_creation_tokens
-            .map(|count| count.min(usage.input_tokens));
-        usage.cache_read_tokens = usage
-            .cache_read_tokens
-            .map(|count| count.min(usage.input_tokens));
+        let (cache_read, cache_creation) = clamp_cache_counts(
+            usage.cache_read_tokens,
+            usage.cache_creation_tokens,
+            usage.input_tokens,
+        );
+        usage.cache_read_tokens = cache_read;
+        usage.cache_creation_tokens = cache_creation;
         usage.reasoning_tokens = usage
             .reasoning_tokens
             .map(|count| count.min(usage.output_tokens));
@@ -3411,25 +3436,26 @@ impl CumulativeUsage {
     /// The input component accumulates [`TurnUsage::presented_tokens`], the
     /// provider-normalized presented-input total, never the raw per-call
     /// `input_tokens`. The cache-read and cache-write counters accumulate the
-    /// call's cache counters, each clamped to the call's presented tokens:
-    /// every provider convention reports them as subsets of presented input
-    /// (Anthropic as disjoint components of it, OpenAI, Gemini and
-    /// OpenAI-compatible backends as details inside it). Reasoning
-    /// accumulates clamped to the call's output. This is the reference
+    /// call's cache counters, clamped jointly to the call's presented tokens:
+    /// reads to presented, then writes to what reads leave. Every provider
+    /// convention reports them as disjoint parts of presented input
+    /// (Anthropic as components of it, OpenAI, Gemini and OpenAI-compatible
+    /// backends as details inside it), so the clamp only bites on malformed
+    /// counters. Reasoning accumulates clamped to the call's output. This is the reference
     /// aggregation consumers should reproduce; see the worked example in
     /// `docs/reference/usage-accounting.mdx`.
     pub fn add_turn(&mut self, turn: &TurnUsage) {
         let presented = turn.presented_tokens();
         self.0.input_tokens = self.0.input_tokens.saturating_add(presented);
         self.0.output_tokens = self.0.output_tokens.saturating_add(turn.output_tokens);
-        self.0.cache_creation_tokens = add_optional_counts(
-            self.0.cache_creation_tokens,
-            turn.cache_creation_tokens.map(|count| count.min(presented)),
+        let (cache_read, cache_creation) = clamp_cache_counts(
+            turn.cache_read_tokens,
+            turn.cache_creation_tokens,
+            presented,
         );
-        self.0.cache_read_tokens = add_optional_counts(
-            self.0.cache_read_tokens,
-            turn.cache_read_tokens.map(|count| count.min(presented)),
-        );
+        self.0.cache_creation_tokens =
+            add_optional_counts(self.0.cache_creation_tokens, cache_creation);
+        self.0.cache_read_tokens = add_optional_counts(self.0.cache_read_tokens, cache_read);
         self.0.reasoning_tokens = add_optional_counts(
             self.0.reasoning_tokens,
             turn.reasoning_tokens

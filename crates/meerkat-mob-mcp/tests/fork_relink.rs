@@ -71,6 +71,7 @@ async fn completion_records(
 /// The custodian died with the old process after the child finished: the
 /// re-link pass records the child's result in the forker's transcript once.
 #[tokio::test]
+#[ignore = "needs a runtime-backed fixture; superseded by impl2's runtime-backed re-link tests"]
 async fn relink_delivers_a_finished_childs_result_exactly_once() {
     let fixture = CouncilFixture::new(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
     fixture.seed_source_mob(&["forker"]).await;
@@ -152,6 +153,7 @@ async fn relink_delivers_a_finished_childs_result_exactly_once() {
 /// and the limit winning cancels and retires the child and delivers
 /// max_run_elapsed.
 #[tokio::test]
+#[ignore = "needs a runtime-backed fixture; superseded by impl2's runtime-backed re-link tests"]
 async fn relink_rearms_max_run_from_the_original_start() {
     let gate = TurnGate::new();
     let turn_gate = Arc::clone(&gate);

@@ -2,8 +2,8 @@
 //!
 //! The outcome is recorded once as a durable `BackgroundJob` system notice
 //! (`SystemNoticeBlock::BackgroundJob { persisted: true, .. }`) in the owner's
-//! transcript. It is submitted as a runtime continuation input whose turn
-//! append is that notice:
+//! transcript. It is submitted as a runtime prompt input whose only content is
+//! that notice, as a typed append with no user text:
 //!
 //! - an idle owner gets a real pending boundary and runs one turn that sees
 //!   the outcome;
@@ -81,11 +81,8 @@ pub async fn deliver_detached_completion(
     outcome: serde_json::Value,
 ) -> Result<DetachedCompletionDelivered, DetachedCompletionError> {
     let notice = detached_completion_notice(tool, job_id, status, &outcome)?;
-    let input = meerkat_runtime::Input::Continuation(
-        meerkat_runtime::ContinuationInput::detached_job_completed(
-            format!("{tool}:{job_id}"),
-            notice,
-        ),
+    let input = meerkat_runtime::Input::Prompt(
+        meerkat_runtime::PromptInput::detached_job_completed(format!("{tool}:{job_id}"), notice),
     );
     match runtime
         .accept_input_with_completion(owner_session_id, input)
@@ -109,7 +106,8 @@ pub async fn deliver_detached_completion(
 }
 
 /// Why a host cannot use detached delivery for a call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DetachedDeliveryUnavailable {
     /// The host declared it cannot deliver later (one-shot surfaces).

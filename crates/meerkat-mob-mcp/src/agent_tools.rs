@@ -211,10 +211,6 @@ pub struct AgentMobToolSurface {
     /// session's builder (owner-session equality against the machine owner
     /// fact — `MobControlPrincipal::from_owner_bridge_session`).
     control_principal: meerkat_mob::MobControlPrincipal,
-    /// The owner session's operation registry, bound by the agent loop.
-    /// `fork_off` registers its detached child run here so the child's
-    /// outcome reaches the forker as a background-job completion.
-    ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
 }
 
 impl AgentMobToolSurface {
@@ -350,7 +346,6 @@ impl AgentMobToolSurface {
             // (A16); byte-identical single-user behavior. The field is the
             // v2 injection seam, not an ambient default at call sites.
             control_principal: meerkat_mob::MobControlPrincipal::Owner,
-            ops_registry: None,
         }
     }
 
@@ -1317,11 +1312,12 @@ impl AgentMobToolSurface {
         // the tool owns its deadline (max_run_secs), so the core default
         // does not cut the wait.
         let route = self.state.detached_delivery_route();
-        if let Err(crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter) = route
+        let blocked_because = route.as_ref().err().copied();
+        if blocked_because
+            == Some(crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter)
         {
             tracing::warn!(
-                reason = ?crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter,
-                "fork_off falls back to blocking: the host declares detached delivery but has no runtime to admit the completion"
+                "fork_off blocks: the host declares detached delivery but has no runtime to admit the completion"
             );
         }
         let runtime = route.ok();
@@ -1377,6 +1373,7 @@ impl AgentMobToolSurface {
                         usage: turn.result().usage().clone(),
                         turns: turn.result().turns(),
                         tool_calls: turn.result().tool_calls(),
+                        blocked_because,
                     };
                     let value = serde_json::to_value(result).map_err(|error| {
                         ToolError::execution_failed(format!(
@@ -1564,7 +1561,9 @@ impl AgentMobToolSurface {
                     .run(request)
                     .await
                     .map_err(|error| Self::map_council_error(call, error))?;
-                return Self::encode_result(call, council_outcome_json(&outcome));
+                let mut value = council_outcome_json(&outcome);
+                value["blocked_because"] = json!(reason);
+                return Self::encode_result(call, value);
             }
         };
         let council_label = request.council_id.as_str().to_string();
@@ -2285,7 +2284,7 @@ impl AgentToolDispatcher for AgentMobToolSurface {
 
     fn bind_ops_lifecycle(
         self: Arc<Self>,
-        registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
+        _registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>,
         owner_bridge_session_id: SessionId,
     ) -> Result<meerkat_core::agent::BindOutcome, meerkat_core::agent::OpsLifecycleBindError> {
         if Arc::strong_count(&self) != 1 {
@@ -2306,7 +2305,6 @@ impl AgentToolDispatcher for AgentMobToolSurface {
             comms_peer_id: this.comms_peer_id,
             comms_runtime: this.comms_runtime,
             snapshot_context: this.snapshot_context,
-            ops_registry: Some(registry),
         })))
     }
 }
@@ -2983,6 +2981,10 @@ struct ForkOffResult {
     usage: meerkat_core::Usage,
     turns: u32,
     tool_calls: u32,
+    /// Set when the call blocked because this host cannot deliver a detached
+    /// completion; says why in typed form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocked_because: Option<crate::detached_delivery::DetachedDeliveryUnavailable>,
 }
 
 /// Immediate `fork_off` result: the child is seated and its turn admitted.
@@ -6004,20 +6006,39 @@ mod tests {
         ));
     }
 
-    /// Library embedders (MobKit's gateway builds MobMcpState::new) are
-    /// long-lived hosts: detached delivery is available unless a one-shot
-    /// surface declares otherwise.
+    /// Detached delivery follows the runtime's presence: a host with a
+    /// runtime delivers detached; one without is declared unable, and
+    /// declaring Available anyway is reported typed rather than silently
+    /// blocking.
     #[test]
-    fn library_hosts_default_to_detached_completion_delivery() {
-        let state = MobMcpState::new_in_memory();
-        assert_eq!(
-            state.detached_completion_delivery(),
-            crate::DetachedCompletionDelivery::Available
+    fn detached_delivery_follows_runtime_presence() {
+        let without_runtime = MobMcpState::new_with_runtime_adapter(
+            Arc::new(crate::LocalSessionService::new()),
+            None,
+            meerkat_mob::MobControlPrincipal::Owner,
         );
-        state.set_detached_completion_delivery(crate::DetachedCompletionDelivery::Unavailable);
         assert_eq!(
-            state.detached_completion_delivery(),
-            crate::DetachedCompletionDelivery::Unavailable
+            without_runtime.detached_delivery_blocked_because(),
+            Some(crate::DetachedDeliveryUnavailable::HostDeclaredUnavailable)
+        );
+        without_runtime
+            .set_detached_completion_delivery(crate::DetachedCompletionDelivery::Available);
+        assert_eq!(
+            without_runtime.detached_delivery_blocked_because(),
+            Some(crate::DetachedDeliveryUnavailable::NoRuntimeAdapter)
+        );
+
+        let with_runtime = MobMcpState::new_with_runtime_adapter(
+            Arc::new(crate::LocalSessionService::new()),
+            Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral())),
+            meerkat_mob::MobControlPrincipal::Owner,
+        );
+        assert_eq!(with_runtime.detached_delivery_blocked_because(), None);
+        with_runtime
+            .set_detached_completion_delivery(crate::DetachedCompletionDelivery::Unavailable);
+        assert_eq!(
+            with_runtime.detached_delivery_blocked_because(),
+            Some(crate::DetachedDeliveryUnavailable::HostDeclaredUnavailable)
         );
     }
 

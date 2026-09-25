@@ -12,6 +12,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+#![allow(clippy::result_large_err)]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -392,21 +393,22 @@ async fn e2e_fast_detached_fork_off_reaches_the_forker_and_its_next_turn() {
     );
 
     // The idle forker is woken by the completion and runs exactly one turn
-    // that sees it.
-    let deadline = tokio::time::Instant::now() + WAIT;
-    loop {
-        let wake_turns = requests
+    // that sees it (the only requests before the follow-up that carry the
+    // persisted record).
+    let wake_turns = |requests: &Mutex<Vec<(String, String)>>| {
+        requests
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, rendered)| {
-                rendered.contains(&job_id) && !rendered.contains(FOLLOW_UP_PROMPT)
+            .filter(|(last_user, rendered)| {
+                !last_user.contains(FOLLOW_UP_PROMPT)
+                    && rendered.contains(&job_id)
+                    && rendered.contains("persisted: true")
             })
-            .filter(|(last_user, _)| last_user.contains(FORK_PROMPT))
-            .count();
-        if wake_turns >= 1 {
-            break;
-        }
+            .count()
+    };
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while wake_turns(&requests) == 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the idle forker was never woken by its child's completion"
@@ -414,15 +416,7 @@ async fn e2e_fast_detached_fork_off_reaches_the_forker_and_its_next_turn() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let wake_turns = requests
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(last_user, rendered)| {
-            last_user.contains(FORK_PROMPT) && rendered.contains(&job_id)
-        })
-        .count();
-    assert_eq!(wake_turns, 1, "one wake turn for one completion");
+    assert_eq!(wake_turns(&requests), 1, "one wake turn for one completion");
 
     // The forker keeps working after the detached job ended, and its next
     // model request carries the child's outcome.
@@ -445,4 +439,27 @@ async fn e2e_fast_detached_fork_off_reaches_the_forker_and_its_next_turn() {
     );
 
     let _ = mob_state.mob_destroy(&mob_id).await;
+}
+
+/// MobKit's gateway builds its mob state with `MobMcpState::new` over a
+/// session service that forwards the runtime. That shape must take the
+/// detached path, never the blocking one (HomeCore's fork_off would
+/// otherwise block its caller for the child's whole run).
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_library_host_built_like_mobkit_delivers_detached() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let client: Arc<dyn LlmClient> = Arc::new(ForkOffScript {
+        requests: Arc::clone(&requests),
+    });
+    let (_router, stack_state) = make_stack(temp.path(), client).await;
+    let mobkit_shaped = MobMcpState::new(
+        stack_state.session_service(),
+        meerkat_mob::MobControlPrincipal::Owner,
+    );
+    assert_eq!(
+        mobkit_shaped.detached_delivery_blocked_because(),
+        None,
+        "a library host whose session service carries a runtime delivers detached"
+    );
 }

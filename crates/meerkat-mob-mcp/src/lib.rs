@@ -521,6 +521,7 @@ impl MobMcpState {
         runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
         console_principal: MobControlPrincipal,
     ) -> Self {
+        let can_deliver_detached = runtime_adapter.is_some();
         Self {
             console_principal,
             session_service,
@@ -556,7 +557,10 @@ impl MobMcpState {
                     .unwrap_or(30_000),
             ),
             temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool::new(false),
-            detached_completion_delivery: std::sync::atomic::AtomicBool::new(true),
+            // Detached delivery needs a runtime to admit completions, so the
+            // default follows the runtime's presence: a host built without one
+            // is declared unable to deliver, never silently mismatched.
+            detached_completion_delivery: std::sync::atomic::AtomicBool::new(can_deliver_detached),
             created_at_ms: u64::try_from(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -649,6 +653,12 @@ impl MobMcpState {
     /// Re-declare the capability on a shared state, e.g. once a one-shot CLI
     /// run learns it will stay alive.
     pub fn set_detached_completion_delivery(&self, delivery: DetachedCompletionDelivery) {
+        if delivery == DetachedCompletionDelivery::Available && self.runtime_adapter.is_none() {
+            tracing::error!(
+                "detached completion delivery declared Available on a host with no runtime \
+                 adapter; fork_off and council will block and report no_runtime_adapter"
+            );
+        }
         self.detached_completion_delivery.store(
             matches!(delivery, DetachedCompletionDelivery::Available),
             std::sync::atomic::Ordering::Release,
@@ -669,6 +679,14 @@ impl MobMcpState {
         self.runtime_adapter
             .clone()
             .ok_or(crate::detached_delivery::DetachedDeliveryUnavailable::NoRuntimeAdapter)
+    }
+
+    /// Why fork_off and council would block on this host, or `None` when
+    /// they deliver detached.
+    pub fn detached_delivery_blocked_because(
+        &self,
+    ) -> Option<crate::detached_delivery::DetachedDeliveryUnavailable> {
+        self.detached_delivery_route().err()
     }
 
     pub fn detached_completion_delivery(&self) -> DetachedCompletionDelivery {

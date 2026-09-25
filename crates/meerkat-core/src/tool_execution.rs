@@ -881,6 +881,20 @@ pub struct ToolExecutionContract {
     streaming_policy: Option<StreamingToolExecutionPolicy>,
     detached_policy: Option<DetachedToolExecutionPolicy>,
     detached_restart_classes: BTreeSet<RestartClass>,
+    core_deadline: CoreDispatchDeadline,
+}
+
+/// Whether the agent loop's default tool deadline bounds a tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum CoreDispatchDeadline {
+    /// The configured core dispatch timeout applies (the default).
+    #[default]
+    Applies,
+    /// The tool owns its own lifetime bound (an explicit, caller-chosen
+    /// limit such as fork_off's `max_run_secs` or a council deadline), so the
+    /// core default must not cut it. Other contributors still apply.
+    ToolOwned,
 }
 
 impl Default for ToolExecutionContract {
@@ -891,6 +905,7 @@ impl Default for ToolExecutionContract {
             streaming_policy: None,
             detached_policy: None,
             detached_restart_classes: BTreeSet::new(),
+            core_deadline: CoreDispatchDeadline::Applies,
         }
     }
 }
@@ -934,7 +949,20 @@ impl ToolExecutionContract {
             streaming_policy,
             detached_policy,
             detached_restart_classes,
+            core_deadline: CoreDispatchDeadline::Applies,
         })
+    }
+
+    /// Declare that this tool owns its lifetime bound: the core dispatch
+    /// default deadline no longer applies to it.
+    #[must_use]
+    pub fn with_tool_owned_deadline(mut self) -> Self {
+        self.core_deadline = CoreDispatchDeadline::ToolOwned;
+        self
+    }
+
+    pub const fn core_deadline(&self) -> CoreDispatchDeadline {
+        self.core_deadline
     }
 
     pub fn supported_modes(&self) -> &BTreeSet<ToolExecutionMode> {
@@ -1066,6 +1094,7 @@ impl ToolExecutionContract {
             owner_witnesses: Vec::new(),
             resolved_call: None,
             root_dispatcher: None,
+            core_deadline: self.core_deadline,
         })
     }
 
@@ -1169,6 +1198,7 @@ pub struct ResolvedToolExecutionPlan {
     owner_witnesses: Vec<ToolExecutionOwnerWitness>,
     resolved_call: Option<ResolvedToolCallIdentity>,
     root_dispatcher: Option<RootDispatcherLease>,
+    core_deadline: CoreDispatchDeadline,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1257,6 +1287,22 @@ impl ResolvedToolExecutionPlan {
 
     pub fn deadlines(&self) -> &ToolDeadlineChain {
         &self.deadlines
+    }
+
+    /// The deadline the agent loop enforces for this call. The chain itself
+    /// is never rewritten (plans must extend their upstream chain); a tool
+    /// that owns its lifetime bound only drops the core dispatch default.
+    pub fn effective_timeout(&self) -> Option<Duration> {
+        match self.core_deadline {
+            CoreDispatchDeadline::Applies => self.deadlines.effective_timeout(),
+            CoreDispatchDeadline::ToolOwned => self
+                .deadlines
+                .contributors
+                .iter()
+                .filter(|contributor| contributor.owner != ToolDeadlineOwner::CoreToolDispatch)
+                .filter_map(|contributor| contributor.timeout)
+                .min(),
+        }
     }
 
     pub fn kind(&self) -> &ResolvedExecutionKind {
@@ -1525,6 +1571,42 @@ mod tests {
         assert!(chain.diagnostic().contains("effective deadline: 1ns"));
         assert!(chain.diagnostic().contains("tool internal: 1ns"));
         assert!(!chain.diagnostic().contains("0ms"));
+    }
+
+    #[test]
+    fn tool_owned_deadline_lifts_only_the_core_dispatch_default() {
+        let chain = ToolDeadlineChain::new(vec![
+            ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::CoreToolDispatch,
+                Duration::from_secs(600),
+            ),
+            ToolDeadlineContributor::finite(
+                ToolDeadlineOwner::GatewayWire,
+                Duration::from_secs(900),
+            ),
+        ])
+        .expect("chain");
+        let default_plan = ToolExecutionContract::default()
+            .resolve_default(chain.clone())
+            .expect("default plan");
+        assert_eq!(
+            default_plan.effective_timeout(),
+            Some(Duration::from_secs(600))
+        );
+        let owned_plan = ToolExecutionContract::default()
+            .with_tool_owned_deadline()
+            .resolve_default(chain)
+            .expect("tool-owned plan");
+        assert_eq!(
+            owned_plan.effective_timeout(),
+            Some(Duration::from_secs(900)),
+            "only the core default is lifted; other owners still bound the call"
+        );
+        assert_eq!(
+            owned_plan.deadlines(),
+            default_plan.deadlines(),
+            "the chain is not rewritten, so the plan still extends its upstream"
+        );
     }
 
     #[test]

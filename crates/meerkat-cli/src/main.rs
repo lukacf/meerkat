@@ -11639,7 +11639,13 @@ async fn run_agent(
                 persistence.clone(),
             )
             .await?;
-            Some(prepare_run_mob_tools_from_surface(storage_scope, mob_surface).await?)
+            let ctx = prepare_run_mob_tools_from_surface(storage_scope, mob_surface).await?;
+            if keep_alive {
+                ctx.state.set_detached_completion_delivery(
+                    meerkat_mob_mcp::DetachedCompletionDelivery::Available,
+                );
+            }
+            Some(ctx)
         } else {
             None
         };
@@ -12349,7 +12355,13 @@ async fn resume_session_with_llm_override(
             let mob_persistent = remember_mob_persistent_service(scope, Arc::clone(&service))?;
             let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
                 Arc::new(MobCliSessionService::new(mob_persistent));
-            Some(prepare_run_mob_tools(scope, run_mob_service).await?)
+            let ctx = prepare_run_mob_tools(scope, run_mob_service).await?;
+            if keep_alive {
+                ctx.state.set_detached_completion_delivery(
+                    meerkat_mob_mcp::DetachedCompletionDelivery::Available,
+                );
+            }
+            Some(ctx)
         } else {
             None
         };
@@ -15602,7 +15614,11 @@ async fn hydrate_mob_state(
     .with_persistent_storage_root(Some(mob_persistent_runtime_root(scope)))
     .with_workgraph_service(Some(workgraph_service))
     .with_default_llm_client_provider(default_llm_client_provider)
-    .with_external_tools_provider(external_tools_provider.clone());
+    .with_external_tools_provider(external_tools_provider.clone())
+    // The CLI is one-shot unless a surface declares otherwise: a detached
+    // fork_off or council completion would be lost when the process exits.
+    // Long-lived surfaces (keep-alive runs, the RPC surface) re-declare it.
+    .with_detached_completion_delivery(meerkat_mob_mcp::DetachedCompletionDelivery::Unavailable);
     if let Some(acceptor) = controlling_acceptor {
         state = state.with_controlling_acceptor(acceptor);
     }
@@ -18750,6 +18766,9 @@ where
         seeded_handles,
     )
     .await?;
+    // The RPC surface is a long-lived host.
+    mob_state
+        .set_detached_completion_delivery(meerkat_mob_mcp::DetachedCompletionDelivery::Available);
 
     // Set mob tools factory using the SAME hydrated state the router will use.
     // This ensures agent-created mobs (via delegate/mob_create) live in the

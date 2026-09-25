@@ -7235,7 +7235,7 @@ fn dispatch_tool_calls_boxed<T: AgentToolDispatcher + ?Sized + 'static>(
                             start.elapsed().as_millis() as u64,
                         );
                     }
-                    let effective_timeout = plan.deadlines().effective_timeout();
+                    let effective_timeout = plan.effective_timeout();
                     tracing::debug!(
                         tool = %tc.name,
                         execution_mode = ?plan.mode(),

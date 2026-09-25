@@ -13003,6 +13003,12 @@ impl MobHandle {
                 source_admission,
             )
             .await?;
+        // Until the caller holds the run handle the child is nobody's: if
+        // this future is dropped while admitting its turn, retire it.
+        let unreturned_child = ProvisionedChildRetireOnDrop::arm(
+            self.fork_child_cleanup_authority(),
+            fork.agent_identity.clone(),
+        );
         let turn = match self
             .start_work_for_identity_bounded(
                 fork.agent_identity.clone(),
@@ -13014,6 +13020,7 @@ impl MobHandle {
         {
             Ok(turn) => turn,
             Err(error) => {
+                unreturned_child.disarm();
                 return Err(self
                     .retire_failed_fork_child(
                         &fork.agent_identity,
@@ -13057,6 +13064,8 @@ impl MobHandle {
             // does not depend on it.
             let _ = outcome_tx.send(outcome);
         });
+        // The supervisor now owns the run; the caller gets the handle.
+        unreturned_child.disarm();
         Ok((
             fork,
             ForkChildRun {

@@ -535,10 +535,25 @@ pub async fn hydrate_user_images_for_realtime_projection_reporting_lowest(
                     // A reference that is not the payload's content address is
                     // accepted only when the store attests it as its own
                     // address for exactly this payload.
+                    // Attestation recomputes the store's address from the
+                    // payload's own media type, so that type must agree
+                    // with the transcript's before attestation can count.
+                    // It must also be a supported image whose bytes carry
+                    // that type's signature, exactly as the fork gate checks.
+                    let media_type_agrees =
+                        crate::image_generation::MediaType::canonical_str(&payload.media_type)
+                            == crate::image_generation::MediaType::canonical_str(media_type)
+                            && crate::blob::validate_image_blob_payload(
+                                &payload.media_type,
+                                &payload.data,
+                                usize::MAX / 4,
+                            )
+                            .is_ok();
                     let identity_holds = payload.blob_id == *blob_id
                         && (computed_blob_id == *blob_id
-                            || blob_store.attest_address(blob_id, &payload).await?
-                                == crate::blob::BlobAddressAttestation::StoreAddress);
+                            || (media_type_agrees
+                                && blob_store.attest_address(blob_id, &payload).await?
+                                    == crate::blob::BlobAddressAttestation::StoreAddress));
                     if !identity_holds {
                         return Err(RealtimeUserImageHydrationError::BlobIdentityMismatch {
                             expected_blob_id: blob_id.clone(),
@@ -1431,6 +1446,30 @@ mod tests {
             error,
             RealtimeUserImageHydrationError::BlobIdentityMismatch { .. }
         ));
+    }
+
+    /// A store's own-address attestation must not let a non-image object be
+    /// hydrated under an image block: the stored media type must match the
+    /// block's and be a valid image (review finding on MobKit #440).
+    #[tokio::test]
+    async fn realtime_projection_refuses_attested_object_with_foreign_media_type() {
+        let store = LegacyAddressStore::new(true);
+        let pdf_bytes = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7 not an image");
+        let legacy_id = store.insert_legacy("application/pdf", &pdf_bytes);
+        let mut messages = vec![user_image_ref(&legacy_id)];
+        let error = hydrate_user_images_for_realtime_projection(&store, &mut messages, 1024)
+            .await
+            .expect_err("a PDF attested by the store must not hydrate as image/png");
+        assert!(matches!(
+            error,
+            RealtimeUserImageHydrationError::BlobIdentityMismatch { .. }
+        ));
+        assert_eq!(only_user_image_blob_id(&messages), legacy_id);
+
+        let mut fork_messages = vec![user_image_ref(&legacy_id)];
+        preflight_messages_for_durable_fork(&store, &mut fork_messages)
+            .await
+            .expect_err("the fork gate refuses the same reference");
     }
 
     #[test]

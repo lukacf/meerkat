@@ -382,6 +382,19 @@ impl TemporaryCouncilStoreSelection {
 }
 
 /// In-memory MCP state for multiple mobs.
+/// Whether a host can deliver a detached tool completion after the call
+/// returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DetachedCompletionDelivery {
+    /// The host outlives the call: detached tools return a handle and their
+    /// completion is delivered to the owner session later.
+    Available,
+    /// The host may exit when the turn ends: detached-capable tools block for
+    /// their result instead.
+    Unavailable,
+}
+
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
@@ -441,6 +454,10 @@ pub struct MobMcpState {
     /// Set once the automatic post-restore recovery sweep has been scheduled.
     /// Also what keeps the sweep from re-entering `ensure_restored`.
     temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool,
+    /// Whether this host can deliver a detached tool completion to its
+    /// owner session after the tool call returns. Declared by the host;
+    /// never inferred.
+    detached_completion_delivery: std::sync::atomic::AtomicBool,
     /// Set once the realm-local capability expiry/cleanup driver is running.
     local_forked_participant_sweeper_started: std::sync::atomic::AtomicBool,
     /// Driver cadence, configurable only through the explicit test seam.
@@ -527,6 +544,7 @@ impl MobMcpState {
                     .unwrap_or(30_000),
             ),
             temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool::new(false),
+            detached_completion_delivery: std::sync::atomic::AtomicBool::new(true),
             local_forked_participant_sweeper_started: std::sync::atomic::AtomicBool::new(false),
             local_forked_participant_sweep_interval_ms: std::sync::atomic::AtomicU64::new(
                 u64::try_from(LOCAL_FORKED_PARTICIPANT_SWEEP_INTERVAL.as_millis())
@@ -596,6 +614,37 @@ impl MobMcpState {
     }
 
     /// Inject the single realm-scoped temporary-council custody store.
+    /// Declare whether this host outlives a tool call long enough to deliver
+    /// detached completions (a long-lived server or a keep-alive session).
+    /// One-shot hosts declare [`DetachedCompletionDelivery::Unavailable`], so
+    /// `fork_off` and `council` block for their result instead of returning a
+    /// handle whose completion would be lost when the process exits.
+    #[must_use]
+    pub fn with_detached_completion_delivery(self, delivery: DetachedCompletionDelivery) -> Self {
+        self.set_detached_completion_delivery(delivery);
+        self
+    }
+
+    /// Re-declare the capability on a shared state, e.g. once a one-shot CLI
+    /// run learns it will stay alive.
+    pub fn set_detached_completion_delivery(&self, delivery: DetachedCompletionDelivery) {
+        self.detached_completion_delivery.store(
+            matches!(delivery, DetachedCompletionDelivery::Available),
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    pub fn detached_completion_delivery(&self) -> DetachedCompletionDelivery {
+        if self
+            .detached_completion_delivery
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            DetachedCompletionDelivery::Available
+        } else {
+            DetachedCompletionDelivery::Unavailable
+        }
+    }
+
     pub fn with_temporary_council_store(mut self, store: Arc<dyn TemporaryCouncilStore>) -> Self {
         self.temporary_council_store_selection =
             TemporaryCouncilStoreSelection::CallerSupplied(store);

@@ -283,9 +283,9 @@ else
 fi
 
 if slo_contract="$(workflow_contract registry-slo)"; then
-  pass "Rust registry publication enforces the 30 minute tag-to-public SLO"
+  pass "Rust registry publication reads crates back before the SDKs and enforces the 30 minute publication SLO"
 else
-  bad "Rust registry publication does not enforce the 30 minute tag-to-public SLO (${slo_contract//$'\n'/; })"
+  bad "Rust registry publication does not read crates back before the SDKs or enforce the 30 minute publication SLO (${slo_contract//$'\n'/; })"
 fi
 
 if [[ -n "${VERSION:-${RELEASE_TAG:-}}" ]]; then

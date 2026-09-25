@@ -1573,10 +1573,14 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           MEERKAT_REGISTRY_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}
         run: |
+          # The publication SLO window opens when this job starts publishing,
+          # not at the tag push: full-fresh release validation runs first.
+          echo "RUST_PUBLISH_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_ENV}"
           MEERKAT_REGISTRY_DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}" \
             scripts/release-publish-rust-crates.sh
 
-      - name: Verify all Rust crates are public within 30 minutes
+      - name: Verify all Rust crates are public
+        id: rust_crates_public
         if: >-
           ${{
             (github.event_name != 'workflow_dispatch' ||
@@ -1585,34 +1589,16 @@ jobs:
              github.event.inputs.publish_web_sdk_only != 'true')
           }}
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          release_tag="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}"
-          release_sha="$(git rev-parse HEAD)"
-          tag_run_json="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?event=push&head_sha=${release_sha}&per_page=100")"
-          tag_pushed_at="$(jq -r \
-            --arg release_tag "${release_tag}" \
-            --arg release_sha "${release_sha}" \
-            '[.workflow_runs[] |
-              select(.event == "push" and
-                     .head_sha == $release_sha and
-                     .head_branch == $release_tag)] |
-             sort_by(.created_at) | first | .created_at // empty' \
-            <<<"${tag_run_json}")"
-          if [[ -z "${tag_pushed_at}" ]]; then
-            echo "::error::No tag-triggered release run found for ${release_tag} at ${release_sha}."
-            exit 1
-          fi
-          # Recovery still verifies every crate, but cannot re-enforce the
-          # original tag-to-publication SLO after the recovery window opened.
+          # Readback only: every crate public, checksummed and not yanked
+          # within the deadline. The SDK packages below depend on this, not on
+          # the publication SLO, which is enforced after they publish.
           python3 scripts/verify-rust-release-public.py \
             --repo-root "${GITHUB_WORKSPACE}" \
-            --tag-pushed-at "${tag_pushed_at}" \
             --deadline-seconds 900 \
-            --slo-seconds ${{ github.event_name == 'workflow_dispatch' && '2147483647' || '1800' }}
+            --readback-only \
+            --observations-out "${RUNNER_TEMP}/rust-crates-public.json"
 
       - name: Publish Python SDK
         if: >-
@@ -1678,6 +1664,41 @@ jobs:
           else
             npm publish --access public
           fi
+
+      - name: Enforce the 30 minute Rust publication SLO
+        if: >-
+          ${{
+            !cancelled() &&
+            steps.rust_crates_public.outcome == 'success'
+          }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_tag="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}"
+          release_sha="$(git rev-parse HEAD)"
+          tag_run_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?event=push&head_sha=${release_sha}&per_page=100")"
+          tag_pushed_at="$(jq -r \
+            --arg release_tag "${release_tag}" \
+            --arg release_sha "${release_sha}" \
+            '[.workflow_runs[] |
+              select(.event == "push" and
+                     .head_sha == $release_sha and
+                     .head_branch == $release_tag)] |
+             sort_by(.created_at) | first | .created_at // empty' \
+            <<<"${tag_run_json}")"
+          # Measured from the start of crate publication on the observations
+          # the readback step recorded; tag-to-public latency is reported for
+          # information. Recovery dispatches still verify every crate but
+          # cannot re-enforce the original window.
+          python3 scripts/verify-rust-release-public.py \
+            --repo-root "${GITHUB_WORKSPACE}" \
+            --observations-in "${RUNNER_TEMP}/rust-crates-public.json" \
+            --window-started-at "${RUST_PUBLISH_STARTED_AT}" \
+            ${tag_pushed_at:+--tag-pushed-at "${tag_pushed_at}"} \
+            --slo-seconds ${{ github.event_name == 'workflow_dispatch' && '2147483647' || '1800' }}
 
   publish_web_sdk:
     name: Publish Web SDK package

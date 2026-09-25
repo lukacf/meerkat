@@ -1189,6 +1189,7 @@ mod tests {
                     structured_output: serde_json::json!({"answer": "ok"}),
                     schema_warnings: None,
                     request_usage: vec![openai_row(1250, 25, 1200), openai_row(1300, 30, 1250)],
+                    origin: meerkat_core::StructuredOutputOrigin::ExtractionRequest,
                 },
             ],
             true,

@@ -13,6 +13,8 @@ pub mod tokio {
 pub mod client;
 pub(crate) mod request_support;
 pub mod runtime;
+#[cfg(test)]
+mod structured_output_request_tests;
 pub mod web_search;
 
 pub use client::AnthropicClient;

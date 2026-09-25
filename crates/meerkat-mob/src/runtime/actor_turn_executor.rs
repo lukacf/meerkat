@@ -870,6 +870,7 @@ mod tests {
                 structured_output: serde_json::json!({"answer": 42}),
                 schema_warnings: None,
                 request_usage: Vec::new(),
+                origin: meerkat_core::StructuredOutputOrigin::ExtractionRequest,
             })
             .await
             .expect("send extraction succeeded event");

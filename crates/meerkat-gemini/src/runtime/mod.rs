@@ -1183,6 +1183,9 @@ fn backend_option_string(binding: &ValidatedBinding, key: &str) -> Option<String
         .map(ToString::to_string)
 }
 
+#[cfg(all(test, feature = "copilot", not(target_arch = "wasm32")))]
+mod copilot_structured_output_tests;
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

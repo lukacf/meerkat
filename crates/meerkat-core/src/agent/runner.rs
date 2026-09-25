@@ -1499,6 +1499,88 @@ where
             .await
             .map_err(AgentControlStateError::Boundary)
     }
+    /// Whether requests composed for this agent carry the request-only
+    /// structured-output instruction projection.
+    ///
+    /// The projection rewrites the leading system prompt of the request, so
+    /// provider-authored cache breakpoints computed over such a request do not
+    /// describe the canonical transcript. Request composition and cache-claim
+    /// promotion both read this one fact so they cannot disagree.
+    pub(crate) fn requests_carry_output_schema_projection(&self) -> bool {
+        self.config.output_schema.is_some() && !self.request_system_prompt_owned_by_cached_content()
+    }
+
+    /// Whether provider-side cached content owns the request's system prompt.
+    ///
+    /// Gemini explicit context caching (`cached_content_name`) keeps the
+    /// system instruction inside the cached content, and GenerateContent does
+    /// not accept a request that references cached content while setting a
+    /// system instruction of its own. Such requests are left exactly as they
+    /// are; validate-first and the extraction fallback still apply.
+    fn request_system_prompt_owned_by_cached_content(&self) -> bool {
+        // A provider-parameter merge fault terminalizes the request on its
+        // own path before any projection could matter.
+        self.config
+            .provider_params
+            .effective_params()
+            .is_ok_and(|params| {
+                matches!(
+                    params.provider_tag,
+                    Some(crate::lifecycle::run_primitive::ProviderTag::Gemini(ref tag))
+                        if tag.cached_content_name.is_some()
+                )
+            })
+    }
+
+    /// The structured-output instruction section for this agent's requests,
+    /// or `None` when no output schema is configured.
+    ///
+    /// The model is shown the schema the active provider compiles for
+    /// validation, so it is asked for exactly the shape the validator accepts.
+    /// A schema the provider cannot compile is shown as configured; the run
+    /// then surfaces the compile fault through the ordinary extraction path.
+    pub(crate) fn output_schema_request_instructions(&self) -> Option<String> {
+        if !self.requests_carry_output_schema_projection() {
+            return None;
+        }
+        let output_schema = self.config.output_schema.as_ref()?;
+        let rendered = match self.client.compile_schema(output_schema) {
+            Ok(compiled) => {
+                crate::structured_output::render_output_schema_instructions(&compiled.schema)
+            }
+            Err(_) => crate::structured_output::render_output_schema_instructions(
+                output_schema.schema.as_value(),
+            ),
+        };
+        Some(rendered)
+    }
+
+    /// Re-render the structured-output section of a request that was
+    /// composed before a sticky model fallback switched the active client.
+    ///
+    /// `previous` is the section the request was composed with. The retried
+    /// request goes to the fallback target, whose compiled schema is also the
+    /// one terminal validation uses from now on, so it must show that schema
+    /// rather than the failed provider's. Whether a section is projected at
+    /// all does not depend on the active client, so only its bytes can change.
+    pub(crate) fn reproject_output_schema_instructions_after_fallback(
+        &self,
+        messages: &mut [Message],
+        previous: Option<&str>,
+    ) {
+        let (Some(previous), Some(next)) = (previous, self.output_schema_request_instructions())
+        else {
+            return;
+        };
+        if previous != next {
+            // A request that does not end its leading system prompt with the
+            // section it was composed with is left as it is.
+            let _ = crate::structured_output::replace_output_schema_instructions(
+                messages, previous, &next,
+            );
+        }
+    }
+
     pub(crate) fn llm_messages_for_boundary(
         &self,
         include_turn_request_context: bool,
@@ -1507,6 +1589,12 @@ where
             .validate_instruction_activation_turn_readiness()
             .map_err(|error| AgentError::ConfigError(error.to_string()))?;
         let mut messages = self.session.messages_for_model_boundary();
+        if let Some(instructions) = self.output_schema_request_instructions() {
+            crate::structured_output::project_output_schema_instructions(
+                &mut messages,
+                &instructions,
+            );
+        }
         if !self.active_turn_request_contexts.is_empty() {
             project_turn_request_context(
                 &mut messages,
@@ -1592,6 +1680,7 @@ where
         &self,
         structured_output: serde_json::Value,
         schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
+        origin: crate::event::StructuredOutputOrigin,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
         let _ = crate::event_tap::tap_emit(
@@ -1602,6 +1691,7 @@ where
                 structured_output,
                 schema_warnings,
                 request_usage: self.extraction_state.request_usage().to_vec(),
+                origin,
             },
         )
         .await;

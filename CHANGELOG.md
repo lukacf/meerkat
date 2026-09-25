@@ -87,6 +87,12 @@ them.
   Vec<TurnUsage>`, one usage row per answered structured-output extraction
   request. Struct literals naming every field must add it; it is
   serde-defaulted and skipped when empty, so the JSON shape is additive.
+- `meerkat_core::AgentEvent::ExtractionSucceeded` gains the public field
+  `origin: StructuredOutputOrigin` (new enum `meerkat_core::StructuredOutputOrigin`:
+  `ExtractionRequest`, `FinalReply`). Struct literals naming every field must
+  add it; it is serde-defaulted to `extraction_request` and omitted when it has
+  that value, so the JSON shape is additive and older event logs read as
+  before.
 - Behaviour: `turn_completed` is now published for every committed agent-loop
   provider call, including tool-loop calls (`stop_reason: tool_use`), instead of
   only the call that closes the run. It pairs with the call's `turn_started`.
@@ -181,6 +187,33 @@ them.
   `ToolDef.input_schema` is unchanged. Behavior-only:
   `meerkat_openai::normalize_openai_tool_parameters_schema` removes both root
   keys.
+- Structured output (`--schema`, `output_schema`) shows the model the schema
+  up front and skips the extraction request when it is not needed. Every
+  request of a schema-bearing run carries a delimited `<structured_output>`
+  section, appended to the system prompt, stating that the final reply must be
+  a single JSON value matching the schema and including the schema as the
+  provider compiles it for validation. The section is byte-identical across
+  the run's requests, so prompt caching is unaffected, and it is request-only:
+  it is never written into the session transcript. Runs without a schema are
+  unchanged. When the final reply of the tool loop already validates (after
+  the existing code-fence and named-wrapper normalization, and with known JSON
+  Schema `format` keywords such as `date-time`, `email`, `uri` and `uuid`
+  asserted, since native constrained decoding enforces them on the extraction
+  request), it becomes `structured_output` and no extraction request is sent.
+  `RunResult` and the RPC, REST and SDK result shapes are the same as for a
+  successful extraction, `RunResult.text` is that reply, and the events are
+  `run_completed` then `extraction_succeeded`, whose new `origin` field is
+  `final_reply` (with no `request_usage`), so the ATIF export and `--verbose`
+  output record no extraction request for it. Any other final reply runs the
+  extraction path exactly as before: same prompt, temperature 0, no tools, the
+  native schema slot with unchanged `strict` defaults, and the same retry and
+  attempt accounting. After a sticky model fallback, the retried request shows
+  the schema as the fallback provider compiles it. Requests that reference
+  Gemini cached content are not given the section, and provider-authored cache
+  breakpoints over a request carrying it are not recorded as durable cache
+  evidence, since they describe a system prompt the transcript does not
+  contain. `meerkat_core::structured_output` and
+  `meerkat_core::StructuredOutputOrigin` are new public API.
 
 ### Fixed
 

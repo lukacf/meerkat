@@ -12260,6 +12260,284 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Structured output over JSON-RPC: validate-first and extraction fallback
+    // -----------------------------------------------------------------------
+
+    /// The loop's default extraction prompt, verbatim.
+    const RPC_DEFAULT_EXTRACTION_PROMPT: &str = "Provide the final output as valid JSON \
+matching the required schema. Output ONLY the JSON, no additional text or markdown formatting.";
+
+    /// Scripted client for structured-output runs: answers the n-th request
+    /// with the n-th scripted reply and records every request it receives.
+    struct ScriptedStructuredOutputClient {
+        replies: Vec<&'static str>,
+        requests: Arc<std::sync::Mutex<Vec<meerkat_client::LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for ScriptedStructuredOutputClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            let reply = {
+                let mut requests = self.requests.lock().expect("recorded requests lock");
+                requests.push(request.clone());
+                self.replies
+                    .get(requests.len() - 1)
+                    .copied()
+                    .expect("the run sent more requests than scripted")
+            };
+            Box::pin(stream::iter(vec![
+                Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: reply.to_string(),
+                    meta: None,
+                }),
+                Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                }),
+                Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Anthropic
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    fn rpc_verdict_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "verdict": {"type": "string", "enum": ["approve", "reject"]}
+            },
+            "required": ["verdict"],
+            "additionalProperties": false
+        })
+    }
+
+    /// Run `session/create` with an output schema against the scripted
+    /// replies. Returns the result, the recorded requests, and the
+    /// `session/event` payloads in emission order, collected until the run's
+    /// structured-output terminal event arrived.
+    async fn run_structured_output_session_create(
+        replies: Vec<&'static str>,
+    ) -> (
+        serde_json::Value,
+        Vec<meerkat_client::LlmRequest>,
+        Vec<serde_json::Value>,
+    ) {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (router, mut notif_rx) =
+            test_router_with_llm(Arc::new(ScriptedStructuredOutputClient {
+                replies,
+                requests: Arc::clone(&requests),
+            }))
+            .await;
+
+        let response = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "Review the change and give a verdict.",
+                    "output_schema": rpc_verdict_schema()
+                }),
+            ))
+            .await
+            .expect("session/create response");
+        let result = result_value(&response);
+
+        let payloads = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut payloads = Vec::new();
+            loop {
+                let notif = notif_rx.recv().await.expect("notification");
+                if notif.method != "session/event" {
+                    continue;
+                }
+                let payload = notification_params!(notif)["event"]["payload"].clone();
+                let terminal = matches!(
+                    payload["type"].as_str(),
+                    Some("extraction_succeeded" | "extraction_failed")
+                );
+                payloads.push(payload);
+                if terminal {
+                    break payloads;
+                }
+            }
+        })
+        .await
+        .expect("the structured-output terminal event must reach the notification sink");
+        let recorded = requests.lock().expect("recorded requests lock").clone();
+        (result, recorded, payloads)
+    }
+
+    fn payload_positions(payloads: &[serde_json::Value], kind: &str) -> Vec<usize> {
+        payloads
+            .iter()
+            .enumerate()
+            .filter(|(_, payload)| payload["type"] == kind)
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn leads_with_schema_section(request: &meerkat_client::LlmRequest) -> bool {
+        matches!(
+            request.messages.first(),
+            Some(Message::System(system))
+                if system.content.matches(
+                    meerkat_core::structured_output::OUTPUT_SCHEMA_INSTRUCTIONS_OPEN
+                ).count() == 1
+        )
+    }
+
+    /// Validate-first over JSON-RPC: the final reply already matches the
+    /// schema, so no extraction request is sent. `run_completed` (announcing
+    /// that extraction is required and carrying no structured output) is
+    /// notified before `extraction_succeeded`, which carries
+    /// `origin: "final_reply"` on the wire, and the `session/create` result
+    /// carries the structured output.
+    #[tokio::test]
+    async fn session_create_validate_first_notifies_run_completed_then_final_reply_extraction() {
+        let (result, requests, payloads) =
+            run_structured_output_session_create(vec![r#"{"verdict":"approve"}"#]).await;
+
+        assert_eq!(
+            requests.len(),
+            1,
+            "validate-first sends no extraction request"
+        );
+        assert!(
+            leads_with_schema_section(&requests[0]),
+            "the request leads with exactly one schema section: {:?}",
+            requests[0].messages.first()
+        );
+
+        assert_eq!(
+            result["structured_output"],
+            serde_json::json!({"verdict": "approve"})
+        );
+        assert_eq!(result["turns"], 1);
+        assert_eq!(result["text"], r#"{"verdict":"approve"}"#);
+        assert!(result.get("extraction_error").is_none(), "{result}");
+
+        let run_completed = payload_positions(&payloads, "run_completed");
+        let succeeded = payload_positions(&payloads, "extraction_succeeded");
+        assert_eq!(run_completed.len(), 1, "one run_completed: {payloads:#?}");
+        assert_eq!(
+            succeeded.len(),
+            1,
+            "one extraction_succeeded: {payloads:#?}"
+        );
+        assert!(
+            run_completed[0] < succeeded[0],
+            "run_completed must be notified before extraction_succeeded: {payloads:#?}"
+        );
+        assert!(payload_positions(&payloads, "extraction_failed").is_empty());
+
+        let run_completed = &payloads[run_completed[0]];
+        assert_eq!(run_completed["extraction_required"], true);
+        assert!(
+            run_completed.get("structured_output").is_none(),
+            "run_completed carries no structured output when extraction is required: {run_completed}"
+        );
+
+        let succeeded = &payloads[succeeded[0]];
+        assert_eq!(succeeded["origin"], "final_reply");
+        assert_eq!(
+            succeeded["structured_output"],
+            serde_json::json!({"verdict": "approve"})
+        );
+        assert!(
+            succeeded.get("request_usage").is_none(),
+            "no extraction request ran, so there are no extraction usage rows: {succeeded}"
+        );
+        assert_eq!(succeeded["session_id"], result["session_id"]);
+    }
+
+    /// Extraction fallback over JSON-RPC: a prose final reply fails
+    /// validate-first, the unchanged extraction request runs (default prompt,
+    /// temperature 0, no tools, same schema section), and
+    /// `extraction_succeeded` follows `run_completed` with `origin` omitted
+    /// (an extraction request produced the value).
+    #[tokio::test]
+    async fn session_create_extraction_fallback_notifies_run_completed_then_extraction_request() {
+        let (result, requests, payloads) = run_structured_output_session_create(vec![
+            "I approve this change.",
+            r#"{"verdict":"approve"}"#,
+        ])
+        .await;
+
+        assert_eq!(requests.len(), 2, "the extraction request ran");
+        assert!(leads_with_schema_section(&requests[0]));
+        assert!(leads_with_schema_section(&requests[1]));
+        assert_eq!(
+            requests[0].messages.first(),
+            requests[1].messages.first(),
+            "the extraction request keeps the main turn's system prompt byte for byte"
+        );
+        let extraction = &requests[1];
+        assert!(
+            matches!(
+                extraction.messages.last(),
+                Some(Message::User(user)) if user.text_content() == RPC_DEFAULT_EXTRACTION_PROMPT
+            ),
+            "the unchanged extraction prompt closes the request: {:?}",
+            extraction.messages.last()
+        );
+        assert_eq!(extraction.temperature, Some(0.0));
+        assert!(extraction.tools.is_empty(), "no tools on extraction");
+
+        assert_eq!(
+            result["structured_output"],
+            serde_json::json!({"verdict": "approve"})
+        );
+        assert_eq!(result["turns"], 2);
+        assert_eq!(
+            result["text"], "I approve this change.",
+            "text stays the primary final reply"
+        );
+        assert!(result.get("extraction_error").is_none(), "{result}");
+
+        let run_completed = payload_positions(&payloads, "run_completed");
+        let succeeded = payload_positions(&payloads, "extraction_succeeded");
+        assert_eq!(run_completed.len(), 1, "{payloads:#?}");
+        assert_eq!(succeeded.len(), 1, "{payloads:#?}");
+        assert!(run_completed[0] < succeeded[0], "{payloads:#?}");
+        assert!(payload_positions(&payloads, "extraction_failed").is_empty());
+        assert_eq!(payloads[run_completed[0]]["extraction_required"], true);
+        let succeeded = &payloads[succeeded[0]];
+        assert!(
+            succeeded.get("origin").is_none(),
+            "an extraction-request success omits origin on the wire: {succeeded}"
+        );
+        assert_eq!(
+            succeeded["structured_output"],
+            serde_json::json!({"verdict": "approve"})
+        );
+    }
+
     /// 8b. `session/create` accepts structured skill refs at wire boundary.
     #[tokio::test]
     async fn session_create_accepts_structured_skill_refs() {

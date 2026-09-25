@@ -974,6 +974,11 @@ export type StreamTruncationReason = {
   max_bytes: number;
 };
 
+/**
+ * Which request produced a run's structured output.
+ */
+export type StructuredOutputOrigin = "extraction_request" | "final_reply";
+
 export type ToolCallArguments = Record<string, unknown>;
 
 export interface SystemTime {
@@ -1125,6 +1130,7 @@ export type AgentEvent = {
   type: "run_completed";
   usage: CumulativeUsage;
 } | {
+  origin?: StructuredOutputOrigin;
   request_usage?: TurnUsage[];
   schema_warnings?: SchemaWarning[] | null;
   session_id: SessionId;

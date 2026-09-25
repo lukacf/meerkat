@@ -76,10 +76,29 @@ pub(super) enum ExtractionValidation {
     Failed { error: String, retry_prompt: String },
 }
 
+/// How the JSON Schema `format` keyword is treated when validating a reply.
+///
+/// Draft 2020-12 (the validator's default draft) treats `format` as an
+/// annotation, so `{"type":"string","format":"date-time"}` accepts any string.
+/// Providers that decode natively against the schema (Anthropic, OpenAI with
+/// `strict`) do enforce common formats, so a value the extraction request
+/// would have been forced to produce can differ from a free-form final reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FormatAssertion {
+    /// `format` is an annotation only (the validator's draft default). The
+    /// extraction phase validates this way, unchanged.
+    Annotation,
+    /// Known `format` values are asserted; unknown formats stay ignored.
+    /// Validate-first uses this, so a final reply that breaks a declared
+    /// format falls back to the extraction request instead of being accepted.
+    Asserted,
+}
+
 pub(super) fn validate_response_text(
     content: &str,
     output_schema: &OutputSchema,
     compiled_schema: &Value,
+    formats: FormatAssertion,
 ) -> Result<ExtractionValidation, AgentError> {
     let json_content = strip_code_fences(content.trim());
     let parsed = match serde_json::from_str::<Value>(json_content) {
@@ -93,8 +112,13 @@ pub(super) fn validate_response_text(
 
     #[cfg(feature = "jsonschema")]
     {
-        let validator = jsonschema::Validator::new(compiled_schema)
-            .map_err(|error| AgentError::InvalidOutputSchema(error.to_string()))?;
+        let validator = match formats {
+            FormatAssertion::Annotation => jsonschema::Validator::new(compiled_schema),
+            FormatAssertion::Asserted => jsonschema::options()
+                .should_validate_formats(true)
+                .build(compiled_schema),
+        }
+        .map_err(|error| AgentError::InvalidOutputSchema(error.to_string()))?;
         if let Err(error) = validator.validate(&normalized) {
             return Ok(invalid_validation(format!(
                 "Schema validation failed: {error}"
@@ -103,7 +127,7 @@ pub(super) fn validate_response_text(
     }
     #[cfg(not(feature = "jsonschema"))]
     {
-        let _ = (compiled_schema, &normalized);
+        let _ = (compiled_schema, &normalized, formats);
         // Fail closed: a declared output schema demands real validation. When
         // the `jsonschema` validator is compiled out we cannot honor that
         // contract, so we must NOT launder unvalidated JSON into a `Passed`
@@ -309,7 +333,12 @@ mod tests {
             "required": ["answer"]
         }))?;
 
-        let result = validate_response_text("not json {{{", &schema, schema.schema.as_value())?;
+        let result = validate_response_text(
+            "not json {{{",
+            &schema,
+            schema.schema.as_value(),
+            FormatAssertion::Annotation,
+        )?;
 
         match result {
             ExtractionValidation::Failed {
@@ -337,8 +366,12 @@ mod tests {
             "required": ["count"]
         }))?;
 
-        let result =
-            validate_response_text(r#"{"count":"wrong"}"#, &schema, schema.schema.as_value())?;
+        let result = validate_response_text(
+            r#"{"count":"wrong"}"#,
+            &schema,
+            schema.schema.as_value(),
+            FormatAssertion::Annotation,
+        )?;
 
         match result {
             ExtractionValidation::Failed { error, .. } => {
@@ -366,11 +399,99 @@ mod tests {
             r#"{"advisor":{"response":"hello"}}"#,
             &schema,
             schema.schema.as_value(),
+            FormatAssertion::Annotation,
         )?;
 
         assert_eq!(
             result,
             ExtractionValidation::Passed(json!({"response": "hello"}))
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "jsonschema")]
+    fn format_schema() -> Result<OutputSchema, Box<dyn std::error::Error>> {
+        Ok(OutputSchema::new(json!({
+            "type": "object",
+            "properties": {
+                "due": { "type": "string", "format": "date-time" },
+                "owner": { "type": "string", "format": "email" },
+                "ref": { "type": "string", "format": "uuid" },
+                "home": { "type": "string", "format": "uri" },
+                "tag": { "type": "string", "format": "x-vendor-unknown" }
+            },
+            "required": ["due", "owner"]
+        }))?)
+    }
+
+    /// Draft 2020-12 treats `format` as an annotation. The extraction phase
+    /// keeps that behavior unchanged.
+    #[cfg(feature = "jsonschema")]
+    #[test]
+    fn test_validate_response_text_annotation_mode_ignores_format()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = format_schema()?;
+        let result = validate_response_text(
+            r#"{"due":"next Friday","owner":"the backend team"}"#,
+            &schema,
+            schema.schema.as_value(),
+            FormatAssertion::Annotation,
+        )?;
+        assert!(
+            matches!(result, ExtractionValidation::Passed(_)),
+            "annotation mode must not assert formats: {result:?}"
+        );
+        Ok(())
+    }
+
+    /// Validate-first asserts known formats, so a reply that breaks a
+    /// declared format is not accepted.
+    #[cfg(feature = "jsonschema")]
+    #[test]
+    fn test_validate_response_text_asserted_mode_rejects_format_violations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = format_schema()?;
+        for reply in [
+            r#"{"due":"next Friday","owner":"backend@example.com"}"#,
+            r#"{"due":"2026-09-25T10:00:00Z","owner":"the backend team"}"#,
+            r#"{"due":"2026-09-25T10:00:00Z","owner":"backend@example.com","ref":"not-a-uuid"}"#,
+            r#"{"due":"2026-09-25T10:00:00Z","owner":"backend@example.com","home":"not a uri"}"#,
+        ] {
+            let result = validate_response_text(
+                reply,
+                &schema,
+                schema.schema.as_value(),
+                FormatAssertion::Asserted,
+            )?;
+            match result {
+                ExtractionValidation::Failed { error, .. } => {
+                    assert!(error.contains("Schema validation failed"), "{error}");
+                }
+                ExtractionValidation::Passed(value) => {
+                    panic!("format violation must fail validate-first, got {value:?}")
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Conforming values pass, and an unknown format stays ignored rather
+    /// than failing every reply.
+    #[cfg(feature = "jsonschema")]
+    #[test]
+    fn test_validate_response_text_asserted_mode_accepts_conforming_formats()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = format_schema()?;
+        let reply = r#"{"due":"2026-09-25T10:00:00Z","owner":"backend@example.com","ref":"67e55044-10b1-426f-9247-bb680e5fe0c8","home":"https://example.com/team","tag":"anything"}"#;
+        let result = validate_response_text(
+            reply,
+            &schema,
+            schema.schema.as_value(),
+            FormatAssertion::Asserted,
+        )?;
+        assert!(
+            matches!(result, ExtractionValidation::Passed(_)),
+            "conforming formats must pass: {result:?}"
         );
         Ok(())
     }
@@ -392,8 +513,12 @@ mod tests {
         // Syntactically valid, schema-conformant JSON. With the validator
         // compiled in this would be `Passed`; without it, the declared schema
         // contract cannot be honored, so it must surface a typed fault.
-        let result =
-            validate_response_text(r#"{"response":"hello"}"#, &schema, schema.schema.as_value());
+        let result = validate_response_text(
+            r#"{"response":"hello"}"#,
+            &schema,
+            schema.schema.as_value(),
+            FormatAssertion::Asserted,
+        );
 
         match result {
             Err(AgentError::InvalidOutputSchema(_)) => Ok(()),

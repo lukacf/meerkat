@@ -2234,6 +2234,8 @@ where
                                     &retry_schedule,
                                     self.effective_model_registry.as_deref(),
                                 )?;
+                                let previous_output_schema_section =
+                                    self.output_schema_request_instructions();
                                 match self
                                     .apply_model_fallback_switch(
                                         activation,
@@ -2255,7 +2257,12 @@ where
                                         current_tools = next_tools;
                                         current_provider_params = next_params;
                                         current_max_tokens = next_max_tokens;
-                                        Arc::make_mut(&mut current_messages).push(notice);
+                                        let messages = Arc::make_mut(&mut current_messages);
+                                        self.reproject_output_schema_instructions_after_fallback(
+                                            messages,
+                                            previous_output_schema_section.as_deref(),
+                                        );
+                                        messages.push(notice);
                                         *durable_visibility_parent =
                                             Some(next_durable_visibility_parent);
                                     }
@@ -2388,6 +2395,8 @@ where
                                 &retry_schedule,
                                 self.effective_model_registry.as_deref(),
                             )?;
+                            let previous_output_schema_section =
+                                self.output_schema_request_instructions();
                             match self
                                 .apply_model_fallback_switch(
                                     activation,
@@ -2409,7 +2418,12 @@ where
                                     current_tools = next_tools;
                                     current_provider_params = next_params;
                                     current_max_tokens = next_max_tokens;
-                                    Arc::make_mut(&mut current_messages).push(notice);
+                                    let messages = Arc::make_mut(&mut current_messages);
+                                    self.reproject_output_schema_instructions_after_fallback(
+                                        messages,
+                                        previous_output_schema_section.as_deref(),
+                                    );
+                                    messages.push(notice);
                                     *durable_visibility_parent =
                                         Some(next_durable_visibility_parent);
                                 }
@@ -5774,9 +5788,20 @@ where
         in_extraction: bool,
         result: LlmStreamResult,
     ) -> Result<CallingLlmGate<CallingLlmAssistantTurn>, AgentError> {
+        // A request carrying the structured-output instruction projection has
+        // a leading system prompt the canonical transcript does not contain,
+        // so a breakpoint the provider authored over it is evidence about that
+        // request only. It can never bind to the transcript, and reporting it
+        // as a discarded anchor on every turn would describe a fault that does
+        // not exist. Such claims are therefore not promoted at all.
+        let turn_cache_breakpoint_claims = if self.requests_carry_output_schema_projection() {
+            &[][..]
+        } else {
+            result.cache_breakpoint_claims()
+        };
         let (authored_cache_breakpoints, mut cache_breakpoint_discards) =
             promote_cache_breakpoint_claims(
-                result.cache_breakpoint_claims(),
+                turn_cache_breakpoint_claims,
                 self.client.provider(),
                 self.client.model(),
             );
@@ -6781,6 +6806,7 @@ where
             &assistant_text,
             output_schema,
             &compiled.schema,
+            super::extraction::FormatAssertion::Annotation,
         );
         let validation = match validation {
             Ok(validation) => validation,
@@ -6850,13 +6876,36 @@ where
                 self.save_session_best_effort(ctx.run_id).await?;
                 self.emit_extraction_failed_event(&extraction_error, ctx.event_tx.as_ref())
                     .await;
-                return Ok(CallingLlmStep::Done(Ok(result)));
+                Ok(CallingLlmStep::Done(Ok(result)))
             }
             super::extraction::ExtractionValidation::Passed(normalized) => {
-                self.extraction_state.record_success(normalized);
+                self.complete_extraction_validation_passed(
+                    ctx,
+                    normalized,
+                    crate::event::StructuredOutputOrigin::ExtractionRequest,
+                )
+                .await
             }
         }
-
+    }
+    /// Complete a run whose structured output validated.
+    ///
+    /// The one success terminal for structured output, shared by the
+    /// extraction phase and by validate-first (the primary final reply already
+    /// validated, so no extraction request was sent). Both therefore produce
+    /// the same `RunResult` shape, the same authority transition out of
+    /// `Extracting`, the same checkpoint, and the same `ExtractionSucceeded`
+    /// event, whose typed `origin` records which request produced the value
+    /// (validate-first sends no extraction request, so it has no
+    /// `request_usage` rows). The caller must already have entered
+    /// `Extracting`.
+    async fn complete_extraction_validation_passed(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        normalized: serde_json::Value,
+        origin: crate::event::StructuredOutputOrigin,
+    ) -> Result<CallingLlmStep, AgentError> {
+        self.extraction_state.record_success(normalized);
         let structured_output = self.extraction_state.take_result();
         let schema_warnings = self.extraction_state.take_schema_warnings();
         let result = RunResult {
@@ -6877,7 +6926,7 @@ where
             schema_warnings,
             skill_diagnostics: self.resolve_skill_diagnostics_for_result().await,
         };
-        // Validation passed — complete via authority
+        // Validation passed - complete via authority
         let t = self.apply_turn_input(TurnExecutionInput::ExtractionValidationPassed {
             run_id: ctx.run_id.clone(),
         })?;
@@ -6889,6 +6938,7 @@ where
             self.emit_extraction_succeeded_event(
                 structured_output,
                 result.schema_warnings.clone(),
+                origin,
                 ctx.event_tx.as_ref(),
             )
             .await;
@@ -6996,6 +7046,45 @@ where
 
             self.extraction_state
                 .set_schema_warnings(compiled.warnings.clone());
+
+            // Validate-first: the model was shown the schema up front, so its
+            // final reply may already be the structured output. When it
+            // validates (after the same code-fence and named-wrapper
+            // normalization the extraction phase applies), accept it and skip
+            // the extraction request. Anything else - invalid JSON, a schema
+            // mismatch, or a validator fault - falls through to the unchanged
+            // extraction path below, which reproduces and reports that fault
+            // exactly as before. No extraction attempt is consumed here.
+            //
+            // Known `format` keywords are asserted here even though the
+            // extraction phase treats them as annotations: providers that
+            // decode natively against the schema (Anthropic, OpenAI strict)
+            // force conforming values on the extraction request, and a
+            // free-form final reply must not bypass that contract. A format
+            // violation therefore takes the extraction path, as it did before
+            // validate-first existed.
+            if let Ok(super::extraction::ExtractionValidation::Passed(normalized)) =
+                super::extraction::validate_response_text(
+                    &final_text,
+                    &output_schema,
+                    &compiled.schema,
+                    super::extraction::FormatAssertion::Asserted,
+                )
+            {
+                // Authority: DrainingBoundary -> Extracting -> Completed,
+                // the same completion the extraction phase takes.
+                self.apply_turn_input(TurnExecutionInput::EnterExtraction {
+                    run_id: ctx.run_id.clone(),
+                    max_retries: self.config.structured_output_retries,
+                })?;
+                return self
+                    .complete_extraction_validation_passed(
+                        ctx,
+                        normalized,
+                        crate::event::StructuredOutputOrigin::FinalReply,
+                    )
+                    .await;
+            }
 
             // Push extraction prompt as user message
             let prompt = self
@@ -22268,6 +22357,7 @@ mod tests {
         seen_max_tokens: Mutex<Vec<u32>>,
         seen_provider_params:
             Mutex<Vec<Option<crate::lifecycle::run_primitive::ProviderParamsOverride>>>,
+        seen_leading_system_prompts: Mutex<Vec<Option<String>>>,
     }
 
     fn extraction_fallback_registry() -> crate::ModelRegistry {
@@ -22307,7 +22397,12 @@ mod tests {
                 target_profile,
                 seen_max_tokens: Mutex::new(Vec::new()),
                 seen_provider_params: Mutex::new(Vec::new()),
+                seen_leading_system_prompts: Mutex::new(Vec::new()),
             }
+        }
+
+        fn seen_leading_system_prompts(&self) -> Vec<Option<String>> {
+            self.seen_leading_system_prompts.lock().unwrap().clone()
         }
 
         fn with_provider_mismatch() -> Self {
@@ -22361,12 +22456,19 @@ mod tests {
 
         async fn stream_response(
             &self,
-            _messages: &[Message],
+            messages: &[Message],
             _tools: &[Arc<ToolDef>],
             max_tokens: u32,
             _temperature: Option<f32>,
             provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
         ) -> Result<super::LlmStreamResult, AgentError> {
+            self.seen_leading_system_prompts
+                .lock()
+                .unwrap()
+                .push(match messages.first() {
+                    Some(Message::System(system)) => Some(system.content.clone()),
+                    _ => None,
+                });
             self.seen_max_tokens.lock().unwrap().push(max_tokens);
             self.seen_provider_params
                 .lock()
@@ -22508,6 +22610,30 @@ mod tests {
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+            })
+        }
+
+        /// Follows the active client, like the production fallback client:
+        /// once the fallback is active, the target provider's lowering
+        /// applies.
+        fn compile_schema(
+            &self,
+            output_schema: &crate::OutputSchema,
+        ) -> Result<crate::CompiledSchema, crate::schema::SchemaError> {
+            let mut schema = output_schema.schema.as_value().clone();
+            if self
+                .active_fallback
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && let Some(object) = schema.as_object_mut()
+            {
+                object.insert(
+                    "x-active-compiled".to_string(),
+                    serde_json::json!("anthropic"),
+                );
+            }
+            Ok(crate::CompiledSchema {
+                schema,
+                warnings: Vec::new(),
             })
         }
 
@@ -22816,6 +22942,111 @@ mod tests {
             }
             other => panic!("expected Anthropic fallback extraction params, got {other:?}"),
         }
+    }
+
+    /// The `<structured_output>` section shows the active provider's compiled
+    /// schema. A retry after a sticky model fallback goes to the target
+    /// provider, so it must carry the target's section (the schema terminal
+    /// validation now uses), not the one composed for the failed provider.
+    #[tokio::test]
+    async fn fallback_retry_reprojects_the_output_schema_section_for_the_target() {
+        use crate::retry::RetryPolicy;
+        use crate::structured_output::render_output_schema_instructions;
+
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        let registry = Arc::new(extraction_fallback_registry());
+        let target_profile = registry
+            .profile_witness_for_provider(crate::Provider::Anthropic, "claude-backup")
+            .expect("same-registry fallback profile");
+        let client = Arc::new(ExtractionFallbackOverrideClient::with_target_profile(
+            target_profile,
+        ));
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new().max_tokens_per_turn(1024),
+            explicit_hot_swap_session("gpt-primary"),
+        )
+        .output_schema(schema.clone())
+        .with_effective_model_registry(Arc::clone(&registry))
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing)
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+            stream_inactivity_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+
+        let result = agent
+            .run("extract after fallback".to_string().into())
+            .await
+            .expect("extraction fallback should retry and validate structured output");
+        assert_eq!(result.structured_output.unwrap()["answer"], "42");
+
+        let primary_section = render_output_schema_instructions(schema.schema.as_value());
+        let mut target_schema = schema.schema.as_value().clone();
+        target_schema["x-active-compiled"] = serde_json::json!("anthropic");
+        let target_section = render_output_schema_instructions(&target_schema);
+        assert_ne!(primary_section, target_section);
+
+        let prompts = client.seen_leading_system_prompts();
+        assert_eq!(
+            prompts.len(),
+            3,
+            "expected main call, failed extraction call, and fallback extraction retry"
+        );
+        for (index, prompt) in prompts.iter().enumerate().take(2) {
+            let prompt = prompt.as_deref().expect("leading system prompt");
+            assert!(
+                prompt.ends_with(&primary_section),
+                "call {index} must carry the primary provider's section: {prompt}"
+            );
+        }
+        let retried = prompts[2].as_deref().expect("leading system prompt");
+        let head = retried.strip_suffix(&target_section).unwrap_or_else(|| {
+            panic!("the fallback retry must carry the target's section: {retried}")
+        });
+        let primary_head = prompts[0]
+            .as_deref()
+            .and_then(|prompt| prompt.strip_suffix(&primary_section))
+            .expect("primary section suffix");
+        assert_eq!(
+            head, primary_head,
+            "only the section changes; the rest of the leading system prompt is kept"
+        );
+        assert_eq!(
+            retried
+                .matches(crate::structured_output::OUTPUT_SCHEMA_INSTRUCTIONS_OPEN)
+                .count(),
+            1,
+            "the fallback retry carries exactly one section"
+        );
+        assert!(
+            !agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| matches!(message, Message::System(system) if system.content.contains(crate::structured_output::OUTPUT_SCHEMA_INSTRUCTIONS_OPEN))),
+            "the re-projected section stays request-only"
+        );
     }
 
     #[tokio::test]

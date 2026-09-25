@@ -1258,6 +1258,10 @@ class StreamTruncationReasonOversizedRemoteEvent(TypedDict, total=False):
 StreamTruncationReason = StreamTruncationReasonChannelFull | StreamTruncationReasonStreamLagged | StreamTruncationReasonOutputAudioDegraded | StreamTruncationReasonRemoteCursorOverrun | StreamTruncationReasonOversizedRemoteEvent
 
 
+# Which request produced a run's structured output.
+StructuredOutputOrigin = Literal['extraction_request', 'final_reply']
+
+
 class SystemNoticePeer(TypedDict, total=False):
     """Peer identity carried in a typed comms transcript block.
 
@@ -1468,6 +1472,7 @@ class AgentEventRunCompleted(TypedDict, total=False):
 class AgentEventExtractionSucceeded(TypedDict, total=False):
     """Structured-output extraction succeeded after a completed main run.
     """
+    origin: NotRequired[StructuredOutputOrigin]
     request_usage: NotRequired[list[TurnUsage]]
     schema_warnings: NotRequired[Optional[list[SchemaWarning]]]
     session_id: Required[SessionId]

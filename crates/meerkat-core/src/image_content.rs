@@ -57,18 +57,52 @@ pub async fn preflight_messages_for_durable_fork(
                     media_type,
                     data: ImageData::Blob { blob_id },
                 } => {
-                    crate::blob::verify_stored_image_blob(
-                        blob_store,
-                        blob_id,
-                        media_type,
-                        MAX_DURABLE_FORK_IMAGE_BYTES,
-                    )
-                    .await?;
+                    if let Some(rehomed) =
+                        rehome_store_attested_fork_image(blob_store, blob_id, media_type).await?
+                    {
+                        *block = ContentBlock::Image {
+                            media_type: rehomed.media_type,
+                            data: ImageData::Blob {
+                                blob_id: rehomed.blob_id,
+                            },
+                        };
+                    }
                 }
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    /// Verify one referenced image for the child and, when the store attests
+    /// the reference as its own (non-content) address, store the same payload
+    /// under its meerkat content address and return that reference. Only the
+    /// not-yet-durable child is re-homed; the source keeps its reference.
+    async fn rehome_store_attested_fork_image(
+        blob_store: &dyn BlobStore,
+        blob_id: &BlobId,
+        media_type: &str,
+    ) -> Result<Option<crate::blob::BlobRef>, crate::ImageBlobIntegrityError> {
+        match crate::blob::verify_stored_image_blob_accepting_store_address(
+            blob_store,
+            blob_id,
+            media_type,
+            MAX_DURABLE_FORK_IMAGE_BYTES,
+        )
+        .await?
+        {
+            crate::blob::StoredImageBlobVerification::ContentAddressed(_) => Ok(None),
+            crate::blob::StoredImageBlobVerification::StoreAttested { verified, data } => {
+                let rehomed = crate::ensure_stored_image_blob(
+                    blob_store,
+                    &verified.blob_ref.media_type,
+                    &data,
+                    MAX_DURABLE_FORK_IMAGE_BYTES,
+                )
+                .await?;
+                Ok(Some(rehomed.blob_ref))
+            }
+        }
     }
 
     for message in messages {
@@ -91,15 +125,16 @@ pub async fn preflight_messages_for_durable_fork(
                 }
             }
             Message::BlockAssistant(assistant) => {
-                for block in &assistant.blocks {
-                    if let crate::AssistantBlock::Image { blob_ref, .. } = block {
-                        crate::blob::verify_stored_image_blob(
+                for block in &mut assistant.blocks {
+                    if let crate::AssistantBlock::Image { blob_ref, .. } = block
+                        && let Some(rehomed) = rehome_store_attested_fork_image(
                             blob_store,
                             &blob_ref.blob_id,
                             &blob_ref.media_type,
-                            MAX_DURABLE_FORK_IMAGE_BYTES,
                         )
-                        .await?;
+                        .await?
+                    {
+                        *blob_ref = rehomed;
                     }
                 }
             }
@@ -497,7 +532,14 @@ pub async fn hydrate_user_images_for_realtime_projection_reporting_lowest(
                         Err(error) => return Err(error.into()),
                     };
                     let computed_blob_id = crate::blob::content_blob_id(media_type, &payload.data);
-                    if payload.blob_id != *blob_id || computed_blob_id != *blob_id {
+                    // A reference that is not the payload's content address is
+                    // accepted only when the store attests it as its own
+                    // address for exactly this payload.
+                    let identity_holds = payload.blob_id == *blob_id
+                        && (computed_blob_id == *blob_id
+                            || blob_store.attest_address(blob_id, &payload).await?
+                                == crate::blob::BlobAddressAttestation::StoreAddress);
+                    if !identity_holds {
                         return Err(RealtimeUserImageHydrationError::BlobIdentityMismatch {
                             expected_blob_id: blob_id.clone(),
                             returned_blob_id: payload.blob_id,
@@ -1148,6 +1190,246 @@ mod tests {
                         ..
                     }] if blob_id == &expected_blob_id
                 )
+        ));
+    }
+
+    /// A 1x1 PNG, valid for the durable-fork signature and size gates.
+    const LEGACY_TEST_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+    /// Mirrors MobKit's blob store before 0.8.41: meerkat images were stored
+    /// under a raw-bytes address, `sha256(media_type || 0x00 || decoded)`,
+    /// not meerkat's content address. New writes use the content address.
+    struct LegacyAddressStore {
+        blobs: Mutex<HashMap<BlobId, BlobPayload>>,
+        attests: bool,
+    }
+
+    impl LegacyAddressStore {
+        fn new(attests: bool) -> Self {
+            Self {
+                blobs: Mutex::new(HashMap::new()),
+                attests,
+            }
+        }
+
+        fn raw_bytes_address(media_type: &str, data: &str) -> Option<BlobId> {
+            use sha2::{Digest, Sha256};
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .ok()?;
+            let mut hasher = Sha256::new();
+            hasher.update(media_type.as_bytes());
+            hasher.update([0]);
+            hasher.update(&decoded);
+            Some(BlobId::new(format!("sha256:{:x}", hasher.finalize())))
+        }
+
+        fn insert_legacy(&self, media_type: &str, data: &str) -> BlobId {
+            let blob_id = Self::raw_bytes_address(media_type, data).expect("valid base64");
+            self.blobs.lock().expect("store lock").insert(
+                blob_id.clone(),
+                BlobPayload {
+                    blob_id: blob_id.clone(),
+                    media_type: media_type.to_string(),
+                    data: data.to_string(),
+                },
+            );
+            blob_id
+        }
+
+        fn contains(&self, blob_id: &BlobId) -> bool {
+            self.blobs.lock().expect("store lock").contains_key(blob_id)
+        }
+    }
+
+    #[async_trait]
+    impl BlobStore for LegacyAddressStore {
+        async fn put_image(&self, media_type: &str, data: &str) -> Result<BlobRef, BlobStoreError> {
+            let media_type = crate::image_generation::MediaType::canonical_str(media_type);
+            let blob_id = crate::blob::content_blob_id(&media_type, data);
+            self.blobs.lock().expect("store lock").insert(
+                blob_id.clone(),
+                BlobPayload {
+                    blob_id: blob_id.clone(),
+                    media_type: media_type.clone(),
+                    data: data.to_string(),
+                },
+            );
+            Ok(BlobRef {
+                blob_id,
+                media_type,
+            })
+        }
+
+        async fn get(&self, blob_id: &BlobId) -> Result<BlobPayload, BlobStoreError> {
+            self.blobs
+                .lock()
+                .expect("store lock")
+                .get(blob_id)
+                .cloned()
+                .ok_or_else(|| BlobStoreError::NotFound(blob_id.clone()))
+        }
+
+        async fn attest_address(
+            &self,
+            blob_id: &BlobId,
+            payload: &BlobPayload,
+        ) -> Result<crate::blob::BlobAddressAttestation, BlobStoreError> {
+            let recomputed = Self::raw_bytes_address(&payload.media_type, &payload.data);
+            Ok(if self.attests && recomputed.as_ref() == Some(blob_id) {
+                crate::blob::BlobAddressAttestation::StoreAddress
+            } else {
+                crate::blob::BlobAddressAttestation::Unattested
+            })
+        }
+
+        async fn delete(&self, blob_id: &BlobId) -> Result<(), BlobStoreError> {
+            self.blobs.lock().expect("store lock").remove(blob_id);
+            Ok(())
+        }
+
+        fn is_persistent(&self) -> bool {
+            true
+        }
+    }
+
+    fn user_image_ref(blob_id: &BlobId) -> Message {
+        Message::User(crate::types::UserMessage::with_blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: blob_id.clone(),
+                },
+            },
+        ]))
+    }
+
+    fn only_user_image_blob_id(messages: &[Message]) -> BlobId {
+        match messages {
+            [Message::User(user)] => match user.content.as_slice() {
+                [
+                    ContentBlock::Image {
+                        data: ImageData::Blob { blob_id },
+                        ..
+                    },
+                ] => blob_id.clone(),
+                other => panic!("expected one blob-backed image, got {other:?}"),
+            },
+            other => panic!("expected one user message, got {other:?}"),
+        }
+    }
+
+    /// Regression (HomeCore fork_off calls f-h): a source transcript holding
+    /// an image written under MobKit's pre-0.8.41 raw-bytes address failed
+    /// every fork with "blob identity mismatch". A store that attests the
+    /// address now lets the fork proceed, and the child's reference is
+    /// re-homed to the meerkat content address.
+    #[tokio::test]
+    async fn durable_fork_rehomes_store_attested_legacy_image_reference() {
+        let store = LegacyAddressStore::new(true);
+        let legacy_id = store.insert_legacy("image/png", LEGACY_TEST_PNG);
+        let content_id = crate::blob::content_blob_id("image/png", LEGACY_TEST_PNG);
+        assert_ne!(
+            legacy_id, content_id,
+            "the fixture must model a foreign address"
+        );
+        let mut messages = vec![user_image_ref(&legacy_id)];
+
+        preflight_messages_for_durable_fork(&store, &mut messages)
+            .await
+            .expect("a store-attested legacy reference must not block the fork");
+
+        assert_eq!(only_user_image_blob_id(&messages), content_id);
+        crate::blob::verify_stored_image_blob(
+            &store,
+            &content_id,
+            "image/png",
+            MAX_DURABLE_FORK_IMAGE_BYTES,
+        )
+        .await
+        .expect("the child's re-homed reference must verify under meerkat's own gate");
+        assert!(
+            store.contains(&legacy_id),
+            "re-homing the child must not remove the source's object"
+        );
+    }
+
+    /// Fail closed: without the store's attestation the same reference is
+    /// refused exactly as before, with HomeCore's error shape.
+    #[tokio::test]
+    async fn durable_fork_refuses_unattested_foreign_image_address() {
+        let store = LegacyAddressStore::new(false);
+        let legacy_id = store.insert_legacy("image/png", LEGACY_TEST_PNG);
+        let content_id = crate::blob::content_blob_id("image/png", LEGACY_TEST_PNG);
+        let mut messages = vec![user_image_ref(&legacy_id)];
+
+        let error = preflight_messages_for_durable_fork(&store, &mut messages)
+            .await
+            .expect_err("an unattested foreign address must still be refused");
+        assert_eq!(
+            error,
+            crate::ImageBlobIntegrityError::BlobIdentityMismatch {
+                expected_blob_id: legacy_id.clone(),
+                actual_blob_id: content_id,
+            }
+        );
+        assert_eq!(only_user_image_blob_id(&messages), legacy_id);
+    }
+
+    /// HomeCore's failing turn issued three forks of the same source at once.
+    /// Concurrent preflights over one legacy reference all succeed and agree
+    /// on the re-homed address.
+    #[tokio::test]
+    async fn parallel_durable_forks_rehome_one_legacy_reference_consistently() {
+        let store = std::sync::Arc::new(LegacyAddressStore::new(true));
+        let legacy_id = store.insert_legacy("image/png", LEGACY_TEST_PNG);
+        let content_id = crate::blob::content_blob_id("image/png", LEGACY_TEST_PNG);
+        let forks = (0..3).map(|_| {
+            let store = std::sync::Arc::clone(&store);
+            let legacy_id = legacy_id.clone();
+            async move {
+                let mut messages = vec![user_image_ref(&legacy_id)];
+                preflight_messages_for_durable_fork(store.as_ref(), &mut messages)
+                    .await
+                    .map(|()| only_user_image_blob_id(&messages))
+            }
+        });
+        let rehomed = futures::future::join_all(forks).await;
+        for result in rehomed {
+            assert_eq!(
+                result.expect("each parallel fork must preflight"),
+                content_id
+            );
+        }
+    }
+
+    /// Realtime history hydration has the same gate: an attested legacy
+    /// reference hydrates, an unattested one is still refused.
+    #[tokio::test]
+    async fn realtime_projection_accepts_only_store_attested_foreign_addresses() {
+        let attesting = LegacyAddressStore::new(true);
+        let legacy_id = attesting.insert_legacy("image/png", LEGACY_TEST_PNG);
+        let mut messages = vec![user_image_ref(&legacy_id)];
+        hydrate_user_images_for_realtime_projection(&attesting, &mut messages, 1024)
+            .await
+            .expect("an attested legacy reference must hydrate");
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::User(user)] if matches!(
+                user.content.as_slice(),
+                [ContentBlock::Image { data: ImageData::Inline { data }, .. }] if data == LEGACY_TEST_PNG
+            )
+        ));
+
+        let silent = LegacyAddressStore::new(false);
+        let legacy_id = silent.insert_legacy("image/png", LEGACY_TEST_PNG);
+        let mut messages = vec![user_image_ref(&legacy_id)];
+        let error = hydrate_user_images_for_realtime_projection(&silent, &mut messages, 1024)
+            .await
+            .expect_err("an unattested foreign address must still be refused");
+        assert!(matches!(
+            error,
+            RealtimeUserImageHydrationError::BlobIdentityMismatch { .. }
         ));
     }
 

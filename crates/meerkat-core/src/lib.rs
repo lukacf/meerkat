@@ -138,9 +138,10 @@ pub use auth::{
     can_observe_visibility, metadata_grants_no_visibility,
 };
 pub use blob::{
-    BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, ImageBlobIntegrityError,
-    VerifiedImageBlob, content_blob_id, ensure_stored_image_blob, validate_image_blob_payload,
-    verify_stored_image_blob,
+    BlobAddressAttestation, BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError,
+    ImageBlobIntegrityError, StoredImageBlobVerification, VerifiedImageBlob, content_blob_id,
+    ensure_stored_image_blob, validate_image_blob_payload, verify_stored_image_blob,
+    verify_stored_image_blob_accepting_store_address,
 };
 pub use budget::{
     Budget, BudgetDimension, BudgetExceeded, BudgetLimits, BudgetObservation, BudgetPool,

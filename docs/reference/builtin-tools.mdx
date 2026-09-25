@@ -49,15 +49,15 @@ may apply explicit presets of their own.
 | `tool_catalog_load` | Control plane | Adaptive | exact deferred catalog | Stage deferred tool-catalog entries for visibility |
 | `brain_swap` | Model routing | Conditional | realization host + multiple reachable models + tool policy | Stage a model switch for a later input |
 | `delegate` | Mob | Yes | `mob` + generated authority | Run one bounded helper task in an implicit mob |
-| `fork_off` | Mob | Yes | `mob` + generated authority | Run a bounded task in a durable transcript-forked member |
+| `fork_off` | Mob | Yes | `mob` + generated authority | Fork the calling member into a durable child that runs one task in the background and belongs to the caller |
 | `council` | Mob | Yes | `mob` + generated authority | Convene a bounded temporary council forked from existing members |
 | `conclude_objective` | Mob | Yes | `mob` + kickoff objective | Conclude the pre-addressed kickoff objective |
 | `mob_create` | Mob | Yes | `mob` + generated authority | Create an explicit mob |
 | `mob_destroy` | Mob | Yes | `mob` + mob scope | Destroy an explicit mob |
 | `mob_spawn_member` | Mob | Yes | `mob` + spawn scope | Spawn a member |
-| `mob_retire_member` | Mob | Yes | `mob` + mob scope | Retire a member and archive its session |
-| `mob_check_member` | Mob | Yes | `mob` + mob scope | Read member execution status and output |
-| `mob_list_members` | Mob | Yes | `mob` + mob scope | List a mob's members |
+| `mob_retire_member` | Mob | Yes | `mob` + mob scope, or ownership of the member | Retire a member and archive its session |
+| `mob_check_member` | Mob | Yes | `mob` + mob scope, or ownership of the member | Read member execution status and output |
+| `mob_list_members` | Mob | Yes | `mob` + mob scope; without it, only the members the caller owns | List a mob's members |
 | `mob_list` | Mob | Yes | `mob` + generated authority | List managed mobs |
 | `mob_wire` | Mob | Yes | `mob` + mob scope | Wire a member to a local or external peer |
 | `mob_unwire` | Mob | Yes | `mob` + mob scope | Remove a member wiring relationship |
@@ -314,6 +314,77 @@ also adds `mob_profile_list_sources`. Admission is then checked again at each
 dispatch against the current typed mob, spawn, profile-mutation, or objective
 scope. See [Mob tools](/guides/mobs#agent-tools-vs-host-apis) for argument shapes
 and workflows.
+
+### `fork_off` and `council` delivery
+
+`fork_off` forks the calling member's committed transcript into a durable child
+member, commits the task (and any `expected_output` guidance) as the child's
+input, and admits the child's one turn. On a host that outlives the call, such
+as a long-lived server or `rkat run --keep-alive`, it then returns without
+waiting for that turn:
+
+```json
+{
+  "status": "running",
+  "mob_id": "research",
+  "source_member_id": "planner",
+  "agent_identity": "planner-ledger-fork",
+  "member_ref": "...",
+  "fork_session_id": "...",
+  "cache_inheritance": { "...": "..." },
+  "job_id": "..."
+}
+```
+
+When the child's turn ends, the forker receives a background-job completion for
+that `job_id`. Its detail is a JSON outcome naming the child (`agent_identity`,
+`member_ref`) with a `status`:
+
+| `status` | Meaning |
+|----------|---------|
+| `completed` | The turn completed. Carries `bounded_result` (the child's final text under `max_text_bytes`, with explicit truncation), `usage`, `turns`, and `tool_calls`. The child stays seated. |
+| `failed` | The turn failed. Carries `error`. The child was retired. |
+| `max_run_elapsed` | The opt-in `max_run_secs` elapsed. The run was cancelled and the child retired; `retirement_error` reports a failed retirement. |
+| `supervisor_stopped` | The runtime supervising the child stopped (mob shutdown) before the turn ended. |
+
+There is no default deadline: the child runs for as long as its task needs.
+`max_run_secs` is an opt-in autokill that cancels the child's run and retires
+the child once it has run that long; omit it for no limit. `fork_off` rejects
+arguments it does not define, so a misspelled or invented field is an argument
+error instead of a silently ignored intent.
+
+`council` follows the same pattern: on a host that outlives the call it returns
+`status: "running"`, the `council_id`, and a `job_id`, and the sealed council
+outcome arrives as that job's completion. See
+[Temporary Councils](/guides/temporary-councils#agent-tool).
+
+A one-shot host, such as `rkat run` without `--keep-alive`, may exit when the
+turn ends and so cannot deliver a later completion. There both tools block and
+return the outcome as their ordinary tool result: `fork_off` returns the
+child's `bounded_result`, and `council` the sealed outcome. The agent loop's
+default tool deadline does not apply to that wait; `max_run_secs` and the
+council's `timeout_seconds` are the only bounds.
+
+### Forked children belong to their forker
+
+A child created by `fork_off` belongs to the member that forked it, and so does
+every member that child forks in turn. Ownership is recorded durably when the
+child is seated and is read from the caller's own session binding, never from
+tool arguments. Without manage scope over the mob, the forker can still:
+
+- read any of its descendants with `mob_check_member`;
+- retire any of its descendants with `mob_retire_member`, which also retires
+  the members that descendant forked;
+- list its descendants, and only those, with `mob_list_members`.
+
+A profile's member operator tools (`member_status`, `retire_member`,
+`force_cancel_member`, `list_members`) apply the same rule. With manage scope,
+all of these tools behave as before.
+
+A child whose own turn fails is retired automatically. A child whose turn
+completes stays seated, for inspection or further work, until its forker
+retires it. Meerkat adds no retention limit of its own; a host can apply one
+(MobKit's `idle_retire_secs`, for example).
 
 Host/operator surfaces for placement, binding, grants, observation, live
 member sessions, and hard cancellation are control-plane APIs, not agent

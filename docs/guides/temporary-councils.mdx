@@ -174,9 +174,21 @@ decision-support action, not a human-operated lifecycle surface.
 
 The caller names existing source members and the question to decide. The tool
 resolves each member's current profile and placement, synthesizes the explicit
-temporary `MobDefinition`, derives stable branch identities, runs the council,
-and returns the sealed result through the ordinary structured tool-result
-channel.
+temporary `MobDefinition`, derives stable branch identities, and starts the
+council. How the sealed result reaches the caller depends on the host:
+
+- **Detached (hosts that outlive the call).** The call returns at once with
+  `{"status": "running", "council_id": ..., "job_id": ...}`. The council runs
+  as a background operation of the convener's session. When it ends, the
+  convener receives a background-job completion for that `job_id` whose detail
+  is the sealed outcome (`result`, `cleanup`, `replayed`). The council's own
+  `timeout_seconds` bounds it; the agent loop's default tool deadline does not,
+  so a council longer than that deadline still delivers its result.
+- **Blocking (one-shot hosts).** A host that may exit when the turn ends, such
+  as `rkat run` without `--keep-alive`, cannot deliver a later completion. There
+  the call waits for the council and returns the sealed outcome as its ordinary
+  tool result. No default tool deadline applies to the wait; `timeout_seconds`
+  is the bound.
 
 ### Example Tool Call
 
@@ -218,11 +230,18 @@ create a temporary mob and manage every source mob in the participant list.
 
 ## Errors
 
-Malformed input and missing mob authority are ordinary tool errors. Once a
-council is admitted, its structured result separates the discussion terminal
+Malformed input, missing mob authority, and an unknown source member are
+ordinary tool errors returned by the call itself, before anything starts. Once
+a council is admitted, its structured result separates the discussion terminal
 from cleanup status. A repeated explicit `council_id` with the same arguments
 joins or replays the original run; the same id with different arguments is a
 conflict.
+
+On a detached host, a refusal that the council itself decides after the call
+returned (an over-budget bound, a `council_id` conflict, `capability_unavailable`
+for a durable request on a process-bound store) arrives as a **failed**
+background-job completion whose detail carries the typed error text. On a
+blocking host the same refusals are tool errors.
 
 Seating failures, wiring gaps, exhausted budgets, and elapsed deadlines are
 **not** errors: they are typed `exit_reason` values on a sealed result, so you

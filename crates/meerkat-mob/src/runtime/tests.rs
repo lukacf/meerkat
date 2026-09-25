@@ -22507,14 +22507,7 @@ async fn fork_member_then_run_bounded_keeps_bare_fork_provisioning_only_and_resu
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_return_exact_run_result(true);
     let source_identity = AgentIdentity::from("bounded-fork-source");
-    let source = handle
-        .spawn(
-            ProfileName::from("worker"),
-            source_identity.clone(),
-            Some(ContentInput::Text("source context".to_string())),
-        )
-        .await
-        .expect("spawn bounded fork source");
+    let source = spawn_settled_fork_source(&handle, &source_identity).await;
     let source_session = source
         .bridge_session_id()
         .expect("source bridge session")
@@ -22572,6 +22565,59 @@ async fn spawn_bounded_fork_source(handle: &MobHandle, source_identity: &AgentId
         .expect("spawn bounded fork source");
 }
 
+/// Spawn a source for an external (`Quiescent`) fork, and return once its
+/// initial turn is answered.
+///
+/// A `Quiescent` fork refuses a source that still owes a turn, so the source
+/// must be settled before it is forked. It runs turn-driven: this
+/// mock models an autonomous member's kickoff as a keep-alive host loop that
+/// never ends on its own, which is a source that owes its turn forever.
+async fn spawn_settled_fork_source(
+    handle: &MobHandle,
+    source_identity: &AgentIdentity,
+) -> MemberRef {
+    let source = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            source_identity.clone(),
+            Some(ContentInput::Text("source context".to_string())),
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn bounded fork source");
+    let source_session = source
+        .bridge_session_id()
+        .expect("source bridge session")
+        .clone();
+    wait_for_fork_source_settled(handle, &source_session).await;
+    source
+}
+
+/// Wait until the source runtime holds no admitted input.
+#[cfg(feature = "runtime-adapter")]
+async fn wait_for_fork_source_settled(handle: &MobHandle, source_session: &SessionId) {
+    use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+    let Some(runtime) = handle.runtime_adapter.clone() else {
+        return;
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !runtime
+        .list_active_inputs(source_session)
+        .await
+        .is_ok_and(|active| active.is_empty())
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the fork source never answered its initial turn"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(not(feature = "runtime-adapter"))]
+async fn wait_for_fork_source_settled(_handle: &MobHandle, _source_session: &SessionId) {}
+
 fn bounded_fork_child_spec(child_identity: &AgentIdentity) -> SpawnMemberSpec {
     let mut child = SpawnMemberSpec::new(ProfileName::from("worker"), child_identity.clone());
     child.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
@@ -22586,7 +22632,7 @@ fn bounded_fork_child_spec(child_identity: &AgentIdentity) -> SpawnMemberSpec {
 async fn fork_member_then_run_bounded_retires_child_when_its_turn_fails() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let source_identity = AgentIdentity::from("bounded-fork-failing-source");
-    spawn_bounded_fork_source(&handle, &source_identity).await;
+    spawn_settled_fork_source(&handle, &source_identity).await;
     service.set_fail_start_turn(true);
 
     let child_identity = AgentIdentity::from("bounded-fork-failing-child");
@@ -22625,7 +22671,7 @@ async fn fork_member_then_run_bounded_retires_child_when_its_turn_fails() {
 async fn fork_member_then_run_detached_returns_promptly_and_child_outlives_the_caller() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let source_identity = AgentIdentity::from("detached-fork-source");
-    spawn_bounded_fork_source(&handle, &source_identity).await;
+    spawn_settled_fork_source(&handle, &source_identity).await;
     service.set_start_turn_delay_ms(600_000);
 
     let child_identity = AgentIdentity::from("detached-fork-child");
@@ -22661,7 +22707,7 @@ async fn fork_member_then_run_detached_returns_promptly_and_child_outlives_the_c
 async fn fork_member_then_run_detached_autokill_cancels_and_retires_the_child() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let source_identity = AgentIdentity::from("autokill-fork-source");
-    spawn_bounded_fork_source(&handle, &source_identity).await;
+    spawn_settled_fork_source(&handle, &source_identity).await;
     service.set_start_turn_delay_ms(600_000);
 
     let child_identity = AgentIdentity::from("autokill-fork-child");

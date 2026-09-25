@@ -12780,7 +12780,13 @@ impl MobHandle {
     /// [`meerkat_core::DurableForkSourceAdmission::Quiescent`]: a source whose
     /// turn is running is refused with
     /// `MobError::ForkSourceUnavailable { cause: Running }`. This is the
-    /// external (RPC, console, operator) fork contract.
+    /// external (RPC, console, operator) fork contract. "Running" covers all
+    /// work the source owes, not only a provider call in flight: an admitted
+    /// input that has not reached a terminal state (queued, steered, staged,
+    /// or waiting while the runtime materializes or revives the member's
+    /// session) and a committed end that is still an unanswered input
+    /// boundary are refused the same way. The refusal answers at once; it
+    /// never queues behind the source's turn.
     pub async fn fork_member(
         &self,
         source_identity: &AgentIdentity,
@@ -12956,6 +12962,75 @@ impl MobHandle {
         })
     }
 
+    /// Refuse an external fork of a source whose runtime still owes a turn.
+    ///
+    /// The durable fork owner only sees a turn once it holds a live actor
+    /// admission, but a runtime admits work well before that: an input is
+    /// accepted and queued, then the runtime loop dequeues it, stages it,
+    /// materializes or revives the member's session and only then starts the
+    /// turn. Throughout that window the source is busy, and a fork of it
+    /// would either queue behind the turn or branch a transcript the turn is
+    /// about to extend. So the source runtime's typed state is read first:
+    /// a bound run (`RuntimeState::Running`) or any admitted input that has
+    /// not reached a terminal state refuses the fork as
+    /// `ForkSourceUnavailable { Running }` at once.
+    ///
+    /// Both reads are out of band: they observe the MeerkatMachine's session
+    /// registry and input ledger and never enter the source's command queue
+    /// or turn boundary. A source with no runtime registration (the runtime
+    /// retired its idle executor) owes no runtime-held work; the durable fork
+    /// owner still applies its own boundary and transcript checks.
+    #[cfg(feature = "runtime-adapter")]
+    async fn refuse_fork_source_with_admitted_work(
+        &self,
+        source_identity: &AgentIdentity,
+        source_session_id: &meerkat_core::SessionId,
+    ) -> Result<(), MobError> {
+        use meerkat_runtime::RuntimeDriverError;
+        use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+        let Some(runtime) = self.runtime_adapter.as_ref() else {
+            return Ok(());
+        };
+        let busy = || MobError::ForkSourceUnavailable {
+            source_member_id: source_identity.to_string(),
+            cause: crate::error::ForkSourceUnavailableCause::Running,
+        };
+        let unreadable = |read: &str, error: RuntimeDriverError| {
+            MobError::Internal(format!(
+                "fork source '{source_identity}' runtime {read} could not be read: {error}"
+            ))
+        };
+        match runtime.runtime_state(source_session_id).await {
+            Ok(meerkat_runtime::RuntimeState::Running) => return Err(busy()),
+            Ok(_) => {}
+            Err(
+                RuntimeDriverError::NotFound { .. }
+                | RuntimeDriverError::Destroyed
+                | RuntimeDriverError::NotReady { .. },
+            ) => return Ok(()),
+            Err(error) => return Err(unreadable("state", error)),
+        }
+        match runtime.list_active_inputs(source_session_id).await {
+            Ok(active) if active.is_empty() => Ok(()),
+            Ok(_) => Err(busy()),
+            Err(
+                RuntimeDriverError::NotFound { .. }
+                | RuntimeDriverError::Destroyed
+                | RuntimeDriverError::NotReady { .. },
+            ) => Ok(()),
+            Err(error) => Err(unreadable("input ledger", error)),
+        }
+    }
+
+    #[cfg(not(feature = "runtime-adapter"))]
+    async fn refuse_fork_source_with_admitted_work(
+        &self,
+        _source_identity: &AgentIdentity,
+        _source_session_id: &meerkat_core::SessionId,
+    ) -> Result<(), MobError> {
+        Ok(())
+    }
+
     async fn fork_member_with_source_admission(
         &self,
         source_identity: &AgentIdentity,
@@ -12966,6 +13041,10 @@ impl MobHandle {
         let (source_session_id, fork_target) = self
             .admit_fork_member(source_identity, &member, source_admission)
             .await?;
+        if source_admission == meerkat_core::DurableForkSourceAdmission::Quiescent {
+            self.refuse_fork_source_with_admitted_work(source_identity, &source_session_id)
+                .await?;
+        }
         let fork = self
             .session_service
             .fork_persisted_session(

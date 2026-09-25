@@ -6,6 +6,7 @@
 )]
 
 mod agent_tools;
+pub mod fork_relink;
 #[cfg(all(feature = "openai-live", not(target_arch = "wasm32")))]
 pub mod live_delegation;
 mod public_definition;
@@ -458,6 +459,12 @@ pub struct MobMcpState {
     /// owner session after the tool call returns. Declared by the host;
     /// never inferred.
     detached_completion_delivery: std::sync::atomic::AtomicBool,
+    /// When this state was built (Unix ms). Fork children whose job started
+    /// earlier belonged to a previous process and are re-linked on restore.
+    created_at_ms: u64,
+    fork_relink_scheduled: std::sync::atomic::AtomicBool,
+    /// Mobs whose fork children were already re-linked by this state.
+    fork_relinked_mobs: std::sync::Mutex<std::collections::BTreeSet<MobId>>,
     /// Set once the realm-local capability expiry/cleanup driver is running.
     local_forked_participant_sweeper_started: std::sync::atomic::AtomicBool,
     /// Driver cadence, configurable only through the explicit test seam.
@@ -545,6 +552,15 @@ impl MobMcpState {
             ),
             temporary_council_recovery_scheduled: std::sync::atomic::AtomicBool::new(false),
             detached_completion_delivery: std::sync::atomic::AtomicBool::new(true),
+            created_at_ms: u64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX),
+            fork_relink_scheduled: std::sync::atomic::AtomicBool::new(false),
+            fork_relinked_mobs: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             local_forked_participant_sweeper_started: std::sync::atomic::AtomicBool::new(false),
             local_forked_participant_sweep_interval_ms: std::sync::atomic::AtomicU64::new(
                 u64::try_from(LOCAL_FORKED_PARTICIPANT_SWEEP_INTERVAL.as_millis())
@@ -1434,8 +1450,38 @@ impl MobMcpState {
         // on its own task, so recovery can use the ordinary mob verbs (which
         // call back into `ensure_restored`) without recursion or deadlock.
         self.schedule_temporary_council_recovery();
+        self.schedule_fork_relink();
         self.schedule_local_forked_participant_sweeper();
         Ok(())
+    }
+
+    /// Schedule the one-time post-restore fork_off re-link pass (see
+    /// [`crate::fork_relink`]). Runs on its own task, like council recovery.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn schedule_fork_relink(&self) {
+        use std::sync::atomic::Ordering;
+        if self.fork_relink_scheduled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(weak) = self.self_weak.get().cloned() else {
+            self.fork_relink_scheduled.store(false, Ordering::SeqCst);
+            return;
+        };
+        let restored_before_ms = self.created_at_ms;
+        tokio::spawn(async move {
+            let Some(state) = weak.upgrade() else {
+                return;
+            };
+            let reports =
+                crate::fork_relink::relink_restored_fork_children(&state, restored_before_ms, true)
+                    .await;
+            if !reports.is_empty() {
+                tracing::info!(
+                    children = reports.len(),
+                    "fork_off re-link pass handled children from a previous process"
+                );
+            }
+        });
     }
 
     async fn ensure_restored_best_effort(&self, action: &str) -> bool {
@@ -1595,13 +1641,54 @@ impl MobMcpState {
     /// building the handle.
     pub async fn mob_insert_handle(&self, mob_id: MobId, handle: MobHandle) {
         self.mobs.write().await.insert(
-            mob_id,
+            mob_id.clone(),
             ManagedMob {
-                handle,
+                handle: handle.clone(),
                 storage_path: None,
             },
         );
         self.note_mob_set_changed();
+        // A host that restores mobs by inserting their handles (MobKit) gets
+        // the fork_off re-link for each restored mob here.
+        if self.claim_fork_relink(&mob_id) {
+            let service = self.session_service.clone();
+            let restored_before_ms = self.created_at_ms;
+            tokio::spawn(async move {
+                let reports = crate::fork_relink::relink_mob_fork_children(
+                    service,
+                    &mob_id,
+                    &handle,
+                    restored_before_ms,
+                )
+                .await;
+                if !reports.is_empty() {
+                    tracing::info!(
+                        mob_id = %mob_id,
+                        children = reports.len(),
+                        "fork_off re-link handled children from a previous process"
+                    );
+                }
+            });
+        }
+    }
+
+    /// Claim the one-time fork_off re-link of `mob_id` for this state.
+    pub(crate) fn claim_fork_relink(&self, mob_id: &MobId) -> bool {
+        self.fork_relinked_mobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(mob_id.clone())
+    }
+
+    /// Run the fork_off re-link for every managed mob now and report what it
+    /// did. Hosts normally get this automatically after restore; this is the
+    /// explicit entry point (and the test seam).
+    pub async fn relink_restored_fork_children(
+        self: &Arc<Self>,
+    ) -> Vec<crate::fork_relink::ForkRelinkReport> {
+        // Explicit runs ignore the automatic pass's claims; delivery is
+        // idempotent per job, so running twice never records twice.
+        crate::fork_relink::relink_restored_fork_children(self, self.created_at_ms, false).await
     }
 
     /// Change signal over the managed-mob handle set: the receiver wakes when

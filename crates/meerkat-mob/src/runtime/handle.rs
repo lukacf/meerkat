@@ -4317,6 +4317,36 @@ pub struct ForkMemberBoundedRunOutcome {
     pub turn: WorkBoundedTurnResult,
 }
 
+/// Who is waiting for a detached fork child's outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkJobBinding {
+    /// Background job id the forker was given.
+    pub job_id: String,
+    /// The forker's session, which receives the durable completion entry.
+    pub owner_session_id: meerkat_core::SessionId,
+}
+
+/// Durable record of the fork_off job a member was created to run.
+///
+/// Stored on the child's spawn event and roster entry so a restarted host
+/// can re-deliver the outcome (or re-arm the opt-in limit) after the
+/// process-local supervisor that owned the run is gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkJobRecord {
+    pub job_id: String,
+    pub owner_session_id: meerkat_core::SessionId,
+    /// When the child's turn was admitted (Unix epoch milliseconds).
+    pub started_at_ms: u64,
+    /// The opt-in max_run limit, if any, measured from `started_at_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_run_ms: Option<u64>,
+    /// Transcript length the child was forked with; the child's own
+    /// exchange starts after it.
+    pub prefix_message_count: usize,
+    pub result_label: String,
+    pub max_text_bytes: usize,
+}
+
 /// The in-flight exact turn of a detached fork child.
 ///
 /// Resolves once the child's turn reaches an outcome. Dropping it stops the
@@ -4954,6 +4984,7 @@ pub struct SpawnMemberSpec {
     /// without holding manage scope over the whole mob. Never taken from
     /// caller-supplied arguments.
     pub(crate) spawned_by: Option<AgentIdentity>,
+    pub(crate) fork_job: Option<crate::runtime::ForkJobRecord>,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -5035,6 +5066,7 @@ impl SpawnMemberSpec {
             placement: None,
             forked_participant_attachment: None,
             spawned_by: None,
+            fork_job: None,
         }
     }
 
@@ -12804,6 +12836,9 @@ impl MobHandle {
     ) -> Result<ForkMemberResult, MobError> {
         let child_identity = member.identity.clone();
         let fork_session_id = fork.session_id.clone();
+        if let Some(job) = member.fork_job.as_mut() {
+            job.prefix_message_count = fork.message_count;
+        }
         member.launch_mode = crate::launch::MemberLaunchMode::Resume {
             bridge_session_id: fork_session_id.clone(),
             resume_from_role: None,
@@ -12972,7 +13007,28 @@ impl MobHandle {
         max_text_bytes: usize,
         source_admission: meerkat_core::DurableForkSourceAdmission,
         max_run: Option<Duration>,
+        job: Option<ForkJobBinding>,
     ) -> Result<(ForkMemberResult, ForkChildRun), BoundedMemberRunError> {
+        let result_label: String = result_label.into();
+        if let Some(job) = job {
+            member.fork_job = Some(ForkJobRecord {
+                job_id: job.job_id,
+                owner_session_id: job.owner_session_id,
+                started_at_ms: u64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis(),
+                )
+                .unwrap_or(u64::MAX),
+                max_run_ms: max_run
+                    .map(|limit| u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)),
+                // Filled from the committed fork when the child is seated.
+                prefix_message_count: 0,
+                result_label: result_label.clone(),
+                max_text_bytes,
+            });
+        }
         let result_spec = BoundedResultSpec::new(result_label, max_text_bytes)?;
         if max_run.is_some_and(|limit| limit.is_zero()) {
             return Err(MobError::InvalidBoundedHelperResult {
@@ -15753,6 +15809,7 @@ mod tests {
             effective_profile_override: None,
             effective_model_override: None,
             spawned_by: None,
+            fork_job: None,
             direct_member_fence: None,
         }
     }

@@ -5032,6 +5032,7 @@ mod tests {
                 effective_profile_override: None,
                 effective_model_override: None,
                 spawned_by: None,
+                fork_job: None,
             };
             let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(
                 crate::roster::Roster::from_projected_entries([entry]),

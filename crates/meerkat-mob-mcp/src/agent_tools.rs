@@ -56,7 +56,7 @@ const TOOL_CONCLUDE_OBJECTIVE: &str = "conclude_objective";
 const TOOL_MOB_CREATE: &str = "mob_create";
 const TOOL_MOB_DESTROY: &str = "mob_destroy";
 const TOOL_MOB_SPAWN_MEMBER: &str = "mob_spawn_member";
-const TOOL_FORK_OFF: &str = "fork_off";
+pub(crate) const TOOL_FORK_OFF: &str = "fork_off";
 const TOOL_COUNCIL: &str = "council";
 const TOOL_MOB_RETIRE_MEMBER: &str = "mob_retire_member";
 const TOOL_MOB_CHECK_MEMBER: &str = "mob_check_member";
@@ -1349,6 +1349,12 @@ impl AgentMobToolSurface {
             unreturned_operation.arm(Arc::clone(registry));
         }
 
+        // A detached child's job is recorded durably with the child so a
+        // restarted host can still deliver its outcome.
+        let job = registry.as_ref().map(|_| meerkat_mob::ForkJobBinding {
+            job_id: operation_id.to_string(),
+            owner_session_id: self.owner_bridge_session_id.clone(),
+        });
         let handle = audit_handle.clone();
         let operation_source = source_identity.clone();
         let result_label = args.result_label;
@@ -1366,6 +1372,7 @@ impl AgentMobToolSurface {
                     // active admission is the caller, not a competing writer.
                     meerkat_core::DurableForkSourceAdmission::CallerTurn,
                     max_run,
+                    job,
                 )
                 .await
         })
@@ -1627,7 +1634,13 @@ impl AgentMobToolSurface {
             TOOL_COUNCIL,
             async move {
                 match council.run(request).await {
-                    Ok(outcome) => (Ok(council_outcome_json(&outcome)), false),
+                    // A council that ran but failed (e.g. participant seating)
+                    // completes its job as failed; the durable record keeps
+                    // the full typed outcome either way.
+                    Ok(outcome) => (
+                        Ok(council_outcome_json(&outcome)),
+                        outcome.result.exit_reason.is_failure(),
+                    ),
                     Err(error) => (Ok(json!({"error": error.to_string()})), true),
                 }
             },
@@ -2514,11 +2527,9 @@ fn build_tool_defs_with_profile_support(
         ),
         tool_def(
             TOOL_FORK_OFF,
-            "Delegate one task through a real durable transcript fork.\n\n\
-             Unlike delegate, the child starts from an exact committed prefix of an existing mob member's transcript. Unlike prompt-context fork_helper, this persists a real child session and provisions it through the ordinary resume path. The tool visibly commits the task and expected-output guidance as the child input, captures ordinary final assistant text under the caller's byte bound, and retains the child in the normal mob roster.\n\n\
-             The call returns as soon as the child is seated and its turn admitted, with status \"running\", the child's agent_identity and member_ref, and a job_id. It does not wait for the child: the child may run for as long as its task needs. When the child's turn ends you receive a background job notice for that job_id whose detail is the child's outcome: the bounded final text on completion, or the error.\n\n\
-             The child belongs to you. It has no deadline unless you set max_run_secs, after which its run is cancelled and it is retired. Otherwise use mob_check_member to observe it and mob_retire_member to end it. A child whose turn fails is retired automatically; a child whose turn completes stays seated for further work until you retire it.\n\n\
-             The parent remains responsible for replying to the user. The child does not autonomously deliver across sessions. The bounded result is ordinary final text with explicit status and truncation, not a validated summary or report.",
+            "Fork yourself into a durable child that runs one task from your committed transcript.\n\n\
+             Usually the call returns at once with status \"running\", the child's agent_identity and a job_id, and the child works in the background. When it finishes, its outcome (bounded final text, or the error) is written into your transcript as a System entry \"Background fork_off job <job_id> finished\", which you can refer back to on later turns. On hosts that cannot deliver later (one-shot runs) the call instead waits and returns the result directly.\n\n\
+             There is no default deadline; set max_run_secs to have the child's run cancelled and the child retired after that long. The child and anything it forks belong to you: check them with mob_check_member, list them with mob_list_members, and end them with mob_retire_member (retiring a member retires its descendants). A child whose turn fails is retired automatically; a finished child stays seated until you retire it, so retire children you no longer need.",
             typed_schema::<ForkOffArgs>(),
         ),
         tool_def(
@@ -2534,9 +2545,11 @@ fn build_tool_defs_with_profile_support(
              discussion. The tool resolves and copies their existing profiles; you do not construct \
              a temporary mob definition. The default merge asks the last participant for a bounded \
              summary. council_id is optional and should be supplied only when you need an explicit \
-             idempotency key across retries. The call returns at once with status \"running\", \
-             the council_id and a job_id; the sealed result arrives as that job's completion \
-             notice when the council ends.",
+             idempotency key across retries. Usually the call returns at once with status \
+             \"running\", the council_id and a job_id, and the sealed result is written into \
+             your transcript as a System entry \"Background council job <job_id> finished\" when \
+             the council ends; on one-shot hosts the call waits and returns the result directly. \
+             timeout_seconds is the council's own deadline.",
             typed_schema::<CouncilArgs>(),
         ),
         tool_def(
@@ -2779,9 +2792,8 @@ struct ForkOffArgs {
     /// Maximum UTF-8 bytes returned, including any truncation marker.
     #[serde(default = "fork_off_default_max_text_bytes")]
     max_text_bytes: usize,
-    /// Optional autokill: cancel the child's run and retire the child once
-    /// it has run this many seconds. Omit for no limit; the child then runs
-    /// until it finishes, and you retire it with mob_retire_member.
+    /// Optional limit: cancel the child's run and retire it (and its
+    /// descendants) after this many seconds. Omit for no limit.
     #[serde(default)]
     max_run_secs: Option<u64>,
 }
@@ -2896,13 +2908,14 @@ fn agent_council_id(
 ) -> Result<meerkat_mob::temporary_council::TemporaryCouncilId, ToolError> {
     let seed = format!("{owner_bridge_session_id}:{tool_call_id}");
     let id = uuid::Uuid::new_v5(&AGENT_COUNCIL_NAMESPACE, seed.as_bytes());
-    meerkat_mob::temporary_council::TemporaryCouncilId::new(format!("agent:{id}")).map_err(
-        |error| {
+    // Comms-safe by construction: the id becomes part of every participant's
+    // comms name. ("agent:" ids could never seat a comms-enabled member.)
+    meerkat_mob::temporary_council::TemporaryCouncilId::new(format!("agent-{}", id.simple()))
+        .map_err(|error| {
             ToolError::execution_failed(format!(
                 "tool '{tool_name}' could not derive its canonical council id: {error}"
             ))
-        },
-    )
+        })
 }
 
 fn council_target_identity(
@@ -3056,29 +3069,29 @@ enum ForkOffStartedStatus {
 /// The child's outcome, delivered to the forker as the background job's
 /// completion detail.
 #[derive(Serialize)]
-struct ForkOffCompletion {
-    agent_identity: String,
-    member_ref: meerkat_contracts::WireMemberRef,
-    status: ForkOffCompletionStatus,
+pub(crate) struct ForkOffCompletion {
+    pub(crate) agent_identity: String,
+    pub(crate) member_ref: meerkat_contracts::WireMemberRef,
+    pub(crate) status: ForkOffCompletionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    bounded_result: Option<meerkat_contracts::MobBoundedHelperResult>,
+    pub(crate) bounded_result: Option<meerkat_contracts::MobBoundedHelperResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    usage: Option<meerkat_core::Usage>,
+    pub(crate) usage: Option<meerkat_core::Usage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    turns: Option<u32>,
+    pub(crate) turns: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<u32>,
+    pub(crate) tool_calls: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    max_run_secs: Option<u64>,
+    pub(crate) max_run_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    retirement_error: Option<String>,
+    pub(crate) retirement_error: Option<String>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-enum ForkOffCompletionStatus {
+pub(crate) enum ForkOffCompletionStatus {
     /// The turn completed; the child stays seated for further work.
     Completed,
     /// The turn failed; the child was retired.
@@ -3087,9 +3100,31 @@ enum ForkOffCompletionStatus {
     MaxRunElapsed,
     /// The runtime supervising the child stopped before the turn ended.
     SupervisorStopped,
+    /// The host restarted while the child's turn was running and the turn
+    /// did not survive; the child is still seated for its forker.
+    RestartInterrupted,
 }
 
 impl ForkOffCompletion {
+    pub(crate) fn empty(
+        agent_identity: String,
+        member_ref: meerkat_contracts::WireMemberRef,
+        status: ForkOffCompletionStatus,
+    ) -> Self {
+        Self {
+            agent_identity,
+            member_ref,
+            status,
+            bounded_result: None,
+            usage: None,
+            turns: None,
+            tool_calls: None,
+            error: None,
+            max_run_secs: None,
+            retirement_error: None,
+        }
+    }
+
     /// Returns the completion and whether it reports a failure.
     fn from_outcome(
         agent_identity: String,
@@ -3176,6 +3211,31 @@ impl Drop for UnreturnedOperationGuard {
     }
 }
 
+/// The durable owner-transcript record for one detached tool outcome.
+///
+/// One format and one idempotency key (`{tool}:{job_id}`) for the live
+/// custodian and the post-restart re-link pass, so a second delivery of the
+/// same job is a Duplicate (or, with different content, a Conflict) and is
+/// never recorded twice.
+pub(crate) fn detached_completion_record(
+    tool_name: &str,
+    job_id: &str,
+    outcome: serde_json::Value,
+) -> (String, meerkat_core::service::AppendSystemContextRequest) {
+    let content = json!({
+        "tool": tool_name,
+        "job_id": job_id,
+        "outcome": outcome,
+    })
+    .to_string();
+    let mut append = meerkat_core::service::AppendSystemContextRequest::from_text(format!(
+        "Background {tool_name} job {job_id} finished:\n{content}"
+    ));
+    append.source = Some(format!("{tool_name}_completion"));
+    append.idempotency_key = Some(format!("{tool_name}:{job_id}"));
+    (content, append)
+}
+
 /// Own one detached tool run's completion.
 ///
 /// When `outcome` resolves, the typed outcome is first appended to the owner
@@ -3208,17 +3268,8 @@ fn spawn_detached_completion_custodian<F>(
                 return;
             }
         };
-        let record = json!({
-            "tool": tool_name,
-            "job_id": operation_id.to_string(),
-            "outcome": value,
-        });
-        let content = record.to_string();
-        let mut append = meerkat_core::service::AppendSystemContextRequest::from_text(format!(
-            "Background {tool_name} job {operation_id} finished:\n{content}"
-        ));
-        append.source = Some(format!("{tool_name}_completion"));
-        append.idempotency_key = Some(format!("{tool_name}:{operation_id}"));
+        let (content, append) =
+            detached_completion_record(tool_name, &operation_id.to_string(), value);
         if let Err(error) = state
             .session_service()
             .append_system_context(&owner_session_id, append)

@@ -4958,6 +4958,7 @@ pub(super) struct PendingSpawn {
     pub(super) effective_model_override: Option<String>,
     /// Durable spawner provenance for the roster entry and spawn event.
     pub(super) spawned_by: Option<AgentIdentity>,
+    pub(super) fork_job: Option<crate::runtime::ForkJobRecord>,
     /// Objective causality inherited from the spawning turn.
     pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
@@ -5468,6 +5469,7 @@ struct RespawnSnapshot {
     effective_model_override: Option<String>,
     /// Spawner provenance carried to the replacement incarnation.
     spawned_by: Option<AgentIdentity>,
+    fork_job: Option<crate::runtime::ForkJobRecord>,
     /// The old member is already in a partial-retire state and respawn should
     /// retry cleanup instead of re-admitting the original Respawn transition.
     cleanup_retry: bool,
@@ -5516,6 +5518,7 @@ struct SpawnFinalizeCtx {
     effective_profile_override: Option<crate::profile::Profile>,
     effective_model_override: Option<String>,
     spawned_by: Option<AgentIdentity>,
+    fork_job: Option<crate::runtime::ForkJobRecord>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
@@ -5571,6 +5574,7 @@ struct SpawnActivateState {
     effective_profile_override: Option<crate::profile::Profile>,
     effective_model_override: Option<String>,
     spawned_by: Option<AgentIdentity>,
+    fork_job: Option<crate::runtime::ForkJobRecord>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     remote: Option<Box<RemoteSpawnFinalize>>,
@@ -5613,6 +5617,7 @@ impl SpawnActivateState {
             effective_profile_override,
             effective_model_override,
             spawned_by,
+            fork_job,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
@@ -5661,6 +5666,7 @@ impl SpawnActivateState {
             effective_profile_override,
             effective_model_override,
             spawned_by,
+            fork_job,
             objective_id,
             per_spawn_external_tools,
             remote,
@@ -17553,6 +17559,7 @@ impl ExplicitResumePreparationContext {
             restore_spec.override_profile = entry.effective_profile_override.clone();
             restore_spec.model_override = entry.effective_model_override.clone();
             restore_spec.spawned_by = entry.spawned_by.clone();
+            restore_spec.fork_job = entry.fork_job.clone();
             if let Some(customizer) = self.spawn_member_customizer.as_ref() {
                 customizer.customize_spawn(
                     &super::handle::SpawnCustomizationContext {
@@ -27697,6 +27704,7 @@ impl MobActor {
             effective_profile_override: entry.effective_profile_override,
             effective_model_override: entry.effective_model_override,
             spawned_by: entry.spawned_by,
+            fork_job: entry.fork_job,
             objective_id: None,
             per_spawn_external_tools: None,
             authorized_profile_material,
@@ -27965,6 +27973,7 @@ impl MobActor {
             // the placed lane above.
             forked_participant_attachment: _,
             spawned_by,
+            fork_job,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
@@ -28659,6 +28668,7 @@ impl MobActor {
                 effective_profile_override,
                 effective_model_override,
                 spawned_by: spawned_by.clone(),
+                fork_job: fork_job.clone(),
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -28851,6 +28861,7 @@ impl MobActor {
             effective_profile_override,
             effective_model_override,
             spawned_by,
+            fork_job,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
@@ -29782,6 +29793,7 @@ impl MobActor {
             // Spawner provenance is only set by the caller-turn fork, which
             // refuses placement; a placed spawn never carries one.
             spawned_by: _,
+            fork_job: _,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -30549,6 +30561,7 @@ impl MobActor {
             effective_profile_override,
             effective_model_override,
             spawned_by: None,
+            fork_job: None,
             objective_id,
             authorized_profile_material,
             continuity_intent,
@@ -30825,6 +30838,7 @@ impl MobActor {
                 effective_profile_override,
                 effective_model_override,
                 spawned_by,
+                fork_job,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -31006,6 +31020,7 @@ impl MobActor {
                                 effective_profile_override,
                                 effective_model_override,
                                 spawned_by: spawned_by.clone(),
+                                fork_job: fork_job.clone(),
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -31077,6 +31092,7 @@ impl MobActor {
                                 effective_profile_override,
                                 effective_model_override,
                                 spawned_by: spawned_by.clone(),
+                                fork_job: fork_job.clone(),
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -31200,6 +31216,7 @@ impl MobActor {
             placement: _,
             forked_participant_attachment: _,
             spawned_by: _,
+            fork_job: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -31389,6 +31406,7 @@ impl MobActor {
             effective_profile_override: override_profile.clone(),
             effective_model_override: model_override.clone(),
             spawned_by: None,
+            fork_job: None,
             objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
@@ -32130,6 +32148,7 @@ impl MobActor {
             spawned.effective_profile_override = ctx.effective_profile_override.clone();
             spawned.effective_model_override = ctx.effective_model_override.clone();
             spawned.spawned_by = ctx.spawned_by.clone();
+            spawned.fork_job = ctx.fork_job.clone();
             self.append_committed_placed_event_exact(MobEventKind::MemberSpawned(spawned))
                 .await?;
             self.restore_diagnostics
@@ -32284,6 +32303,7 @@ impl MobActor {
         spawned_event.effective_profile_override = ctx.effective_profile_override.clone();
         spawned_event.effective_model_override = ctx.effective_model_override.clone();
         spawned_event.spawned_by = ctx.spawned_by.clone();
+        spawned_event.fork_job = ctx.fork_job.clone();
         spawned_event = spawned_event.with_placed_spawn_id(None);
         if let Err(append_error) = self
             .append_member_spawned_with_identity_fence(
@@ -41330,6 +41350,7 @@ impl MobActor {
                 effective_profile_override: entry.effective_profile_override,
                 effective_model_override: entry.effective_model_override,
                 spawned_by: entry.spawned_by,
+                fork_job: entry.fork_job,
                 cleanup_retry,
             }
         };
@@ -41361,6 +41382,7 @@ impl MobActor {
                         spec.override_profile = snapshot.effective_profile_override.clone();
                         spec.model_override = snapshot.effective_model_override.clone();
                         spec.spawned_by = snapshot.spawned_by.clone();
+                        spec.fork_job = snapshot.fork_job.clone();
                         spec
                     }
                 };
@@ -41369,6 +41391,9 @@ impl MobActor {
                 // spawner of the incarnation it replaces.
                 if replacement_spec.spawned_by.is_none() {
                     replacement_spec.spawned_by = snapshot.spawned_by.clone();
+                }
+                if replacement_spec.fork_job.is_none() {
+                    replacement_spec.fork_job = snapshot.fork_job.clone();
                 }
         self.customize_spawn_spec(
             super::handle::SpawnSource::Respawn,

@@ -969,6 +969,10 @@ pub struct MemberSpawnedEvent {
     /// field decode it as absent, which grants nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<AgentIdentity>,
+    /// Durable record of the fork_off job this member was created to run,
+    /// used to re-deliver its outcome after a restart. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_job: Option<crate::runtime::ForkJobRecord>,
     /// Bridge-internal member reference needed for event replay.
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
@@ -1021,6 +1025,7 @@ impl MemberSpawnedEvent {
             effective_model_override: None,
             continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
             spawned_by: None,
+            fork_job: None,
             bridge_member_ref: None,
             identity_intent_authority_digest: None,
             placed_spawn_id: None,

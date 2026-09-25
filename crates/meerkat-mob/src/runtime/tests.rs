@@ -21450,6 +21450,7 @@ async fn forker_without_manage_scope_observes_and_retires_only_its_own_children(
             256,
             meerkat_core::DurableForkSourceAdmission::CallerTurn,
             None,
+            None,
         )
         .await
         .expect("caller-turn fork");
@@ -21572,6 +21573,7 @@ async fn caller_turn_fork_child(
             256,
             meerkat_core::DurableForkSourceAdmission::CallerTurn,
             max_run,
+            None,
         )
         .await
         .expect("caller-turn fork");
@@ -22637,6 +22639,7 @@ async fn fork_member_then_run_detached_returns_promptly_and_child_outlives_the_c
             256,
             meerkat_core::DurableForkSourceAdmission::Quiescent,
             None,
+            None,
         ),
     )
     .await
@@ -22671,6 +22674,7 @@ async fn fork_member_then_run_detached_autokill_cancels_and_retires_the_child() 
             256,
             meerkat_core::DurableForkSourceAdmission::Quiescent,
             Some(std::time::Duration::from_millis(200)),
+            None,
         )
         .await
         .expect("detached fork admits the child's turn");
@@ -22714,6 +22718,7 @@ async fn fork_member_then_run_detached_reports_completion_and_records_the_spawne
             "fork_child_result",
             256,
             meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
             None,
         )
         .await

@@ -167,6 +167,7 @@ mod tests {
                 effective_profile_override: None,
                 effective_model_override: None,
                 spawned_by: None,
+                fork_job: None,
                 direct_member_fence: None,
             },
             retiring_comms: None,

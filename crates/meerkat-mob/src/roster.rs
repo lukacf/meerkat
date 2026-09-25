@@ -126,6 +126,10 @@ pub struct RosterEntry {
     /// Grants that spawner status and retirement over this member only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<AgentIdentity>,
+    /// Durable record of the fork_off job this member was created to run,
+    /// used to re-deliver its outcome after a restart. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_job: Option<crate::runtime::ForkJobRecord>,
 }
 
 /// Directed projection presence state for an undirected peer edge.
@@ -146,6 +150,7 @@ pub(crate) struct RosterAddEntry {
     pub(crate) effective_profile_override: Option<crate::profile::Profile>,
     pub(crate) effective_model_override: Option<String>,
     pub(crate) spawned_by: Option<AgentIdentity>,
+    pub(crate) fork_job: Option<crate::runtime::ForkJobRecord>,
 }
 
 /// Tracks active members and their wiring in a mob.
@@ -212,6 +217,7 @@ impl Roster {
                     effective_profile_override: member_spawned.effective_profile_override.clone(),
                     effective_model_override: member_spawned.effective_model_override.clone(),
                     spawned_by: member_spawned.spawned_by.clone(),
+                    fork_job: member_spawned.fork_job.clone(),
                 });
             }
             // Retirement admission is not roster terminality. Keep the spawn
@@ -367,6 +373,7 @@ impl Roster {
                     effective_profile_override: entry.effective_profile_override,
                     effective_model_override: entry.effective_model_override,
                     spawned_by: entry.spawned_by,
+                    fork_job: entry.fork_job,
                 },
             )
             .is_none()
@@ -704,6 +711,7 @@ mod tests {
             effective_profile_override: None,
             effective_model_override: None,
             spawned_by: None,
+            fork_job: None,
         }
     }
 
@@ -1283,6 +1291,7 @@ mod tests {
             effective_profile_override: None,
             effective_model_override: None,
             spawned_by: None,
+            fork_job: None,
             direct_member_fence: None,
         };
         let json = serde_json::to_string(&entry).unwrap();

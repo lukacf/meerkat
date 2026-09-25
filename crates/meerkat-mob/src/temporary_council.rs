@@ -137,7 +137,7 @@ pub enum TemporaryCouncilIdentityError {
     NonCanonical,
     /// The identity carried a character outside the canonical alphabet.
     #[error(
-        "temporary council id may only contain ASCII alphanumerics, '-', '_', '.', or ':' (found {found:?})"
+        "temporary council id may only contain ASCII alphanumerics, '-', or '_' (found {found:?})"
     )]
     IllegalCharacter {
         /// The first rejected character.
@@ -156,8 +156,31 @@ pub struct TemporaryCouncilId(String);
 
 impl TemporaryCouncilId {
     /// Validate and wrap a caller-supplied council identity.
+    ///
+    /// The id is embedded verbatim in the temporary mob id and therefore in
+    /// every participant's comms name, whose components allow only ASCII
+    /// alphanumerics, '-' and '_'. Accepting anything else would admit a
+    /// council that can never seat a member, so construction refuses it.
     pub fn new(raw: impl AsRef<str>) -> Result<Self, TemporaryCouncilIdentityError> {
-        let raw = raw.as_ref();
+        Self::validate(raw.as_ref(), |c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_')
+        })
+    }
+
+    /// Decode a stored identity. Records written before the alphabet was
+    /// tightened may contain '.' or ':'; they still load (they are sealed
+    /// history whose councils could not seat), but no new council is
+    /// admitted under such an id.
+    fn decode_stored(raw: &str) -> Result<Self, TemporaryCouncilIdentityError> {
+        Self::validate(raw, |c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')
+        })
+    }
+
+    fn validate(
+        raw: &str,
+        allowed: impl Fn(char) -> bool,
+    ) -> Result<Self, TemporaryCouncilIdentityError> {
         if raw.is_empty() {
             return Err(TemporaryCouncilIdentityError::Empty);
         }
@@ -167,10 +190,7 @@ impl TemporaryCouncilId {
         if raw.len() > MAX_TEMPORARY_COUNCIL_ID_LEN {
             return Err(TemporaryCouncilIdentityError::TooLong);
         }
-        if let Some(found) = raw
-            .chars()
-            .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')))
-        {
+        if let Some(found) = raw.chars().find(|c| !allowed(*c)) {
             return Err(TemporaryCouncilIdentityError::IllegalCharacter { found });
         }
         Ok(Self(raw.to_owned()))
@@ -230,7 +250,7 @@ impl<'de> Deserialize<'de> for TemporaryCouncilId {
         D: Deserializer<'de>,
     {
         let raw = String::deserialize(deserializer)?;
-        Self::new(raw).map_err(serde::de::Error::custom)
+        Self::decode_stored(&raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -683,6 +703,21 @@ impl TemporaryCouncilExitReason {
     pub const fn is_complete(&self) -> bool {
         matches!(self, Self::Completed)
     }
+
+    /// Whether the council failed rather than ending within its bounds.
+    ///
+    /// Bound-limited ends (`MaxExchangesReached`, `DeadlineExceeded`) still
+    /// carry a usable partial result and are not failures.
+    #[must_use]
+    pub const fn is_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::ParticipantSeatingFailed { .. }
+                | Self::WiringIncomplete { .. }
+                | Self::ExchangeFailed { .. }
+                | Self::CoordinatorInterrupted
+        )
+    }
 }
 
 /// Immutable result of one temporary council.
@@ -815,8 +850,20 @@ mod tests {
             TemporaryCouncilId::new("has/slash"),
             Err(TemporaryCouncilIdentityError::IllegalCharacter { found: '/' })
         );
-        let ok = TemporaryCouncilId::new("council.A-1_2:x").expect("canonical id");
-        assert_eq!(ok.as_str(), "council.A-1_2:x");
+        assert_eq!(
+            TemporaryCouncilId::new("agent:0f1e"),
+            Err(TemporaryCouncilIdentityError::IllegalCharacter { found: ':' }),
+            "a council id must yield a comms-safe temporary mob id"
+        );
+        assert_eq!(
+            TemporaryCouncilId::new("council.v2"),
+            Err(TemporaryCouncilIdentityError::IllegalCharacter { found: '.' })
+        );
+        let legacy: TemporaryCouncilId =
+            serde_json::from_str("\"agent:0f1e\"").expect("stored legacy ids still decode");
+        assert_eq!(legacy.as_str(), "agent:0f1e");
+        let ok = TemporaryCouncilId::new("council-A-1_2-x").expect("canonical id");
+        assert_eq!(ok.as_str(), "council-A-1_2-x");
     }
 
     #[test]

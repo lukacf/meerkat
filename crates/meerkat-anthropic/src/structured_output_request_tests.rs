@@ -761,3 +761,144 @@ mod recorded {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bounded schemas: the section shows the validation schema, the slot is lowered
+// ---------------------------------------------------------------------------
+
+/// A review schema with numeric bounds Anthropic's slot rejects and a string
+/// format it accepts.
+fn bounded_review_schema() -> OutputSchema {
+    OutputSchema::new(json!({
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string", "enum": ["approve", "request_changes"]},
+            "comments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "line": {"type": "integer", "minimum": 1},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                    },
+                    "required": ["path", "line", "confidence"]
+                }
+            },
+            "due": {"type": "string", "format": "date-time"}
+        },
+        "required": ["verdict", "comments", "due"]
+    }))
+    .expect("valid schema")
+}
+
+/// Every object key anywhere in `value`.
+fn keys_anywhere(value: &Value, keys: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, item) in map {
+                keys.push(key.clone());
+                keys_anywhere(item, keys);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| keys_anywhere(item, keys)),
+        _ => {}
+    }
+}
+
+/// With a bounded schema the section every request shows is rendered from
+/// the validation schema (`compile_schema`, bounds and format intact), main
+/// turns carry no slot, and only the extraction request's
+/// `output_config.format` carries the lowered slot schema. The validator
+/// validate-first builds (formats asserted) against the validation schema
+/// rejects an out-of-bounds reply and a malformed date-time, which the
+/// lowered slot alone would let through.
+#[test]
+fn bounded_schema_section_keeps_the_bounds_and_only_the_extraction_slot_is_lowered() {
+    let client = AnthropicClient::new("test-key".to_string()).expect("client");
+    let schema = bounded_review_schema();
+    let validation_schema = client.compile_schema(&schema).expect("compile").schema;
+    let section = render_output_schema_instructions(&validation_schema);
+    for shown in [
+        r#""confidence":{"maximum":1,"minimum":0,"type":"number"}"#,
+        r#""line":{"minimum":1,"type":"integer"}"#,
+        r#""due":{"format":"date-time","type":"string"}"#,
+    ] {
+        assert!(
+            section.contains(shown),
+            "the section shows {shown}: {section}"
+        );
+    }
+    let slot_schema = crate::output_format_schema::lower_output_format_schema(&validation_schema);
+    assert_ne!(
+        slot_schema, validation_schema,
+        "the bounded schema is lowered"
+    );
+
+    let tag = AnthropicProviderTag::default();
+    let bodies: Vec<(&str, Value)> = run_requests(&client, &schema, &tag, true)
+        .into_iter()
+        .map(|(label, request)| (label, client.build_request_body(&request).expect("body")))
+        .collect();
+    let expected_system = format!("{SYSTEM_PROMPT}\n\n{section}");
+    for (label, body) in &bodies {
+        assert_eq!(system_text(body), expected_system, "{label}");
+        assert!(
+            !system_text(body).contains("Constraints (JSON Schema)"),
+            "{label}: the section never shows the lowered slot schema"
+        );
+    }
+    for (label, body) in &bodies[..2] {
+        assert!(
+            body.get("output_config")
+                .and_then(|config| config.get("format"))
+                .is_none(),
+            "{label}: main turns carry no native slot"
+        );
+    }
+    let slot = &bodies[2].1["output_config"]["format"]["schema"];
+    assert_eq!(
+        slot, &slot_schema,
+        "the extraction slot is the lowered schema"
+    );
+    let mut keys = Vec::new();
+    keys_anywhere(slot, &mut keys);
+    assert!(
+        !keys.iter().any(|key| key == "minimum" || key == "maximum"),
+        "no bound reaches the slot: {slot}"
+    );
+    assert_eq!(
+        slot["properties"]["due"],
+        json!({"type": "string", "format": "date-time"}),
+        "the slot keeps the format"
+    );
+
+    // Validate-first's validator: the validation schema with formats asserted.
+    let validate_first = jsonschema::options()
+        .should_validate_formats(true)
+        .build(&validation_schema)
+        .expect("validator");
+    let slot_only = jsonschema::options()
+        .should_validate_formats(true)
+        .build(&slot_schema)
+        .expect("slot validator");
+    let in_bounds = json!({"verdict": "approve", "comments": [{"path": "a.py", "line": 3, "confidence": 0.9}], "due": "2026-10-01T12:00:00Z"});
+    let out_of_bounds = json!({"verdict": "approve", "comments": [{"path": "a.py", "line": 3, "confidence": 1.5}], "due": "2026-10-01T12:00:00Z"});
+    let line_zero = json!({"verdict": "approve", "comments": [{"path": "a.py", "line": 0, "confidence": 0.9}], "due": "2026-10-01T12:00:00Z"});
+    let not_a_date_time = json!({"verdict": "approve", "comments": [], "due": "next Friday"});
+    assert!(validate_first.is_valid(&in_bounds));
+    for (label, reply) in [
+        ("confidence above maximum", &out_of_bounds),
+        ("line below minimum", &line_zero),
+        ("due not a date-time", &not_a_date_time),
+    ] {
+        assert!(
+            !validate_first.is_valid(reply),
+            "validation rejects the reply with {label}"
+        );
+    }
+    assert!(
+        slot_only.is_valid(&out_of_bounds) && slot_only.is_valid(&line_zero),
+        "the lowered slot alone accepts out-of-bounds values, so validation must not use it"
+    );
+}

@@ -44,7 +44,10 @@ JSON Schema:
 
 The schema is the one the active provider compiles for validation, as compact
 JSON (Anthropic, for example, shows `additionalProperties: false` on every
-object). The optional schema `name` is not shown. The section is a pure
+object). For Anthropic the section also keeps keywords the native
+`output_config.format` slot cannot take, such as `minimum` and `maximum`: only
+the slot copy on the extraction request is lowered, and validate-first and
+extraction both validate against the full compiled schema. The optional schema `name` is not shown. The section is a pure
 function of the compiled schema, so it is byte-identical across the requests
 of a run and prompt caching is unaffected. It is added to requests only and
 never written into the session transcript. Requests that reference Gemini

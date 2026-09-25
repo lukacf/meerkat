@@ -11,8 +11,9 @@
 //!   validation and goes through the existing retry path.
 //!
 //! They also pin what the lowering leaves in the slot: a string `format`
-//! outside Anthropic's list stays (the reply validator does not assert
-//! `format`, so removing it would leave it enforced nowhere), while a pydantic
+//! outside Anthropic's list stays (the extraction-phase reply validator does
+//! not assert `format`, so removing it would leave the extraction reply
+//! unchecked; validate-first asserts it on the final reply only), while a pydantic
 //! discriminated union loses its `discriminator` annotation and has `oneOf`
 //! widened to `anyOf`.
 
@@ -349,7 +350,7 @@ async fn unsupported_format_stays_in_the_slot_and_discriminated_unions_are_lower
                     "title": "Pet",
                     "description": "Constraints (JSON Schema): {\"discriminator\":{\"mapping\":{\"cat\":\"#/$defs/Cat\",\"dog\":\"#/$defs/Dog\"},\"propertyName\":\"kind\"}}"
                 },
-                // The reply validator does not assert `format`, so the slot
+                // The extraction-phase validator does not assert `format`, so the slot
                 // keeps it and Anthropic rejects it loudly rather than
                 // leaving it enforced nowhere.
                 "ptr": {"type": "string", "format": "json-pointer"}
@@ -360,5 +361,267 @@ async fn unsupported_format_stays_in_the_slot_and_discriminated_unions_are_lower
             "additionalProperties": false
         })),
         "discriminator removed and restated, oneOf widened to anyOf, format kept"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Interplay with schema visibility and validate-first
+// ---------------------------------------------------------------------------
+//
+// Every request of a schema-bearing run shows the model a `<structured_output>`
+// section built from `compile_schema()`, the validation schema, and the final
+// reply is validated against that same schema before any extraction request
+// (with known string formats asserted). The native slot lowering must stay out
+// of both: the section keeps every bound, validate-first enforces every bound,
+// and only the extraction request's `output_config.format` carries the lowered
+// slot schema.
+
+/// The review schema plus a string `format` Anthropic's slot supports
+/// (`date-time`), so the lowering keeps it and validate-first asserts it.
+fn bounded_schema_with_format() -> Value {
+    let mut schema = review_schema();
+    schema["properties"]["due"] = json!({"type": "string", "format": "date-time"});
+    schema["required"] = json!(["verdict", "inline_comments", "due"]);
+    schema
+}
+
+const DUE_IN_BOUNDS: &str = r#"{"verdict":"request_changes","inline_comments":[{"path":"calc.py","line":3,"confidence":0.95}],"due":"2026-10-01T12:00:00Z"}"#;
+const DUE_OUT_OF_BOUNDS: &str = r#"{"verdict":"request_changes","inline_comments":[{"path":"calc.py","line":3,"confidence":1.5}],"due":"2026-10-01T12:00:00Z"}"#;
+const DUE_NOT_A_DATE_TIME: &str = r#"{"verdict":"request_changes","inline_comments":[{"path":"calc.py","line":3,"confidence":0.95}],"due":"next Friday"}"#;
+
+struct InterplayRun {
+    result: meerkat::RunResult,
+    requests: Vec<Value>,
+    origins: Vec<meerkat_core::StructuredOutputOrigin>,
+    /// The section the loop must show: rendered from the validation schema.
+    section: String,
+    validation_schema: Value,
+}
+
+async fn run_interplay(replies: Vec<&str>) -> InterplayRun {
+    use meerkat::LlmClient;
+
+    let (base_url, requests, server) =
+        spawn_messages_stub(replies.into_iter().map(str::to_string).collect()).await;
+    let client = AnthropicClient::builder("test-key".to_string())
+        .base_url(base_url)
+        .build()
+        .expect("anthropic client");
+    let schema = OutputSchema::new(bounded_schema_with_format()).expect("schema");
+    let validation_schema = client.compile_schema(&schema).expect("compile").schema;
+    let section =
+        meerkat_core::structured_output::render_output_schema_instructions(&validation_schema);
+
+    let factory = AgentFactory::new(".rkat/sessions");
+    let llm_adapter = Arc::new(factory.build_llm_adapter(Arc::new(client), MODEL).await);
+    let store_adapter = Arc::new(
+        factory
+            .build_store_adapter(Arc::new(TestSessionStore::new()))
+            .await,
+    );
+    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(EmptyDispatcher);
+    let mut agent = AgentBuilder::new()
+        .model(MODEL)
+        .max_tokens_per_turn(256)
+        .output_schema(schema)
+        .structured_output_retries(1)
+        .build(llm_adapter, tools, store_adapter)
+        .await
+        .expect("agent");
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
+    let result = agent
+        .run_with_events("Review calc.py.".to_string().into(), tx)
+        .await
+        .expect("run completes");
+    server.abort();
+    let mut origins = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let meerkat_core::AgentEvent::ExtractionSucceeded { origin, .. } = event {
+            origins.push(origin);
+        }
+    }
+    let requests = requests.lock().unwrap().clone();
+    InterplayRun {
+        result,
+        requests,
+        origins,
+        section,
+        validation_schema,
+    }
+}
+
+/// The leading system text of a recorded Messages request.
+fn system_text(request: &Value) -> String {
+    match &request["system"] {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block["text"].as_str())
+            .collect(),
+        other => panic!("request without a system prompt: {other}"),
+    }
+}
+
+/// Every object key anywhere in `value`.
+fn keys_anywhere(value: &Value, keys: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, item) in map {
+                keys.push(key.clone());
+                keys_anywhere(item, keys);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| keys_anywhere(item, keys)),
+        _ => {}
+    }
+}
+
+/// The section on every request is the validation schema, bounds and format
+/// intact, and never the lowered slot schema.
+fn assert_section_shows_the_validation_schema(run: &InterplayRun) {
+    for (index, request) in run.requests.iter().enumerate() {
+        let system = system_text(request);
+        assert!(
+            system.ends_with(&run.section),
+            "request {index}: the section closes the system prompt: {system}"
+        );
+        assert_eq!(
+            system
+                .matches(meerkat_core::structured_output::OUTPUT_SCHEMA_INSTRUCTIONS_OPEN)
+                .count(),
+            1,
+            "request {index}: one section"
+        );
+        for shown in [
+            r#""confidence":{"maximum":1,"minimum":0,"type":"number"}"#,
+            r#""line":{"minimum":1,"type":"integer"}"#,
+            r#""due":{"format":"date-time","type":"string"}"#,
+        ] {
+            assert!(
+                system.contains(shown),
+                "request {index}: the section shows {shown}: {system}"
+            );
+        }
+        assert!(
+            !system.contains("Constraints (JSON Schema)"),
+            "request {index}: the section never shows the lowered slot schema"
+        );
+    }
+    let first = system_text(&run.requests[0]);
+    assert!(
+        run.requests
+            .iter()
+            .all(|request| system_text(request) == first),
+        "the section is byte-identical on every request, extraction included"
+    );
+}
+
+/// A final reply inside every bound and format validates first: no extraction
+/// request and no native slot are sent, and the value is the structured output.
+#[tokio::test]
+async fn bounded_schema_final_reply_in_bounds_is_accepted_by_validate_first() {
+    let run = run_interplay(vec![DUE_IN_BOUNDS]).await;
+
+    assert_eq!(
+        run.requests.len(),
+        1,
+        "validate-first sends no extraction request"
+    );
+    assert_eq!(run.result.turns, 1);
+    assert_eq!(
+        run.result.structured_output,
+        Some(serde_json::from_str::<Value>(DUE_IN_BOUNDS).unwrap())
+    );
+    assert!(run.result.extraction_error.is_none());
+    assert_eq!(
+        run.origins,
+        vec![meerkat_core::StructuredOutputOrigin::FinalReply]
+    );
+    assert!(
+        slot_schema(&run.requests[0]).is_none(),
+        "the main turn carries no native schema slot"
+    );
+    assert_section_shows_the_validation_schema(&run);
+}
+
+/// A final reply that breaks `maximum` fails validate-first against the
+/// validation schema. The extraction request then carries the lowered slot
+/// (no bounds, `format` kept) while its section still shows the bounds, and
+/// the in-bounds extraction reply becomes the structured output.
+#[tokio::test]
+async fn bounded_schema_out_of_bounds_final_reply_falls_back_to_the_lowered_slot() {
+    let run = run_interplay(vec![DUE_OUT_OF_BOUNDS, DUE_IN_BOUNDS]).await;
+
+    assert_eq!(
+        run.requests.len(),
+        2,
+        "the out-of-bounds final reply was rejected and one extraction request ran"
+    );
+    assert_eq!(run.result.turns, 2);
+    assert_eq!(
+        run.result.structured_output,
+        Some(serde_json::from_str::<Value>(DUE_IN_BOUNDS).unwrap())
+    );
+    assert_eq!(
+        run.origins,
+        vec![meerkat_core::StructuredOutputOrigin::ExtractionRequest]
+    );
+    assert_eq!(
+        run.result.text, DUE_OUT_OF_BOUNDS,
+        "text stays the primary final reply"
+    );
+    assert_section_shows_the_validation_schema(&run);
+
+    assert!(slot_schema(&run.requests[0]).is_none());
+    let slot = slot_schema(&run.requests[1]).expect("the extraction request carries the slot");
+    let mut expected = expected_slot_schema();
+    expected["properties"]["due"] = json!({"type": "string", "format": "date-time"});
+    expected["required"] = json!(["verdict", "inline_comments", "due"]);
+    assert_eq!(slot, &expected, "the slot carries the lowered schema");
+    assert_ne!(
+        slot, &run.validation_schema,
+        "the slot is not the validation schema the section shows"
+    );
+    let mut keys = Vec::new();
+    keys_anywhere(slot, &mut keys);
+    assert!(
+        !keys.iter().any(|key| key == "minimum" || key == "maximum"),
+        "no bound reaches the slot: {slot}"
+    );
+    let last = run.requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    assert!(
+        last.to_string()
+            .contains("Provide the final output as valid JSON"),
+        "the unchanged extraction prompt closes the extraction request: {last}"
+    );
+}
+
+/// Validate-first still asserts known string formats with a bounded schema: a
+/// reply inside every bound whose `due` is not a date-time falls back to the
+/// extraction request, whose slot keeps `format` (Anthropic supports
+/// `date-time`, and the lowering never removes `format`).
+#[tokio::test]
+async fn bounded_schema_validate_first_still_asserts_formats() {
+    let run = run_interplay(vec![DUE_NOT_A_DATE_TIME, DUE_IN_BOUNDS]).await;
+
+    assert_eq!(run.requests.len(), 2, "the format violation ran extraction");
+    assert_eq!(
+        run.result.structured_output,
+        Some(serde_json::from_str::<Value>(DUE_IN_BOUNDS).unwrap())
+    );
+    assert_eq!(
+        run.origins,
+        vec![meerkat_core::StructuredOutputOrigin::ExtractionRequest]
+    );
+    assert_section_shows_the_validation_schema(&run);
+    let slot = slot_schema(&run.requests[1]).expect("slot");
+    assert_eq!(
+        slot["properties"]["due"],
+        json!({"type": "string", "format": "date-time"})
     );
 }

@@ -312,9 +312,12 @@ them.
   draft (`$schema`, 2020-12 when absent), so a reply that breaks a bound fails
   validation and is retried as before. `discriminator` is the exception: it
   is an OpenAPI annotation that forbids nothing. String `format` values
-  outside Anthropic's list are not lowered, because the validator treats
-  `format` as an annotation and nothing would enforce a removed format; those
-  schemas still fail loudly with HTTP 400. `compile_schema` and
+  outside Anthropic's list are not lowered, because the extraction-phase
+  validator treats `format` as an annotation (validate-first asserts known
+  formats on the final reply only), so nothing would enforce a removed format
+  on the extraction reply; those schemas still fail loudly with HTTP 400. The
+  `<structured_output>` section shows the validation schema, bounds included,
+  never the lowered slot copy. `compile_schema` and
   `schema_warnings` are unchanged: the lowering adds no warning and
   `compat: strict` does not reject the lowered keywords, since validation
   enforces them. Keywords Anthropic accepts (`minLength`, `maxLength`,

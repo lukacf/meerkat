@@ -39,8 +39,11 @@
 //!   object or array members, and unsupported regex features in `pattern`:
 //!   removing them would narrow what the slot accepts.
 //! - `format`. Anthropic rejects string formats outside its list, but the
-//!   validator's default draft (2020-12) treats `format` as an annotation, so
-//!   a format removed from the slot would be enforced nowhere.
+//!   extraction-phase reply validator's default draft (2020-12) treats
+//!   `format` as an annotation, so a format removed from the slot would not
+//!   be enforced on the extraction reply. (Validate-first asserts known
+//!   formats, but only on the final reply of the tool loop, before any
+//!   extraction request.)
 //! - A keyword the declared draft does not define, for example
 //!   `dependentRequired` in a schema whose `$schema` is draft-07: the
 //!   validator ignores it there. A `$schema` the validator does not recognize
@@ -674,9 +677,11 @@ mod tests {
     /// String formats outside Anthropic's list (`json-pointer`, `iri`,
     /// `idn-email`, `regex`, `uri-reference`, `uri-template`,
     /// `idn-hostname`, ...) get HTTP 400 from the slot. They stay in it
-    /// anyway: the reply validator treats `format` as an annotation under its
-    /// default draft, so removing a format would leave it enforced nowhere
-    /// and turn a loud failure into a silent pass.
+    /// anyway: the extraction-phase reply validator treats `format` as an
+    /// annotation under its default draft (validate-first asserts known
+    /// formats, but only on the final reply), so removing a format would
+    /// leave the extraction reply unchecked and turn a loud failure into a
+    /// silent pass.
     #[test]
     fn string_formats_are_never_lowered_because_validation_does_not_assert_them() {
         for format in [
@@ -1206,8 +1211,8 @@ mod tests {
         }
         assert!(removals > 0);
 
-        // The premise for keeping `format`: without a `$schema`, the reply
-        // validator does not assert formats.
+        // The premise for keeping `format`: without a `$schema`, the
+        // extraction-phase reply validator does not assert formats.
         let unasserted = closed(json!({"type": "string", "format": "json-pointer"}));
         assert!(validator(&unasserted).is_valid(&json!({"x": "no-leading-slash"})));
     }

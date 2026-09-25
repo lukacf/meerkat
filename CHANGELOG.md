@@ -284,6 +284,15 @@ them.
   a valid image. Unattested references still fail closed. Existing MobKit
   references are accepted once MobKit's blob adapter implements
   `attest_address`.
+- A mob member could not run again after the runtime retired its idle executor.
+  When a detached operation's completion wake found no pending boundary (the
+  member's own turn had already seen the completion), the runtime retired the
+  idle executor as designed, and the member's next turn failed with
+  `MemberRestoreFailed` ("already has a different operation-registry binding
+  incarnation") because the mob still held the retired registration's ops
+  binding. Warm revival now releases that superseded binding by exact compare
+  before binding the new registration; a binding that changed meanwhile still
+  fails closed. A detached `fork_off` made this the common case.
 - A `council` called without `council_id` failed to seat any participant: the
   derived id was `agent:<uuid>`, and the `:` is illegal in the temporary mob's
   comms names. The derived id is now `agent-<uuid>`.

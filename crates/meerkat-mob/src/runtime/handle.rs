@@ -3556,20 +3556,27 @@ impl Drop for ProvisionedChildRetireOnDrop {
             return;
         };
         let identity = self.identity.clone();
+        let retire = async move {
+            if let Err(error) = handle.retire(identity.clone()).await {
+                tracing::warn!(
+                    member = %identity,
+                    error = %error,
+                    "abandoned bounded child retirement failed; the member remains until retired"
+                );
+            }
+        };
+        // The browser runtime has one local executor and no runtime handle.
+        #[cfg(target_arch = "wasm32")]
+        {
+            tokio::spawn(retire);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
-                runtime.spawn(async move {
-                    if let Err(error) = handle.retire(identity.clone()).await {
-                        tracing::warn!(
-                            member = %identity,
-                            error = %error,
-                            "abandoned bounded child retirement failed; the member remains until retired"
-                        );
-                    }
-                });
+                runtime.spawn(retire);
             }
             Err(_) => tracing::warn!(
-                member = %identity,
+                member = %self.identity,
                 "abandoned bounded child could not be retired: no async runtime at drop"
             ),
         }
@@ -13015,8 +13022,8 @@ impl MobHandle {
                 job_id: job.job_id,
                 owner_session_id: job.owner_session_id,
                 started_at_ms: u64::try_from(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
+                    meerkat_core::time_compat::SystemTime::now()
+                        .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis(),
                 )

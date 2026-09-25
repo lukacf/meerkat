@@ -23,6 +23,8 @@ use meerkat_mob::{AgentIdentity, ForkJobRecord, MemberRunState, MobHandle, MobId
 
 use crate::MobMcpState;
 use crate::agent_tools::{ForkOffCompletion, ForkOffCompletionStatus, TOOL_FORK_OFF};
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 
 /// What the re-link pass did for one child.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,8 +51,8 @@ const WATCH_INTERVAL: Duration = Duration::from_millis(500);
 
 fn now_ms() -> u64 {
     u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        meerkat_core::time_compat::SystemTime::now()
+            .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis(),
     )

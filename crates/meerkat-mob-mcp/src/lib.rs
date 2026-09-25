@@ -562,8 +562,8 @@ impl MobMcpState {
             // is declared unable to deliver, never silently mismatched.
             detached_completion_delivery: std::sync::atomic::AtomicBool::new(can_deliver_detached),
             created_at_ms: u64::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                SystemTime::now()
+                    .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis(),
             )

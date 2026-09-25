@@ -1485,6 +1485,19 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Ordinary", "WorkgraphAttention"],
             ),
             NamedTypeBinding::string_enum(
+                "AdmissionTurnAppendShape",
+                &["FollowUpOnly", "Untyped", "InTurnEligible"],
+            ),
+            NamedTypeBinding::string_enum(
+                "LiveBoundaryDelivery",
+                &["FollowUpOnly", "RequestOnly", "DurableAppend"],
+            ),
+            NamedTypeBinding::string_enum("LiveBoundaryJoinPhase", &["Published", "Retained"]),
+            NamedTypeBinding::string_enum(
+                "LiveBoundaryJoinObservation",
+                &["NotApplied", "AppliedRetained", "AppliedDiscarded"],
+            ),
+            NamedTypeBinding::string_enum(
                 "InputDurabilityKind",
                 &["Durable", "Ephemeral", "Derived", "Missing"],
             ),
@@ -2819,6 +2832,7 @@ runtime_internal_inputs!(
         InteractionStreamCompleted,
         InteractionStreamExpired,
         InteractionStreamReserved,
+        JoinLiveBoundaryDurableAppend,
         LiveBoundaryUnavailable,
         LlmReturnedTerminal,
         LlmReturnedToolCalls,
@@ -2986,6 +3000,7 @@ runtime_internal_inputs!(
         ResolveInputPublicLifecycle,
         ResolveInputPublicTerminalOutcome,
         ResolveLiveBoundaryContextReceipt,
+        ResolveLiveBoundaryDurableAppendJoin,
         ResolveLiveWebrtcAnswerAdmission,
         ResolveLiveWebsocketTokenAdmission,
         ResolveMobOperatorCreateAuthority,

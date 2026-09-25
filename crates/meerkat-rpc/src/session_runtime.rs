@@ -1630,14 +1630,14 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
-    async fn prepare_transient_turn_context_for_active_turn(
+    async fn prepare_turn_boundary_delivery_for_active_turn(
         &self,
         session_id: &SessionId,
         expected_run_id: &RunId,
-        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<meerkat_core::CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
         self.service
-            .prepare_live_transient_turn_context_boundary(session_id, expected_run_id, contexts)
+            .prepare_live_transient_turn_context_boundary(session_id, expected_run_id, delivery)
             .await
     }
 
@@ -4191,13 +4191,13 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         expected_run_id: &RunId,
-        contexts: Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<
         meerkat_core::lifecycle::CoreBoundaryStageOutput,
         meerkat_core::lifecycle::CoreBoundaryStageError,
     > {
         self.service
-            .prepare_live_transient_turn_context_boundary(session_id, expected_run_id, contexts)
+            .prepare_live_transient_turn_context_boundary(session_id, expected_run_id, delivery)
             .await
     }
 

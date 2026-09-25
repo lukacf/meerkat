@@ -1713,6 +1713,10 @@
         ],
         "type": "string"
       },
+      "InputId": {
+        "description": "Opaque identifier for an input accepted by the runtime layer.\n\nCore passes this through in `contributing_input_ids` on receipts and events\nbut NEVER interprets it. The runtime layer creates and manages these.",
+        "type": "string"
+      },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
         "oneOf": [
@@ -2992,6 +2996,10 @@
           "provider",
           "meerkat_projection"
         ],
+        "type": "string"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
         "type": "string"
       },
       "RunInput": {
@@ -5432,6 +5440,41 @@
           "error"
         ],
         "type": "object"
+      },
+      {
+        "description": "A durable runtime input joined the running turn at a cooperative model\nboundary: its typed conversation appends (for example a background\njob's persisted system notice delivered as a Steer) were written into\nthe session transcript before the next model request of the same run.\n\nEmitted once, after the append is applied, so live streams and consoles\nsee a mid-turn append without waiting for history. The appends commit\nwith the run like tool results. If the image that carried them is later\ndiscarded (an uncommitted persistent run, or a compaction rollback),\nthe runtime redelivers the input in exactly one follow-up turn, so\nconsumers should reconcile this event against the run terminal and the\ncommitted transcript. Request-only steers never emit it.",
+        "properties": {
+          "append_count": {
+            "description": "Number of transcript rows appended.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content": {
+            "$ref": "#/$defs/ContentInput",
+            "description": "Model projection of the appended transcript rows."
+          },
+          "input_id": {
+            "$ref": "#/$defs/InputId",
+            "description": "The runtime input that carried the appends."
+          },
+          "run_id": {
+            "$ref": "#/$defs/RunId",
+            "description": "The running turn the appends joined."
+          },
+          "type": {
+            "const": "boundary_append_applied",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "run_id",
+          "input_id",
+          "content",
+          "append_count"
+        ],
+        "type": "object"
       }
     ],
     "title": "AgentEvent"
@@ -7012,6 +7055,41 @@
               "error"
             ],
             "type": "object"
+          },
+          {
+            "description": "A durable runtime input joined the running turn at a cooperative model\nboundary: its typed conversation appends (for example a background\njob's persisted system notice delivered as a Steer) were written into\nthe session transcript before the next model request of the same run.\n\nEmitted once, after the append is applied, so live streams and consoles\nsee a mid-turn append without waiting for history. The appends commit\nwith the run like tool results. If the image that carried them is later\ndiscarded (an uncommitted persistent run, or a compaction rollback),\nthe runtime redelivers the input in exactly one follow-up turn, so\nconsumers should reconcile this event against the run terminal and the\ncommitted transcript. Request-only steers never emit it.",
+            "properties": {
+              "append_count": {
+                "description": "Number of transcript rows appended.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "content": {
+                "$ref": "#/$defs/ContentInput",
+                "description": "Model projection of the appended transcript rows."
+              },
+              "input_id": {
+                "$ref": "#/$defs/InputId",
+                "description": "The runtime input that carried the appends."
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The running turn the appends joined."
+              },
+              "type": {
+                "const": "boundary_append_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id",
+              "input_id",
+              "content",
+              "append_count"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -8325,6 +8403,10 @@
         ],
         "type": "string"
       },
+      "InputId": {
+        "description": "Opaque identifier for an input accepted by the runtime layer.\n\nCore passes this through in `contributing_input_ids` on receipts and events\nbut NEVER interprets it. The runtime layer creates and manages these.",
+        "type": "string"
+      },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
         "oneOf": [
@@ -9604,6 +9686,10 @@
           "provider",
           "meerkat_projection"
         ],
+        "type": "string"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
         "type": "string"
       },
       "RunInput": {
@@ -10980,7 +11066,8 @@
       "background_job_completed",
       "transcript_rewrite_committed",
       "peer_content_ingested",
-      "provider_cache_breakpoints_discarded"
+      "provider_cache_breakpoints_discarded",
+      "boundary_append_applied"
     ],
     "known_payloads": {
       "tool_config_changed": {

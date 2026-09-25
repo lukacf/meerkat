@@ -107,6 +107,84 @@ them.
   `budget_exhausted` earlier than before. A backend that omits `total_tokens`
   is read as OpenAI's convention (reasoning inside completion).
 
+- Durable in-turn steer delivery (meerkat-core, meerkat-session, meerkat-mob,
+  meerkat-runtime, and the generated `MeerkatMachine`):
+  - `meerkat_core::lifecycle::CoreExecutorBoundaryHandle::prepare_transient_turn_context_at_boundary(&RunId, Vec<TurnRequestContext>)`
+    is replaced by `prepare_turn_boundary_delivery(&RunId, TurnBoundaryDelivery)`
+    (still defaulted to `Unavailable`). Every implementor must rename the
+    method; the forwarders in meerkat (`PersistentRuntimeBoundaryHandle`),
+    meerkat-mob (`MobSessionRuntimeBoundaryHandle`), meerkat-rpc
+    (`SessionRuntimeBoundaryHandle`, `MobRpcRuntimeBoundaryHandle`),
+    meerkat-rest, meerkat-mcp-server and rkat are updated.
+  - `meerkat_core::TransientTurnContextStateHandle::prepare_active_turn_boundary`
+    takes a `TurnBoundaryDelivery` instead of `Vec<TurnRequestContext>`.
+  - `meerkat_session::EphemeralSessionService::prepare_transient_turn_context_for_active_turn`
+    and `meerkat_session::PersistentSessionService::prepare_live_transient_turn_context_boundary`
+    take a `TurnBoundaryDelivery` instead of `Vec<TurnRequestContext>`.
+  - `meerkat_mob::MobSessionService::prepare_transient_turn_context_for_active_turn`
+    is renamed `prepare_turn_boundary_delivery_for_active_turn` and takes a
+    `TurnBoundaryDelivery`. Session-service decorators (MobKit's included)
+    must forward the renamed method.
+  - `meerkat_core::AgentEvent` gains the variant `BoundaryAppendApplied`
+    (appended after the released variants; the enum is `#[non_exhaustive]`).
+  - Generated `MeerkatMachine` (meerkat-machine-schema, meerkat-machine-kernels,
+    meerkat-runtime `meerkat_machine::dsl`): the input `ResolveAdmissionPlan`
+    gains the field `turn_append_shape`; the inputs
+    `JoinLiveBoundaryDurableAppend { run_id, input_id }` and
+    `ResolveLiveBoundaryDurableAppendJoin { run_id, input_id, lane, observation }`
+    are added (`MeerkatMachineInput::*`, `MeerkatMachineInputVariant::*`, and
+    kernel `InputKind::*` discriminants move); the transitions
+    `JoinLiveBoundaryDurableAppendRunning`,
+    `ResolveLiveBoundaryDurableAppendJoinNotAppliedRunning`,
+    `ResolveLiveBoundaryDurableAppendJoinAppliedDiscardedRunning` and
+    `ResolveLiveBoundaryDurableAppendJoinAppliedRetainedRunning` are added
+    (`TransitionId::*` discriminants move); the effects
+    `MeerkatMachineEffect::AdmissionResolved` and
+    `MeerkatMachineEffect::LiveBoundaryUnavailableNormalized` gain the field
+    `live_boundary_delivery` (struct-literal and exhaustive-pattern users must
+    add it); `MeerkatMachineState` gains the fields
+    `admission_authorized_live_boundary_delivery`,
+    `input_live_boundary_delivery`, `input_live_boundary_join_run` and
+    `input_live_boundary_join_phase`; the enums `AdmissionTurnAppendShape`,
+    `LiveBoundaryDelivery`, `LiveBoundaryJoinPhase` and
+    `LiveBoundaryJoinObservation` are added; the invariants
+    `live_boundary_delivery_only_for_queued_steer`,
+    `live_boundary_join_maps_lockstep`,
+    `live_boundary_join_bound_to_current_run`,
+    `live_boundary_join_is_unlaned_contributor`,
+    `live_boundary_published_join_is_recoverable` and
+    `live_boundary_retained_join_is_consumable` are added.
+  - Kernel vocabulary for the item above (`meerkat_machine_kernels`,
+    `generated::meerkat`): the kernel `Input` enum gains
+    `Input::JoinLiveBoundaryDurableAppend` and
+    `Input::ResolveLiveBoundaryDurableAppendJoin` (exhaustive matches must add
+    the arms; `InputKind` gains the same two variants); the kernel `State`
+    struct gains the fields `admission_authorized_live_boundary_delivery`,
+    `input_live_boundary_delivery`, `input_live_boundary_join_run` and
+    `input_live_boundary_join_phase` (struct literals must name them); the
+    kernel `ResolveAdmissionPlan` input gains `turn_append_shape` and the
+    kernel `LiveBoundaryUnavailableNormalized` effect gains
+    `live_boundary_delivery`.
+  - Behaviour-only: a Steer prompt carrying typed conversation appends whose
+    roles are all `system_notice`, `user` or `injected_context` is now written
+    into the RUNNING turn's transcript at the next cooperative model boundary
+    and committed with that run, instead of waiting for a follow-up turn; its
+    completion resolves with the run terminal. A Steer prompt carrying a
+    `system` (or any other) typed append is never delivered in-turn.
+  - Behaviour-only: a Steer prompt with non-empty text plus typed appends is no
+    longer request-only; it is delivered durably (in-turn or by one follow-up
+    turn) with all of its rows. Previously the typed appends were dropped.
+  - Behaviour-only: guards tightened on existing generated transitions:
+    `ChangeLane` now requires a queued input in a work lane;
+    `ConsumeInput`, `MarkApplied` and `MarkAppliedPendingConsumption` refuse an
+    unresolved durable join; `AbandonInput` refuses a retained join;
+    `RollbackStaged`, `ResolveStagedRollback*`, `SupersedeInput`,
+    `CoalesceInput` and `ConsumeOnAccept` refuse a joined input; `Commit*`
+    requires every join of the run to be retained, and `Fail*`, `CancelRun*`
+    and `RollbackRun*` require every join to be retained and applied;
+    `StartConversationRunRunning` and
+    `StartImmediateAppendRunning` refuse while a join exists.
+
 ### Added
 
 - Cumulative usage reports cached input, cache writes and reasoning. The run
@@ -138,6 +216,37 @@ them.
   structured-output extraction is accounted on the event stream.
 - `meerkat_core::usage_summary` and `turn_usage_summary` format the one-line
   token summaries `rkat run --verbose` prints.
+
+- Durable in-turn steer. A Steer input that carries typed conversation appends
+  (for example the persisted `BackgroundJob` system notice of a detached
+  `fork_off` or council completion) joins the running turn at its next
+  cooperative model boundary: the rows land after that boundary's tool results,
+  every later model request of the run sees them, and they commit with the run
+  like tool results. A durable steer that arrives while the model streams waits
+  for the next boundary of the same run; if the run ends first, it takes exactly
+  one follow-up turn with the same rows. Exactly-once is machine-owned: the
+  input joins the run before its payload is published (persistent runtimes make
+  the binding durable first), and the run terminal consumes it only when the
+  append survives in the session image the run commits or keeps, otherwise it
+  returns to the head of its lane. See
+  [Request-only and durable steer](docs/reference/session-contracts.mdx#request-only-and-durable-steer).
+- `meerkat_core::lifecycle::boundary_delivery` (re-exported from `meerkat_core`):
+  `TurnBoundaryDelivery`, `DurableTurnBoundaryAppends` (with
+  `DurableTurnBoundaryAppendsError`), `CoreBoundaryDeliveryWitness` and
+  `CoreBoundaryDeliveryOutcome`; `CoreBoundaryStageOutput::delivery_witness`,
+  `PreparedTransientTurnContextBoundary::delivery_witness`,
+  `TransientTurnContextStateHandle::discard_uncommitted_durable_deliveries`
+  and `EphemeralSessionService::discard_uncommitted_boundary_deliveries`.
+- The `boundary_append_applied` event (`AgentEvent::BoundaryAppendApplied
+  { run_id, input_id, content, append_count }`) announces a durable append the
+  runner wrote into the running turn, so SSE clients and consoles see it live.
+  It is in the contracts event catalog and the generated SDK event inventories.
+- `meerkat_runtime::ingress_types::LiveBoundaryDeliveryClass` and
+  `RuntimeInputSemantics::live_boundary_delivery` expose the machine-owned
+  delivery class of an admitted live-interrupt input.
+- A hand-written bounded TLC audit of the durable-steer input lifecycle,
+  `specs/machines/meerkat_machine/durable_in_turn_steer_audit.tla` with
+  `audit.cfg`.
 
 ### Changed
 
@@ -214,6 +323,15 @@ them.
   evidence, since they describe a system prompt the transcript does not
   contain. `meerkat_core::structured_output` and
   `meerkat_core::StructuredOutputOrigin` are new public API.
+
+- Request-only steers are unaffected by a waiting durable steer: the model
+  boundary keeps a separate slot per delivery class and FIFO arbitration runs
+  per class, so a request-only steer admitted while a durable steer waits still
+  lands in the running turn under the old rules.
+- A failed or cancelled run on a persistent session now reports its
+  uncommitted image to the boundary coordinator, and an ephemeral session's
+  compaction rollback discards the durable appends it rolls back, so the run
+  terminal redelivers exactly those inputs once.
 
 ### Fixed
 

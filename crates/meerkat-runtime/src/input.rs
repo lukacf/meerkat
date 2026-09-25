@@ -1293,6 +1293,57 @@ pub(crate) fn runtime_input_projection_for_machine_batch(
     runtime_input_projection(input)
 }
 
+/// Typed shape of `input`'s runtime-authored transcript appends, reported to
+/// `ResolveAdmissionPlan`. This reads structure only (the variant and each
+/// append's typed role and identity slot), never content.
+///
+/// A prompt whose typed appends are all of a kind every provider accepts in
+/// the middle of a conversation (`SystemNotice`, `User`, `InjectedContext`)
+/// and carry no append identity is `InTurnEligible`. A prompt with any other
+/// typed append (a `System` row, or a forged `Assistant`/`Tool` row) is
+/// `FollowUpOnly`. Every other input is `Untyped`. Prompts are never directed
+/// interactions, so a durable in-turn delivery never owns a directed terminal.
+pub(crate) fn admission_turn_append_shape(
+    input: &Input,
+) -> crate::meerkat_machine::dsl::AdmissionTurnAppendShape {
+    use crate::meerkat_machine::dsl::AdmissionTurnAppendShape;
+    match input {
+        Input::Prompt(prompt) if !prompt.typed_turn_appends.is_empty() => {
+            let in_turn_eligible = prompt.typed_turn_appends.iter().all(|append| {
+                append.identity.is_none()
+                    && matches!(
+                        append.role,
+                        ConversationAppendRole::SystemNotice
+                            | ConversationAppendRole::User
+                            | ConversationAppendRole::InjectedContext
+                    )
+            });
+            if in_turn_eligible {
+                AdmissionTurnAppendShape::InTurnEligible
+            } else {
+                AdmissionTurnAppendShape::FollowUpOnly
+            }
+        }
+        _ => AdmissionTurnAppendShape::Untyped,
+    }
+}
+
+/// The exact conversation appends a durable in-turn delivery writes for one
+/// admitted input: the same list, in the same order, that its fallback
+/// follow-up turn would write (`injected context ++ main append ++ typed
+/// appends`), so both delivery paths produce the same transcript rows.
+pub(crate) fn projection_durable_boundary_appends(
+    projection: &crate::ingress_types::RuntimeInputProjection,
+) -> Vec<ConversationAppend> {
+    projection
+        .injected_context_appends
+        .iter()
+        .cloned()
+        .chain(projection.append.clone())
+        .chain(projection.additional_appends.iter().cloned())
+        .collect()
+}
+
 /// Project one exact machine-admitted live steer into request-only user
 /// context. Input-store persistence remains the retry/idempotency owner; this
 /// clone-cheap value is only the provider-request projection.
@@ -1308,6 +1359,15 @@ pub(crate) fn projection_to_transient_turn_context(
     if !semantics.live_interrupt_required
         || semantics.peer_response_terminal_apply_intent.is_some()
         || semantics.execution_handling_mode == Some(HandlingMode::Queue)
+    {
+        return None;
+    }
+    // Only the request-only class projects into a single model request. A
+    // durable-class input writes its full typed projection (in-turn or in its
+    // follow-up turn) and a follow-up-only input always takes the follow-up,
+    // so neither may drop its typed appends into request-only text.
+    if let Some(class) = semantics.live_boundary_delivery
+        && class != crate::ingress_types::LiveBoundaryDeliveryClass::RequestOnly
     {
         return None;
     }
@@ -1371,6 +1431,7 @@ fn live_steer_semantics() -> crate::ingress_types::RuntimeInputSemantics {
         execution_handling_mode: None,
         peer_response_terminal_apply_intent: None,
         live_interrupt_required: true,
+        live_boundary_delivery: Some(crate::ingress_types::LiveBoundaryDeliveryClass::RequestOnly),
     }
 }
 
@@ -1384,6 +1445,7 @@ fn terminal_semantics() -> crate::ingress_types::RuntimeInputSemantics {
             meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContentAndRun,
         ),
         live_interrupt_required: true,
+        live_boundary_delivery: Some(crate::ingress_types::LiveBoundaryDeliveryClass::RequestOnly),
     }
 }
 
@@ -1988,6 +2050,7 @@ mod tests {
                 execution_handling_mode: None,
                 peer_response_terminal_apply_intent: None,
                 live_interrupt_required: false,
+                live_boundary_delivery: None,
             },
         );
         assert_eq!(
@@ -2038,6 +2101,116 @@ mod tests {
         assert_eq!(
             projection_conversation_appends(&projection, idle_semantics).len(),
             1
+        );
+    }
+
+    fn durable_steer_semantics() -> crate::ingress_types::RuntimeInputSemantics {
+        crate::ingress_types::RuntimeInputSemantics {
+            live_boundary_delivery: Some(
+                crate::ingress_types::LiveBoundaryDeliveryClass::DurableAppend,
+            ),
+            ..live_steer_semantics()
+        }
+    }
+
+    fn typed_notice_steer_prompt(text: &str) -> Input {
+        Input::Prompt(PromptInput {
+            header: make_header(),
+            content: ContentInput::Text(text.to_string()),
+            typed_turn_appends: vec![typed_runtime_notice_append("job finished")],
+            injected_context: vec![ContentInput::Text("ambient".to_string())],
+            turn_metadata: None,
+        })
+    }
+
+    #[test]
+    fn durable_class_never_projects_request_only_context() {
+        let input = typed_notice_steer_prompt("");
+        let projection = runtime_input_projection(&input);
+        assert!(
+            projection_to_transient_turn_context(&projection, durable_steer_semantics()).is_none()
+        );
+        let follow_up_only = crate::ingress_types::RuntimeInputSemantics {
+            live_boundary_delivery: Some(
+                crate::ingress_types::LiveBoundaryDeliveryClass::FollowUpOnly,
+            ),
+            ..live_steer_semantics()
+        };
+        assert!(projection_to_transient_turn_context(&projection, follow_up_only).is_none());
+    }
+
+    #[test]
+    fn durable_boundary_appends_equal_the_follow_up_transcript_appends() {
+        for text in ["", "please also look at this"] {
+            let input = typed_notice_steer_prompt(text);
+            let projection = runtime_input_projection(&input);
+            let durable = projection_durable_boundary_appends(&projection);
+            assert_eq!(
+                durable,
+                projection_conversation_appends(&projection, durable_steer_semantics()),
+                "the in-turn delivery writes exactly the rows its follow-up would write"
+            );
+            let roles = durable.iter().map(|append| append.role).collect::<Vec<_>>();
+            let mut expected = vec![ConversationAppendRole::InjectedContext];
+            if !text.is_empty() {
+                expected.push(ConversationAppendRole::User);
+            }
+            expected.push(ConversationAppendRole::SystemNotice);
+            assert_eq!(roles, expected, "no append is dropped for text {text:?}");
+        }
+    }
+
+    #[test]
+    fn text_plus_typed_steer_prompt_is_durable_and_keeps_every_append() {
+        let mut header = make_header();
+        header.source = InputOrigin::Operator;
+        let input = Input::Prompt(PromptInput {
+            header,
+            content: ContentInput::Text("look at the result".to_string()),
+            typed_turn_appends: vec![typed_runtime_notice_append("job finished")],
+            injected_context: Vec::new(),
+            turn_metadata: Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(HandlingMode::Steer),
+                    ..Default::default()
+                },
+            ),
+        });
+        let semantics = crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(
+            &input, false,
+        )
+        .expect("running steer admission");
+        assert_eq!(
+            semantics.live_boundary_delivery(),
+            Some(crate::ingress_types::LiveBoundaryDeliveryClass::DurableAppend)
+        );
+        let projection = runtime_input_projection(&input);
+        assert!(projection_to_transient_turn_context(&projection, semantics).is_none());
+        assert_eq!(
+            projection_conversation_appends(&projection, semantics).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn admission_turn_append_shape_reads_only_typed_roles() {
+        use crate::meerkat_machine::dsl::AdmissionTurnAppendShape;
+        assert_eq!(
+            admission_turn_append_shape(&typed_notice_steer_prompt("")),
+            AdmissionTurnAppendShape::InTurnEligible
+        );
+        let mut system = typed_notice_steer_prompt("");
+        if let Input::Prompt(prompt) = &mut system {
+            prompt.typed_turn_appends[0].role = ConversationAppendRole::System;
+        }
+        assert_eq!(
+            admission_turn_append_shape(&system),
+            AdmissionTurnAppendShape::FollowUpOnly
+        );
+        let plain = Input::Prompt(PromptInput::new("plain", None));
+        assert_eq!(
+            admission_turn_append_shape(&plain),
+            AdmissionTurnAppendShape::Untyped
         );
     }
 

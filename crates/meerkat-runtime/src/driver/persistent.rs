@@ -2518,6 +2518,173 @@ impl PersistentRuntimeDriver {
         Ok(result)
     }
 
+    /// Join one durable-class Steer input to the current run and make its
+    /// Staged binding (`last_run_id`) durable BEFORE the caller publishes the
+    /// payload to the parked runner. A generated guard refusal changes
+    /// nothing, in memory or in the store. A store failure never abandons the
+    /// input: the compatibility profile restores the Queued checkpoint, and a
+    /// durability-tracked profile requires a reload from the store, where the
+    /// row is still Queued.
+    pub(crate) async fn machine_join_live_boundary_durable_append(
+        &mut self,
+        run_id: &RunId,
+        input_id: &InputId,
+        witness: meerkat_core::CoreBoundaryDeliveryWitness,
+    ) -> Result<crate::meerkat_machine::driver::LiveBoundaryJoinOutcome, RuntimeDriverError> {
+        self.require_durability_ready()?;
+        let checkpoint = self.persistence_rollback_checkpoint();
+        if let Err(error) = self
+            .inner
+            .machine_join_live_boundary_durable_append(run_id, input_id, witness)
+        {
+            return Ok(
+                crate::meerkat_machine::driver::LiveBoundaryJoinOutcome::Refused {
+                    reason: error.to_string(),
+                },
+            );
+        }
+        let records = match self
+            .inner
+            .authorized_stored_input_states_for_ids(std::slice::from_ref(input_id))
+        {
+            Ok(records) => records,
+            Err(error) => {
+                return Err(self.post_transition_failure(
+                    checkpoint,
+                    "live_boundary_join_materialization",
+                    error.to_string(),
+                ));
+            }
+        };
+        if let Err(error) = self
+            .store
+            .persist_input_states_atomically(&self.runtime_id, &records)
+            .await
+        {
+            return Err(self.post_transition_failure(
+                checkpoint,
+                "live_boundary_join_commit",
+                format!("durable live-boundary join persist failed: {error}"),
+            ));
+        }
+        Ok(crate::meerkat_machine::driver::LiveBoundaryJoinOutcome::Joined)
+    }
+
+    /// Resolve every durable join of `run_id` and make the requeued rows
+    /// durable. Retained rows stay Staged until the run's own terminal commit
+    /// (or their checkpoint consumption) persists them.
+    pub(crate) async fn machine_resolve_live_boundary_joins(
+        &mut self,
+        run_id: &RunId,
+    ) -> Result<crate::meerkat_machine::driver::LiveBoundaryJoinResolution, RuntimeDriverError>
+    {
+        self.require_durability_ready()?;
+        let checkpoint = self.persistence_rollback_checkpoint();
+        let resolution = match self.inner.machine_resolve_live_boundary_joins(run_id) {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                return Err(self.post_transition_failure(
+                    checkpoint,
+                    "live_boundary_join_resolution",
+                    error.to_string(),
+                ));
+            }
+        };
+        if resolution.requeued.is_empty() {
+            return Ok(resolution);
+        }
+        let records = match self
+            .inner
+            .authorized_stored_input_states_for_ids(&resolution.requeued)
+        {
+            Ok(records) => records,
+            Err(error) => {
+                return Err(self.post_transition_failure(
+                    checkpoint,
+                    "live_boundary_join_requeue_materialization",
+                    error.to_string(),
+                ));
+            }
+        };
+        if let Err(error) = self
+            .store
+            .persist_input_states_atomically(&self.runtime_id, &records)
+            .await
+        {
+            return Err(self.post_transition_failure(
+                checkpoint,
+                "live_boundary_join_requeue_commit",
+                format!("durable live-boundary requeue persist failed: {error}"),
+            ));
+        }
+        Ok(resolution)
+    }
+
+    /// Consume one Retained durable join with a live-boundary checkpoint
+    /// receipt committed together with its input row.
+    pub(crate) async fn machine_consume_retained_live_boundary_join(
+        &mut self,
+        run_id: &RunId,
+        input_id: &InputId,
+        owner_session_id: &meerkat_core::types::SessionId,
+    ) -> Result<PreparedRuntimeSessionCommitResult, RuntimeDriverError> {
+        self.require_durability_ready()?;
+        let checkpoint = self.persistence_rollback_checkpoint();
+        let receipt = match self
+            .inner
+            .machine_consume_retained_live_boundary_join(run_id, input_id)
+        {
+            Ok(receipt) => receipt,
+            Err(err) => {
+                return Err(self.post_transition_failure(
+                    checkpoint,
+                    "live_boundary_join_consumption",
+                    err.to_string(),
+                ));
+            }
+        };
+        let input_updates = match self
+            .inner
+            .authorized_stored_input_states_for_ids(std::slice::from_ref(input_id))
+        {
+            Ok(input_updates) => input_updates,
+            Err(err) => {
+                return Err(self.post_transition_failure(
+                    checkpoint,
+                    "live_boundary_join_consumption_materialization",
+                    err.to_string(),
+                ));
+            }
+        };
+        let request = match self.prepare_success_boundary(
+            None,
+            receipt,
+            input_updates,
+            owner_session_id.clone(),
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                return Err(self.post_transition_failure(
+                    checkpoint,
+                    "live_boundary_join_consumption_validation",
+                    format!("durable live-boundary consumption is invalid: {error}"),
+                ));
+            }
+        };
+        match self
+            .store
+            .commit_prepared_session_boundary(&self.runtime_id, request)
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(err) => Err(self.post_transition_failure(
+                checkpoint,
+                "live_boundary_join_consumption_commit",
+                format!("durable live-boundary consumption commit failed: {err}"),
+            )),
+        }
+    }
+
     pub(crate) async fn machine_commit_completed_boundary_snapshot(
         &mut self,
         receipt: &RunBoundaryReceipt,

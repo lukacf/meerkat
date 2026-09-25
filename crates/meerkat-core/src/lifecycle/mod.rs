@@ -12,6 +12,7 @@
 //! - live executor handles — authority-scoped boundary and hard-interrupt capabilities
 //! - `RunId`, `InputId` — identifiers (InputId is opaque to core)
 
+pub mod boundary_delivery;
 pub mod core_executor;
 pub mod identifiers;
 pub mod run_event;
@@ -19,6 +20,10 @@ pub mod run_primitive;
 pub mod run_receipt;
 
 // Re-exports for convenience
+pub use boundary_delivery::{
+    CoreBoundaryDeliveryOutcome, CoreBoundaryDeliveryWitness, DurableTurnBoundaryAppends,
+    DurableTurnBoundaryAppendsError, TurnBoundaryDelivery,
+};
 pub use core_executor::{
     CommittedSessionBoundaryAuthority, CoreApplyFailureCause, CoreApplyFailureCauseKind,
     CoreBoundaryStageError, CoreBoundaryStageOutput, CoreControlFailureCause,

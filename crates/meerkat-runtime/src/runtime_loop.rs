@@ -5763,6 +5763,62 @@ async fn resolve_failed_batch_backlog(
 
 /// Process all queued inputs until the queue is empty.
 #[allow(clippy::too_many_arguments)]
+/// Resolve every durable Steer input that joined `run_id` at a cooperative
+/// model boundary against its core delivery witness, before any terminal
+/// realization of the run. The witness is final here: `apply` has returned, so
+/// the run guard closed the run and every unapplied delivery is withdrawn.
+///
+/// Appends that survive in the run's image come back as `retained` (consumed
+/// with the run); unapplied or discarded ones are already back at the head of
+/// their lane for exactly one follow-up turn.
+async fn resolve_live_boundary_joins_for_terminal(
+    driver: &crate::meerkat_machine::SharedDriver,
+    run_id: &RunId,
+) -> Result<crate::meerkat_machine::driver::LiveBoundaryJoinResolution, crate::RuntimeDriverError> {
+    driver
+        .lock()
+        .await
+        .machine_resolve_live_boundary_joins_for_terminal(run_id)
+        .await
+}
+
+/// A run that ends without a committed boundary (failed or cancelled) still
+/// consumes every Retained durable join: its append is in the image the
+/// session keeps (an ephemeral session retains a failed run's transcript), so
+/// requeueing it would deliver the same record twice. Each input is consumed
+/// under the still-current run with its own checkpoint receipt and completion.
+async fn consume_retained_live_boundary_joins_without_commit(
+    driver: &crate::meerkat_machine::SharedDriver,
+    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    run_id: &RunId,
+    retained: &[InputId],
+    owner_session_id: &meerkat_core::types::SessionId,
+) -> Result<(), crate::RuntimeDriverError> {
+    for input_id in retained {
+        driver
+            .lock()
+            .await
+            .machine_realize_retained_live_boundary_join_consumed(
+                run_id,
+                input_id,
+                owner_session_id,
+            )
+            .await?;
+        if let Some(completions) = completions {
+            crate::meerkat_machine::MeerkatMachine::finalize_live_boundary_completion_owned(
+                driver,
+                completions,
+                input_id.clone(),
+                run_id.clone(),
+                crate::meerkat_machine::dsl::RuntimeCompletionFinalizationObservation::Succeeded,
+                None,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 async fn process_queue(
     driver: &crate::meerkat_machine::SharedDriver,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
@@ -6536,7 +6592,55 @@ async fn process_queue(
                         // session inside `with_session`, so the witness
                         // validator and the store commit cannot be handed
                         // different documents.
-                        let (receipt, committed, terminal) = output.into_parts();
+                        let (mut receipt, committed, terminal) = output.into_parts();
+                        // Durable Steer inputs that joined this run: the
+                        // retained ones are consumed atomically with this
+                        // commit (they are receipt contributors, like the
+                        // batch); the others are already back in their lane.
+                        let join_resolution = match resolve_live_boundary_joins_for_terminal(
+                            driver, &run_id,
+                        )
+                        .await
+                        {
+                            Ok(resolution) => resolution,
+                            Err(error) => {
+                                tracing::error!(
+                                    %run_id,
+                                    %error,
+                                    "failed closed resolving durable live-boundary joins before the run commit"
+                                );
+                                if let Some(completions) = completions.as_ref() {
+                                    let mut completions = completions.lock().await;
+                                    fail_completion_waiters(
+                                        &mut completions,
+                                        &input_ids,
+                                        format!(
+                                            "runtime durable live-boundary join resolution failed: {error}"
+                                        ),
+                                    );
+                                }
+                                drop(terminal_authority_guard);
+                                return stop_runtime_loop_executor_from_dsl_effect(
+                                        driver,
+                                        completions,
+                                        executor,
+                                        format!(
+                                            "runtime durable live-boundary join resolution failed for run {run_id}: {error}"
+                                        ),
+                                        handoff,
+                                        turn_finalization_guard,
+                                    )
+                                    .await;
+                            }
+                        };
+                        receipt
+                            .contributing_input_ids
+                            .extend(join_resolution.retained.iter().cloned());
+                        let input_ids: Vec<InputId> = input_ids
+                            .iter()
+                            .cloned()
+                            .chain(join_resolution.retained.iter().cloned())
+                            .collect();
                         // A resume against a session that has no pending
                         // boundary is a successful terminal observation, but
                         // the executor must not remain attached afterward
@@ -7002,6 +7106,63 @@ async fn process_queue(
                                 executor,
                                 format!(
                                     "runtime executor stopped during run {run_id}: {error_msg}"
+                                ),
+                                handoff,
+                                turn_finalization_guard,
+                            )
+                            .await;
+                        }
+                        // Durable Steer inputs that joined this run: an
+                        // unapplied or discarded append returns to its lane;
+                        // a retained one is consumed now, because this run
+                        // commits no boundary but its image keeps the append.
+                        let join_resolution = match resolve_live_boundary_joins_for_terminal(
+                            driver, &run_id,
+                        )
+                        .await
+                        {
+                            Ok(resolution) => resolution,
+                            Err(error) => {
+                                tracing::error!(
+                                    %run_id,
+                                    %error,
+                                    "failed closed resolving durable live-boundary joins of a failed run"
+                                );
+                                drop(terminal_authority_guard);
+                                return stop_runtime_loop_executor_from_dsl_effect(
+                                        driver,
+                                        completions,
+                                        executor,
+                                        format!(
+                                            "runtime durable live-boundary join resolution failed for run {run_id}: {error}"
+                                        ),
+                                        handoff,
+                                        turn_finalization_guard,
+                                    )
+                                    .await;
+                            }
+                        };
+                        if let Err(error) = consume_retained_live_boundary_joins_without_commit(
+                            driver,
+                            completions,
+                            &run_id,
+                            &join_resolution.retained,
+                            &authority_binding.session_id,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                %run_id,
+                                %error,
+                                "failed closed consuming retained durable live-boundary joins of a failed run"
+                            );
+                            drop(terminal_authority_guard);
+                            return stop_runtime_loop_executor_from_dsl_effect(
+                                driver,
+                                completions,
+                                executor,
+                                format!(
+                                    "runtime retained durable live-boundary consumption failed for run {run_id}: {error}"
                                 ),
                                 handoff,
                                 turn_finalization_guard,
@@ -9157,6 +9318,7 @@ mod tests {
                 execution_handling_mode: None,
                 peer_response_terminal_apply_intent: None,
                 live_interrupt_required: false,
+                live_boundary_delivery: None,
             };
             2
         ];
@@ -9198,6 +9360,7 @@ mod tests {
             execution_handling_mode: None,
             peer_response_terminal_apply_intent: None,
             live_interrupt_required: true,
+            live_boundary_delivery: None,
         };
         let inputs = vec![(first.id().clone(), first), (second.id().clone(), second)];
 
@@ -12278,6 +12441,7 @@ mod tests {
                 execution_handling_mode: None,
                 peer_response_terminal_apply_intent: None,
                 live_interrupt_required: false,
+                live_boundary_delivery: None,
             },
         )
         .expect("single input metadata cannot conflict");

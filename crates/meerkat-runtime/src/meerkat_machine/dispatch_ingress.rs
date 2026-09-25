@@ -12,20 +12,44 @@ enum LiveBoundaryAttachmentRevalidation {
 pub(super) enum LiveBoundaryInputDisposition {
     QueuedFallback,
     ExactInjected,
-    SuccessorClaimed { wake_needed: bool },
+    /// A durable-class input joined the running run as a late contributor and
+    /// its payload was published to the parked runner. The run terminal
+    /// consumes it (or returns it to its lane if the append did not survive).
+    DurableJoined,
+    SuccessorClaimed {
+        wake_needed: bool,
+    },
 }
 
 impl LiveBoundaryInputDisposition {
     pub(super) fn suppress_cancel(self) -> bool {
-        matches!(self, Self::ExactInjected | Self::SuccessorClaimed { .. })
+        matches!(
+            self,
+            Self::ExactInjected | Self::DurableJoined | Self::SuccessorClaimed { .. }
+        )
     }
 
     pub(super) fn suppress_wake(self) -> bool {
         matches!(
             self,
-            Self::ExactInjected | Self::SuccessorClaimed { wake_needed: false }
+            Self::ExactInjected
+                | Self::DurableJoined
+                | Self::SuccessorClaimed { wake_needed: false }
         )
     }
+}
+
+/// What one live-boundary attempt offers the parked runner.
+enum LiveBoundaryDeliveryPlan {
+    RequestOnly(Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>),
+    Durable(meerkat_core::DurableTurnBoundaryAppends),
+}
+
+fn semantics_class_is_durable(
+    semantics: Option<crate::ingress_types::RuntimeInputSemantics>,
+) -> bool {
+    semantics.and_then(|semantics| semantics.live_boundary_delivery())
+        == Some(crate::ingress_types::LiveBoundaryDeliveryClass::DurableAppend)
 }
 
 enum RetryableLiveBoundaryPreparation {
@@ -380,7 +404,7 @@ impl MeerkatMachine {
     /// only the transient delivery attempt, so the durably accepted input remains
     /// queued. `Fault` still converges the exact accepted input to a durable
     /// terminal before surfacing failure.
-    async fn finalize_live_boundary_completion_owned(
+    pub(crate) async fn finalize_live_boundary_completion_owned(
         driver: &SharedDriver,
         completions: &SharedCompletionRegistry,
         input_id: InputId,
@@ -465,9 +489,22 @@ impl MeerkatMachine {
             // Arbitrate only an actual active-run boundary. Before a run has
             // acquired queue authority, multiple Steer inputs intentionally
             // remain eligible for one generated same-boundary batch.
-            let steer_queue = driver.driver_ingress().steer_queue();
+            //
+            // FIFO is per machine-owned delivery class: a durable delivery
+            // occupies its own boundary slot (and may wait across a closed
+            // window), so it never pushes a later request-only steer to a
+            // follow-up turn, and vice versa. Within a class the earliest
+            // admission keeps the head.
+            let ingress = driver.driver_ingress();
+            let candidate_is_durable =
+                semantics_class_is_durable(ingress.runtime_semantics(input_id));
+            let steer_queue = ingress.steer_queue();
+            let class_head = steer_queue.iter().find(|candidate| {
+                semantics_class_is_durable(ingress.runtime_semantics(candidate))
+                    == candidate_is_durable
+            });
             if steer_queue.iter().any(|candidate| candidate == input_id)
-                && steer_queue.first() != Some(input_id)
+                && class_head != Some(input_id)
             {
                 drop(driver);
                 held_mutation_gate = self
@@ -529,22 +566,85 @@ impl MeerkatMachine {
                     .await;
                 return Err(error);
             };
-            let contexts =
-                crate::input::projection_to_transient_turn_context(&projection, semantics)
-                    .into_iter()
-                    .collect::<Vec<_>>();
-            if contexts.is_empty() {
-                // Idle-normalized steers and peer-terminal facts are ordinary
-                // queued transcript work. Leave the fallback armed so the
-                // runtime loop realizes that durable path.
-                return Ok((
-                    held_mutation_gate,
-                    LiveBoundaryInputDisposition::QueuedFallback,
-                ));
+            if semantics.live_boundary_delivery()
+                == Some(crate::ingress_types::LiveBoundaryDeliveryClass::DurableAppend)
+            {
+                // The durable payload is exactly the appends the fallback
+                // follow-up turn would write, lowered with the input's own
+                // transcript identity so both paths produce the same rows.
+                let transcript_identity = driver
+                    .as_driver()
+                    .input_state(input_id)
+                    .and_then(|state| state.persisted_input.as_ref())
+                    .map(|input| {
+                        crate::runtime_loop::for_input(input, semantics).transcript_identity
+                    });
+                let appends = meerkat_core::DurableTurnBoundaryAppends::try_new(
+                    input_id.clone(),
+                    crate::input::projection_durable_boundary_appends(&projection),
+                    transcript_identity,
+                );
+                match appends {
+                    Ok(appends) => (run_id, LiveBoundaryDeliveryPlan::Durable(appends)),
+                    Err(error) => {
+                        // A payload the runner could not write never joins
+                        // the run and is never abandoned: it takes the
+                        // unchanged queued fallback.
+                        drop(driver);
+                        tracing::warn!(
+                            session_id = %session_id,
+                            input_id = %input_id,
+                            %error,
+                            "durable live-boundary payload is not deliverable in-turn; taking the queued follow-up"
+                        );
+                        let held_mutation_gate = self
+                            .normalize_durable_live_boundary_fallback(
+                                session_id,
+                                witness,
+                                held_mutation_gate,
+                                input_id,
+                            )
+                            .await?;
+                        return Ok((
+                            held_mutation_gate,
+                            LiveBoundaryInputDisposition::QueuedFallback,
+                        ));
+                    }
+                }
+            } else {
+                let contexts =
+                    crate::input::projection_to_transient_turn_context(&projection, semantics)
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                if contexts.is_empty() {
+                    // Idle-normalized steers, peer-terminal facts and
+                    // follow-up-only typed prompts are ordinary queued
+                    // transcript work. Leave the fallback armed so the runtime
+                    // loop realizes that durable path.
+                    return Ok((
+                        held_mutation_gate,
+                        LiveBoundaryInputDisposition::QueuedFallback,
+                    ));
+                }
+                (run_id, LiveBoundaryDeliveryPlan::RequestOnly(contexts))
             }
-            (run_id, contexts)
         };
-        let (run_id, contexts) = live_boundary_plan;
+        let (run_id, contexts) = match live_boundary_plan {
+            (run_id, LiveBoundaryDeliveryPlan::RequestOnly(contexts)) => (run_id, contexts),
+            (run_id, LiveBoundaryDeliveryPlan::Durable(appends)) => {
+                return self
+                    .commit_durable_live_boundary_input(
+                        session_id,
+                        witness,
+                        held_mutation_gate,
+                        input_id,
+                        run_id,
+                        appends,
+                        fallback_wake,
+                    )
+                    .await;
+            }
+        };
 
         tracing::debug!(
             session_id = %session_id,
@@ -559,7 +659,10 @@ impl MeerkatMachine {
         drop(held_mutation_gate);
         let prepared = witness
             .boundary_handle
-            .prepare_transient_turn_context_at_boundary(&run_id, contexts)
+            .prepare_turn_boundary_delivery(
+                &run_id,
+                meerkat_core::TurnBoundaryDelivery::RequestOnly(contexts),
+            )
             .await;
         let mut held_mutation_gate = Arc::clone(&witness.mutation_gate).lock_owned().await;
 
@@ -801,6 +904,267 @@ impl MeerkatMachine {
         Ok((
             held_mutation_gate,
             LiveBoundaryInputDisposition::ExactInjected,
+        ))
+    }
+
+    /// Normalize a durable-class input to its queued follow-up without ever
+    /// abandoning it. On a normalization failure the input stays admitted and
+    /// queued (the fallback wake remains armed), so the runtime loop still
+    /// delivers it as an ordinary follow-up turn with its full projection.
+    async fn normalize_durable_live_boundary_fallback(
+        &self,
+        session_id: &SessionId,
+        witness: &RuntimeLiveBoundaryAttachmentWitness,
+        held_mutation_gate: crate::tokio::sync::OwnedMutexGuard<()>,
+        input_id: &InputId,
+    ) -> Result<crate::tokio::sync::OwnedMutexGuard<()>, RuntimeDriverError> {
+        let queued = witness
+            .driver
+            .lock()
+            .await
+            .as_driver()
+            .stored_input_state(input_id)
+            .is_some_and(|stored| stored.seed.phase == InputLifecycleState::Queued);
+        if !queued {
+            return Ok(held_mutation_gate);
+        }
+        if let Err(error) = witness
+            .driver
+            .lock()
+            .await
+            .machine_normalize_live_boundary_unavailable(input_id)
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                input_id = %input_id,
+                %error,
+                "durable live-boundary fallback normalization failed; the input stays queued for its follow-up turn"
+            );
+            return Err(error);
+        }
+        Ok(held_mutation_gate)
+    }
+
+    /// Deliver one durable-class Steer input into the running turn.
+    ///
+    /// Linearization, in order:
+    /// 1. prepare parks the exact runner at its next `CallingLlm` boundary
+    ///    (waiting across a closed window for the next boundary of the run);
+    /// 2. the attachment, run, and queued input are revalidated under M;
+    /// 3. `JoinLiveBoundaryDurableAppend` binds the input to the run as a late
+    ///    contributor and the persistent driver makes that binding durable;
+    /// 4. only then is the payload published to the runner (`commit`).
+    ///
+    /// The input is NOT consumed here and its completion is NOT resolved: the
+    /// run terminal resolves the join from the core delivery witness. Every
+    /// refusal before step 4 takes the unchanged queued fallback and never
+    /// abandons the input.
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_durable_live_boundary_input(
+        &self,
+        session_id: &SessionId,
+        witness: &RuntimeLiveBoundaryAttachmentWitness,
+        held_mutation_gate: crate::tokio::sync::OwnedMutexGuard<()>,
+        input_id: &InputId,
+        run_id: RunId,
+        appends: meerkat_core::DurableTurnBoundaryAppends,
+        fallback_wake: &mut AcceptedIngressFallbackWakeGuard,
+    ) -> Result<
+        (
+            crate::tokio::sync::OwnedMutexGuard<()>,
+            LiveBoundaryInputDisposition,
+        ),
+        RuntimeDriverError,
+    > {
+        tracing::debug!(
+            session_id = %session_id,
+            run_id = %run_id,
+            input_id = %input_id,
+            append_count = appends.messages().len(),
+            "preparing durable in-turn live-boundary delivery"
+        );
+        // The boundary callback may re-enter MeerkatMachine. Drop M before its
+        // first poll; the process-owned outer ingress task retains all witnesses.
+        drop(held_mutation_gate);
+        let prepared = witness
+            .boundary_handle
+            .prepare_turn_boundary_delivery(
+                &run_id,
+                meerkat_core::TurnBoundaryDelivery::DurableAppends(appends),
+            )
+            .await;
+        let held_mutation_gate = Arc::clone(&witness.mutation_gate).lock_owned().await;
+
+        let revalidation = match self
+            .revalidate_live_boundary_attachment(session_id, witness, &run_id, input_id)
+            .await
+        {
+            Ok(revalidation) => revalidation,
+            Err(error) => {
+                drop(prepared);
+                tracing::warn!(
+                    session_id = %session_id,
+                    run_id = %run_id,
+                    input_id = %input_id,
+                    %error,
+                    "durable live-boundary attachment could not be revalidated; the input stays queued"
+                );
+                return Err(error);
+            }
+        };
+        match revalidation {
+            LiveBoundaryAttachmentRevalidation::RunAdvancedQueued => {
+                drop(prepared);
+                let held_mutation_gate = self
+                    .normalize_durable_live_boundary_fallback(
+                        session_id,
+                        witness,
+                        held_mutation_gate,
+                        input_id,
+                    )
+                    .await?;
+                return Ok((
+                    held_mutation_gate,
+                    LiveBoundaryInputDisposition::QueuedFallback,
+                ));
+            }
+            LiveBoundaryAttachmentRevalidation::RunAdvancedClaimed { wake_needed } => {
+                if let Ok(prepared) = prepared
+                    && let Err(error) = prepared.abort()
+                {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        run_id = %run_id,
+                        input_id = %input_id,
+                        error = %error,
+                        "failed to abort stale parked durable boundary after successor claim"
+                    );
+                }
+                return Ok((
+                    held_mutation_gate,
+                    LiveBoundaryInputDisposition::SuccessorClaimed { wake_needed },
+                ));
+            }
+            LiveBoundaryAttachmentRevalidation::CurrentRun => {}
+        }
+
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                // Unavailable (no boundary opened before the run ended, or an
+                // extraction/noncommitting boundary refused it), Stale, or a
+                // Fault: the durable input never joined the run, so it takes
+                // its queued follow-up turn unchanged.
+                tracing::debug!(
+                    session_id = %session_id,
+                    run_id = %run_id,
+                    input_id = %input_id,
+                    reason = %error,
+                    "durable live boundary unavailable; normalized durable queued fallback"
+                );
+                let held_mutation_gate = self
+                    .normalize_durable_live_boundary_fallback(
+                        session_id,
+                        witness,
+                        held_mutation_gate,
+                        input_id,
+                    )
+                    .await?;
+                return Ok((
+                    held_mutation_gate,
+                    LiveBoundaryInputDisposition::QueuedFallback,
+                ));
+            }
+        };
+        let Some(delivery_witness) = prepared.delivery_witness().cloned() else {
+            drop(prepared);
+            tracing::error!(
+                session_id = %session_id,
+                run_id = %run_id,
+                input_id = %input_id,
+                "durable live-boundary preparation carried no delivery witness; taking the queued follow-up"
+            );
+            let held_mutation_gate = self
+                .normalize_durable_live_boundary_fallback(
+                    session_id,
+                    witness,
+                    held_mutation_gate,
+                    input_id,
+                )
+                .await?;
+            return Ok((
+                held_mutation_gate,
+                LiveBoundaryInputDisposition::QueuedFallback,
+            ));
+        };
+
+        let join = witness
+            .driver
+            .lock()
+            .await
+            .machine_realize_live_boundary_durable_append_joined(
+                &run_id,
+                input_id,
+                delivery_witness,
+            )
+            .await;
+        match join {
+            Ok(crate::meerkat_machine::driver::LiveBoundaryJoinOutcome::Joined) => {}
+            Ok(crate::meerkat_machine::driver::LiveBoundaryJoinOutcome::Refused { reason }) => {
+                drop(prepared);
+                tracing::debug!(
+                    session_id = %session_id,
+                    run_id = %run_id,
+                    input_id = %input_id,
+                    %reason,
+                    "generated authority refused the durable live-boundary join; normalized durable queued fallback"
+                );
+                let held_mutation_gate = self
+                    .normalize_durable_live_boundary_fallback(
+                        session_id,
+                        witness,
+                        held_mutation_gate,
+                        input_id,
+                    )
+                    .await?;
+                return Ok((
+                    held_mutation_gate,
+                    LiveBoundaryInputDisposition::QueuedFallback,
+                ));
+            }
+            Err(error) => {
+                // The driver restored the Queued checkpoint (compatibility
+                // profile) or requires a reload from the store, where the row
+                // is still Queued. Never abandon the durable input.
+                drop(prepared);
+                tracing::warn!(
+                    session_id = %session_id,
+                    run_id = %run_id,
+                    input_id = %input_id,
+                    %error,
+                    "durable live-boundary join could not be persisted; the input stays queued"
+                );
+                return Err(error);
+            }
+        }
+
+        // Publication linearization point. The join is already durable, so a
+        // failure here (the runner left, or the actor was revoked) leaves the
+        // witness Withdrawn and the run terminal returns the input to its lane.
+        if let Err(error) = prepared.commit() {
+            tracing::warn!(
+                session_id = %session_id,
+                run_id = %run_id,
+                input_id = %input_id,
+                %error,
+                "durable live-boundary publication lost its parked runner; the run terminal requeues the input"
+            );
+        }
+        fallback_wake.disarm();
+        Ok((
+            held_mutation_gate,
+            LiveBoundaryInputDisposition::DurableJoined,
         ))
     }
 

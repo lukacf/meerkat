@@ -1043,6 +1043,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
             TRANSCRIPT_REWRITE_AUDIT_RECEIPT_COMMITTED_EVENT_TYPE
         }
         AgentEvent::PeerContentIngested { .. } => "peer_content_ingested",
+        AgentEvent::BoundaryAppendApplied { .. } => "boundary_append_applied",
         AgentEvent::ProviderCacheBreakpointsDiscarded { .. } => {
             "provider_cache_breakpoints_discarded"
         }
@@ -2543,6 +2544,29 @@ pub enum AgentEvent {
         previous: crate::SessionLlmIdentity,
         target: crate::SessionLlmIdentity,
         error: AgentErrorReport,
+    },
+
+    /// A durable runtime input joined the running turn at a cooperative model
+    /// boundary: its typed conversation appends (for example a background
+    /// job's persisted system notice delivered as a Steer) were written into
+    /// the session transcript before the next model request of the same run.
+    ///
+    /// Emitted once, after the append is applied, so live streams and consoles
+    /// see a mid-turn append without waiting for history. The appends commit
+    /// with the run like tool results. If the image that carried them is later
+    /// discarded (an uncommitted persistent run, or a compaction rollback),
+    /// the runtime redelivers the input in exactly one follow-up turn, so
+    /// consumers should reconcile this event against the run terminal and the
+    /// committed transcript. Request-only steers never emit it.
+    BoundaryAppendApplied {
+        /// The running turn the appends joined.
+        run_id: crate::lifecycle::RunId,
+        /// The runtime input that carried the appends.
+        input_id: crate::lifecycle::InputId,
+        /// Model projection of the appended transcript rows.
+        content: crate::types::ContentInput,
+        /// Number of transcript rows appended.
+        append_count: u32,
     },
 }
 

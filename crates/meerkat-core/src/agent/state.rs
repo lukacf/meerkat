@@ -2803,6 +2803,9 @@ where
                             rollback_last_input_tokens: self.last_input_tokens,
                             rollback_compaction_cadence: self.compaction_cadence.clone(),
                             rollback_durable_row_floor: self.durable_row_floor,
+                            rollback_durable_boundary_apply_ordinal: self
+                                .transient_turn_context_state
+                                .durable_apply_ordinal(),
                         };
                         // Cadence for every failure path below, including a
                         // runtime handoff refusal: the attempt is recorded
@@ -3877,6 +3880,12 @@ where
             restored_cadence.last_compaction_attempt_boundary_index =
                 attempted_cadence.last_compaction_attempt_boundary_index;
             self.session = restored_session;
+            // Durable boundary appends applied after the capture are gone
+            // from the restored image.
+            self.transient_turn_context_state
+                .discard_durable_deliveries_applied_after(
+                    rollback.rollback_durable_boundary_apply_ordinal,
+                );
             self.durable_row_floor = rollback.rollback_durable_row_floor;
             self.last_input_tokens = rollback.rollback_last_input_tokens;
             self.compaction_cadence = restored_cadence;
@@ -5276,23 +5285,58 @@ where
         // context pending across fallible/async request hydration.
         // Only the final synchronous consume below records that the
         // model request has crossed its consumption seam.
-        let boundary_contexts = match self
-            .take_transient_turn_context_at_boundary(ctx.run_id)
+        //
+        // Extraction requests and noncommitting live-bridge runs never
+        // write Session state at a boundary, so they accept request-only
+        // context only; a durable delivery registered there is refused
+        // before parking and its input takes the queued follow-up turn.
+        let acceptance = if prepared.in_extraction || self.noncommitting_live_bridge_run {
+            crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance::RequestOnly
+        } else {
+            crate::lifecycle::boundary_delivery::BoundaryDeliveryAcceptance::RequestOnlyAndDurable
+        };
+        let taken = match self
+            .take_transient_turn_context_at_boundary(ctx.run_id, acceptance)
             .await
             .map_err(|e| AgentError::InternalError(e.to_string()))
         {
-            Ok(contexts) => contexts,
+            Ok(taken) => taken,
             Err(error) => {
                 return self
                     .complete_calling_llm_request_failure(ctx, prepared.in_extraction, error)
                     .await;
             }
         };
+        let crate::lifecycle::boundary_delivery::TakenBoundaryDelivery {
+            request_only: boundary_contexts,
+            durable,
+        } = taken;
+        // Durable appends become ordinary Session messages in this same
+        // synchronous segment: this request and every later one see them,
+        // and the run's single final boundary commits them like tool
+        // results. They land after this boundary's tool results and
+        // refreshed notices, before the next assistant message.
+        let applied_durable =
+            durable.and_then(|accepted| self.apply_durable_boundary_appends(accepted));
         let base_context_count = self.active_turn_request_contexts.len();
         self.active_turn_request_contexts.extend(boundary_contexts);
         let request_messages = self.llm_messages_for_boundary(!prepared.in_extraction);
         self.active_turn_request_contexts
             .truncate(base_context_count);
+        if let Some((input_id, content, append_count)) = applied_durable {
+            // Announced only after the witness says Applied; the await below
+            // can no longer split the write from its witness.
+            emit_phase_event!(
+                self,
+                ctx,
+                AgentEvent::BoundaryAppendApplied {
+                    run_id: ctx.run_id.clone(),
+                    input_id,
+                    content,
+                    append_count,
+                }
+            );
+        }
         let request_messages = match request_messages {
             Ok(messages) => messages,
             Err(error) => {
@@ -10099,6 +10143,7 @@ mod tests {
                     rollback_last_input_tokens,
                     rollback_compaction_cadence,
                     rollback_durable_row_floor: 0,
+                    rollback_durable_boundary_apply_ordinal: 0,
                 },
             )),
             projections: vec![projection],
@@ -10157,6 +10202,7 @@ mod tests {
                     rollback_last_input_tokens,
                     rollback_compaction_cadence,
                     rollback_durable_row_floor: 0,
+                    rollback_durable_boundary_apply_ordinal: 0,
                 },
             )),
             projections: vec![projection],
@@ -10219,6 +10265,7 @@ mod tests {
                     rollback_last_input_tokens,
                     rollback_compaction_cadence: rollback_compaction_cadence.clone(),
                     rollback_durable_row_floor: 0,
+                    rollback_durable_boundary_apply_ordinal: 0,
                 },
             )),
             projections: vec![projection.clone()],
@@ -10305,6 +10352,7 @@ mod tests {
                     rollback_last_input_tokens: agent.last_input_tokens,
                     rollback_compaction_cadence: agent.compaction_cadence.clone(),
                     rollback_durable_row_floor: 0,
+                    rollback_durable_boundary_apply_ordinal: 0,
                 },
             )),
             projections: vec![first.clone(), second.clone()],
@@ -10407,6 +10455,7 @@ mod tests {
             rollback_last_input_tokens: agent.last_input_tokens,
             rollback_compaction_cadence: agent.compaction_cadence.clone(),
             rollback_durable_row_floor: 0,
+            rollback_durable_boundary_apply_ordinal: 0,
         };
         let first = append_abort_test_projection(agent.session_mut(), "commit-first");
         let second = append_abort_test_projection(agent.session_mut(), "commit-second");
@@ -10492,6 +10541,7 @@ mod tests {
             rollback_last_input_tokens: agent.last_input_tokens,
             rollback_compaction_cadence: agent.compaction_cadence.clone(),
             rollback_durable_row_floor: 0,
+            rollback_durable_boundary_apply_ordinal: 0,
         };
         let first = append_abort_test_projection(agent.session_mut(), "exact-first");
         let second = append_abort_test_projection(agent.session_mut(), "exact-second");

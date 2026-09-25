@@ -43,4 +43,5 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     "transcript_rewrite_committed",
     "peer_content_ingested",
     "provider_cache_breakpoints_discarded",
+    "boundary_append_applied",
 ];

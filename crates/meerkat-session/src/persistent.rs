@@ -39,7 +39,7 @@ use meerkat_core::lifecycle::core_executor::{
     BoundSessionCommit, CoreApplyOutput, CoreApplyTerminal, CoreBoundaryStageOutput,
     CoreExecutorError, CoreExecutorPublicationHandle, CoreInteractionTerminalPublicationReceipt,
 };
-use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, TurnRequestContext};
+use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
@@ -9592,11 +9592,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         expected_run_id: &RunId,
-        contexts: Vec<TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<CoreBoundaryStageOutput, meerkat_core::CoreBoundaryStageError> {
         let prepared = self
             .inner
-            .prepare_transient_turn_context_for_active_turn(id, expected_run_id, contexts)
+            .prepare_transient_turn_context_for_active_turn(id, expected_run_id, delivery)
             .await?;
         tracing::debug!(
             session_id = %id,
@@ -10637,6 +10637,51 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         run_id: RunId,
+        req: StartTurnRequest,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+        admission: crate::ephemeral::RuntimeContextAdmissionGuard,
+    ) -> Result<
+        CoreApplyOutput,
+        (
+            SessionError,
+            Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
+        ),
+    > {
+        let discarded_run_id = run_id.clone();
+        let result = self
+            .apply_runtime_turn_with_recoverable_reserved_admission_inner(
+                id,
+                run_id,
+                req,
+                boundary,
+                contributing_input_ids,
+                admission,
+            )
+            .await;
+        if result.is_err() {
+            self.report_uncommitted_runtime_turn_image(id, &discarded_run_id)
+                .await;
+        }
+        result
+    }
+
+    /// A runtime turn that returns an error commits no session boundary. The
+    /// live actor is kept only so the runtime can publish the exact terminal;
+    /// the next turn resyncs the uncommitted live transcript from durable
+    /// authority (`discard_stale_live_session_if_needed`). Report that now, so
+    /// a durable boundary append applied during the run is redelivered once
+    /// instead of consumed with a transcript that will not survive.
+    async fn report_uncommitted_runtime_turn_image(&self, id: &SessionId, run_id: &RunId) {
+        self.inner
+            .discard_uncommitted_boundary_deliveries(id, run_id)
+            .await;
+    }
+
+    async fn apply_runtime_turn_with_recoverable_reserved_admission_inner(
+        &self,
+        id: &SessionId,
+        run_id: RunId,
         mut req: StartTurnRequest,
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
@@ -10726,6 +10771,33 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 
     async fn apply_runtime_turn_outcome_with_admission(
+        &self,
+        id: &SessionId,
+        run_id: RunId,
+        req: StartTurnRequest,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+        admission: Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        let discarded_run_id = run_id.clone();
+        let result = self
+            .apply_runtime_turn_outcome_with_admission_inner(
+                id,
+                run_id,
+                req,
+                boundary,
+                contributing_input_ids,
+                admission,
+            )
+            .await;
+        if result.is_err() {
+            self.report_uncommitted_runtime_turn_image(id, &discarded_run_id)
+                .await;
+        }
+        result
+    }
+
+    async fn apply_runtime_turn_outcome_with_admission_inner(
         &self,
         id: &SessionId,
         run_id: RunId,

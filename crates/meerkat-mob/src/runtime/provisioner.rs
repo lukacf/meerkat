@@ -21,9 +21,7 @@ use meerkat_core::lifecycle::core_executor::{
     CoreExecutorTurnFinalizationBoundaryHandle, CoreExecutorTurnFinalizationGuard,
 };
 #[cfg(feature = "runtime-adapter")]
-use meerkat_core::lifecycle::run_primitive::{
-    CoreRenderable, RunApplyBoundary, RunPrimitive, TurnRequestContext,
-};
+use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::{InputId, RunId as CoreRunId};
 use meerkat_core::ops::OperationId;
@@ -9726,19 +9724,19 @@ impl CoreExecutorBoundaryHandle for MobSessionRuntimeBoundaryHandle {
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
 
-    async fn prepare_transient_turn_context_at_boundary(
+    async fn prepare_turn_boundary_delivery(
         &self,
         expected_run_id: &CoreRunId,
-        contexts: Vec<TurnRequestContext>,
+        delivery: meerkat_core::TurnBoundaryDelivery,
     ) -> Result<
         meerkat_core::lifecycle::CoreBoundaryStageOutput,
         meerkat_core::CoreBoundaryStageError,
     > {
         self.session_service
-            .prepare_transient_turn_context_for_active_turn(
+            .prepare_turn_boundary_delivery_for_active_turn(
                 &self.bridge_session_id,
                 expected_run_id,
-                contexts,
+                delivery,
             )
             .await
     }

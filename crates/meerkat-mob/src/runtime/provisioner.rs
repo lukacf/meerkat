@@ -9117,6 +9117,7 @@ mod tests {
                     structured_output: json!({"answer": 42}),
                     schema_warnings: None,
                     request_usage: Vec::new(),
+                    origin: meerkat_core::StructuredOutputOrigin::ExtractionRequest,
                 },
             ))
             .await

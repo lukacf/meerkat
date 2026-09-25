@@ -35,8 +35,8 @@ use meerkat_core::lifecycle::run_primitive::{
 };
 use meerkat_core::{
     AgentBuilder, AgentError, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    AssistantBlock, LlmStreamResult, Message, OutputSchema, Provider, StopReason, ToolCallView,
-    ToolDef, ToolResult, TurnUsage, Usage,
+    AssistantBlock, LlmStreamResult, Message, OutputSchema, Provider, StopReason,
+    StructuredOutputOrigin, ToolCallView, ToolDef, ToolResult, TurnUsage, Usage,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -628,12 +628,19 @@ async fn validate_first_success_skips_extraction_with_unchanged_result_shape() {
         .iter()
         .filter_map(|event| match event {
             AgentEvent::ExtractionSucceeded {
-                structured_output, ..
-            } => Some(structured_output.clone()),
+                structured_output,
+                request_usage,
+                origin,
+                ..
+            } => Some((structured_output.clone(), request_usage.len(), *origin)),
             _ => None,
         })
         .collect();
-    assert_eq!(succeeded, vec![expected_review()]);
+    assert_eq!(
+        succeeded,
+        vec![(expected_review(), 0, StructuredOutputOrigin::FinalReply)],
+        "the success records that the final reply produced the value and no extraction request ran"
+    );
     assert!(
         !events
             .iter()
@@ -741,15 +748,25 @@ async fn validate_first_asserts_declared_formats_and_falls_back_to_extraction() 
             ],
         ));
         let mut agent = build(&client, base_builder().output_schema(format_schema())).await;
-        let result = agent
-            .run("q".to_string().into())
-            .await
-            .unwrap_or_else(|error| panic!("{provider:?}: run failed: {error}"));
+        let (result, events) = run_collecting(&mut agent, "q").await;
+        let result = result.unwrap_or_else(|error| panic!("{provider:?}: run failed: {error}"));
 
         assert_eq!(
             client.call_count(),
             2,
             "{provider:?}: a format violation must not be accepted by validate-first"
+        );
+        let origins: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ExtractionSucceeded { origin, .. } => Some(*origin),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            origins,
+            vec![StructuredOutputOrigin::ExtractionRequest],
+            "{provider:?}: the value came from the extraction request"
         );
         assert_eq!(
             result.structured_output,

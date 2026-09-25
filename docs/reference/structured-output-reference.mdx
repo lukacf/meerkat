@@ -63,6 +63,13 @@ fault) runs the extraction phase exactly as described below: the same prompt,
 temperature `0.0`, no tools, the provider's native schema slot, and the same
 retry accounting.
 
+The `extraction_succeeded` event of a validate-first success carries
+`"origin": "final_reply"` and no `request_usage`, so consumers that count
+provider requests (the ATIF exporter, usage summaries) do not count an
+extraction request that never ran. `origin` is omitted when an extraction
+request produced the value, which is also how events written before the field
+existed read.
+
 Validate-first also asserts known JSON Schema `format` keywords (for example
 `date-time`, `email`, `uri`, `uuid`); unknown formats are ignored. Providers
 that decode natively against the schema enforce these formats on the

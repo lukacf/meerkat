@@ -6860,8 +6860,12 @@ where
                 Ok(CallingLlmStep::Done(Ok(result)))
             }
             super::extraction::ExtractionValidation::Passed(normalized) => {
-                self.complete_extraction_validation_passed(ctx, normalized)
-                    .await
+                self.complete_extraction_validation_passed(
+                    ctx,
+                    normalized,
+                    crate::event::StructuredOutputOrigin::ExtractionRequest,
+                )
+                .await
             }
         }
     }
@@ -6872,11 +6876,15 @@ where
     /// validated, so no extraction request was sent). Both therefore produce
     /// the same `RunResult` shape, the same authority transition out of
     /// `Extracting`, the same checkpoint, and the same `ExtractionSucceeded`
-    /// event. The caller must already have entered `Extracting`.
+    /// event, whose typed `origin` records which request produced the value
+    /// (validate-first sends no extraction request, so it has no
+    /// `request_usage` rows). The caller must already have entered
+    /// `Extracting`.
     async fn complete_extraction_validation_passed(
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
         normalized: serde_json::Value,
+        origin: crate::event::StructuredOutputOrigin,
     ) -> Result<CallingLlmStep, AgentError> {
         self.extraction_state.record_success(normalized);
         let structured_output = self.extraction_state.take_result();
@@ -6911,6 +6919,7 @@ where
             self.emit_extraction_succeeded_event(
                 structured_output,
                 result.schema_warnings.clone(),
+                origin,
                 ctx.event_tx.as_ref(),
             )
             .await;
@@ -7050,7 +7059,11 @@ where
                     max_retries: self.config.structured_output_retries,
                 })?;
                 return self
-                    .complete_extraction_validation_passed(ctx, normalized)
+                    .complete_extraction_validation_passed(
+                        ctx,
+                        normalized,
+                        crate::event::StructuredOutputOrigin::FinalReply,
+                    )
                     .await;
             }
 

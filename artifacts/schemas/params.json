@@ -1169,6 +1169,10 @@
           {
             "description": "Structured-output extraction succeeded after a completed main run.",
             "properties": {
+              "origin": {
+                "$ref": "#/$defs/StructuredOutputOrigin",
+                "description": "Which request produced `structured_output`. `final_reply` means the\nrun's final reply already validated against the schema, so no\nextraction request was sent and `request_usage` is empty. Absent\nmeans `extraction_request`, which is also what every event written\nbefore this field existed means."
+              },
               "request_usage": {
                 "description": "One row per measured provider request of this extraction phase, in\norder: the first attempt and each retry. Extraction publishes no\n`turn_completed`, so these rows are the only per-call accounting\nfor it on the event stream. An attempt whose provider sent no\naccounting publishes no row (its absence is reported by\n`turn_usage_accounting_unmeasured`), so this is never padded with\nzeros.",
                 "items": {
@@ -11799,6 +11803,21 @@
               "max_bytes"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "StructuredOutputOrigin": {
+        "description": "Which request produced a run's structured output.",
+        "oneOf": [
+          {
+            "const": "extraction_request",
+            "description": "A dedicated extraction request after the main run.",
+            "type": "string"
+          },
+          {
+            "const": "final_reply",
+            "description": "The run's final reply already validated against the output schema\n(validate-first), so no extraction request was sent.",
+            "type": "string"
           }
         ]
       },

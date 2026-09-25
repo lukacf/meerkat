@@ -644,6 +644,8 @@ export type StreamTruncationReason = {
   max_bytes: number;
 };
 
+export type StructuredOutputOrigin = "extraction_request" | "final_reply";
+
 export interface StructuredProviderExtension {
   body?: string;
   key: string;
@@ -805,6 +807,7 @@ export interface RunCompletedEvent {
 }
 
 export interface ExtractionSucceededEvent {
+  origin?: StructuredOutputOrigin;
   request_usage?: TurnUsage[];
   schema_warnings?: SchemaWarning[] | null;
   session_id: SessionId;

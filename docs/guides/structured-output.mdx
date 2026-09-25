@@ -78,7 +78,9 @@ main turn is accepted, Meerkat emits:
 
 It then emits exactly one extraction terminal. A run whose final reply
 already validated emits `extraction_succeeded` the same way, without an
-extraction request:
+extraction request; its `origin` is then `"final_reply"` and it carries no
+`request_usage` (`origin` is omitted when an extraction request produced the
+value):
 
 ```json
 {

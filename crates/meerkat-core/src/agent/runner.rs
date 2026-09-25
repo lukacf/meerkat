@@ -1675,6 +1675,7 @@ where
         &self,
         structured_output: serde_json::Value,
         schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
+        origin: crate::event::StructuredOutputOrigin,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
     ) {
         let _ = crate::event_tap::tap_emit(
@@ -1685,6 +1686,7 @@ where
                 structured_output,
                 schema_warnings,
                 request_usage: self.extraction_state.request_usage().to_vec(),
+                origin,
             },
         )
         .await;

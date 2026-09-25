@@ -5,6 +5,9 @@
 //! child (and its durable [`meerkat_mob::ForkJobRecord`]) survives. This pass
 //! runs once after restore and, for every seated child with a fork job:
 //!
+//! - job already over (its completion was admitted to the forker before the
+//!   restart): left alone, whatever its limit, since the child may be doing
+//!   later work that is not this job's;
 //! - already finished (its reply to the job is in its durable transcript):
 //!   delivers that result, however late the restart landed, and leaves the
 //!   child seated; the opt-in `max_run` limit only bounds a run still going;
@@ -154,6 +157,20 @@ pub async fn relink_child(
     child: &AgentIdentity,
     job: &ForkJobRecord,
 ) -> ForkRelinkAction {
+    // A job whose completion the forker's runtime already admitted is over.
+    // The child stays seated for further work that is no longer this job's,
+    // so neither the job's limit nor another delivery applies to it.
+    if let Some(runtime) = runtime.as_deref()
+        && crate::detached_delivery::detached_completion_admitted(
+            runtime,
+            &job.owner_session_id,
+            TOOL_FORK_OFF,
+            &job.job_id,
+        )
+        .await
+    {
+        return ForkRelinkAction::AlreadyDelivered;
+    }
     if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await {
         return deliver(runtime.as_deref(), handle, child, job, completion).await;
     }

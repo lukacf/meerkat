@@ -43,6 +43,33 @@ pub enum DetachedCompletionError {
     Runtime { tool: &'static str, detail: String },
 }
 
+/// The idempotency key of job `job_id`'s completion input: one per job.
+pub(crate) fn detached_completion_key(tool: &str, job_id: &str) -> String {
+    format!("{tool}:{job_id}")
+}
+
+/// Whether job `job_id`'s completion was already admitted to its owner,
+/// read from the runtime's durable input index (never live state). A job
+/// with an admitted completion is over. `false` when there is no durable
+/// evidence, including on a store-less runtime.
+pub(crate) async fn detached_completion_admitted(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    owner_session_id: &SessionId,
+    tool: &str,
+    job_id: &str,
+) -> bool {
+    use meerkat_runtime::SessionServiceRuntimeExt as _;
+    matches!(
+        runtime
+            .durable_input_state_by_idempotency_key(
+                owner_session_id,
+                &detached_completion_key(tool, job_id),
+            )
+            .await,
+        Ok(Some(_))
+    )
+}
+
 /// The durable completion record for one job.
 pub fn detached_completion_notice(
     tool: &'static str,
@@ -81,9 +108,11 @@ pub async fn deliver_detached_completion(
     outcome: serde_json::Value,
 ) -> Result<DetachedCompletionDelivered, DetachedCompletionError> {
     let notice = detached_completion_notice(tool, job_id, status, &outcome)?;
-    let input = meerkat_runtime::Input::Prompt(
-        meerkat_runtime::PromptInput::detached_job_completed(format!("{tool}:{job_id}"), notice),
-    );
+    let input =
+        meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::detached_job_completed(
+            detached_completion_key(tool, job_id),
+            notice,
+        ));
     match runtime
         .accept_input_with_completion(owner_session_id, input)
         .await

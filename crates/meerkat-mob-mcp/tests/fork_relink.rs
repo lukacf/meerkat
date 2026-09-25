@@ -482,3 +482,236 @@ async fn relink_past_max_run_retires_a_child_still_running() {
     gate.open();
     fixture.teardown().await;
 }
+
+/// Regression for the lifecycle review's probe: a child forked with a LIVE
+/// max_run that completes inside it, with its outcome never delivered, is
+/// re-linked after the limit has passed. It delivers the real reply and
+/// stays seated, instead of being retired as max_run_elapsed.
+#[tokio::test]
+async fn relink_after_a_live_limit_passed_delivers_the_completed_childs_reply() {
+    let fixture = CouncilFixture::new(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-live-limit-completed".to_string();
+    let child = AgentIdentity::from("relink-live-limit-child");
+
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec(child.as_str()),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            Some(Duration::from_millis(1500)),
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    assert!(matches!(
+        run.outcome().await,
+        Some(ForkChildRunOutcome::Completed(_))
+    ));
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(
+        handle.get_member(&child).await.unwrap().is_some(),
+        "the live limit does not touch a child that completed within it"
+    );
+
+    let job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    let action = meerkat_mob_mcp::fork_relink::relink_child(
+        fixture.state.session_service(),
+        relink_runtime(&fixture),
+        &fixture.source_mob_id(),
+        &handle,
+        &child,
+        &job,
+    )
+    .await;
+    assert_eq!(action, ForkRelinkAction::Delivered);
+    assert!(handle.get_member(&child).await.unwrap().is_some());
+    await_completion_record(&fixture, &owner, &job_id).await;
+    let record = completion_record_text(&fixture, &owner, &job_id).await;
+    assert!(
+        record.contains(CHILD_REPLY) && !record.contains("max_run_elapsed"),
+        "{record}"
+    );
+    fixture.teardown().await;
+}
+
+/// A job whose completion was already delivered is over. A later restore past
+/// its limit, while the child (kept seated for further work) is busy with a
+/// later task and its transcript no longer shows the job's reply where the
+/// job left it (compaction or later work rewrote it), leaves the child alone:
+/// no cancel, no retirement, no second record.
+#[tokio::test]
+async fn relink_leaves_a_child_whose_job_already_ended_alone() {
+    const LATER_TASK: &str = "a later task, unrelated to the job";
+    let gate = TurnGate::new();
+    let turn_gate = Arc::clone(&gate);
+    let fixture = CouncilFixture::new(move |request| {
+        if support::last_user_text(request).contains(LATER_TASK) {
+            ScriptedTurn::Gated(Arc::clone(&turn_gate), "later work done".to_string())
+        } else {
+            ScriptedTurn::Text(CHILD_REPLY.to_string())
+        }
+    });
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let job_id = "job-ended-earlier".to_string();
+    let child = AgentIdentity::from("relink-ended-child");
+
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec(child.as_str()),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            None,
+            Some(ForkJobBinding {
+                job_id: job_id.clone(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    assert!(matches!(
+        run.outcome().await,
+        Some(ForkChildRunOutcome::Completed(_))
+    ));
+    let mut job = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .and_then(|entry| entry.fork_job.clone())
+        .expect("durable fork job record");
+    // The job's outcome reaches the forker.
+    assert_eq!(
+        meerkat_mob_mcp::fork_relink::relink_child(
+            fixture.state.session_service(),
+            relink_runtime(&fixture),
+            &fixture.source_mob_id(),
+            &handle,
+            &child,
+            &job,
+        )
+        .await,
+        ForkRelinkAction::Delivered
+    );
+    await_completion_record(&fixture, &owner, &job_id).await;
+
+    // The child takes later work, and a restore lands past the job's limit.
+    let member = handle.member(&child).await.expect("child handle");
+    let later_turn = tokio::spawn(async move {
+        member
+            .internal_turn(meerkat_core::types::ContentInput::Text(
+                LATER_TASK.to_string(),
+            ))
+            .await
+    });
+    gate.wait_entered(1).await;
+    job.max_run_ms = Some(1);
+    job.prefix_message_count = usize::MAX / 2;
+
+    let started = tokio::time::Instant::now();
+    let action = meerkat_mob_mcp::fork_relink::relink_child(
+        fixture.state.session_service(),
+        relink_runtime(&fixture),
+        &fixture.source_mob_id(),
+        &handle,
+        &child,
+        &job,
+    )
+    .await;
+    assert_eq!(action, ForkRelinkAction::AlreadyDelivered);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(
+        handle.get_member(&child).await.unwrap().is_some(),
+        "the child is not retired for a job that ended"
+    );
+    assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
+    // The later turn was not cancelled: released, it completes.
+    gate.open();
+    later_turn
+        .await
+        .expect("later turn task")
+        .expect("the child's later turn completes");
+    fixture.teardown().await;
+}
+
+/// A fork job belongs to the incarnation whose turn it admitted: a successor
+/// after a respawn carries none, so no later re-link applies the old job's
+/// limit to the fresh member.
+#[tokio::test]
+async fn a_respawned_fork_child_carries_no_fork_job() {
+    let fixture = CouncilFixture::new(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let owner = forker_session(&fixture).await;
+    let handle = fixture
+        .state
+        .handle_for(&fixture.source_mob_id())
+        .await
+        .unwrap();
+    let child = AgentIdentity::from("relink-respawned-child");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &AgentIdentity::from("forker"),
+            child_spec(child.as_str()),
+            None,
+            "fork_off_result",
+            16 * 1024,
+            meerkat_core::DurableForkSourceAdmission::Quiescent,
+            Some(Duration::from_secs(600)),
+            Some(ForkJobBinding {
+                job_id: "job-before-respawn".to_string(),
+                owner_session_id: owner.clone(),
+            }),
+        )
+        .await
+        .expect("fork");
+    let _ = run.outcome().await;
+    let predecessor = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .cloned()
+        .expect("child seated");
+    assert!(predecessor.fork_job.is_some());
+
+    handle.respawn(child.clone(), None).await.expect("respawn");
+    let entry = handle
+        .roster()
+        .await
+        .get_by_identity(&child)
+        .cloned()
+        .expect("successor seated");
+    assert!(
+        entry.fork_job.is_none(),
+        "the successor carries no fork job"
+    );
+    assert_eq!(
+        entry.spawned_by, predecessor.spawned_by,
+        "ownership still belongs to the identity"
+    );
+    fixture.teardown().await;
+}

@@ -41382,7 +41382,6 @@ impl MobActor {
                         spec.override_profile = snapshot.effective_profile_override.clone();
                         spec.model_override = snapshot.effective_model_override.clone();
                         spec.spawned_by = snapshot.spawned_by.clone();
-                        spec.fork_job = snapshot.fork_job.clone();
                         spec
                     }
                 };
@@ -41392,9 +41391,10 @@ impl MobActor {
                 if replacement_spec.spawned_by.is_none() {
                     replacement_spec.spawned_by = snapshot.spawned_by.clone();
                 }
-                if replacement_spec.fork_job.is_none() {
-                    replacement_spec.fork_job = snapshot.fork_job.clone();
-                }
+                // A fork job belongs to the incarnation whose turn it admitted.
+                // A successor starts fresh and carries none, so a later
+                // re-link can never apply the old job's limit to it.
+                replacement_spec.fork_job = None;
         self.customize_spawn_spec(
             super::handle::SpawnSource::Respawn,
             None,

@@ -3666,6 +3666,36 @@ mod durable_tests {
     }
 
     #[tokio::test]
+    async fn shell_schema_offers_background_only_with_a_durable_binding() {
+        use crate::builtin::BuiltinTool;
+        use crate::builtin::shell::ShellTool;
+
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = SessionId::new();
+        let (runtime, _job_store, config) = durable_fixture(&temp, session_id.clone());
+        let bound = JobManager::new(config.clone())
+            .bind_canonical_async_ops(
+                session_id.clone(),
+                Arc::new(RuntimeOpsLifecycleRegistry::new()),
+            )
+            .with_durable_job_runtime(runtime);
+        assert!(bound.exports_canonical_async_ops());
+        let schema = ShellTool::with_job_manager(config.clone(), Arc::new(bound))
+            .def()
+            .input_schema;
+        assert_eq!(schema["properties"]["background"]["type"], "boolean");
+
+        // An operation binding without durable stores cannot run background
+        // jobs, so the mode stays hidden.
+        let unbound = JobManager::new(config.clone())
+            .bind_canonical_async_ops(session_id, Arc::new(RuntimeOpsLifecycleRegistry::new()));
+        let schema = ShellTool::with_job_manager(config, Arc::new(unbound))
+            .def()
+            .input_schema;
+        assert!(schema["properties"].get("background").is_none());
+    }
+
+    #[tokio::test]
     async fn background_output_keeps_head_and_tail_within_the_configured_cap() {
         let temp = TempDir::new().expect("tempdir");
         let session_id = SessionId::new();

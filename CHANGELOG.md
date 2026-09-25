@@ -41,6 +41,13 @@ them.
   `JsonRenderedAsText { value, text }`; exhaustive matches must handle it.
   `meerkat_tools::builtin::shell::ShellConfig` and `meerkat_core::ShellDefaults`
   gain the public field `max_output_chars: usize` (serde-defaulted to 40000).
+- Dispatched `shell` and `shell_job_status` results are now a `Text` content
+  block instead of a `Structured` JSON block, in transcripts, tool events
+  (`tool_execution_completed`, `tool_result_received`) and every surface
+  (REST, RPC, MCP, SDKs). Hosts that read `exit_code`, `timed_out`, the lossy
+  flags or `placement` from the result content no longer find them there. Only
+  code that calls the tool directly (`BuiltinTool::call`) still gets the typed
+  `ShellOutput` or `BackgroundJob` through `ToolOutput::into_json`.
 
 ### Changed
 
@@ -48,11 +55,10 @@ them.
   a status line (`exit code N (Xs)`, or the timeout), stdout as is, and stderr
   under `[stderr]` only when non-empty. The JSON envelope escaped every stream
   and carried absolute placement paths and `false` flags, and it was re-sent on
-  every later request. Rust callers still get `ShellOutput` through
-  `ToolOutput::into_json`; event streams and transcripts carry the text.
+  every later request. Transcripts and events carry the same text (see
+  Breaking).
 - `shell_job_status` results reach the model as the same compact text: the job
-  ID and state, then the exit status and output of a completed job. Rust
-  callers still get `BackgroundJob` through `ToolOutput::into_json`. The detail
+  ID and state, then the exit status and output of a completed job. The detail
   of a background-job completion notice (and of the `background_job_completed`
   event) is now that exit status and output instead of a Rust debug dump of the
   job status.

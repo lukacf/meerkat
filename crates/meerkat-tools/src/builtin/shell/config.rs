@@ -115,9 +115,9 @@ pub struct ShellConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env_vars: HashMap<String, String>,
 
-    /// Cap, in characters, on foreground stdout returned to the model
-    /// (stderr gets half of it). Longer output keeps its first and last
-    /// halves with an omission marker naming the total size.
+    /// Cap, in characters, on stdout returned to the model by foreground
+    /// calls and background jobs (stderr gets half of it). Longer output
+    /// keeps its head and tail around a marker naming the omitted lines.
     #[serde(default = "default_max_output_chars")]
     pub max_output_chars: usize,
 }

@@ -605,6 +605,7 @@ Shell behavior is controlled by `ShellConfig`:
 | `max_concurrent_processes` | `usize` | `10` | Maximum concurrent background processes |
 | `security_mode` | `SecurityMode` | `Unrestricted` | Command security policy |
 | `security_patterns` | `Vec<String>` | `[]` | Glob patterns for allow/deny lists |
+| `max_output_chars` | `usize` | `40000` | Cap, in characters, on stdout returned to the model by foreground calls and background jobs (stderr gets half). Longer output keeps its head and tail. Set with `[shell] max_output_chars`. |
 
 **Source:** `crates/meerkat-tools/src/builtin/shell/config.rs`
 </Accordion>
@@ -651,8 +652,10 @@ Execute a shell command. Uses POSIX-style parsing for policy checks; runs via Nu
 
 A foreground result reaches the model as compact text: one status line, then
 stdout as is, then stderr under a `[stderr]` line only when it is non-empty.
-Flags such as invalid UTF-8 appear only when set. Rust callers of
-`ShellTool` still get the typed `ShellOutput` through `ToolOutput::into_json`.
+Flags such as invalid UTF-8 appear only when set. Transcripts, tool events and
+every surface carry this text as a `Text` content block. Only code that calls
+the tool directly (`BuiltinTool::call`) gets the typed `ShellOutput` through
+`ToolOutput::into_json`.
 
 stdout is capped at `[shell] max_output_chars` characters (default 40000, about
 10K tokens), and stderr at half of that. The cap applies to foreground calls
@@ -766,9 +769,10 @@ The summary `status` field is one of: `"queued"`, `"running"`,
 <Accordion title="shell_job_status">
 Check status of a background shell job. The model sees compact text: the job
 ID and its state, and for a completed job its exit status and output, capped
-like foreground output. Rust callers still get the typed `BackgroundJob`
-through `ToolOutput::into_json`. A background job's completion notice carries
-the same exit status and output.
+like foreground output. Transcripts and events carry the same text; only code
+that calls the tool directly gets the typed `BackgroundJob` through
+`ToolOutput::into_json`. A background job's completion notice carries the same
+exit status and output.
 
 **Default enabled:** No (requires shell to be enabled)
 

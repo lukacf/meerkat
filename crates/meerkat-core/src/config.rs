@@ -1260,9 +1260,9 @@ pub struct ShellDefaults {
     pub security_mode: SecurityMode,
     /// Patterns for allow/deny lists (glob format)
     pub security_patterns: Vec<String>,
-    /// Per-stream cap, in characters, on foreground shell output returned to
-    /// the model. Longer output keeps its first and last halves with an
-    /// omission marker between them.
+    /// Cap, in characters, on shell stdout returned to the model by
+    /// foreground calls and background jobs (stderr gets half). Longer output
+    /// keeps its head and tail with an omission marker between them.
     pub max_output_chars: usize,
 }
 

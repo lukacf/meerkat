@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use meerkat_core::SessionId;
 use meerkat_core::event::BackgroundJobTerminalStatus;
-use meerkat_core::types::{SystemNoticeBlock, SystemNoticeKind, SystemNoticeMessage};
+use meerkat_core::types::SystemNoticeMessage;
 
 /// Outcome of one delivery attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,19 +87,8 @@ pub fn detached_completion_notice(
             tool,
             detail: error.to_string(),
         })?;
-    Ok(SystemNoticeMessage::with_blocks(
-        SystemNoticeKind::BackgroundJob,
-        Some(format!(
-            "Background {tool} job {job_id} finished ({}):\n{detail}",
-            status.as_str()
-        )),
-        vec![SystemNoticeBlock::BackgroundJob {
-            job_id: job_id.to_string(),
-            display_name: Some(tool.to_string()),
-            status,
-            detail: Some(detail),
-            persisted: true,
-        }],
+    Ok(SystemNoticeMessage::persisted_background_job(
+        tool, job_id, status, detail,
     ))
 }
 

@@ -2737,6 +2737,33 @@ impl SystemNoticeMessage {
         }
     }
 
+    /// Build the durable completion record of a detached job: a
+    /// `BackgroundJob` notice whose block is `persisted`, with a body that
+    /// names the job and carries its outcome `detail`. The record
+    /// [`Self::persisted_background_job_id`] recognizes.
+    #[must_use]
+    pub fn persisted_background_job(
+        display_name: &str,
+        job_id: &str,
+        status: crate::event::BackgroundJobTerminalStatus,
+        detail: String,
+    ) -> Self {
+        Self::with_blocks(
+            SystemNoticeKind::BackgroundJob,
+            Some(format!(
+                "Background {display_name} job {job_id} finished ({}):\n{detail}",
+                status.as_str()
+            )),
+            vec![SystemNoticeBlock::BackgroundJob {
+                job_id: job_id.to_string(),
+                display_name: Some(display_name.to_string()),
+                status,
+                detail: Some(detail),
+                persisted: true,
+            }],
+        )
+    }
+
     /// The durable completion record of a detached job, if this is one:
     /// a `BackgroundJob` notice whose block is `persisted`.
     #[must_use]
@@ -2762,6 +2789,11 @@ impl SystemNoticeMessage {
     pub fn model_projection_text(&self) -> String {
         let mut parts = Vec::new();
         if let Some(body) = self.body.as_deref().filter(|body| !body.trim().is_empty()) {
+            // A detached job's completion record is its body: the body
+            // already carries the outcome detail its block holds.
+            if self.persisted_background_job_id().is_some() {
+                return body.to_string();
+            }
             parts.push(body.to_string());
         }
         for block in &self.blocks {

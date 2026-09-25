@@ -882,12 +882,14 @@ fn create_schedule_schema() -> Value {
     })
 }
 
-/// Update schema. The replaceable trigger, target, and policy shapes are
-/// identical to `meerkat_schedule_create`, which is always advertised next to
-/// this tool, so they point at the create schema instead of repeating it:
-/// providers inline every nested definition, and the full trigger/target
-/// schemas are about 12 KB of every request. Arguments are parsed by the same
-/// typed `UpdateScheduleRequest` either way.
+/// Update schema. Every replaceable field carries exactly the shape
+/// `meerkat_schedule_create` advertises for it, built from the same schema
+/// functions, so this tool stays self-contained. Tool visibility is decided
+/// per tool name (`ToolScope` filters, `--allow-tool`/`--block-tool`, per-turn
+/// allow/deny lists, member tool policies, deferred catalog loads), so the
+/// update tool can be visible while the create tool is not; a pointer to the
+/// create schema would then leave the model guessing the trigger and target
+/// field names.
 fn update_schedule_schema() -> Value {
     json!({
         "type": "object",
@@ -898,19 +900,11 @@ fn update_schedule_schema() -> Value {
             },
             "name": { "type": "string" },
             "description": { "type": "string" },
-            "trigger": same_shape_as_create("trigger"),
-            "target": same_shape_as_create("target"),
-            "misfire_policy": same_shape_as_create("misfire_policy"),
-            "overlap_policy": {
-                "type": "string",
-                "enum": ["allow_concurrent", "skip_if_running"],
-                "description": "Same values as meerkat_schedule_create.overlap_policy."
-            },
-            "missing_target_policy": {
-                "type": "string",
-                "enum": ["skip", "mark_misfired"],
-                "description": "Same values as meerkat_schedule_create.missing_target_policy."
-            },
+            "trigger": trigger_spec_schema(),
+            "target": target_binding_schema(),
+            "misfire_policy": misfire_policy_schema(),
+            "overlap_policy": overlap_policy_schema(),
+            "missing_target_policy": missing_target_policy_schema(),
             "labels": {
                 "type": "object",
                 "additionalProperties": { "type": "string" }
@@ -926,15 +920,6 @@ fn update_schedule_schema() -> Value {
         },
         "required": ["schedule_id"],
         "additionalProperties": false,
-    })
-}
-
-fn same_shape_as_create(field: &'static str) -> Value {
-    json!({
-        "type": "object",
-        "description": format!(
-            "Replacement {field}; uses exactly the JSON shape of meerkat_schedule_create.{field}."
-        ),
     })
 }
 
@@ -1678,12 +1663,16 @@ mod tests {
         );
     }
 
-    /// `meerkat_schedule_update` advertises the replaceable shapes by
-    /// reference to `meerkat_schedule_create` instead of repeating ~12 KB of
-    /// trigger/target schema on every request, and every such reference names
-    /// a field the create schema actually defines.
-    #[test]
-    fn update_schema_points_at_create_shapes_instead_of_repeating_them() {
+    /// Tool visibility is decided per tool name, so `meerkat_schedule_update`
+    /// can be visible while `meerkat_schedule_create` is filtered out (for
+    /// example `--block-tool meerkat_schedule_create`, a per-turn allow list,
+    /// or a member tool policy that allows edits but not creation). Update
+    /// must then still carry every replaceable shape itself: each field it
+    /// shares with create is the identical schema, no field defers its shape
+    /// to the create tool, and the session-scoped wrapper advertises the
+    /// `current_session` shortcut on update's target exactly as on create's.
+    #[tokio::test]
+    async fn update_schema_is_self_contained_when_create_is_not_visible() {
         let tools = schedule_tools_list();
         let schema_of = |name: &str| {
             tools
@@ -1694,37 +1683,65 @@ mod tests {
         };
         let create = schema_of("meerkat_schedule_create");
         let update = schema_of("meerkat_schedule_update");
+        let create_properties = create["properties"]
+            .as_object()
+            .expect("create schema properties");
+        let update_properties = update["properties"]
+            .as_object()
+            .expect("update schema properties");
 
-        for field in ["trigger", "target", "misfire_policy"] {
-            let property = &update["properties"][field];
-            assert!(
-                property.get("oneOf").is_none(),
-                "update.{field} must not repeat the create definition: {property}"
-            );
+        for (field, create_shape) in create_properties {
             assert_eq!(
-                property["description"].as_str(),
-                Some(
-                    format!(
-                        "Replacement {field}; uses exactly the JSON shape of meerkat_schedule_create.{field}."
-                    )
-                    .as_str()
-                )
-            );
-            assert!(
-                create["properties"][field].get("oneOf").is_some(),
-                "create.{field} keeps the full definition the update schema points at"
-            );
-        }
-        for field in ["overlap_policy", "missing_target_policy"] {
-            assert_eq!(
-                update["properties"][field]["enum"], create["properties"][field]["enum"],
-                "update.{field} keeps the same closed value set as create"
+                update_properties.get(field),
+                Some(create_shape),
+                "update.{field} must carry the create shape itself, not point at it"
             );
         }
         assert_eq!(update["required"], json!(["schedule_id"]));
         assert!(
-            update.to_string().len() * 4 < create.to_string().len(),
-            "update schema should be a small fraction of the create schema"
+            !update.to_string().contains("meerkat_schedule_create"),
+            "no update field may defer its shape to the create tool"
+        );
+
+        // The replacement from the review scenario (repeat every 15 minutes)
+        // resolves from the update schema alone.
+        let interval = update["properties"]["trigger"]["oneOf"]
+            .as_array()
+            .expect("update trigger variants")
+            .iter()
+            .find(|variant| variant["properties"]["type"]["const"] == "interval")
+            .expect("update trigger advertises the interval variant");
+        assert_eq!(
+            interval["required"],
+            json!(["type", "start_at_utc", "every_seconds"])
+        );
+
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let dispatcher = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(service)),
+            SessionId::new(),
+        );
+        let session_tools = dispatcher.tools();
+        let session_target_types = |name: &str| {
+            session_tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .expect("session-scoped schedule tool")
+                .input_schema["properties"]["target"]["oneOf"][0]["properties"]["type"]["enum"]
+                .clone()
+        };
+        let update_target_types = session_target_types("meerkat_schedule_update");
+        assert_eq!(
+            update_target_types,
+            session_target_types("meerkat_schedule_create")
+        );
+        assert!(
+            update_target_types
+                .as_array()
+                .expect("update target type enum")
+                .iter()
+                .any(|value| value.as_str() == Some("current_session")),
+            "session-scoped wrapper should advertise current_session on update"
         );
     }
 

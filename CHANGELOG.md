@@ -104,13 +104,11 @@ them.
   `apply_patch` documents its grammar once (the argument schema no longer
   repeats it) and its example now matches the real anchor semantics;
   `generate_image` keeps per-field rules in its schema only and advertises the
-  image-reference definition once; `meerkat_schedule_update` points its
-  trigger/target/misfire shapes at `meerkat_schedule_create` instead of
-  repeating about 12 KB of schema; the comms send tools document image
+  image-reference definition once; the comms send tools document image
   references once, on the `blocks` argument; the OpenAI and Gemini image
   parameter notes are shorter.
-  Behavior-only: `meerkat_schedule::schedule_tools_list` and
-  `meerkat_comms::mcp::tools::tools_list` return the slimmer definitions.
+  Behavior-only: `meerkat_comms::mcp::tools::tools_list` returns the slimmer
+  definitions.
 - OpenAI tool emission drops the root `$schema` and `title` annotations that
   schemars stamps on every derived tool schema (Gemini emission already did).
   `ToolDef.input_schema` is unchanged. Behavior-only:

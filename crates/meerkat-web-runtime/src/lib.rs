@@ -4619,6 +4619,8 @@ capabilities = [{capability_values}]
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         };
         let wire: meerkat_contracts::WireRunResult = run.into();
         let json = serde_json::to_value(&wire).expect("wire result should serialize");

@@ -337,6 +337,15 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     supports `prompt_cache_enabled`, `prompt_cache_key`, and
     `prompt_cache_options` (`implicit` or `explicit`, with optional
     `30m` TTL). Use `max`, not `ultra`, as the public provider effort.
+
+    Meerkat's default `prompt_cache_key` is one key per model
+    (`meerkat:profile:openai:<model>`), shared across sessions so identical
+    system and tool prefixes can reuse OpenAI's prefix cache. The key only
+    routes requests; it never proves a cache hit, and OpenAI still needs a
+    byte-identical prefix. A caller-supplied key wins. Sharing maximises
+    cross-session reuse of the static prefix, while very high aggregate request
+    rates on one model can overflow OpenAI's routing for a single key; see
+    [Rust SDK advanced](/rust/advanced#provider-parameters).
   </Tab>
   <Tab title="Gemini">
     ```bash

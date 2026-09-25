@@ -88,6 +88,8 @@ fn wire_run_result_required_fields() {
         turns: 3,
         tool_calls: 2,
         usage: WireUsage::default(),
+        run_usage: None,
+        request_usage: Vec::new(),
         terminal_cause_kind: None,
         structured_output: None,
         extraction_error: None,
@@ -116,6 +118,8 @@ fn wire_run_result_optional_omitted() {
         turns: 1,
         tool_calls: 0,
         usage: WireUsage::default(),
+        run_usage: None,
+        request_usage: Vec::new(),
         terminal_cause_kind: None,
         structured_output: None,
         extraction_error: None,
@@ -160,7 +164,10 @@ fn wire_run_result_roundtrip() {
             total_tokens: 150,
             cache_creation_tokens: Some(10),
             cache_read_tokens: Some(20),
+            reasoning_tokens: None,
         },
+        run_usage: None,
+        request_usage: Vec::new(),
         terminal_cause_kind: None,
         structured_output: Some(serde_json::json!({"key": "value"})),
         extraction_error: None,
@@ -376,6 +383,7 @@ fn wire_usage_fields() {
         total_tokens: 150,
         cache_creation_tokens: None,
         cache_read_tokens: None,
+        reasoning_tokens: None,
     };
     let value = serde_json::to_value(&wire).unwrap();
 
@@ -430,6 +438,7 @@ fn agent_event_all_variants_roundtrip() {
                 output_tokens: 5,
                 cache_creation_tokens: None,
                 cache_read_tokens: None,
+                reasoning_tokens: None,
                 provider_accounting: None,
             }
             .into(),
@@ -990,6 +999,7 @@ fn wire_run_result_from_run_result_conversion() {
             output_tokens: 100,
             cache_creation_tokens: Some(50),
             cache_read_tokens: Some(30),
+            reasoning_tokens: None,
             provider_accounting: None,
         },
         turns: 4,
@@ -999,6 +1009,8 @@ fn wire_run_result_from_run_result_conversion() {
         extraction_error: None,
         schema_warnings: None,
         skill_diagnostics: None,
+        run_usage: None,
+        request_usage: Vec::new(),
     };
 
     let wire: WireRunResult = run.into();
@@ -1051,6 +1063,7 @@ fn wire_usage_from_usage_conversion() {
         output_tokens: 250,
         cache_creation_tokens: Some(100),
         cache_read_tokens: Some(75),
+        reasoning_tokens: None,
         provider_accounting: None,
     };
 

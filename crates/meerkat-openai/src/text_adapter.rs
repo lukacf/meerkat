@@ -471,6 +471,7 @@ fn map_usage(u: &OaiUsage, model: &str) -> Usage {
         output_tokens: u64::from(u.output_tokens),
         cache_creation_tokens: None,
         cache_read_tokens,
+        reasoning_tokens: None,
         provider_accounting: Some(meerkat_core::ProviderTokenAccounting::openai(
             model,
             u64::from(u.input_tokens),

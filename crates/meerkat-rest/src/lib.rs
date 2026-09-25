@@ -14789,6 +14789,8 @@ mod tests {
                 quarantined: vec![],
                 collection_fault: None,
             }),
+            run_usage: None,
+            request_usage: Vec::new(),
         };
 
         let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
@@ -15823,6 +15825,8 @@ mod tests {
                     extraction_error: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
+                    run_usage: None,
+                    request_usage: Vec::new(),
                 },
                 &realm,
             );

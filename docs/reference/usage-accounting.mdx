@@ -20,12 +20,44 @@ different denominators.
 | Rust type | `TurnUsage` | `CumulativeUsage` |
 | Scope | exactly one provider request: the assistant turn that closed the run | every provider call recorded on the **session** before this event's emission, across runs |
 | `input_tokens` | raw provider counter (Anthropic: **uncached input only**) | already the sum of each recorded call's presented input |
-| `cache_creation_tokens` / `cache_read_tokens` | provider-reported, present | always absent |
+| `cache_creation_tokens` / `cache_read_tokens` | provider-reported, present | normalized sums, subsets of `input_tokens` |
+| `reasoning_tokens` | provider-reported where the provider has a count | normalized sum, a subset of `output_tokens` |
 | `accounting` | present (provider + model + presented input) | absent by design |
 
 A session may span providers and models, so the cumulative account deliberately
-carries no single provider/model and no cache detail counters: their
-relationship to the input total is provider-specific.
+carries no single provider/model. Its detail counters are still comparable
+across providers, because every adapter's cache counts are subsets of that
+call's presented input:
+
+- Anthropic reports cache-write and cache-read input as disjoint components of
+  the presented total.
+- OpenAI, Gemini and OpenAI-compatible backends report cached input as a detail
+  inside their inclusive input total.
+
+So on every cumulative value, on every provider:
+
+```
+cache_read_tokens     <= input_tokens
+cache_creation_tokens <= input_tokens
+reasoning_tokens      <= output_tokens
+```
+
+A detail counter is absent until some recorded call reports it. Sessions saved
+by 0.8.22 through 0.8.42 carry no cumulative detail counters, so theirs start
+from zero and cover only later calls. Sessions saved before 0.8.22 carry raw
+summed cache counters that can exceed the input total; reported totals and run
+deltas clamp them to the invariant above, while the stored value is untouched.
+
+Reasoning is the provider's thinking-token count: OpenAI Responses
+`output_tokens_details.reasoning_tokens`, Chat Completions
+`completion_tokens_details.reasoning_tokens`, and Gemini `thoughtsTokenCount`.
+Gemini bills thinking separately from candidates, so its `output_tokens` is
+candidates plus thoughts. Chat Completions backends differ: OpenAI counts
+reasoning inside `completion_tokens`, while others such as xAI count it beside
+them. A row whose `total_tokens` equals prompt plus completion plus reasoning
+exactly, with non-zero reasoning, is read as reasoning outside completion, and
+its `output_tokens` becomes completion plus reasoning. Anthropic reports no separate count and folds
+thinking into `output_tokens`, so its `reasoning_tokens` stays absent.
 
 <Warning>
 `run_completed.usage` is **session-cumulative, not run-scoped**. It snapshots
@@ -33,8 +65,29 @@ relationship to the input total is provider-specific.
 session and restored on resume, so on the second and later runs it already
 contains earlier runs' recorded calls. Later calls can advance the account
 beyond this snapshot, notably structured-output extraction. There is no
-per-run token account on the event stream.
+per-run token account on the event stream; the final run result carries one
+(see below).
 </Warning>
+
+## Run results: per-run and per-request usage
+
+The final run result (`rkat run --output json`, the RPC and REST run results,
+and the SDK `RunResult`) carries three usage views:
+
+| Field | Scope |
+| --- | --- |
+| `usage` | session-cumulative, as above |
+| `run_usage` | this run alone: the change in the session total from the start of the run to its end, with the same normalized fields |
+| `request_usage` | one row per provider request this run made, in order: tool-loop calls, the structured-output extraction call and its retries, and any compaction summary call. Each row is a per-call usage with its `accounting` |
+
+`run_usage` and the sum of `request_usage[*].accounting.presented_tokens` agree
+on input for a run that records every call it makes. A run that suspends for
+callback tool results and then resumes keeps one account, so calls made before
+the suspension appear in the resumed run's result. Compaction summaries written
+by a host curator or the mechanical capacity fallback make no provider request
+and add no row. Legacy totals are clamped as described above. On a fresh session
+`run_usage` equals `usage`. A harness that runs several turns on one session
+should read `run_usage`, never sum `usage`.
 
 ## Which calls emit a usage row
 
@@ -165,8 +218,11 @@ What the stream publishes:
 ```
 run 1  turn_completed.usage.accounting.presented_tokens = 4420  output = 90
 run 1  run_completed.usage: input = 13720  output = 440  total = 14160
+       cache_creation = 4000  cache_read = 8300
 run 2  turn_completed.usage.accounting.presented_tokens = 4700  output = 60
 run 2  run_completed.usage: input = 18420  output = 500  total = 18920
+       cache_creation = 4000  cache_read = 12800
+run 2  run_usage:           input = 4700   output = 60   cache_read = 4500
 ```
 
 For this ordinary tool-loop example, read that as follows.

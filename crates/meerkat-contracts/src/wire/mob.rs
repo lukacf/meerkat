@@ -2450,10 +2450,10 @@ pub struct WireMobRunAccounting {
     /// `usage_unavailable` contribute nothing, so this is a floor, not a
     /// claim of completeness.
     ///
-    /// Input and output tokens only: the cache counters are absent here even
-    /// when members report them, because their relation to `input_tokens` is
-    /// provider-specific and this aggregate may span providers. Read cache
-    /// numbers per member, never off this total.
+    /// Cache and reasoning counters are summed too. Member usage is already
+    /// session-cumulative and provider-normalized, so on every provider the
+    /// cache counters are subsets of `input_tokens` and reasoning is a subset
+    /// of `output_tokens`, and the sums keep that relation.
     pub usage_total: crate::wire::WireUsage,
     /// Number of members whose usage could not be read.
     #[serde(default, skip_serializing_if = "is_zero_usize")]

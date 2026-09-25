@@ -88,9 +88,11 @@ class Usage:
       ``accounting.presented_tokens``.
     * Cumulative (``run_completed.usage``, ``RunResult.usage``): a
       *session*-cumulative total whose ``input_tokens`` is already the sum of
-      each recorded call's presented tokens, whose cache fields are always
-      ``None``, and which carries no ``accounting`` because a session may span
-      providers and models. It is persisted with the session, so on the second
+      each recorded call's presented tokens, whose cache and reasoning fields
+      are normalized sums (``cache_read_tokens <= input_tokens`` and
+      ``reasoning_tokens <= output_tokens`` on every provider), and which
+      carries no ``accounting`` because a session may span providers and
+      models. It is persisted with the session, so on the second
       run of a session it already contains the first run's calls.
 
     Do not sum the cumulative value with anything - take the latest one - and do
@@ -105,6 +107,9 @@ class Usage:
     cache_creation_tokens: int | None = None
     cache_read_tokens: int | None = None
     accounting: ProviderTokenAccounting | None = None
+    #: Reasoning (thinking) tokens, a subset of ``output_tokens``. ``None`` when
+    #: the provider reports no separate count (Anthropic).
+    reasoning_tokens: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -766,12 +771,15 @@ def _parse_usage(raw: dict[str, Any] | None) -> Usage:
         raise ValueError("usage.cache_creation_tokens must be number")
     if raw.get("cache_read_tokens") is not None and not _is_number(raw.get("cache_read_tokens")):
         raise ValueError("usage.cache_read_tokens must be number")
+    if raw.get("reasoning_tokens") is not None and not _is_number(raw.get("reasoning_tokens")):
+        raise ValueError("usage.reasoning_tokens must be number")
     return Usage(
         input_tokens=raw["input_tokens"],
         output_tokens=raw["output_tokens"],
         cache_creation_tokens=raw.get("cache_creation_tokens"),
         cache_read_tokens=raw.get("cache_read_tokens"),
         accounting=_parse_accounting(raw.get("accounting")),
+        reasoning_tokens=raw.get("reasoning_tokens"),
     )
 
 

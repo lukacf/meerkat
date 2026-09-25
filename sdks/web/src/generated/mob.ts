@@ -213,6 +213,7 @@ export interface Usage {
   input_tokens: number;
   output_tokens: number;
   provider_accounting?: Record<string, unknown> | null;
+  reasoning_tokens?: number | null;
 }
 
 export interface MobHelperResult {

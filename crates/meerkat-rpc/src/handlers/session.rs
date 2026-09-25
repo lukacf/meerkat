@@ -795,6 +795,8 @@ pub async fn create_session_with_params(
             extraction_error: None,
             schema_warnings: None,
             skill_diagnostics: None,
+            run_usage: None,
+            request_usage: Vec::new(),
         }
     } else {
         match runtime
@@ -1069,6 +1071,8 @@ mod tests {
                 quarantined: vec![],
                 collection_fault: None,
             }),
+            run_usage: None,
+            request_usage: Vec::new(),
         };
         let wire: CreateSessionResult = run.into();
         assert!(wire.skill_diagnostics.is_some());

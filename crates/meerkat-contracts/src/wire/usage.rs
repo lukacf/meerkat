@@ -13,6 +13,10 @@ pub struct WireUsage {
     pub cache_creation_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<u64>,
+    /// Reasoning (thinking) tokens, a subset of `output_tokens`. Absent when
+    /// the provider does not report a separate reasoning count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
 }
 
 impl From<meerkat_core::Usage> for WireUsage {
@@ -23,6 +27,7 @@ impl From<meerkat_core::Usage> for WireUsage {
             total_tokens: u.total_tokens(),
             cache_creation_tokens: u.cache_creation_tokens,
             cache_read_tokens: u.cache_read_tokens,
+            reasoning_tokens: u.reasoning_tokens,
         }
     }
 }

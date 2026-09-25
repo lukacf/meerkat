@@ -1684,6 +1684,7 @@ impl BridgeBoundedResultSpec {
                     output_tokens: u64::MAX,
                     cache_creation_tokens: Some(u64::MAX),
                     cache_read_tokens: Some(u64::MAX),
+                    reasoning_tokens: Some(u64::MAX),
                     provider_accounting: None,
                 },
                 turns: u32::MAX,
@@ -3579,6 +3580,52 @@ impl BridgeObservationResponse {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// The framing bound must cover a result whose usage carries every
+    /// optional counter at its widest, reasoning included.
+    #[test]
+    fn protocol_safe_text_ceiling_covers_widest_usage_with_reasoning() {
+        let spec = BridgeBoundedResultSpec {
+            label: "l".repeat(BRIDGE_BOUNDED_RESULT_MAX_LABEL_BYTES),
+            max_text_bytes: 4096,
+        };
+        let record_ceiling = 16_384;
+        let ceiling = spec
+            .protocol_safe_text_ceiling_bytes("input-1", u64::MAX, u64::MAX, record_ceiling)
+            .unwrap();
+        let record = BridgeTurnOutcomeRecord {
+            input_id: "input-1".to_string(),
+            generation: u64::MAX,
+            fence_token: u64::MAX,
+            terminal_seq: u64::MAX,
+            outcome: WireFlowTurnOutcome::RunCompleted,
+            bounded_result: Some(BridgeBoundedTurnResult {
+                result: crate::wire::mob::MobBoundedHelperResult {
+                    label: spec.label.clone(),
+                    status: crate::wire::mob::MobBoundedHelperResultStatus::CompletedTruncated,
+                    // Worst case: every byte escapes to six JSON bytes.
+                    text: "\u{1}".repeat(ceiling),
+                },
+                max_text_bytes: spec.max_text_bytes,
+                session_id: "ffffffff-ffff-ffff-ffff-ffffffffffff".to_string(),
+                usage: meerkat_core::Usage {
+                    input_tokens: u64::MAX,
+                    output_tokens: u64::MAX,
+                    cache_creation_tokens: Some(u64::MAX),
+                    cache_read_tokens: Some(u64::MAX),
+                    reasoning_tokens: Some(u64::MAX),
+                    provider_accounting: None,
+                },
+                turns: u32::MAX,
+                tool_calls: u32::MAX,
+            }),
+        };
+        let encoded = serde_json::to_vec(&record).unwrap().len();
+        assert!(
+            encoded <= record_ceiling,
+            "widest record {encoded} bytes exceeds the {record_ceiling}-byte ceiling"
+        );
+    }
     use serde_json::json;
 
     #[test]

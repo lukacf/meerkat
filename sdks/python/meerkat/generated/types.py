@@ -893,6 +893,8 @@ class HelpResponse:
     turns: int
     usage: WireUsage
     extraction_error: Optional[dict[str, Any]] = None
+    request_usage: Optional[list[dict[str, Any]]] = None
+    run_usage: Optional[WireUsage] = None
     schema_warnings: Optional[list[dict[str, Any]]] = None
     session_ref: Optional[str] = None
     skill_diagnostics: Optional[dict[str, Any]] = None

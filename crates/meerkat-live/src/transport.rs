@@ -1516,7 +1516,7 @@ async fn handle_live_socket(
                         match outcome {
                             ObservationOutcome::UserContentCommitted { observation } => {
                                 let send_ok = match serde_json::to_string(
-                                    &WireLiveAdapterObservation::from(observation),
+                                    &WireLiveAdapterObservation::from(*observation),
                                 ) {
                                     Ok(json) => socket
                                         .send(WsMessage::Text(json.into()))

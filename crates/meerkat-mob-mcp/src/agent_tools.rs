@@ -1333,8 +1333,24 @@ impl AgentMobToolSurface {
         let result_label = args.result_label;
         let max_text_bytes = args.max_text_bytes;
         let message_count = args.message_count;
+        let detached = runtime.clone().map(|runtime| {
+            (
+                runtime,
+                self.owner_bridge_session_id.clone(),
+                audit_handle.clone(),
+                source_identity.clone(),
+                job_id.clone(),
+                mob_id.clone(),
+            )
+        });
+        // The fork runs on a relieved task, whose synchronous tail can finish
+        // after this tool call's future was dropped. So the handoff happens
+        // there, with no await after the fork returns: a detached child's
+        // completion custodian is spawned (its job is registered for
+        // delivery), and a blocking child's run comes back armed to retire the
+        // child if nobody takes it. A cancelled call never strands a child.
         let (fork, run) = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
-            handle
+            let (fork, run) = handle
                 .fork_member_then_run_detached(
                     &operation_source,
                     member,
@@ -1347,14 +1363,34 @@ impl AgentMobToolSurface {
                     max_run,
                     job,
                 )
-                .await
+                .await?;
+            let Some((runtime, owner_session_id, owner, source, job_id, mob_id)) = detached else {
+                return Ok((fork, Some(run.retire_child_if_abandoned())));
+            };
+            // The child's supervisor owns the run; this custodian only turns
+            // its outcome into the owner's one durable completion record.
+            let identity = fork.agent_identity.to_string();
+            let member_ref = meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity);
+            spawn_detached_completion_custodian(
+                runtime,
+                owner_session_id,
+                Some((owner, source)),
+                job_id,
+                TOOL_FORK_OFF,
+                async move {
+                    let (completion, failed) =
+                        ForkOffCompletion::from_outcome(identity, member_ref, run.outcome().await);
+                    (serde_json::to_value(&completion), failed)
+                },
+            );
+            Ok((fork, None))
         })
         .await
         .map_err(|error| Self::map_bounded_member_run_error(call, error))?;
         let identity = fork.agent_identity.to_string();
         let member_ref = meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity);
 
-        let Some(runtime) = runtime else {
+        if let Some(run) = run {
             // Blocking: wait for the child's outcome in this call.
             let outcome = run.outcome().await;
             self.record_successful_operator_action_boxed(&audit_handle, call.name)
@@ -1393,26 +1429,9 @@ impl AgentMobToolSurface {
                     )))
                 }
             };
-        };
+        }
 
-        // Detached. The child's supervisor owns the run; this custodian only
-        // turns its outcome into the owner's one durable completion record.
-        spawn_detached_completion_custodian(
-            runtime,
-            self.owner_bridge_session_id.clone(),
-            Some((audit_handle.clone(), source_identity.clone())),
-            job_id.clone(),
-            TOOL_FORK_OFF,
-            {
-                let identity = identity.clone();
-                let member_ref = member_ref.clone();
-                async move {
-                    let (completion, failed) =
-                        ForkOffCompletion::from_outcome(identity, member_ref, run.outcome().await);
-                    (serde_json::to_value(&completion), failed)
-                }
-            },
-        );
+        // Detached: the custodian was spawned with the handoff above.
         self.record_successful_operator_action_boxed(&audit_handle, call.name)
             .await;
 

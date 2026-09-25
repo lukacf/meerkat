@@ -1233,3 +1233,72 @@ async fn spawned_by_survives_resume_restart_and_successor_respawn() {
     }
     fixture.teardown().await;
 }
+
+/// A detached fork_off whose tool call is dropped while the child's handoff
+/// is in flight never strands the child (lifecycle review: the relieved
+/// task's synchronous tail can finish after the call was dropped). The test
+/// stops polling the call once the child is seated, lets the fork finish on
+/// its own task, then drops the call: the child's completion must still
+/// reach the forker, although the forker never saw the job id.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_off_call_dropped_mid_handoff_still_delivers_its_child() {
+    let fixture = CouncilFixture::new_runtime_backed(routed_script(
+        RequestLog::default(),
+        vec![(CHILD_TASK, ChildReply::Text(CHILD_REPLY))],
+    ));
+    fixture.seed_source_mob(&["forker"]).await;
+    let forker = member_surface(&fixture, "forker").await;
+    let handle = source_handle(&fixture).await;
+    let child = AgentIdentity::from("dropped-call-child");
+    let raw = serde_json::value::RawValue::from_string(
+        fork_args("dropped-call-child", CHILD_TASK).to_string(),
+    )
+    .unwrap();
+    let mut call_future = forker.surface.dispatch(ToolCallView {
+        id: "dropped-call",
+        name: "fork_off",
+        args: &raw,
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if futures::poll!(call_future.as_mut()).is_ready() {
+            // The call finished before it could be dropped mid-handoff; the
+            // delivery below must hold either way.
+            break;
+        }
+        if handle.get_member(&child).await.unwrap().is_some() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the child was never seated"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    // Stop polling: the fork finishes on its relieved task. Then drop.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(call_future);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let messages = persisted_messages(fixture.service.as_ref(), &forker.session).await;
+        let delivered = messages.iter().any(|message| {
+            matches!(message, Message::SystemNotice(notice) if notice.blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    SystemNoticeBlock::BackgroundJob { persisted: true, detail: Some(detail), .. }
+                        if detail.contains(CHILD_REPLY)
+                )
+            }))
+        });
+        if delivered {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped call's child was stranded: no completion reached the forker"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    fixture.teardown().await;
+}

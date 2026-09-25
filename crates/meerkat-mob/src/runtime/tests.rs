@@ -21892,6 +21892,53 @@ async fn retire_cascade_catches_a_child_forked_while_the_subtree_retires() {
     assert!(handle.get_member(&a).await.unwrap().is_some());
 }
 
+/// A fork run armed with `retire_child_if_abandoned` retires its child when
+/// dropped before the outcome (a blocking caller that was cancelled); an
+/// unarmed run keeps the documented contract (dropping only stops
+/// listening), and an armed run whose outcome arrived leaves a completed
+/// child seated.
+#[tokio::test]
+async fn an_abandoned_armed_fork_run_retires_its_child() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    let a = AgentIdentity::from("abandon-a");
+    spawn_bounded_fork_source(&handle, &a).await;
+
+    let completed = AgentIdentity::from("abandon-completed");
+    let outcome = caller_turn_fork_child(&handle, &a, &completed, None)
+        .await
+        .retire_child_if_abandoned()
+        .outcome()
+        .await;
+    assert!(matches!(outcome, Some(ForkChildRunOutcome::Completed(_))));
+    assert!(
+        handle.get_member(&completed).await.unwrap().is_some(),
+        "an armed run whose outcome arrived leaves the completed child seated"
+    );
+
+    service.set_start_turn_delay_ms(600_000);
+    let kept = AgentIdentity::from("abandon-kept");
+    drop(caller_turn_fork_child(&handle, &a, &kept, None).await);
+    let abandoned = AgentIdentity::from("abandon-armed");
+    drop(
+        caller_turn_fork_child(&handle, &a, &abandoned, None)
+            .await
+            .retire_child_if_abandoned(),
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while handle.get_member(&abandoned).await.unwrap().is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the abandoned armed run's child was never retired"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        handle.get_member(&kept).await.unwrap().is_some(),
+        "dropping an unarmed run only stops listening"
+    );
+}
+
 /// Autokill of a child with its own running child retires both, deepest
 /// first (lifecycle review: C autokilled cascades to D).
 #[tokio::test]

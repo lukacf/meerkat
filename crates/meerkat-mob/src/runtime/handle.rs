@@ -4426,10 +4426,22 @@ impl ForkJobRecord {
 ///
 /// Resolves once the child's turn reaches an outcome. Dropping it stops the
 /// caller listening and nothing else: the child keeps running and remains
-/// its forker's to observe and retire.
-#[derive(Debug)]
+/// its forker's to observe and retire. A caller that is the child's only
+/// observer can opt into [`Self::retire_child_if_abandoned`] instead.
 pub struct ForkChildRun {
     outcome: tokio::sync::oneshot::Receiver<ForkChildRunOutcome>,
+    child: AgentIdentity,
+    cleanup: MobHandle,
+    abandon_guard: Option<ProvisionedChildRetireOnDrop>,
+}
+
+impl std::fmt::Debug for ForkChildRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForkChildRun")
+            .field("child", &self.child)
+            .field("retire_if_abandoned", &self.abandon_guard.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ForkChildRun {
@@ -4437,8 +4449,27 @@ impl ForkChildRun {
     ///
     /// `None` means the runtime supervising the child stopped (mob shutdown)
     /// before the turn reached an outcome.
-    pub async fn outcome(self) -> Option<ForkChildRunOutcome> {
-        self.outcome.await.ok()
+    pub async fn outcome(mut self) -> Option<ForkChildRunOutcome> {
+        let outcome = (&mut self.outcome).await.ok();
+        // The outcome arrived: the child's fate is settled (a completed child
+        // stays seated; a failed or timed-out one was already retired).
+        if let Some(guard) = self.abandon_guard.take() {
+            guard.disarm();
+        }
+        outcome
+    }
+
+    /// Retire the child (with its descendants) if this handle is dropped
+    /// before its outcome arrives. For a caller that is the child's only
+    /// observer, such as a blocking fork call whose tool call may be
+    /// cancelled: nobody else would ever receive the outcome.
+    #[must_use]
+    pub fn retire_child_if_abandoned(mut self) -> Self {
+        self.abandon_guard = Some(ProvisionedChildRetireOnDrop::arm(
+            self.cleanup.clone(),
+            self.child.clone(),
+        ));
+        self
     }
 }
 
@@ -13284,12 +13315,13 @@ impl MobHandle {
         });
         // The supervisor now owns the run; the caller gets the handle.
         unreturned_child.disarm();
-        Ok((
-            fork,
-            ForkChildRun {
-                outcome: outcome_rx,
-            },
-        ))
+        let run = ForkChildRun {
+            outcome: outcome_rx,
+            child: fork.agent_identity.clone(),
+            cleanup: self.fork_child_cleanup_authority(),
+            abandon_guard: None,
+        };
+        Ok((fork, run))
     }
 
     fn fork_child_work(

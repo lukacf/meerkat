@@ -53,7 +53,8 @@ them.
   record as its detail, which wakes the forker. The `outcome` names the child
   and has a `status`: `completed` (with `bounded_result`, `usage`, `turns`,
   `tool_calls`), `failed` (with `error`), `max_run_elapsed` (with
-  `max_run_secs` and any `retirement_error`), or `supervisor_stopped`. The
+  `max_run_secs` and any `retirement_error`), `supervisor_stopped`, or
+  `restart_interrupted` (see Changed for restart re-linking). The
   `rkat` CLI declares `Unavailable` unless it stays alive, so `rkat run`
   without `--keep-alive` and one-shot `rkat mob` commands keep a blocking
   `fork_off` that returns the completed result directly (a child that does not
@@ -75,9 +76,17 @@ them.
   the convener's session and delivered as that job's completion. A refusal the
   council decides after the call returned (a bound, a `council_id` conflict,
   `capability_unavailable`) is recorded as `{"error": ...}` and fails the job
-  instead of being a tool error. One-shot hosts keep the blocking contract.
+  instead of being a tool error. A sealed council whose exit reason is a
+  failure (`participant_seating_failed`, `wiring_incomplete`,
+  `exchange_failed`, `coordinator_interrupted`) also fails the job; the record
+  keeps the full outcome. One-shot hosts keep the blocking contract.
   The council's `timeout_seconds` bounds it; the agent loop's default tool
   deadline no longer cuts the call.
+- Behavior-only: `TemporaryCouncilId::new` accepts only ASCII alphanumerics,
+  `-` and `_`; it accepted `.` and `:` before. The id is embedded in the
+  temporary mob id and every participant's comms name, which refuse those
+  characters, so such a council could never seat a member. Stored records
+  whose ids contain `.` or `:` still deserialize.
 - Behavior-only: forks start with zero usage (`meerkat-core`). `Session::fork`,
   `Session::fork_at`, `Session::fork_replacing`, and
   `Session::fork_at_complete_boundary` (with its `_with_identity` form) return
@@ -162,6 +171,18 @@ them.
   and the durable ownership provenance `RosterEntry::spawned_by` and
   `MemberSpawnedEvent::spawned_by`. Journals written before this release
   decode the field as absent, which grants nothing.
+- `meerkat-mob`: the durable fork job record `ForkJobRecord` (`job_id`,
+  `owner_session_id`, `started_at_ms`, `max_run_ms`, `prefix_message_count`,
+  `result_label`, `max_text_bytes`) on the new fields `RosterEntry::fork_job`
+  and `MemberSpawnedEvent::fork_job` (absent in older journals),
+  `ForkJobBinding` (`job_id`, `owner_session_id`), which
+  `MobHandle::fork_member_then_run_detached` takes as its `job` argument, and
+  `TemporaryCouncilExitReason::is_failure`.
+- `meerkat-mob-mcp`: the `fork_relink` module (`relink_restored_fork_children`,
+  `relink_mob_fork_children`, `relink_child`, `ForkRelinkReport`,
+  `ForkRelinkAction` with `Delivered`, `AlreadyDelivered`, `Failed`) and
+  `MobMcpState::relink_restored_fork_children`, the explicit entry point for
+  the post-restore re-link pass.
 - `meerkat-core`: `CoreDispatchDeadline` (`Applies`, `ToolOwned`;
   `#[non_exhaustive]`), `ToolExecutionContract::with_tool_owned_deadline`,
   `ToolExecutionContract::core_deadline`, and
@@ -198,6 +219,16 @@ them.
   dropped while the child is seated, or the job cannot be handed to its
   completion task) retires the seated child and rolls the job back, so no
   child runs unsupervised and no job is left in provisioning.
+- A detached `fork_off` child survives a host restart with its outcome
+  delivery intact. After a host restores its mobs (or inserts a restored mob
+  handle, as MobKit does), a one-time re-link pass settles every child whose
+  job began in a previous process: a still-running child is observed until its
+  turn ends, with `max_run_secs` measured from the original start (autokill
+  cascades); an idle child that already replied after its fork prefix has that
+  result delivered; otherwise `restart_interrupted` is delivered and the child
+  stays seated. Delivery uses the same durable record and idempotency key, so
+  an outcome recorded before the restart is not recorded twice. A restarted
+  host does not wake an idle forker; it sees the outcome on its next turn.
 - A completed `fork_off` child stays seated until its forker retires it.
   Meerkat adds no retention limit of its own; MobKit applies its
   `idle_retire_secs` policy to fork children.
@@ -253,6 +284,9 @@ them.
   a valid image. Unattested references still fail closed. Existing MobKit
   references are accepted once MobKit's blob adapter implements
   `attest_address`.
+- A `council` called without `council_id` failed to seat any participant: the
+  derived id was `agent:<uuid>`, and the `:` is illegal in the temporary mob's
+  comms names. The derived id is now `agent-<uuid>`.
 - `fork_off` failed outright in mobs whose role profile defaults to the
   `autonomous_host` runtime mode: the child was seated with that default and
   its one tracked turn was refused ("tracked turn completion is not supported

@@ -187,9 +187,14 @@ council. How the sealed result reaches the caller depends on the host:
   "cleanup", "replayed"}}` is appended once to the convener's session as an
   ordinary durable System message ("Background council job `<job_id>`
   finished:" followed by the record), and the background job then completes
-  with the same record, which wakes the convener. The System message survives
-  later model calls, turns, and reloads and is readable through the convener's
-  session history; the job notice is transient.
+  with the same record, which wakes the convener. The job **fails** instead
+  when the exit reason is a failure (`participant_seating_failed`,
+  `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`); the
+  record still carries the full sealed outcome, and bound-limited ends
+  (`max_exchanges_reached`, `deadline_exceeded`) complete normally with their
+  partial result. The System message survives later model calls, turns, and
+  reloads and is readable through the convener's session history; the job
+  notice is transient.
 - **Blocking (one-shot hosts).** A host that may exit when the turn ends cannot
   deliver a later completion: the `rkat` CLI unless it stays alive, such as
   `rkat run` without `--keep-alive`. There the call waits for the council and
@@ -229,8 +234,12 @@ deadline still delivers its result.
 }
 ```
 
-`council_id` is optional. Omit it for an id derived from the tool call; provide
-one when the agent needs an explicit idempotency key across retries. The default
+`council_id` is optional. Omit it for an id derived from the tool call
+(`agent-<uuid>`); provide one when the agent needs an explicit idempotency key
+across retries. A council id may contain only ASCII letters, digits, `-`, and
+`_`, because it is embedded in the temporary mob id and in every participant's
+comms name; any other character is refused before the council starts. Stored
+council records whose ids contain `.` or `:` still load. The default
 merge is a bounded summary by the last participant. Other policies are
 `structured`, `selected_exchanges`, `artifact_reference`, and `no_merge`.
 

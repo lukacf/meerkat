@@ -599,8 +599,13 @@ finished:"), readable in later turns and through the forker's session history
 even after the child is retired; then the background job completes with the
 same record, which wakes the forker (that notice is transient). The `outcome`
 status is `completed` (with `bounded_result`, `usage`, `turns`, `tool_calls`),
-`failed` (child retired), `max_run_elapsed` (run cancelled, child retired), or
-`supervisor_stopped`. The `rkat` CLI declares `Unavailable` unless it stays
+`failed` (child retired), `max_run_elapsed` (run cancelled, child retired),
+`supervisor_stopped`, or `restart_interrupted`. The child's durable
+`ForkJobRecord` lets a restarted host re-link it: a one-time pass after restore
+(or when MobKit inserts a restored handle) observes a still-running child with
+`max_run` measured from the original start, delivers an idle child's reply, or
+delivers `restart_interrupted`, under the same idempotency key; an idle forker
+is not woken after a restart and sees the outcome on its next turn. The `rkat` CLI declares `Unavailable` unless it stays
 alive, so `rkat run` without `--keep-alive` and one-shot `rkat mob` commands
 block and return the child's result directly. Neither form has a default
 deadline, and the agent loop's default tool deadline does not cut it;
@@ -632,7 +637,9 @@ resolved by the tool; participants are forks, not the original members. Like
 completion: the call returns `status: "running"`, the `council_id`, and a
 `job_id`, and the sealed outcome (`result`, `cleanup`, `replayed`, or `error`
 when it fails after the call returned) is recorded as a durable System message
-in the convener's session and delivered as that job's completion. On a
+in the convener's session and delivered as that job's completion; a failure
+exit reason fails the job. `council_id` may contain only ASCII alphanumerics,
+`-` and `_` (the derived default is `agent-<uuid>`). On a
 one-shot host the call blocks and returns the sealed outcome.
 `timeout_seconds` bounds it; the agent loop's default tool deadline does not.
 

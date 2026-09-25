@@ -350,6 +350,7 @@ child (`agent_identity`, `member_ref`) and carries a `status`:
 | `failed` | The turn failed. Carries `error`. The child was retired. |
 | `max_run_elapsed` | The opt-in `max_run_secs` elapsed. The run was cancelled and the child retired; `retirement_error` reports a failed retirement. |
 | `supervisor_stopped` | The runtime supervising the child stopped (mob shutdown) before the turn ended. |
+| `restart_interrupted` | The host restarted while the child ran and the child's turn did not survive the restart. The child stays seated for its forker. |
 
 The record reaches the forker in two ways:
 
@@ -364,6 +365,26 @@ The record reaches the forker in two ways:
   with the same record as its detail, which wakes an idle forker. That notice
   is transient; the durable System message is the copy to rely on. If the
   record cannot be appended, the notice is still delivered.
+
+**Across a restart.** A detached child carries a durable job record (job id,
+forker session, start time, opt-in limit, fork prefix length, and result bound)
+on its spawn event and roster entry. When a host restores its mobs, or inserts
+a restored mob handle as MobKit does, a one-time re-link pass settles every
+child whose job began in a previous process:
+
+- a child still running is observed until its turn ends, with `max_run_secs`
+  measured from the original start (an elapsed limit autokills it and its
+  descendants);
+- an idle child that already replied after its fork prefix has that result
+  delivered;
+- otherwise `restart_interrupted` is delivered and the child stays seated.
+
+Delivery writes the same durable System message under the same idempotency key,
+so a job whose outcome was recorded before the restart is never recorded
+twice. A restarted host cannot wake an idle forker, because the job's
+in-memory operation did not survive; the forker sees the re-linked outcome on
+its next turn. `MobMcpState::relink_restored_fork_children` runs the pass
+explicitly.
 
 **Blocking.** A one-shot host may exit when the turn ends and so cannot deliver
 a later completion. The `rkat` CLI is one-shot unless it stays alive: `rkat
@@ -385,8 +406,11 @@ ignored intent.
 the `council_id`, and a `job_id`, and the sealed outcome (`result`, `cleanup`,
 `replayed`) is recorded and delivered the same way, as
 `{"tool": "council", "job_id": ..., "outcome": {...}}`; a council that fails
-after the call returned records `{"error": ...}` as its outcome. Blocking, it
-returns the sealed outcome as its tool result. Its own `timeout_seconds` bounds
+after the call returned records `{"error": ...}` as its outcome, and a council
+whose exit reason is a failure (`participant_seating_failed`,
+`wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`) fails its
+job while the record keeps the full sealed outcome. Blocking, it returns the
+sealed outcome as its tool result. Its own `timeout_seconds` bounds
 it in both forms, and the agent loop's default tool deadline does not. See
 [Temporary Councils](/guides/temporary-councils#agent-tool).
 

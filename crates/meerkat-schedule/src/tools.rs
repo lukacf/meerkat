@@ -882,6 +882,14 @@ fn create_schedule_schema() -> Value {
     })
 }
 
+/// Update schema. Every replaceable field carries exactly the shape
+/// `meerkat_schedule_create` advertises for it, built from the same schema
+/// functions, so this tool stays self-contained. Tool visibility is decided
+/// per tool name (`ToolScope` filters, `--allow-tool`/`--block-tool`, per-turn
+/// allow/deny lists, member tool policies, deferred catalog loads), so the
+/// update tool can be visible while the create tool is not; a pointer to the
+/// create schema would then leave the model guessing the trigger and target
+/// field names.
 fn update_schedule_schema() -> Value {
     json!({
         "type": "object",
@@ -1652,6 +1660,88 @@ mod tests {
         assert_eq!(
             variants[2]["properties"]["type"]["const"],
             json!("calendar")
+        );
+    }
+
+    /// Tool visibility is decided per tool name, so `meerkat_schedule_update`
+    /// can be visible while `meerkat_schedule_create` is filtered out (for
+    /// example `--block-tool meerkat_schedule_create`, a per-turn allow list,
+    /// or a member tool policy that allows edits but not creation). Update
+    /// must then still carry every replaceable shape itself: each field it
+    /// shares with create is the identical schema, no field defers its shape
+    /// to the create tool, and the session-scoped wrapper advertises the
+    /// `current_session` shortcut on update's target exactly as on create's.
+    #[tokio::test]
+    async fn update_schema_is_self_contained_when_create_is_not_visible() {
+        let tools = schedule_tools_list();
+        let schema_of = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect("schedule tool schema must exist")["inputSchema"]
+                .clone()
+        };
+        let create = schema_of("meerkat_schedule_create");
+        let update = schema_of("meerkat_schedule_update");
+        let create_properties = create["properties"]
+            .as_object()
+            .expect("create schema properties");
+        let update_properties = update["properties"]
+            .as_object()
+            .expect("update schema properties");
+
+        for (field, create_shape) in create_properties {
+            assert_eq!(
+                update_properties.get(field),
+                Some(create_shape),
+                "update.{field} must carry the create shape itself, not point at it"
+            );
+        }
+        assert_eq!(update["required"], json!(["schedule_id"]));
+        assert!(
+            !update.to_string().contains("meerkat_schedule_create"),
+            "no update field may defer its shape to the create tool"
+        );
+
+        // The replacement from the review scenario (repeat every 15 minutes)
+        // resolves from the update schema alone.
+        let interval = update["properties"]["trigger"]["oneOf"]
+            .as_array()
+            .expect("update trigger variants")
+            .iter()
+            .find(|variant| variant["properties"]["type"]["const"] == "interval")
+            .expect("update trigger advertises the interval variant");
+        assert_eq!(
+            interval["required"],
+            json!(["type", "start_at_utc", "every_seconds"])
+        );
+
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let dispatcher = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(service)),
+            SessionId::new(),
+        );
+        let session_tools = dispatcher.tools();
+        let session_target_types = |name: &str| {
+            session_tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .expect("session-scoped schedule tool")
+                .input_schema["properties"]["target"]["oneOf"][0]["properties"]["type"]["enum"]
+                .clone()
+        };
+        let update_target_types = session_target_types("meerkat_schedule_update");
+        assert_eq!(
+            update_target_types,
+            session_target_types("meerkat_schedule_create")
+        );
+        assert!(
+            update_target_types
+                .as_array()
+                .expect("update target type enum")
+                .iter()
+                .any(|value| value.as_str() == Some("current_session")),
+            "session-scoped wrapper should advertise current_session on update"
         );
     }
 

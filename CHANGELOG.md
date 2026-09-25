@@ -101,6 +101,36 @@ them.
 - `meerkat_core::usage_summary` and `turn_usage_summary` format the one-line
   token summaries `rkat run --verbose` prints.
 
+### Changed
+
+- Smaller fixed per-request prompt: the system prompt no longer carries a
+  `# Available Tools` inventory. Every tool definition already reaches the
+  provider through the request tool array, so the inventory repeated each
+  composed tool's full description on every request (about 11-12 KB on a
+  CLI `--tools workspace` or `--yolo` session) and could not follow later
+  composition or visibility changes. Only guidance for families that are
+  actually composed remains (comms usage, deferred catalog discovery, skill
+  discovery). The composed tool set and dispatch are unchanged.
+  Behavior-only: `meerkat_skills::renderer::render_inventory` in collection
+  mode no longer names `browse_skills`/`load_skill`; both tools are
+  default-disabled, and the factory now appends
+  `meerkat_tools::builtin::skills::SKILL_DISCOVERY_TOOL_GUIDANCE` only when
+  both are composed.
+- Trimmed the largest tool definitions without dropping information:
+  `apply_patch` documents its grammar once (the argument schema no longer
+  repeats it) and its example now matches the real anchor semantics;
+  `generate_image` keeps per-field rules in its schema only and advertises the
+  image-reference definition once; the comms send tools document image
+  references once, on the `blocks` argument; the OpenAI and Gemini image
+  parameter notes are shorter.
+  Behavior-only: `meerkat_comms::mcp::tools::tools_list` returns the slimmer
+  definitions.
+- OpenAI tool emission drops the root `$schema` and `title` annotations that
+  schemars stamps on every derived tool schema (Gemini emission already did).
+  `ToolDef.input_schema` is unchanged. Behavior-only:
+  `meerkat_openai::normalize_openai_tool_parameters_schema` removes both root
+  keys.
+
 ### Fixed
 
 - `rkat run --export-atif` records every provider request of the run as an

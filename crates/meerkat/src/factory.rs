@@ -6107,8 +6107,7 @@ impl AgentFactory {
         #[allow(unused_mut)]
         let (mut tools, mut tool_usage_instructions) =
             if let Some(dispatcher) = build_config.tool_dispatcher_override.take() {
-                let usage = render_tool_usage_instructions(dispatcher.as_ref());
-                (dispatcher, usage)
+                (dispatcher, String::new())
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -6272,17 +6271,10 @@ impl AgentFactory {
                     .with_creator_tool_access_policy(creator_tool_access_policy),
                 ) as Arc<dyn AgentToolDispatcher>,
             };
-            let schedule_usage = render_tool_usage_instructions(schedule_dispatcher.as_ref());
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
                 tools,
                 schedule_dispatcher,
             ]));
-            if !schedule_usage.is_empty() {
-                if !tool_usage_instructions.is_empty() {
-                    tool_usage_instructions.push_str("\n\n");
-                }
-                tool_usage_instructions.push_str(&schedule_usage);
-            }
         }
 
         tracing::debug!(
@@ -6345,17 +6337,10 @@ impl AgentFactory {
                     }
                 }
             };
-            let workgraph_usage = render_tool_usage_instructions(workgraph_dispatcher.as_ref());
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
                 tools,
                 workgraph_dispatcher,
             ]));
-            if !workgraph_usage.is_empty() {
-                if !tool_usage_instructions.is_empty() {
-                    tool_usage_instructions.push_str("\n\n");
-                }
-                tool_usage_instructions.push_str(&workgraph_usage);
-            }
         }
 
         tracing::debug!(
@@ -6445,18 +6430,8 @@ impl AgentFactory {
                 .build_mob_tools(mob_args)
                 .await
                 .map_err(|e| BuildAgentError::Config(format!("Mob tool factory: {e}")))?;
-            // The mob family is mounted without a `# Available Tools` prompt
-            // inventory: this surface is composed after the inventory was
-            // rendered, and `render_tool_usage_instructions` skips every tool
-            // with `ToolSourceKind::Mob` provenance, which also covers the
-            // operator family that arrives through `external_tools`. The
-            // descriptions already reach every provider through
-            // `ToolDef.description`; rendering them a second time cost each
-            // mob-enabled session roughly 16.6 KB of system prompt per request
-            // (19 agent-facing tools, ~15.8 KB, plus the 12-tool operator
-            // family, ~0.75 KB). Exact deferred-catalog dispatchers already
-            // omit the inventory; the mob family follows that convention.
-            // Non-mob families are unchanged.
+            // No tool family renders a `# Available Tools` prompt inventory:
+            // descriptions reach every provider through `ToolDef.description`.
             // Use DynamicToolComposite (not ToolGateway) so dynamic child
             // dispatchers (e.g. callback tools) can surface additions between turns.
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
@@ -15865,10 +15840,7 @@ impl AgentFactory {
         if !effective_builtins && !effective_shell && !compose_image_generation {
             // No builtins - return the external tools if provided, otherwise empty.
             return match external {
-                Some(ext) => {
-                    let usage = render_tool_usage_instructions(ext.as_ref());
-                    Ok((ext, usage))
-                }
+                Some(ext) => Ok((ext, String::new())),
                 None => Ok((Arc::new(EmptyToolDispatcher), String::new())),
             };
         }
@@ -15956,42 +15928,16 @@ impl AgentFactory {
             )
             .await?;
 
-        let usage = render_tool_usage_instructions(dispatcher.as_ref());
-        Ok((dispatcher, usage))
+        Ok((dispatcher, String::new()))
     }
 }
 
-fn render_tool_usage_instructions(dispatcher: &dyn AgentToolDispatcher) -> String {
-    if CatalogControlDispatcher::should_enable_for(dispatcher) {
-        return String::new();
-    }
-
-    let tools = dispatcher.tools();
-    // The mob family carries no prompt inventory. Its descriptions already
-    // reach every provider through `ToolDef.description`, and the family is
-    // mounted through two dispatchers (the agent-facing mob surface and the
-    // operator tools composed into `external_tools`), so the rule keys on
-    // `ToolSourceKind::Mob` provenance rather than on the call site. Every
-    // other family renders exactly as before.
-    let mut rendered = tools
-        .iter()
-        .filter(|tool| !has_mob_provenance(tool))
-        .peekable();
-    if rendered.peek().is_none() {
-        return String::new();
-    }
-    let mut out = String::from("# Available Tools\n\n");
-    for tool in rendered {
-        out.push_str(&format!("## {}\n{}\n\n", tool.name, tool.description));
-    }
-    out
-}
-
-fn has_mob_provenance(tool: &meerkat_core::ToolDef) -> bool {
-    tool.provenance
-        .as_ref()
-        .is_some_and(|provenance| provenance.kind == meerkat_core::ToolSourceKind::Mob)
-}
+// There is no `# Available Tools` prompt inventory. Every tool's description
+// already reaches the provider through `ToolDef.description` in the request's
+// tool list, so repeating it in the system prompt charged every request for
+// the same text twice: about 12.7 KB (roughly 2.3K tokens) for the default
+// builtin set, dominated by `generate_image`, `apply_patch` and the schedule
+// family. The mob family dropped its inventory for the same reason earlier.
 
 fn deferred_catalog_guidance() -> &'static str {
     "Additional tools may be available in a deferred catalog. Use `tool_catalog_search` to discover deferred tools and `tool_catalog_load` to stage the ones you need."
@@ -16000,7 +15946,7 @@ fn deferred_catalog_guidance() -> &'static str {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod prompt_tests {
-    use super::{deferred_catalog_guidance, render_tool_usage_instructions};
+    use super::deferred_catalog_guidance;
     use async_trait::async_trait;
     use futures::stream;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
@@ -16211,8 +16157,7 @@ mod prompt_tests {
     /// cost each mob-enabled session roughly 16.6 KB of system prompt on every
     /// request. Mounting both families must therefore leave the system prompt
     /// byte-identical to a build without them, while the mob tool definitions
-    /// (descriptions intact) still reach the provider-facing visible tool set
-    /// and non-mob tools keep their inventory entry.
+    /// (descriptions intact) still reach the provider-facing visible tool set.
     #[tokio::test]
     async fn mounting_mob_tools_leaves_system_prompt_byte_identical_saving_16kb_of_descriptions() {
         const DELEGATE_DESCRIPTION: &str =
@@ -16273,8 +16218,8 @@ mod prompt_tests {
         let with_mob = system_prompt_of(mob_agent.session().messages());
 
         assert!(
-            without_mob.contains("## visible\nvisible tool"),
-            "non-mob external tools keep their `# Available Tools` entry: {without_mob}"
+            !without_mob.contains("visible tool"),
+            "no tool family renders a prompt inventory: {without_mob}"
         );
         assert!(
             !with_mob.contains(DELEGATE_DESCRIPTION) && !with_mob.contains(SPAWN_DESCRIPTION),
@@ -16312,89 +16257,37 @@ mod prompt_tests {
         );
     }
 
-    #[test]
-    fn render_tool_usage_instructions_omits_mob_provenance_tools_and_keeps_the_rest() {
-        let mut mixed: Vec<Arc<ToolDef>> = tools(&["visible"]).to_vec();
-        mixed.extend(
-            mob_surface_tools(&[("spawn_member", "Spawn a mob member from a profile.")])
-                .iter()
-                .cloned(),
-        );
-        let dispatcher = UsageTestDispatcher {
-            tools: mixed.into(),
-            exact_catalog: false,
-            may_require_control_plane: false,
-            pending_sources: Arc::from([]),
-        };
-
-        let usage = render_tool_usage_instructions(&dispatcher);
-        assert_eq!(
-            usage, "# Available Tools\n\n## visible\nvisible tool\n\n",
-            "only the non-mob tool renders, exactly as before"
-        );
-    }
-
-    #[test]
-    fn render_tool_usage_instructions_is_empty_when_every_tool_is_mob_provenance() {
-        let dispatcher = UsageTestDispatcher {
-            tools: mob_surface_tools(&[
-                ("spawn_member", "Spawn a mob member from a profile."),
-                ("member_status", "Get a member's execution status snapshot."),
-            ]),
-            exact_catalog: false,
-            may_require_control_plane: false,
-            pending_sources: Arc::from([]),
-        };
-
-        assert!(
-            render_tool_usage_instructions(&dispatcher).is_empty(),
-            "a mob-only dispatcher renders no header and no entries"
-        );
-    }
-
-    #[test]
-    fn render_tool_usage_instructions_keeps_inventory_for_non_exact_dispatchers() {
+    #[tokio::test]
+    async fn system_prompt_carries_no_tool_inventory_because_descriptions_ride_the_tool_list() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let dispatcher = UsageTestDispatcher {
             tools: tools(&["visible", "secret"]),
             exact_catalog: false,
             may_require_control_plane: false,
             pending_sources: Arc::from([]),
         };
+        let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
+        build_config.llm_client_override = Some(Arc::new(PromptTestClient));
+        build_config.override_builtins = ToolCategoryOverride::Disable;
+        build_config.external_tools = Some(Arc::new(dispatcher));
 
-        let usage = render_tool_usage_instructions(&dispatcher);
-        assert!(usage.contains("# Available Tools"));
-        assert!(usage.contains("visible tool"));
-        assert!(usage.contains("secret tool"));
-    }
-
-    #[test]
-    fn render_tool_usage_instructions_omits_inventory_for_exact_dispatchers() {
-        let dispatcher = UsageTestDispatcher {
-            tools: tools(&["visible", "secret_lookup", "secret_audit"]),
-            exact_catalog: true,
-            may_require_control_plane: false,
-            pending_sources: Arc::from([]),
+        let agent = factory
+            .build_agent(build_config, &Config::default())
+            .await
+            .unwrap();
+        let Some(Message::System(message)) = agent.session().messages().first() else {
+            unreachable!("expected system prompt");
         };
-
-        let usage = render_tool_usage_instructions(&dispatcher);
-        assert!(usage.is_empty());
+        assert!(
+            !message.content.contains("# Available Tools"),
+            "the tool inventory duplicated ToolDef.description: {}",
+            message.content
+        );
+        assert!(!message.content.contains("visible tool"));
+        assert!(!message.content.contains("secret tool"));
         assert!(deferred_catalog_guidance().contains("tool_catalog_search"));
         assert!(deferred_catalog_guidance().contains("tool_catalog_load"));
-    }
-
-    #[test]
-    fn render_tool_usage_instructions_keeps_inventory_for_exact_dispatchers_without_deferred_entries()
-     {
-        let dispatcher = UsageTestDispatcher {
-            tools: tools(&["visible"]),
-            exact_catalog: true,
-            may_require_control_plane: false,
-            pending_sources: Arc::from([]),
-        };
-
-        let usage = render_tool_usage_instructions(&dispatcher);
-        assert!(usage.contains("# Available Tools"));
-        assert!(usage.contains("visible tool"));
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createServer } from "vite";
 import { chromium } from "playwright";
@@ -8,6 +8,9 @@ import { anthropicReply } from "./provider-fixture.mjs";
 
 test("Diplomacy real modules, typed event ingress and offline current WASM", { timeout: 120_000 }, async t => {
   const repo = resolve("../../.."), work = resolve(".work/regression");
+  // The runtime reports its crate version, which is the workspace version.
+  const runtimeVersion = (await readFile(resolve(repo, "Cargo.toml"), "utf8"))
+    .match(/^\[workspace\.package\]\nversion = "([^"]+)"/m)[1];
   await mkdir(work, { recursive: true });
   process.env.TMPDIR = work;
   const server = await createServer({
@@ -270,7 +273,7 @@ test("Diplomacy real modules, typed event ingress and offline current WASM", { t
       }
     });
 
-    await t.test("E-NEW-01/E02 real 0.8.40 member envelopes flow unchanged into the real drain", async () => {
+    await t.test("E-NEW-01/E02 real current-runtime member envelopes flow unchanged into the real drain", async () => {
       const result = await page.evaluate(async repoPath => {
         const wasm = await import(`/@fs/${repoPath}/sdks/web/wasm/meerkat_web_runtime.js`);
         const bytes = await (await fetch(`/@fs/${repoPath}/sdks/web/wasm/meerkat_web_runtime_bg.wasm`)).arrayBuffer();
@@ -321,7 +324,7 @@ test("Diplomacy real modules, typed event ingress and offline current WASM", { t
           window.fetch = originalFetch;
         }
       }, repo);
-      assert.equal(result.version, "0.8.40");
+      assert.equal(result.version, runtimeVersion);
       assert.ok(result.events > 0, JSON.stringify(result));
       assert.ok(result.errors.length > 0, JSON.stringify(result));
       assert.equal(result.warnings, 0);
@@ -391,7 +394,7 @@ test("Diplomacy real modules, typed event ingress and offline current WASM", { t
           }
           return { version: wasm.runtime_version(), events, errors, summaries: session.messages.map(m => ({ team: m.faction, headline: m.headline })) };
         });
-        assert.equal(result.version, "0.8.40");
+        assert.equal(result.version, runtimeVersion);
         assert.ok(result.events > 0);
         assert.deepEqual(result.errors, []);
         for (const team of ["france", "prussia", "russia"]) assert.ok(result.summaries.some(s => s.team === team && s.headline === "Synthetic ready dispatch"), JSON.stringify(result));

@@ -11,6 +11,9 @@ import { anthropicReply } from "./provider-fixture.mjs";
 const exec = promisify(execFile);
 const work = resolve(".work/regression");
 const repo = resolve("../../..");
+// The runtime reports its crate version, which is the workspace version.
+const runtimeVersion = (await readFile(resolve(repo, "Cargo.toml"), "utf8"))
+  .match(/^\[workspace\.package\]\nversion = "([^"]+)"/m)[1];
 
 test("WebCM regressions run actual browser modules and local synthetic shell inputs", { timeout: 120_000 }, async t => {
   await mkdir(work, { recursive: true });
@@ -208,7 +211,7 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
       await success.close();
     });
 
-    await t.test("E01/E19 current 0.8.40 WASM accepts all four real definitions offline", async () => {
+    await t.test("E01/E19 current WASM runtime accepts all four real definitions offline", async () => {
       const result = await page.evaluate(async repoPath => {
         const wasm = await import(`/@fs/${repoPath}/sdks/web/wasm/meerkat_web_runtime.js`);
         const bytes = await (await fetch(`/@fs/${repoPath}/sdks/web/wasm/meerkat_web_runtime_bg.wasm`)).arrayBuffer();
@@ -230,7 +233,7 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
         }
         return { version: wasm.runtime_version(), accepted, legacyRejected };
       }, repo);
-      assert.deepEqual(result, { version: "0.8.40", accepted: 4, legacyRejected: 4 });
+      assert.deepEqual(result, { version: runtimeVersion, accepted: 4, legacyRejected: 4 });
     });
 
     await t.test("real WASM MobOrchestrator startup, all six wires, subscriptions and successful typed events", { timeout: 45_000 }, async () => {
@@ -316,7 +319,7 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
           wasm.destroy_runtime();
         }
       }, { repoPath: repo, origin }).catch(error => { throw Error(`${error.message}; successful single-member control requests=${controlRequests}; mob startup HTTP requests=${requests - controlRequests}`); });
-      assert.equal(result.version, "0.8.40");
+      assert.equal(result.version, runtimeVersion);
       assert.equal(result.results.length, 4);
       for (const panel of result.results) {
         assert.equal(panel.errors, 0, JSON.stringify(result));

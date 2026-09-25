@@ -67,6 +67,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "changes",
             "clippy",
             "closure-check",
+            "example-web",
             "fmt-governance",
             "gate",
             "main-unit",
@@ -151,6 +152,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "closure-check",
         "wasm-check",
         "sdk-host",
+        "example-web",
         "bazel-graph",
     ] {
         assert!(gate_needs.contains(&lane), "the CI gate must bind `{lane}`");
@@ -164,6 +166,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "require_ran \"Main unit tests\"",
         "require_ran \"Closure check\"",
         "require_ran \"Bazel graph check\"",
+        "require_ran \"Example web suites\"",
         "a build-relevant change produced no lanes",
         "neither a unit lane nor a deferred package list",
         "unit tests deferred to the push-to-main run",
@@ -193,6 +196,8 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "bazel build --nobuild //...",
         "hashFiles('MODULE.bazel.lock')",
         "npx playwright install --with-deps chromium",
+        "MEERKAT_WEB_WASM_OPT: \"0\"",
+        "npm run test:offline",
     ] {
         assert!(ci.contains(lane), "PR CI must run `{lane}`");
     }

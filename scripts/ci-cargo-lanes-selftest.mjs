@@ -295,6 +295,7 @@ for (const path of [
     "sdk_host",
     "bazel_graph",
     "examples_browser",
+    "example_web",
     "docs_only",
     "package_count",
     "closure_count",
@@ -357,6 +358,7 @@ for (const path of [
   const plan = planFor(["docs/index.mdx", "README.md"]);
   assert.equal(plan.bazel_graph, false, "a docs-only diff does not select the Bazel graph check");
   assert.equal(plan.examples_browser, false, "a docs-only diff does not select the example suites");
+  assert.equal(plan.example_web, false, "a docs-only diff does not select the example web suites");
 }
 {
   const plan = planFor(["crates/meerkat-core/Cargo.toml"]);
@@ -389,12 +391,42 @@ for (const path of [
   assert.equal(planFor(["crates/meerkat-core/src/lib.rs"]).examples_browser, false);
 }
 
+// Example web suites selection: the sdks/web runtime, the crates it builds
+// from, and the sources of examples 031, 032 and 033 select them; their
+// documentation, other examples and unrelated crates do not.
+{
+  for (const path of [
+    "sdks/web/scripts/build-wasm.mjs",
+    "sdks/web/src/index.ts",
+    "crates/meerkat-web-runtime/src/lib.rs",
+    "crates/meerkat-contracts/src/lib.rs",
+    "examples/031-wasm-mini-diplomacy-sh/web/tests/regression.test.mjs",
+    "examples/032-wasm-webcm-agent/web/package.json",
+    "examples/033-the-office-demo-sh/web/tests/regression.cjs",
+  ]) {
+    assert.equal(planFor([path]).example_web, true, `${path} selects the example web suites`);
+  }
+  for (const path of [
+    "examples/033-the-office-demo-sh/README.md",
+    "examples/037-live-webrtc-web/app.js",
+    "sdks/typescript/src/index.ts",
+    "crates/meerkat-core/src/lib.rs",
+    "CHANGELOG.md",
+  ]) {
+    assert.equal(planFor([path]).example_web, false, `${path} does not select the example web suites`);
+  }
+  const result = run(["--format", "github", "--", "sdks/web/src/index.ts"]);
+  const lines = Object.fromEntries(result.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  assert.equal(lines.example_web, "true");
+}
+
 // A change to the lane definitions runs the lanes they define.
 {
   for (const path of [".github/workflows/ci.yml", "scripts/ci-cargo-lanes.mjs", "scripts/ci-cargo-lanes-selftest.mjs"]) {
     const plan = planFor([path]);
     assert.equal(plan.bazel_graph, true, `${path} selects the Bazel graph check`);
     assert.equal(plan.examples_browser, true, `${path} selects the example suites`);
+    assert.equal(plan.example_web, true, `${path} selects the example web suites`);
   }
 }
 

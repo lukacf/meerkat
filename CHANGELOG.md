@@ -37,6 +37,19 @@ them.
 
 ### Fixed
 
+- The example web suites for 031 (wasm mini diplomacy), 032 (wasm WebCM agent)
+  and 033 (the office demo) pass again and run in pull-request CI. A new
+  "Example web suites" lane builds the `sdks/web` wasm runtime once with the
+  pinned wasm-pack 0.13.1 and runs all three in Playwright Chromium. It runs on
+  every push to main and on pull requests that touch `sdks/web/`,
+  `crates/meerkat-web-runtime/`, `crates/meerkat-contracts/` or those examples.
+  031 and 032 compared the runtime version with a stale 0.8.40 and now read the
+  workspace version. The 033 harness waited forever for a `Page.close` reply
+  that is lost when the page's socket closes first, and it now closes the page
+  through the browser connection. Its offline lane now names the missing
+  runtime and page build instead of failing later with "Page failed to start".
+  `MEERKAT_WEB_WASM_OPT=0` skips the wasm-opt pass in `sdks/web` builds.
+
 - The release semver gate identifies crates by package name across the baseline
   and candidate trees. After the move into `crates/` it resolved every crate by
   its old directory, classified all of them as identical or first publications,

@@ -845,8 +845,8 @@ jobs:
 
       - name: Build the sdks/web wasm runtime
         working-directory: sdks/web
-        # Built once; all three suites read sdks/web/wasm. The SDK has no
-        # lockfile.
+        # Built once; all three suites read sdks/web/wasm (033 through its
+        # sync:runtime copy). The SDK has no lockfile.
         run: |
           npm install --no-fund --no-audit --ignore-scripts
           npm run build

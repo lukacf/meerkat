@@ -117,6 +117,15 @@ them.
   validation precedes by about an hour. The tag-to-public latency is still
   reported. `scripts/verify-rust-release-public.py` gains `--readback-only`,
   `--observations-out`, `--observations-in` and `--window-started-at`.
+- The OpenAI prompt-cache docs describe the default `prompt_cache_key`
+  correctly. It is one key per model (`meerkat:profile:openai:<model>`),
+  shared across sessions so identical system and tool prefixes can reuse
+  OpenAI's prefix cache, not a per-session key derived from the `SessionId`.
+  The key only routes requests, never proves a cache hit, and still needs a
+  byte-identical prefix; very high aggregate request rates on one model can
+  overflow OpenAI's routing for a single key. The docs also name the actual
+  GPT-5.6 default mode, `explicit`, instead of `implicit`. Behaviour is
+  unchanged.
 
 ## [0.8.42] - 2026-09-24
 

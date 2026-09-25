@@ -766,6 +766,11 @@ where
                 ordered_results,
             } => (batch, ordered_results),
         };
+        if let Some(suspended) = self.run_usage_suspended_run.as_mut()
+            && suspended.run_id == batch.run_id
+        {
+            suspended.callback_results_applied = true;
+        }
         let (post_tool_effects, pre_tool_effects): (Vec<_>, Vec<_>) =
             batch.session_effects.iter().cloned().partition(|effect| {
                 matches!(
@@ -1871,8 +1876,8 @@ where
         let saved_last_input_tokens = self.last_input_tokens;
         let saved_run_usage_baseline = self.run_usage_baseline.clone();
         let saved_run_request_usage = std::mem::take(&mut self.run_request_usage);
-        let saved_run_usage_suspended_for_callback =
-            std::mem::take(&mut self.run_usage_suspended_for_callback);
+        let saved_run_usage_suspended_run = self.run_usage_suspended_run.take();
+        let saved_run_usage_resume = self.run_usage_resume.take();
         let saved_compaction_cadence = self.compaction_cadence.clone();
         let saved_pending_compaction_boundary_index = self.pending_compaction_boundary_index.take();
         let saved_pending_compaction_request_pressure =
@@ -1963,7 +1968,8 @@ where
         self.last_input_tokens = saved_last_input_tokens;
         self.run_usage_baseline = saved_run_usage_baseline;
         self.run_request_usage = saved_run_request_usage;
-        self.run_usage_suspended_for_callback = saved_run_usage_suspended_for_callback;
+        self.run_usage_suspended_run = saved_run_usage_suspended_run;
+        self.run_usage_resume = saved_run_usage_resume;
         self.compaction_cadence = saved_compaction_cadence;
         self.pending_compaction_boundary_index = saved_pending_compaction_boundary_index;
         self.pending_compaction_request_pressure = saved_pending_compaction_request_pressure;
@@ -2446,6 +2452,13 @@ where
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
             );
+        // The callback-resume path is the only one that continues a
+        // suspended run's usage account, and only once that run's staged
+        // callback results were applied.
+        self.run_usage_resume = self
+            .run_usage_suspended_run
+            .take()
+            .filter(|suspended| suspended.callback_results_applied);
         let loop_result = self.run_loop(event_tx.clone()).await;
         self.tool_dispatch_context = crate::ToolDispatchContext::default();
 
@@ -2706,7 +2719,8 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             last_input_tokens: self.last_input_tokens,
             run_usage_baseline: crate::types::Usage::default(),
             run_request_usage: Vec::new(),
-            run_usage_suspended_for_callback: false,
+            run_usage_suspended_run: None,
+            run_usage_resume: None,
             compaction_cadence: self.compaction_cadence.clone(),
             pending_compaction_boundary_index: None,
             pending_compaction_request_pressure: None,

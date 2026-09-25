@@ -939,9 +939,10 @@ Read those numbers exactly as labelled:
 - **`usage_total`** is the sum of the readable members only. When
   `members_usage_unavailable` is non-zero (remote members, archived sessions)
   it is a floor, and each affected member carries a `usage_unavailable` reason
-  instead of a zero. Cache and reasoning counters are summed too: member usage
-  is already normalized, so on every provider the cache counters are subsets
-  of `input_tokens` and reasoning is a subset of `output_tokens`.
+  instead of a zero. Cache and reasoning counters are summed too. Each
+  member's usage is normalized first, including members whose sessions were
+  saved before 0.8.22, so on every provider cache reads plus writes stay within
+  `input_tokens` and reasoning within `output_tokens`.
 - **`members` is the mob's current roster**, not this run's participant set:
   the run projection records no participation, so a member that took no part in
   the run is still listed and its session id still rides in

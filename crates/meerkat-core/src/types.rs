@@ -3271,6 +3271,20 @@ impl Usage {
     }
 }
 
+/// Clamp cache reads and writes to disjoint subsets of `input`: reads to
+/// `input`, then writes to what reads leave. Every provider reports them as
+/// disjoint parts of the presented input, so a clamp only ever bites on
+/// malformed or pre-0.8.22 summed counters.
+fn clamp_cache_counts(
+    cache_read: Option<u64>,
+    cache_creation: Option<u64>,
+    input: u64,
+) -> (Option<u64>, Option<u64>) {
+    let cache_read = cache_read.map(|count| count.min(input));
+    let remaining = input.saturating_sub(cache_read.unwrap_or(0));
+    (cache_read, cache_creation.map(|count| count.min(remaining)))
+}
+
 /// Sum two optional counters, treating a missing side as zero, and keep
 /// `None` only when both sides are missing.
 fn add_optional_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
@@ -3393,12 +3407,13 @@ impl CumulativeUsage {
     /// clamped to their parent totals so the subset invariant holds even for
     /// a malformed input.
     pub fn from_usage(mut usage: Usage) -> Self {
-        usage.cache_creation_tokens = usage
-            .cache_creation_tokens
-            .map(|count| count.min(usage.input_tokens));
-        usage.cache_read_tokens = usage
-            .cache_read_tokens
-            .map(|count| count.min(usage.input_tokens));
+        let (cache_read, cache_creation) = clamp_cache_counts(
+            usage.cache_read_tokens,
+            usage.cache_creation_tokens,
+            usage.input_tokens,
+        );
+        usage.cache_read_tokens = cache_read;
+        usage.cache_creation_tokens = cache_creation;
         usage.reasoning_tokens = usage
             .reasoning_tokens
             .map(|count| count.min(usage.output_tokens));
@@ -3422,14 +3437,14 @@ impl CumulativeUsage {
         let presented = turn.presented_tokens();
         self.0.input_tokens = self.0.input_tokens.saturating_add(presented);
         self.0.output_tokens = self.0.output_tokens.saturating_add(turn.output_tokens);
-        self.0.cache_creation_tokens = add_optional_counts(
-            self.0.cache_creation_tokens,
-            turn.cache_creation_tokens.map(|count| count.min(presented)),
+        let (cache_read, cache_creation) = clamp_cache_counts(
+            turn.cache_read_tokens,
+            turn.cache_creation_tokens,
+            presented,
         );
-        self.0.cache_read_tokens = add_optional_counts(
-            self.0.cache_read_tokens,
-            turn.cache_read_tokens.map(|count| count.min(presented)),
-        );
+        self.0.cache_creation_tokens =
+            add_optional_counts(self.0.cache_creation_tokens, cache_creation);
+        self.0.cache_read_tokens = add_optional_counts(self.0.cache_read_tokens, cache_read);
         self.0.reasoning_tokens = add_optional_counts(
             self.0.reasoning_tokens,
             turn.reasoning_tokens

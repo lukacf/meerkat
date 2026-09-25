@@ -37,16 +37,19 @@ call's presented input:
 So on every cumulative value, on every provider:
 
 ```
-cache_read_tokens     <= input_tokens
-cache_creation_tokens <= input_tokens
-reasoning_tokens      <= output_tokens
+cache_read_tokens + cache_creation_tokens <= input_tokens
+reasoning_tokens                          <= output_tokens
 ```
 
 A detail counter is absent until some recorded call reports it. Sessions saved
 by 0.8.22 through 0.8.42 carry no cumulative detail counters, so theirs start
 from zero and cover only later calls. Sessions saved before 0.8.22 carry raw
-summed cache counters that can exceed the input total; reported totals and run
-deltas clamp them to the invariant above, while the stored value is untouched.
+summed cache counters that can exceed the input total. Every reporting surface
+clamps them to the invariant above: the run result, run and compaction
+rollback deltas, session read and list `billing.usage`, and mob run accounting.
+Reads are clamped to input first and writes to what reads leave, so such a
+session's history reads as fully cached. The stored value is untouched until
+the next recorded call normalizes it.
 
 Reasoning is the provider's thinking-token count: OpenAI Responses
 `output_tokens_details.reasoning_tokens`, Chat Completions
@@ -72,7 +75,8 @@ per-run token account on the event stream; the final run result carries one
 ## Run results: per-run and per-request usage
 
 The final run result (`rkat run --output json`, the RPC and REST run results,
-and the SDK `RunResult`) carries three usage views:
+the Python and TypeScript SDK `RunResult` and the `@rkat/web` `TurnResult`)
+carries three usage views:
 
 | Field | Scope |
 | --- | --- |
@@ -82,8 +86,12 @@ and the SDK `RunResult`) carries three usage views:
 
 `run_usage` and the sum of `request_usage[*].accounting.presented_tokens` agree
 on input for a run that records every call it makes. A run that suspends for
-callback tool results and then resumes keeps one account, so calls made before
-the suspension appear in the resumed run's result. Compaction summaries written
+callback tool results keeps one account when its staged results are applied
+and it resumes through `run_pending`, so calls made before the suspension
+appear in the resumed run's result. Any other run discards the suspended
+account. The carry-over lives in the agent's memory: a resume on an agent
+rebuilt from storage starts a fresh account, and the pre-suspension calls
+appear only in the session total. Compaction summaries written
 by a host curator or the mechanical capacity fallback make no provider request
 and add no row. Legacy totals are clamped as described above. On a fresh session
 `run_usage` equals `usage`. A harness that runs several turns on one session

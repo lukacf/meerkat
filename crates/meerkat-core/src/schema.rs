@@ -72,6 +72,13 @@ impl MeerkatSchema {
 }
 
 /// Provider-compiled schema and warnings.
+///
+/// `schema` is the validation schema: the agent validates the model's reply
+/// against it (and retries on a violation), and it is the schema to show the
+/// model. A provider adapter may send a further-lowered schema in its native
+/// structured-output slot when that slot rejects some JSON Schema keywords
+/// (Anthropic's `output_config.format` does); that slot schema is an adapter
+/// request detail and never replaces `schema` for validation or display.
 #[derive(Debug, Clone)]
 pub struct CompiledSchema {
     pub schema: Value,

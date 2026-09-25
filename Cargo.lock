@@ -2895,6 +2895,7 @@ dependencies = [
  "chrono",
  "futures",
  "getrandom 0.3.4",
+ "jsonschema",
  "meerkat-auth-core",
  "meerkat-copilot",
  "meerkat-core",

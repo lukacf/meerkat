@@ -11,6 +11,7 @@ pub mod tokio {
 }
 
 pub mod client;
+pub(crate) mod output_format_schema;
 pub(crate) mod request_support;
 pub mod runtime;
 #[cfg(test)]

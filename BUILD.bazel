@@ -715,6 +715,7 @@ test_suite(
         "//crates/meerkat-workgraph:meerkat_workgraph_unit_test",
         "//crates/meerkat:agent_builder_policy_canary_test",
         "//crates/meerkat:agent_factory_auth_binding_test",
+        "//crates/meerkat:anthropic_structured_output_bounds_test",
         "//crates/meerkat:atif_reexport_test",
         "//crates/meerkat:brain_swap_history_read_classification_test",
         "//crates/meerkat:brain_swap_pre_dequeue_loop_test",

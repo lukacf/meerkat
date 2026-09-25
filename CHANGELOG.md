@@ -296,6 +296,34 @@ them.
   overflow OpenAI's routing for a single key. The docs also name the actual
   GPT-5.6 default mode, `explicit`, instead of `implicit`. Behaviour is
   unchanged.
+- Anthropic structured output works with schemas that use JSON Schema keywords
+  Anthropic's native slot rejects. The extraction request sent the full schema
+  in `output_config.format`, so a schema with `minimum`/`maximum` on a number
+  or integer (or `multipleOf`, `exclusiveMinimum`/`exclusiveMaximum`,
+  `maxItems`, `uniqueItems`, `minItems` above 1, `contains`,
+  `minProperties`/`maxProperties`, `propertyNames`, `dependentRequired`,
+  `dependentSchemas`, `dependencies`, `unevaluatedProperties`, `not`,
+  `oneOf`, or a pydantic discriminated union's `discriminator`) failed with
+  HTTP 400 and the run ended with `extraction_error` and no
+  `structured_output`. The slot now gets a lowered copy: those keywords are
+  removed (`oneOf` becomes `anyOf`) and restated in the field's
+  `description`. A keyword is lowered only where removing it widens what the
+  slot accepts and meerkat's validator still enforces it for the schema's
+  draft (`$schema`, 2020-12 when absent), so a reply that breaks a bound fails
+  validation and is retried as before. `discriminator` is the exception: it
+  is an OpenAPI annotation that forbids nothing. String `format` values
+  outside Anthropic's list are not lowered, because the extraction-phase
+  validator treats `format` as an annotation (validate-first asserts known
+  formats on the final reply only), so nothing would enforce a removed format
+  on the extraction reply; those schemas still fail loudly with HTTP 400. The
+  `<structured_output>` section shows the validation schema, bounds included,
+  never the lowered slot copy. `compile_schema` and
+  `schema_warnings` are unchanged: the lowering adds no warning and
+  `compat: strict` does not reject the lowered keywords, since validation
+  enforces them. Keywords Anthropic accepts (`minLength`, `maxLength`,
+  `pattern`, supported formats, `minItems` 0 or 1) are sent as before, and a
+  schema without rejected keywords is sent byte-identical. OpenAI,
+  OpenAI-compatible and Gemini requests are unchanged.
 
 ## [0.8.42] - 2026-09-24
 

@@ -18,6 +18,7 @@ use meerkat_mob_mcp::fork_relink::ForkRelinkAction;
 use support::{CouncilFixture, ScriptedTurn, TurnGate};
 
 const CHILD_REPLY: &str = "RELINKED-REPLY-4K";
+const CHILD_TASK: &str = "reply with the token";
 
 async fn forker_session(fixture: &CouncilFixture) -> meerkat_core::SessionId {
     fixture
@@ -35,7 +36,7 @@ fn child_spec(child: &str) -> SpawnMemberSpec {
         SpawnMemberSpec::new(ProfileName::from("participant"), AgentIdentity::from(child));
     spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
     spec.initial_message = Some(meerkat_core::types::ContentInput::Text(
-        "reply with the token".to_string(),
+        CHILD_TASK.to_string(),
     ));
     spec
 }
@@ -125,7 +126,6 @@ async fn completion_record_text(
 /// The custodian died with the old process after the child finished: the
 /// re-link pass records the child's result in the forker's transcript once.
 #[tokio::test]
-#[ignore = "needs a runtime-backed fixture; superseded by impl2's runtime-backed re-link tests"]
 async fn relink_delivers_a_finished_childs_result_exactly_once() {
     let fixture = CouncilFixture::new(|_| ScriptedTurn::Text(CHILD_REPLY.to_string()));
     fixture.seed_source_mob(&["forker"]).await;
@@ -207,12 +207,16 @@ async fn relink_delivers_a_finished_childs_result_exactly_once() {
 /// and the limit winning cancels and retires the child and delivers
 /// max_run_elapsed.
 #[tokio::test]
-#[ignore = "needs a runtime-backed fixture; superseded by impl2's runtime-backed re-link tests"]
 async fn relink_rearms_max_run_from_the_original_start() {
     let gate = TurnGate::new();
     let turn_gate = Arc::clone(&gate);
-    let fixture = CouncilFixture::new(move |_| {
-        ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+    // Only the child's task is held; the forker's wake turn (delivery) runs.
+    let fixture = CouncilFixture::new(move |request| {
+        if support::last_user_text(request).contains(CHILD_TASK) {
+            ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+        } else {
+            ScriptedTurn::Text("noted".to_string())
+        }
     });
     fixture.seed_source_mob(&["forker"]).await;
     let owner = forker_session(&fixture).await;
@@ -282,8 +286,6 @@ async fn relink_rearms_max_run_from_the_original_start() {
         fired_after >= Duration::from_millis(500) && fired_after < Duration::from_secs(5),
         "the limit fired {fired_after:?} after the re-link; it counts from the original start"
     );
-    // Delivery wakes the forker, whose turn goes through the same gate.
-    gate.open();
     await_completion_record(&fixture, &owner, &job_id).await;
     assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
     let persisted = <meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session(
@@ -410,8 +412,13 @@ async fn relink_past_max_run_delivers_a_child_that_finished_within_its_limit() {
 async fn relink_past_max_run_retires_a_child_still_running() {
     let gate = TurnGate::new();
     let turn_gate = Arc::clone(&gate);
-    let fixture = CouncilFixture::new(move |_| {
-        ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+    // Only the child's task is held; the forker's wake turn (delivery) runs.
+    let fixture = CouncilFixture::new(move |request| {
+        if support::last_user_text(request).contains(CHILD_TASK) {
+            ScriptedTurn::Gated(Arc::clone(&turn_gate), CHILD_REPLY.to_string())
+        } else {
+            ScriptedTurn::Text("noted".to_string())
+        }
     });
     fixture.seed_source_mob(&["forker"]).await;
     let owner = forker_session(&fixture).await;
@@ -467,12 +474,11 @@ async fn relink_past_max_run_retires_a_child_still_running() {
         "an elapsed limit applies at once, without waiting for the run"
     );
     assert!(handle.get_member(&child).await.unwrap().is_none());
-    // Delivery wakes the forker, whose turn goes through the same gate.
-    gate.open();
     await_completion_record(&fixture, &owner, &job_id).await;
     assert_eq!(completion_records(&fixture, &owner, &job_id).await, 1);
     let record = completion_record_text(&fixture, &owner, &job_id).await;
     assert!(record.contains("max_run_elapsed"), "{record}");
     assert!(!record.contains(CHILD_REPLY), "{record}");
+    gate.open();
     fixture.teardown().await;
 }

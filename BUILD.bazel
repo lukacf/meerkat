@@ -584,6 +584,7 @@ test_suite(
         "//crates/meerkat-mcp:meerkat_mcp_unit_test",
         "//crates/meerkat-memory:meerkat_memory_unit_test",
         "//crates/meerkat-mob-adaptive:meerkat_mob_adaptive_unit_test",
+        "//crates/meerkat-mob-mcp:fork_off_surface_test",
         "//crates/meerkat-mob-mcp:meerkat_mob_mcp_unit_test",
         "//crates/meerkat-mob-mcp:temporary_council_test",
         "//crates/meerkat-mob-pack:meerkat_mob_pack_unit_test",

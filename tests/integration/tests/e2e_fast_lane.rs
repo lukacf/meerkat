@@ -23,6 +23,9 @@ mod cross_host_live_member;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "e2e_fast/mixed_temporary_council.rs"]
 mod mixed_temporary_council;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "e2e_fast/mob_fork_off_detached.rs"]
+mod mob_fork_off_detached;
 #[path = "e2e_fast/multi_host_bind.rs"]
 mod multi_host_bind;
 // Phase 7 (T-A8): the console verbs served through the REAL RPC handler →

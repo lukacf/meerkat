@@ -37950,6 +37950,67 @@ async fn cleanup_without_exact_actor_witness_fails_closed_with_retry_anchors() {
     );
 }
 
+/// Regression (#1190, Scenario 96): after a detached fork_off completion
+/// wake finds nothing pending, the runtime retires the idle member's
+/// executor on its own. The member's next turn revives it, and the revival
+/// used to fail with "already has a different operation-registry binding
+/// incarnation" because the ops adapter still held the retired
+/// registration's binding. Revival now releases that superseded binding by
+/// exact compare before binding the new registration.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn member_turn_revives_after_the_runtime_retired_its_idle_executor() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    service.set_return_exact_run_result(true);
+    let member = AgentIdentity::from("revived-after-runtime-teardown");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn member");
+    let session_id = handle
+        .resolve_bridge_session_id(&member)
+        .await
+        .expect("member session");
+    assert!(adapter.contains_session(&session_id).await);
+
+    // The runtime's own idle teardown: its executor and live session go
+    // away without the mob retiring the member.
+    super::session_service::MobSessionService::discard_live_session(service.as_ref(), &session_id)
+        .await
+        .expect("discard the idle live session");
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("runtime unregisters the idle executor");
+    assert!(!adapter.contains_session(&session_id).await);
+
+    let spec = BoundedResultSpec::new("revived-turn", 256).expect("bounded spec");
+    let turn = handle
+        .start_work_for_identity_bounded(
+            member.clone(),
+            WorkSpec::new(
+                ContentInput::Text("next turn".to_string()),
+                WorkOrigin::Internal,
+            ),
+            HandlingMode::Queue,
+            spec.clone(),
+        )
+        .await
+        .expect("the member's next turn revives it instead of failing on a stale ops binding");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), turn.wait_bounded(spec))
+        .await
+        .expect("revived turn completes")
+        .expect("revived turn succeeds");
+    assert_eq!(result.result().result().text(), "next turn");
+}
+
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
 async fn test_abort_member_provision_archive_failure_keeps_runtime_binding_for_retry() {

@@ -319,9 +319,10 @@ async fn bounded_turn(handle: &MobHandle, identity: &str, prompt: &str) -> Strin
         )
         .await
         .unwrap_or_else(|error| panic!("start a turn for {identity} ({prompt:?}): {error:?}"));
-    tokio::time::timeout(WAIT, work.wait_bounded(spec))
-        .await
-        .unwrap_or_else(|_| panic!("turn for {identity} ({prompt:?}) timed out"))
+    let Ok(outcome) = tokio::time::timeout(WAIT, work.wait_bounded(spec)).await else {
+        panic!("turn for {identity} ({prompt:?}) timed out");
+    };
+    outcome
         .unwrap_or_else(|error| panic!("turn for {identity} ({prompt:?}) failed: {error:?}"))
         .result()
         .result()
@@ -737,4 +738,430 @@ async fn e2e_fast_detached_completion_during_a_running_turn_is_delivered_once_af
     );
     wait_for_single_record(&router, &parent_session, &job_id).await;
     let _ = mob_state.mob_destroy(&mob_id).await;
+}
+
+// ===========================================================================
+// External fork admission: a source that owes a turn is refused at once
+// ===========================================================================
+//
+// An external fork (`MobHandle::fork_member`) is a readiness check on the
+// source. The source is busy from the moment the runtime admits its input,
+// not only once a provider call is in flight: the runtime loop dequeues,
+// stages, materializes or revives the member's session first. A fork issued
+// in that window used to queue behind the whole turn on the source's turn
+// boundary and then branch whatever the turn left behind. It must answer at
+// once instead, and a fork of an idle member must still be accepted.
+
+const ADMITTED_PROMPT: &str = "ADMITTED-6M hold before the reply";
+const ADMITTED_REPLY: &str = "ADMITTED-ACK";
+const IDLE_PROMPT: &str = "IDLE-2P say hello";
+/// How long an external fork may take to answer. Generous for a loaded CI
+/// host and far below the held turns, which never end on their own.
+const FORK_ANSWER_BOUND: Duration = Duration::from_secs(5);
+
+/// Holds every provider call whose last user message carries
+/// [`ADMITTED_PROMPT`] while closed, and counts the calls that reached it.
+#[derive(Clone)]
+struct ProviderGate {
+    open: tokio::sync::watch::Sender<bool>,
+    entered: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ProviderGate {
+    fn new() -> Self {
+        Self {
+            open: tokio::sync::watch::channel(true).0,
+            entered: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn entered(&self) -> usize {
+        self.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// [`ForkOffScript`] plus the [`ProviderGate`] for admitted turns.
+struct AdmissionScript {
+    script: ForkOffScript,
+    gate: ProviderGate,
+}
+
+#[async_trait::async_trait]
+impl LlmClient for AdmissionScript {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        if !last_user_text(request).contains(ADMITTED_PROMPT) {
+            let events = self.script.events(request);
+            return Box::pin(futures::stream::iter(events.into_iter().map(Ok)));
+        }
+        let events = vec![
+            LlmEvent::TextDelta {
+                delta: ADMITTED_REPLY.to_string(),
+                meta: None,
+            },
+            LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: meerkat_core::StopReason::EndTurn,
+                },
+            },
+        ];
+        let gate = self.gate.clone();
+        let released = async move {
+            gate.entered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut open = gate.open.subscribe();
+            while !*open.borrow_and_update() {
+                if open.changed().await.is_err() {
+                    break;
+                }
+            }
+            events
+        };
+        Box::pin(futures::StreamExt::flat_map(
+            futures::stream::once(released),
+            |events| futures::stream::iter(events.into_iter().map(Ok)),
+        ))
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+}
+
+struct AdmissionLane {
+    router: MethodRouter,
+    mob_state: Arc<MobMcpState>,
+    mob_id: meerkat_mob::MobId,
+    handle: MobHandle,
+    parent_session: SessionId,
+    gate: ProviderGate,
+    requests: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+/// The Scenario 96 stack with the scripted provider and a spawned forker.
+async fn admission_lane(root: &std::path::Path) -> AdmissionLane {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let gate = ProviderGate::new();
+    let client: Arc<dyn LlmClient> = Arc::new(AdmissionScript {
+        script: ForkOffScript {
+            requests: Arc::clone(&requests),
+        },
+        gate: gate.clone(),
+    });
+    let (router, mob_state) = make_stack(root, client).await;
+    let mob_id = format!("fork-admission-{}", uuid::Uuid::new_v4().simple());
+    let mob_id = mob_state
+        .mob_create_definition(mob_definition(&mob_id))
+        .await
+        .expect("create mob");
+    let handle = mob_state.handle_for(&mob_id).await.expect("mob handle");
+    handle
+        .spawn_spec(SpawnMemberSpec::new("keeper", AgentIdentity::from(PARENT)))
+        .await
+        .expect("spawn forker");
+    let parent_session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from(PARENT))
+        .await
+        .expect("forker session");
+    AdmissionLane {
+        router,
+        mob_state,
+        mob_id,
+        handle,
+        parent_session,
+        gate,
+        requests,
+    }
+}
+
+impl AdmissionLane {
+    /// Admit an [`ADMITTED_PROMPT`] turn for the forker and return as soon as
+    /// the runtime accepted it.
+    async fn admit_turn(&self) -> (meerkat_mob::WorkTurnHandle, BoundedResultSpec) {
+        let spec = BoundedResultSpec::new("admitted", 16 * 1024).expect("bounded result spec");
+        let work = tokio::time::timeout(
+            WAIT,
+            self.handle.start_work_for_identity_bounded(
+                AgentIdentity::from(PARENT),
+                WorkSpec::new(
+                    ContentInput::Text(ADMITTED_PROMPT.to_string()),
+                    WorkOrigin::Internal,
+                ),
+                HandlingMode::Queue,
+                spec.clone(),
+            ),
+        )
+        .await
+        .expect("the runtime must admit the turn without waiting for it to start")
+        .expect("admit the forker's turn");
+        (work, spec)
+    }
+
+    /// Issue an external fork of the forker and return its answer, failing
+    /// the test if the fork does not answer within [`FORK_ANSWER_BOUND`].
+    async fn external_fork(
+        &self,
+        fork_identity: &str,
+        when: &str,
+    ) -> Result<meerkat_mob::ForkMemberResult, meerkat_mob::MobError> {
+        tokio::time::timeout(
+            FORK_ANSWER_BOUND,
+            self.handle.fork_member(
+                &AgentIdentity::from(PARENT),
+                SpawnMemberSpec::new("keeper", AgentIdentity::from(fork_identity)),
+                None,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{when}: the external fork did not answer within {FORK_ANSWER_BOUND:?}; it queued \
+                 behind the source's admitted turn instead of refusing it"
+            )
+        })
+    }
+
+    async fn assert_refused_as_busy(&self, fork_identity: &str, when: &str) {
+        let attempt = self.external_fork(fork_identity, when).await;
+        match &attempt {
+            Err(meerkat_mob::MobError::ForkSourceUnavailable { cause, .. }) => assert_eq!(
+                *cause,
+                meerkat_mob::ForkSourceUnavailableCause::Running,
+                "{when}: a source that owes a turn is refused with the Running cause"
+            ),
+            other => panic!(
+                "{when}: an external fork of a source with an admitted turn must be refused as \
+                 Running, got {other:?}"
+            ),
+        }
+        assert!(
+            self.handle
+                .roster()
+                .await
+                .get_by_identity(&AgentIdentity::from(fork_identity))
+                .is_none(),
+            "{when}: a refused fork leaves no roster member behind"
+        );
+    }
+
+    /// An external fork of the idle forker is accepted and branches exactly
+    /// the forker's committed transcript, which ends in an answer rather
+    /// than an unanswered input.
+    async fn assert_idle_fork_accepted(&self, fork_identity: &str, when: &str) {
+        let parent = session_history(&self.router, &self.parent_session).await;
+        let fork = self
+            .external_fork(fork_identity, when)
+            .await
+            .unwrap_or_else(|error| panic!("{when}: an idle forker must be forkable: {error:?}"));
+        let child = session_history(&self.router, &fork.session_id).await;
+        let child_rows = history_messages(&child);
+        assert_eq!(
+            child_rows.len(),
+            history_messages(&parent).len(),
+            "{when}: the fork branches the forker's whole committed transcript: {child}"
+        );
+        let last_role = child_rows
+            .last()
+            .and_then(|row| row["role"].as_str())
+            .unwrap_or_default();
+        assert_ne!(
+            last_role, "user",
+            "{when}: the branch must not end in an unanswered input: {child}"
+        );
+        assert!(
+            self.handle
+                .roster()
+                .await
+                .get_by_identity(&AgentIdentity::from(fork_identity))
+                .is_some(),
+            "{when}: the accepted fork is seated as a roster member"
+        );
+    }
+
+    /// Run the forker's fork_off turn from its own turn (a self-fork), wait
+    /// for the detached child's outcome to reach the forker and for the
+    /// forker to settle, then retire the forker's idle executor.
+    ///
+    /// The retirement goes through the runtime's own owned unregister saga,
+    /// exactly what the runtime loop's idle teardown runs. It is performed
+    /// explicitly because completion delivery wakes the forker instead of
+    /// leaving its executor idle, so whether the runtime retires it on its
+    /// own is not something this lane controls. What matters is the state
+    /// after it: the member has no live executor, so its next turn goes
+    /// through revival first.
+    async fn self_fork_then_retire_idle_executor(&self) {
+        assert_eq!(
+            bounded_turn(&self.handle, PARENT, FORK_PROMPT).await,
+            FORK_DONE,
+            "fork_off from the forker's own turn must still work"
+        );
+        let history = session_history(&self.router, &self.parent_session).await;
+        let started = recorded_fork_off_start(&history).unwrap_or_else(|| {
+            panic!("the forker's transcript holds no fork_off result: {history}")
+        });
+        assert_eq!(started["status"], "running", "{started}");
+        assert_eq!(started["agent_identity"], CHILD, "{started}");
+        let job_id = started["job_id"].as_str().expect("job id").to_string();
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while recorded_completions(
+            &session_history(&self.router, &self.parent_session).await,
+            &job_id,
+        )
+        .is_empty()
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the forker never received the fork_off completion"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let runtime = self
+            .mob_state
+            .session_service()
+            .runtime_adapter()
+            .expect("runtime adapter");
+        // Settled: no admitted input across a few consecutive reads, so any
+        // wake turn the completion caused has been answered.
+        use meerkat_runtime::SessionServiceRuntimeExt as _;
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let mut quiet_reads = 0;
+        while quiet_reads < 5 {
+            let settled = match runtime.list_active_inputs(&self.parent_session).await {
+                Ok(active) => active.is_empty(),
+                Err(_) => !runtime.contains_session(&self.parent_session).await,
+            };
+            quiet_reads = if settled { quiet_reads + 1 } else { 0 };
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the forker never settled after the fork_off completion"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if runtime.contains_session(&self.parent_session).await {
+            runtime
+                .unregister_session(&self.parent_session)
+                .await
+                .expect("retire the forker's idle executor");
+        }
+        assert!(
+            !runtime.contains_session(&self.parent_session).await,
+            "the forker's idle executor is retired"
+        );
+    }
+
+    fn provider_saw(&self, prompt: &str) -> bool {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(last_user, _)| last_user.contains(prompt))
+    }
+}
+
+/// An external fork issued right after the runtime admitted the source's
+/// turn, before the turn can reach the provider, is refused at once.
+///
+/// The test holds the forker's turn-finalization boundary, which is what the
+/// runtime loop needs to dequeue and start the turn, so the admitted input
+/// provably waits before the provider for the whole fork attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_external_fork_is_refused_at_once_while_an_admitted_turn_waits_to_start() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let lane = admission_lane(temp.path()).await;
+    assert_eq!(
+        bounded_turn(&lane.handle, PARENT, IDLE_PROMPT).await,
+        FOLLOW_UP_REPLY
+    );
+    assert!(
+        lane.provider_saw(IDLE_PROMPT),
+        "the forker's turns must run on the scripted provider"
+    );
+
+    let boundary = lane
+        .mob_state
+        .session_service()
+        .acquire_runtime_turn_finalization_guard(&lane.parent_session)
+        .await
+        .expect("hold the forker's turn boundary");
+    let (work, spec) = lane.admit_turn().await;
+    lane.assert_refused_as_busy("fork-while-admitted", "an admitted turn not yet started")
+        .await;
+    assert_eq!(
+        lane.gate.entered(),
+        0,
+        "the admitted turn must not have reached the provider during the fork attempt"
+    );
+
+    drop(boundary);
+    let reply = tokio::time::timeout(WAIT, work.wait_bounded(spec))
+        .await
+        .expect("the admitted turn runs once its boundary is free")
+        .expect("the admitted turn completes");
+    assert_eq!(reply.result().result().text(), ADMITTED_REPLY);
+
+    let _ = lane.mob_state.mob_destroy(&lane.mob_id).await;
+}
+
+/// The same refusal during revival: after the forker's own fork_off (a
+/// self-fork from inside its turn, which keeps working) completes and its
+/// idle executor is retired, the forker's next turn goes through revival
+/// first, and a fork issued as soon as that turn is admitted is refused at
+/// once.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_external_fork_is_refused_at_once_while_a_revived_turn_is_admitted() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let lane = admission_lane(temp.path()).await;
+    lane.self_fork_then_retire_idle_executor().await;
+    assert!(
+        lane.handle
+            .roster()
+            .await
+            .get_by_identity(&AgentIdentity::from(CHILD))
+            .is_some(),
+        "the self-fork child is seated"
+    );
+
+    lane.gate.open.send_replace(false);
+    let (work, spec) = lane.admit_turn().await;
+    lane.assert_refused_as_busy("fork-while-reviving", "a turn admitted through revival")
+        .await;
+
+    lane.gate.open.send_replace(true);
+    let reply = tokio::time::timeout(WAIT, work.wait_bounded(spec))
+        .await
+        .expect("the revived turn completes once released")
+        .expect("the revived turn completes");
+    assert_eq!(reply.result().result().text(), ADMITTED_REPLY);
+
+    let _ = lane.mob_state.mob_destroy(&lane.mob_id).await;
+}
+
+/// An external fork of an idle member is accepted: right after its turn was
+/// answered, and again after the runtime retired its idle executor.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_external_fork_of_an_idle_member_is_accepted() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let lane = admission_lane(temp.path()).await;
+    assert_eq!(
+        bounded_turn(&lane.handle, PARENT, IDLE_PROMPT).await,
+        FOLLOW_UP_REPLY
+    );
+    lane.assert_idle_fork_accepted("fork-of-idle", "right after an answered turn")
+        .await;
+
+    lane.self_fork_then_retire_idle_executor().await;
+    lane.assert_idle_fork_accepted(
+        "fork-of-retired-executor",
+        "after the runtime retired the idle executor",
+    )
+    .await;
+
+    let _ = lane.mob_state.mob_destroy(&lane.mob_id).await;
 }

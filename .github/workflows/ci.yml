@@ -794,7 +794,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Setup Bazelisk
-        # Bazelisk downloads the Bazel release pinned in .bazelversion.
+        # Bazelisk downloads the Bazel release pinned in .bazelversion (9.1.1).
         uses: bazelbuild/setup-bazelisk@v3
 
       - name: Cache Bazel repository and disk caches

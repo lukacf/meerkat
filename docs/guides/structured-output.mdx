@@ -37,7 +37,8 @@ When `output_schema` is configured on an agent, the execution flow is:
   </Step>
   <Step title="Validate-first">
     The final reply is parsed and validated against the schema (after the same
-    code-fence and named-wrapper normalization extraction uses). When it
+    code-fence and named-wrapper normalization extraction uses, and with known
+    `format` keywords such as `date-time` or `email` asserted). When it
     validates, it becomes `RunResult.structured_output` and no extraction
     request is sent.
   </Step>

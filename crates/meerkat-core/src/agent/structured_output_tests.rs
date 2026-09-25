@@ -710,6 +710,101 @@ async fn validate_first_accepts_an_omitted_optional_field_and_an_empty_array() {
     );
 }
 
+/// A schema with `format` keywords that native constrained decoding enforces
+/// on the extraction request (Anthropic always, OpenAI with `strict`).
+fn format_schema() -> OutputSchema {
+    OutputSchema::new(json!({
+        "type": "object",
+        "properties": {
+            "due": {"type": "string", "format": "date-time"},
+            "owner": {"type": "string", "format": "email"}
+        },
+        "required": ["due", "owner"]
+    }))
+    .expect("valid schema")
+}
+
+const CONFORMING_FORMATS: &str = r#"{"due":"2026-09-25T10:00:00Z","owner":"backend@example.com"}"#;
+
+/// Validate-first asserts declared `format` keywords. A final reply that is
+/// the right shape but breaks a format is not accepted: it takes the
+/// unchanged extraction path, whose request is the one native decoding
+/// constrains. A conforming reply still skips extraction.
+#[tokio::test]
+async fn validate_first_asserts_declared_formats_and_falls_back_to_extraction() {
+    for provider in [Provider::Anthropic, Provider::OpenAI, Provider::Gemini] {
+        let client = Arc::new(RecordingSchemaClient::new(
+            provider,
+            vec![
+                text(r#"{"due":"next Friday","owner":"the backend team"}"#),
+                text(CONFORMING_FORMATS),
+            ],
+        ));
+        let mut agent = build(&client, base_builder().output_schema(format_schema())).await;
+        let result = agent
+            .run("q".to_string().into())
+            .await
+            .unwrap_or_else(|error| panic!("{provider:?}: run failed: {error}"));
+
+        assert_eq!(
+            client.call_count(),
+            2,
+            "{provider:?}: a format violation must not be accepted by validate-first"
+        );
+        assert_eq!(
+            result.structured_output,
+            Some(serde_json::from_str::<Value>(CONFORMING_FORMATS).unwrap()),
+            "{provider:?}: the extraction answer is the structured output"
+        );
+        assert_eq!(
+            client.calls()[1].last_user_text(),
+            DEFAULT_EXTRACTION_PROMPT,
+            "{provider:?}: the fallback is the unchanged extraction request"
+        );
+
+        let client = Arc::new(RecordingSchemaClient::new(
+            provider,
+            vec![text(CONFORMING_FORMATS)],
+        ));
+        let mut agent = build(&client, base_builder().output_schema(format_schema())).await;
+        let result = agent.run("q".to_string().into()).await.expect("run");
+        assert_eq!(
+            client.call_count(),
+            1,
+            "{provider:?}: conforming formats still skip extraction"
+        );
+        assert_eq!(
+            result.structured_output,
+            Some(serde_json::from_str::<Value>(CONFORMING_FORMATS).unwrap())
+        );
+    }
+}
+
+/// The extraction phase's own validation is unchanged: it treats `format` as
+/// an annotation, as it did before validate-first existed, and relies on the
+/// provider's native schema slot to constrain the values.
+#[tokio::test]
+async fn extraction_phase_validation_still_treats_format_as_an_annotation() {
+    let off_format = r#"{"due":"soon","owner":"someone"}"#;
+    let client = Arc::new(RecordingSchemaClient::new(
+        Provider::OpenAI,
+        vec![text("prose answer"), text(off_format)],
+    ));
+    let mut agent = build(&client, base_builder().output_schema(format_schema())).await;
+    let result = agent.run("q".to_string().into()).await.expect("run");
+
+    assert_eq!(
+        client.call_count(),
+        2,
+        "extraction runs for the prose reply"
+    );
+    assert_eq!(
+        result.structured_output,
+        Some(serde_json::from_str::<Value>(off_format).unwrap()),
+        "extraction acceptance is unchanged"
+    );
+}
+
 /// Every way a final reply can miss the schema falls back to extraction, and
 /// the extraction answer (not the rejected reply) becomes the structured
 /// output.

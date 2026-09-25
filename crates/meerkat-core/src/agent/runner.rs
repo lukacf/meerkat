@@ -1534,7 +1534,7 @@ where
     /// validation, so it is asked for exactly the shape the validator accepts.
     /// A schema the provider cannot compile is shown as configured; the run
     /// then surfaces the compile fault through the ordinary extraction path.
-    fn output_schema_request_instructions(&self) -> Option<String> {
+    pub(crate) fn output_schema_request_instructions(&self) -> Option<String> {
         if !self.requests_carry_output_schema_projection() {
             return None;
         }
@@ -1548,6 +1548,32 @@ where
             ),
         };
         Some(rendered)
+    }
+
+    /// Re-render the structured-output section of a request that was
+    /// composed before a sticky model fallback switched the active client.
+    ///
+    /// `previous` is the section the request was composed with. The retried
+    /// request goes to the fallback target, whose compiled schema is also the
+    /// one terminal validation uses from now on, so it must show that schema
+    /// rather than the failed provider's. Whether a section is projected at
+    /// all does not depend on the active client, so only its bytes can change.
+    pub(crate) fn reproject_output_schema_instructions_after_fallback(
+        &self,
+        messages: &mut [Message],
+        previous: Option<&str>,
+    ) {
+        let (Some(previous), Some(next)) = (previous, self.output_schema_request_instructions())
+        else {
+            return;
+        };
+        if previous != next {
+            // A request that does not end its leading system prompt with the
+            // section it was composed with is left as it is.
+            let _ = crate::structured_output::replace_output_schema_instructions(
+                messages, previous, &next,
+            );
+        }
     }
 
     pub(crate) fn llm_messages_for_boundary(

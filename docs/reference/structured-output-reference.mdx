@@ -63,6 +63,18 @@ fault) runs the extraction phase exactly as described below: the same prompt,
 temperature `0.0`, no tools, the provider's native schema slot, and the same
 retry accounting.
 
+Validate-first also asserts known JSON Schema `format` keywords (for example
+`date-time`, `email`, `uri`, `uuid`); unknown formats are ignored. Providers
+that decode natively against the schema enforce these formats on the
+extraction request, so a final reply that has the right shape but breaks a
+declared format runs extraction instead of being accepted. The extraction
+phase's own validation treats `format` as an annotation, as before.
+
+The section shows the schema as the active provider compiles it. When a
+sticky model fallback switches providers mid-request, the retried request
+shows the fallback provider's compiled schema, which is also the one used
+for validation from then on.
+
 ## Result-side fields
 
 | Field | Meaning |

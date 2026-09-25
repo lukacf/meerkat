@@ -174,15 +174,19 @@ them.
   the run's requests, so prompt caching is unaffected, and it is request-only:
   it is never written into the session transcript. Runs without a schema are
   unchanged. When the final reply of the tool loop already validates (after
-  the existing code-fence and named-wrapper normalization), it becomes
-  `structured_output` and no extraction request is sent; `RunResult`, the
+  the existing code-fence and named-wrapper normalization, and with known
+  JSON Schema `format` keywords such as `date-time`, `email`, `uri` and
+  `uuid` asserted, since native constrained decoding enforces them on the
+  extraction request), it becomes `structured_output` and no extraction
+  request is sent; `RunResult`, the
   `run_completed` then `extraction_succeeded` events, and the RPC, REST and
   SDK result shapes are the same as for a successful extraction, and
   `RunResult.text` is that reply. Any other final reply runs the extraction
   path exactly as before: same prompt, temperature 0, no tools, the native
   schema slot with unchanged `strict` defaults, and the same retry and attempt
-  accounting. Requests that reference Gemini cached content are not given the
-  section, and provider-authored cache breakpoints over a request carrying it
+  accounting. After a sticky model fallback, the retried request shows the
+  schema as the fallback provider compiles it. Requests that reference Gemini
+  cached content are not given the section, and provider-authored cache breakpoints over a request carrying it
   are not recorded as durable cache evidence, since they describe a system
   prompt the transcript does not contain. Behaviour-only; no public signature
   changed. `meerkat_core::structured_output` is new public API.

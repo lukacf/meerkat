@@ -389,10 +389,62 @@ fn chatgpt_backend_carries_the_section_in_instructions() {
             "ChatGPT carries the system prompt only in instructions"
         );
     }
-    assert_eq!(responses_tool_names(&turn_one), vec!["lookup".to_string()]);
-    assert!(turn_one["text"].get("format").is_none());
+    for (label, body) in [("turn one", &turn_one), ("turn two", &turn_two)] {
+        assert_eq!(
+            responses_tool_names(body),
+            vec!["lookup".to_string()],
+            "{label}"
+        );
+        assert!(
+            body["text"].get("format").is_none(),
+            "{label}: main turns carry no native schema slot: {body}"
+        );
+    }
+    assert_eq!(
+        extraction["tools"],
+        json!([]),
+        "the ChatGPT wire always sends a tools array; extraction leaves it empty"
+    );
     assert_eq!(extraction["text"]["format"]["type"], "json_schema");
     assert_eq!(extraction["text"]["format"]["strict"], false);
+    assert_eq!(
+        extraction["text"]["format"]["schema"],
+        *schema.schema.as_value()
+    );
+    let last = extraction["input"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["role"], "user");
+    assert!(
+        serde_json::to_string(&last["content"])
+            .unwrap()
+            .contains(EXTRACTION_PROMPT),
+        "the unchanged extraction prompt closes the request: {last}"
+    );
+}
+
+#[test]
+fn chatgpt_backend_requests_without_a_schema_are_unchanged() {
+    let client = OpenAiClient::new("test-key".to_string()).with_chatgpt_backend_wire();
+    let body = client
+        .build_request_body(&main_request(
+            "gpt-5.5",
+            run_transcripts().turn_one,
+            OpenAiProviderTag::default(),
+        ))
+        .unwrap();
+    assert_eq!(
+        body["instructions"],
+        Value::String(SYSTEM_PROMPT.to_string())
+    );
+    assert!(
+        body.get("text")
+            .is_none_or(|text| text.get("format").is_none())
+    );
+    assert!(!body.to_string().contains(OUTPUT_SCHEMA_INSTRUCTIONS_OPEN));
 }
 
 /// ChatGPT rejects a second leading system row, which is why the projection
@@ -509,6 +561,30 @@ fn chat_completions_with_explicit_cache_keeps_the_section_before_the_breakpoint(
         ))
         .unwrap();
     assert_eq!(chat_system_text(&body), expected_system(&client, &schema));
+    // The adapter authors breakpoints on conversation rows, never on the
+    // system row, so the section is part of the prefix the first breakpoint
+    // closes.
+    assert!(
+        body["messages"][0]["content"].is_string(),
+        "the system row carries no breakpoint of its own: {body}"
+    );
+    let first_breakpoint = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|message| {
+            message["content"].as_array().is_some_and(|parts| {
+                parts
+                    .iter()
+                    .any(|part| part["prompt_cache_breakpoint"]["mode"] == "explicit")
+            })
+        })
+        .expect("explicit mode authors a breakpoint");
+    assert!(
+        first_breakpoint > 0,
+        "the first breakpoint comes after the system row that carries the section"
+    );
+    assert_eq!(body["messages"][first_breakpoint]["role"], "user");
 }
 
 #[test]

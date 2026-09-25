@@ -8,9 +8,12 @@
 //! prompt caching keeps working.
 //!
 //! The projection is request-only: it is never written into the session
-//! transcript. It is derived from the build-time schema on every request, so a
-//! session always sees exactly the schema it is currently configured with, and
-//! nothing at all when no schema is configured.
+//! transcript. It is derived from the build-time schema on every request, so
+//! every request the loop composes carries exactly the schema the session is
+//! currently configured with, and nothing at all when no schema is configured.
+//! A provider-side conversation chain that replays earlier requests (OpenAI
+//! Responses `store=true` continuation) keeps whatever section those requests
+//! carried, exactly as it keeps an earlier system prompt.
 //!
 //! This module owns the rendering and the placement. It is public so provider
 //! adapter tests can compose exactly the request the agent loop sends.
@@ -98,6 +101,32 @@ pub fn project_output_schema_instructions(messages: &mut Vec<Message>, instructi
         return;
     }
     messages.insert(0, Message::System(SystemMessage::new(instructions)));
+}
+
+/// Swap one projected instruction section for another in request messages
+/// that [`project_output_schema_instructions`] already composed.
+///
+/// The projection always leaves the section at the very end of the leading
+/// system prompt (either after the separator or as the whole prompt), so the
+/// swap replaces exactly those trailing bytes. Returns `true` when the leading
+/// system prompt ended with `previous` and now ends with `next`; otherwise the
+/// messages are left untouched and `false` is returned.
+pub fn replace_output_schema_instructions(
+    messages: &mut [Message],
+    previous: &str,
+    next: &str,
+) -> bool {
+    let Some(Message::System(system)) = messages.first_mut() else {
+        return false;
+    };
+    let Some(head) = system.content.strip_suffix(previous) else {
+        return false;
+    };
+    let mut content = String::with_capacity(head.len() + next.len());
+    content.push_str(head);
+    content.push_str(next);
+    system.content = content;
+    true
 }
 
 #[cfg(test)]
@@ -215,6 +244,59 @@ mod tests {
         assert!(matches!(&messages[0], Message::System(s) if s.content == "SECTION"));
         assert!(matches!(&messages[1], Message::User(_)));
         assert!(matches!(&messages[2], Message::System(s) if s.content == "late system row"));
+    }
+
+    #[test]
+    fn replacement_swaps_an_appended_section() {
+        let mut messages = vec![
+            Message::System(SystemMessage::new("You are a reviewer.")),
+            Message::User(UserMessage::text("review this")),
+        ];
+        project_output_schema_instructions(&mut messages, "OLD");
+        assert!(replace_output_schema_instructions(
+            &mut messages,
+            "OLD",
+            "NEW"
+        ));
+        assert!(
+            matches!(&messages[0], Message::System(s) if s.content == "You are a reviewer.\n\nNEW")
+        );
+        assert!(matches!(&messages[1], Message::User(_)));
+    }
+
+    #[test]
+    fn replacement_swaps_an_inserted_section() {
+        let mut messages = vec![Message::User(UserMessage::text("go"))];
+        project_output_schema_instructions(&mut messages, "OLD");
+        assert!(replace_output_schema_instructions(
+            &mut messages,
+            "OLD",
+            "NEW"
+        ));
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(&messages[0], Message::System(s) if s.content == "NEW"));
+    }
+
+    #[test]
+    fn replacement_leaves_messages_without_the_section_untouched() {
+        let mut messages = vec![
+            Message::System(SystemMessage::new("no section here")),
+            Message::User(UserMessage::text("go")),
+        ];
+        assert!(!replace_output_schema_instructions(
+            &mut messages,
+            "OLD",
+            "NEW"
+        ));
+        assert!(matches!(&messages[0], Message::System(s) if s.content == "no section here"));
+
+        let mut messages = vec![Message::User(UserMessage::text("OLD"))];
+        assert!(!replace_output_schema_instructions(
+            &mut messages,
+            "OLD",
+            "NEW"
+        ));
+        assert!(matches!(&messages[0], Message::User(_)));
     }
 
     #[test]

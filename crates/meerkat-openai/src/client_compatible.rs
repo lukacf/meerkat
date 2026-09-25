@@ -1014,9 +1014,11 @@ impl LlmClient for OpenAiCompatibleClient {
                             };
 
                             if let Some(event_usage) = event.usage {
+                                let (output_tokens, reasoning_tokens) =
+                                    chat_output_and_reasoning(&event_usage);
                                 let usage = Usage {
                                     input_tokens: event_usage.prompt_tokens.unwrap_or(0),
-                                    output_tokens: event_usage.completion_tokens.unwrap_or(0),
+                                    output_tokens,
                                     cache_creation_tokens: event_usage
                                         .prompt_tokens_details
                                         .as_ref()
@@ -1025,10 +1027,7 @@ impl LlmClient for OpenAiCompatibleClient {
                                         .prompt_tokens_details
                                         .as_ref()
                                         .and_then(|details| details.cached_tokens),
-                                    reasoning_tokens: event_usage
-                                        .completion_tokens_details
-                                        .as_ref()
-                                        .and_then(|details| details.reasoning_tokens),
+                                    reasoning_tokens,
                                     provider_accounting: Some(
                                         meerkat_core::ProviderTokenAccounting::openai_compatible_for(
                                             self.provider,
@@ -1364,9 +1363,44 @@ struct ChatUsage {
     #[serde(default)]
     completion_tokens: Option<u64>,
     #[serde(default)]
+    total_tokens: Option<u64>,
+    #[serde(default)]
     prompt_tokens_details: Option<ChatPromptTokensDetails>,
     #[serde(default)]
     completion_tokens_details: Option<ChatCompletionTokensDetails>,
+}
+
+/// Output and reasoning for one Chat Completions usage row, with reasoning a
+/// subset of output.
+///
+/// Backends differ on where reasoning sits. OpenAI counts
+/// `completion_tokens_details.reasoning_tokens` inside `completion_tokens`;
+/// others (xAI) count it beside them. The row's own arithmetic says which:
+/// when `total_tokens == prompt_tokens + completion_tokens + reasoning_tokens`
+/// exactly and reasoning is non-zero, reasoning was outside completion and is
+/// added to output. Every other row keeps `completion_tokens` as output.
+fn chat_output_and_reasoning(usage: &ChatUsage) -> (u64, Option<u64>) {
+    let completion = usage.completion_tokens.unwrap_or(0);
+    let reasoning = usage
+        .completion_tokens_details
+        .as_ref()
+        .and_then(|details| details.reasoning_tokens);
+    let reasoning_outside_completion = match (reasoning, usage.total_tokens) {
+        (Some(reasoning), Some(total)) if reasoning > 0 => {
+            usage
+                .prompt_tokens
+                .unwrap_or(0)
+                .checked_add(completion)
+                .and_then(|sum| sum.checked_add(reasoning))
+                == Some(total)
+        }
+        _ => false,
+    };
+    if reasoning_outside_completion {
+        (completion.saturating_add(reasoning.unwrap_or(0)), reasoning)
+    } else {
+        (completion, reasoning)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1387,6 +1421,43 @@ struct ChatPromptTokensDetails {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    fn chat_usage(value: serde_json::Value) -> ChatUsage {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn chat_usage_adds_reasoning_reported_outside_completion() {
+        // Recorded from a live xAI grok-3-mini streaming call.
+        let usage = chat_usage(serde_json::json!({
+            "prompt_tokens": 205,
+            "completion_tokens": 1,
+            "total_tokens": 324,
+            "prompt_tokens_details": {"cached_tokens": 192},
+            "completion_tokens_details": {"reasoning_tokens": 118}
+        }));
+        assert_eq!(chat_output_and_reasoning(&usage), (119, Some(118)));
+    }
+
+    #[test]
+    fn chat_usage_keeps_reasoning_counted_inside_completion() {
+        // OpenAI: total = prompt + completion, reasoning inside completion.
+        let usage = chat_usage(serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 50,
+            "total_tokens": 60,
+            "completion_tokens_details": {"reasoning_tokens": 40}
+        }));
+        assert_eq!(chat_output_and_reasoning(&usage), (50, Some(40)));
+        let without_total = chat_usage(serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 50,
+            "completion_tokens_details": {"reasoning_tokens": 40}
+        }));
+        assert_eq!(chat_output_and_reasoning(&without_total), (50, Some(40)));
+        let none = chat_usage(serde_json::json!({"prompt_tokens": 3, "completion_tokens": 2}));
+        assert_eq!(chat_output_and_reasoning(&none), (2, None));
+    }
     use axum::body::to_bytes;
     use axum::{
         Json, Router,

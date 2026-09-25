@@ -2909,7 +2909,11 @@ where
                             // can silently refund usage.
                             self.session.record_turn_usage(&outcome.summary_usage);
                             self.budget.record_turn_usage(&outcome.summary_usage);
-                            self.run_request_usage.push(outcome.summary_usage.clone());
+                            if outcome.summary_source
+                                == crate::agent::compact::CompactionSummarySource::ProviderCall
+                            {
+                                self.run_request_usage.push(outcome.summary_usage.clone());
+                            }
                             // The summary call's accounting identity is routed,
                             // not repaired: the counters above are charged as
                             // reported and the disagreement is published.
@@ -3809,7 +3813,11 @@ where
         live: &crate::types::Usage,
         rollback: &crate::types::Usage,
     ) -> Result<crate::types::Usage, AgentError> {
-        live.cumulative_delta_since(rollback).ok_or_else(|| {
+        // Both snapshots are normalized first: a legacy session's stored total
+        // can carry raw cache sums that a later recorded turn clamps.
+        let live = crate::types::CumulativeUsage::from_usage(live.clone()).into_inner();
+        let rollback = crate::types::CumulativeUsage::from_usage(rollback.clone()).into_inner();
+        live.cumulative_delta_since(&rollback).ok_or_else(|| {
             AgentError::InternalError(format!(
                 "compaction rollback observed non-monotonic usage (live {live:?} < rollback {rollback:?})"
             ))
@@ -4087,7 +4095,7 @@ where
         let result = RunResult {
             text: extraction_error.last_output.clone(),
             session_id: self.session.id().clone(),
-            usage: self.session.total_usage(),
+            usage: self.reported_session_usage(),
             run_usage: self.run_usage_delta(),
             request_usage: self.run_request_usage.clone(),
             turns: turn_count + 1,
@@ -4145,10 +4153,17 @@ where
         Ok(())
     }
 
-    /// Usage accrued since the current `run_loop` entry began.
+    /// The session total as reported and as used for deltas: normalized so
+    /// the cache and reasoning counters are subsets of their parent totals.
+    /// Sessions saved before 0.8.22 summed raw per-call cache counters, which
+    /// can exceed the input total; the stored value is left untouched.
+    fn reported_session_usage(&self) -> crate::types::Usage {
+        crate::types::CumulativeUsage::from_usage(self.session.total_usage()).into_inner()
+    }
+
+    /// Usage accrued since the current run began.
     fn run_usage_delta(&self) -> Option<crate::types::Usage> {
-        self.session
-            .total_usage()
+        self.reported_session_usage()
             .cumulative_delta_since(&self.run_usage_baseline)
     }
 
@@ -4194,8 +4209,13 @@ where
         // park is a separate seam and remains unbounded here.
         self.budget.begin_turn();
         self.extraction_state.reset();
-        self.run_usage_baseline = self.session.total_usage();
-        self.run_request_usage.clear();
+        // A run that suspended for callback results continues in this entry:
+        // keep its baseline and rows so calls made before the suspension stay
+        // in this run's usage. Every other entry starts a fresh run account.
+        if !std::mem::take(&mut self.run_usage_suspended_for_callback) {
+            self.run_usage_baseline = self.reported_session_usage();
+            self.run_request_usage.clear();
+        }
         // RuntimeStore holds the pre-run Session snapshot until an explicit
         // sticky-fallback CAS advances its control projection. Seal that exact
         // parent once; CallingLlm visibility promotion/catalog refreshes mutate
@@ -6585,6 +6605,7 @@ where
             })?;
             self.execute_turn_effects(&transition, ctx.turn_count, ctx.event_tx)
                 .await?;
+            self.run_usage_suspended_for_callback = true;
             if callback_pending.len() == 1 {
                 let (tool_use_id, tool_name, args) = callback_pending.remove(0);
                 return Err(AgentError::CallbackPending {
@@ -6763,7 +6784,7 @@ where
                 let result = RunResult {
                     text: extraction_error.last_output.clone(),
                     session_id: self.session.id().clone(),
-                    usage: self.session.total_usage(),
+                    usage: self.reported_session_usage(),
                     run_usage: self.run_usage_delta(),
                     request_usage: self.run_request_usage.clone(),
                     turns: ctx.turn_count + 1,
@@ -6793,7 +6814,7 @@ where
                 .unwrap_or_default()
                 .to_string(),
             session_id: self.session.id().clone(),
-            usage: self.session.total_usage(),
+            usage: self.reported_session_usage(),
             run_usage: self.run_usage_delta(),
             request_usage: self.run_request_usage.clone(),
             turns: ctx.turn_count + 1,
@@ -6899,7 +6920,7 @@ where
             let mut result = RunResult {
                 text: final_text.clone(),
                 session_id: self.session.id().clone(),
-                usage: self.session.total_usage(),
+                usage: self.reported_session_usage(),
                 run_usage: self.run_usage_delta(),
                 request_usage: self.run_request_usage.clone(),
                 turns: ctx.turn_count + 1,
@@ -6961,7 +6982,7 @@ where
         let mut result = RunResult {
             text: final_text,
             session_id: self.session.id().clone(),
-            usage: self.session.total_usage(),
+            usage: self.reported_session_usage(),
             run_usage: self.run_usage_delta(),
             request_usage: self.run_request_usage.clone(),
             turns: ctx.turn_count + 1,
@@ -7011,7 +7032,7 @@ where
             SurfaceResultClass::Success => Ok(RunResult {
                 text: self.session.last_assistant_text().unwrap_or_default(),
                 session_id: self.session.id().clone(),
-                usage: self.session.total_usage(),
+                usage: self.reported_session_usage(),
                 run_usage: self.run_usage_delta(),
                 request_usage: self.run_request_usage.clone(),
                 turns,

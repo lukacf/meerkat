@@ -1684,7 +1684,7 @@ impl BridgeBoundedResultSpec {
                     output_tokens: u64::MAX,
                     cache_creation_tokens: Some(u64::MAX),
                     cache_read_tokens: Some(u64::MAX),
-                    reasoning_tokens: None,
+                    reasoning_tokens: Some(u64::MAX),
                     provider_accounting: None,
                 },
                 turns: u32::MAX,

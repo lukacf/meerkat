@@ -50,7 +50,11 @@ Reasoning is the provider's thinking-token count: OpenAI Responses
 `output_tokens_details.reasoning_tokens`, Chat Completions
 `completion_tokens_details.reasoning_tokens`, and Gemini `thoughtsTokenCount`.
 Gemini bills thinking separately from candidates, so its `output_tokens` is
-candidates plus thoughts. Anthropic reports no separate count and folds
+candidates plus thoughts. Chat Completions backends differ: OpenAI counts
+reasoning inside `completion_tokens`, while others such as xAI count it beside
+them. A row whose `total_tokens` equals prompt plus completion plus reasoning
+exactly, with non-zero reasoning, is read as reasoning outside completion, and
+its `output_tokens` becomes completion plus reasoning. Anthropic reports no separate count and folds
 thinking into `output_tokens`, so its `reasoning_tokens` stays absent.
 
 <Warning>
@@ -75,7 +79,12 @@ and the SDK `RunResult`) carries three usage views:
 | `request_usage` | one row per provider request this run made, in order: tool-loop calls, the structured-output extraction call and its retries, and any compaction summary call. Each row is a per-call usage with its `accounting` |
 
 `run_usage` and the sum of `request_usage[*].accounting.presented_tokens` agree
-on input for a run that records every call it makes. On a fresh session
+on input for a run that records every call it makes. A run that suspends for
+callback tool results and then resumes keeps one account, so calls made before
+the suspension appear in the resumed run's result. Compaction summaries written
+by a host curator or the mechanical capacity fallback make no provider request
+and add no row. Legacy sessions saved before 0.8.22 summed raw cache counters;
+their reported totals are clamped so the subset invariant holds. On a fresh session
 `run_usage` equals `usage`. A harness that runs several turns on one session
 should read `run_usage`, never sum `usage`.
 

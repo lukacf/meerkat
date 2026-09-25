@@ -4671,10 +4671,13 @@ where
                         .as_ref()
                         .map(|e| e.job_id.clone())
                         .unwrap_or_else(|| entry.operation_id.to_string());
+                    // Without a process-local enrichment record the typed
+                    // terminal outcome is the detail: a detached tool's result
+                    // or error must reach the owner, not just its status.
                     let detail = enrichment
                         .as_ref()
                         .map(|e| e.detail.clone())
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| terminal_outcome_detail(&entry.terminal_outcome));
                     let terminal_status =
                         BackgroundJobTerminalStatus::from_terminal_outcome(&entry.terminal_outcome);
                     prepared_background_job_events.push((
@@ -7118,6 +7121,20 @@ type ToolDispatchResult = (
     Result<crate::ops::ToolDispatchOutcome, ToolError>,
     u64,
 );
+
+/// The owner-facing detail carried by a terminal operation outcome.
+fn terminal_outcome_detail(outcome: &crate::ops_lifecycle::OperationTerminalOutcome) -> String {
+    use crate::ops_lifecycle::OperationTerminalOutcome as Outcome;
+    match outcome {
+        Outcome::Completed(result) => result.content.clone(),
+        Outcome::Failed { error } => error.clone(),
+        Outcome::Aborted { reason } | Outcome::Cancelled { reason } => {
+            reason.clone().unwrap_or_default()
+        }
+        Outcome::Terminated { reason } => reason.clone(),
+        Outcome::Retired => String::new(),
+    }
+}
 
 fn background_job_completion_notice(
     display_name: &str,
@@ -23940,6 +23957,102 @@ mod tests {
             1,
             "eventual enrichment must apply and publish exactly once"
         );
+    }
+
+    /// A detached tool without a process-local enrichment record (fork_off,
+    /// mob_wait_ready) must still deliver its typed result to the owner: the
+    /// completion notice carries the operation's terminal outcome.
+    #[tokio::test]
+    async fn completion_without_enrichment_delivers_the_terminal_outcome_to_the_owner() {
+        use crate::completion_feed::tests::MockCompletionFeed;
+
+        struct CapturingClient(Arc<std::sync::Mutex<Vec<Message>>>);
+
+        #[async_trait]
+        impl AgentLlmClient for CapturingClient {
+            async fn stream_response(
+                &self,
+                messages: &[Message],
+                _tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                *self.0.lock().expect("capture lock") = messages.to_vec();
+                Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "ok".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    normalized_test_usage(self, Usage::default()),
+                ))
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "capturing-model"
+            }
+        }
+
+        let operation_id = crate::ops::OperationId::new();
+        let feed = Arc::new(MockCompletionFeed::new());
+        feed.push(crate::completion_feed::CompletionEntry {
+            seq: 1,
+            operation_id: operation_id.clone(),
+            kind: crate::ops_lifecycle::OperationKind::BackgroundToolOp,
+            display_name: "fork_off analysis-fork".to_string(),
+            terminal_outcome: crate::ops_lifecycle::OperationTerminalOutcome::Completed(
+                crate::ops::OperationResult {
+                    id: operation_id,
+                    content: "{\"agent_identity\":\"analysis-fork\",\"text\":\"FORKED\"}"
+                        .to_string(),
+                    is_error: false,
+                    duration_ms: 1,
+                    tokens_used: 0,
+                },
+            ),
+            completed_at_ms: Some(1),
+        });
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut agent = with_test_turn_state_handle(
+            AgentBuilder::new()
+                .with_ops_lifecycle(Arc::new(CompletionCursorRegistry::rejecting_first(0)))
+                .with_completion_feed(feed),
+        )
+        .build_standalone(
+            Arc::new(CapturingClient(Arc::clone(&seen))),
+            Arc::new(NoTools),
+            Arc::new(NoopStore),
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::channel(32);
+        agent
+            .run_with_events("apply completion".to_string().into(), tx)
+            .await
+            .expect("turn runs");
+
+        let details: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                crate::event::AgentEvent::BackgroundJobCompleted { detail, .. } => Some(detail),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(details.len(), 1);
+        assert!(
+            details[0].contains("FORKED"),
+            "the completion event must carry the result: {details:?}"
+        );
+        let delivered = seen
+            .lock()
+            .expect("capture lock")
+            .iter()
+            .any(|message| format!("{message:?}").contains("FORKED"));
+        assert!(delivered, "the owner's model must see the detached result");
     }
 
     #[tokio::test]

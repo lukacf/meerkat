@@ -7011,7 +7011,11 @@ impl Session {
             metadata: self.fork_metadata_projection(),
             history_caches: Box::default(),
             transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
-            usage: self.usage.clone(),
+            // Usage is this session's own spend. A fork's prefix was paid for
+            // by the source; copying the source's lifetime counters made the
+            // child's first turn report the source's whole history as its
+            // own (HomeCore saw 1.76e9 input tokens on a one-word reply).
+            usage: Usage::default(),
             // A fork is a new session identity with its own run lineage. An
             // owed handoff belongs to the originating session's runtime, so it
             // must not be inherited: otherwise parent and fork could each
@@ -7192,7 +7196,7 @@ impl Session {
             metadata: self.fork_metadata_projection(),
             history_caches: Box::default(),
             transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
-            usage: self.usage.clone(),
+            usage: Usage::default(), // see fork_at: a fork owns only its own spend
             // See `fork_at`: a new identity inherits no handoff log at all,
             // owed or settled.
             model_routing_control: Box::new(
@@ -13200,6 +13204,36 @@ mod tests {
 
         assert_eq!(session.messages().len(), 1);
         assert!(session.updated_at() > initial_updated);
+    }
+
+    /// Regression (HomeCore fork_off): a fork inherited the source's lifetime
+    /// usage, so the child's first turn reported the source's whole history
+    /// (1.76e9 input tokens for a one-word reply). A fork starts at zero.
+    #[test]
+    fn fork_does_not_inherit_the_source_lifetime_usage() {
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("Hello".to_string())));
+        session.record_turn_usage(&test_turn_usage(Usage {
+            input_tokens: 1_762_988_458,
+            output_tokens: 1_863_286,
+            ..Usage::default()
+        }));
+        assert_eq!(session.total_usage().input_tokens, 1_762_988_458);
+
+        assert_eq!(session.fork_at(1).total_usage(), Usage::default());
+        assert_eq!(session.fork().total_usage(), Usage::default());
+        assert_eq!(
+            session
+                .fork_at_complete_boundary(1)
+                .expect("complete boundary")
+                .total_usage(),
+            Usage::default()
+        );
+        assert_eq!(
+            session.total_usage().input_tokens,
+            1_762_988_458,
+            "forking must not change the source's own usage"
+        );
     }
 
     #[test]

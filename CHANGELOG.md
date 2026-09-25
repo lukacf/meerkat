@@ -116,16 +116,19 @@ them.
   `list_members` return only the members the caller owns instead of
   `access_denied`. Ownership is transitive and never flows upward: a member
   owns the children it forked with `fork_off`, their forks, and so on.
-- Behavior-only: retirement cascades to spawned descendants.
-  `MobMcpState::mob_retire`, and through it RPC `mob/retire`, MCP
-  `meerkat_mob_retire`, the web runtime's `mob_retire`, the agent tool
-  `mob_retire_member`, and the member operator tool `retire_member`, retires
-  every member the target transitively spawned (durable `spawned_by`
-  provenance), deepest first, then the target. Every retirement is attempted
-  and the first failure is returned. So do the `fork_off` `max_run_secs`
-  autokill and failed-child cleanup. Only members created from a spawner's own
-  turn (`fork_off`) carry that provenance; `MobHandle::retire` still retires
-  one member.
+- Behavior-only: every retirement cascades to spawned descendants.
+  `MobHandle::retire` (the core `MobMachineCommand::Retire`), and so RPC
+  `mob/retire`, MCP `meerkat_mob_retire`, the web runtime's `mob_retire`, the
+  agent tool `mob_retire_member`, the member operator tool `retire_member`,
+  the `fork_off` `max_run_secs` autokill, failed-child cleanup and every
+  MobKit retire path (its idle sweep included), retires every member the
+  target transitively spawned (durable `spawned_by` provenance), deepest
+  first, then the target, each through the same exact-incarnation retire.
+  Descendants are re-collected until none remain, so a child forked while its
+  subtree is retiring is retired with it. Every retirement is attempted and
+  the first failure is returned; a retry converges.
+  `MobHandle::retire_with_descendants` is an alias. Only members created from
+  a spawner's own turn (`fork_off`) carry that provenance.
 - Behavior-only: a background-job completion for a detached operation without a
   process-local enrichment record (for example `mob_wait_ready`) carries the
   operation's terminal outcome (the result content, or the error or reason) as
@@ -216,8 +219,9 @@ them.
   `MobMcpState::set_detached_completion_delivery`, and
   `MobMcpState::detached_completion_delivery`. A host declares whether it
   outlives a tool call long enough to deliver detached completions; the
-  default is `Available`. One-shot hosts declare `Unavailable`, and `fork_off`
-  and `council` block for their result there.
+  default follows the presence of a runtime adapter (see Changed). One-shot
+  hosts declare `Unavailable`, and `fork_off` and `council` block for their
+  result there.
 - `meerkat-mob-mcp`: the `detached_delivery` module
   (`deliver_detached_completion`, `deliver_detached_completion_to_member`,
   `detached_completion_notice`, `DetachedCompletionDelivered`,
@@ -225,9 +229,18 @@ them.
   `HostDeclaredUnavailable` and `NoRuntimeAdapter`),
   `MobMcpState::detached_delivery_blocked_because`, the `council_relink` module
   (`relink_detached_councils`, `relink_council`, `CouncilRelinkReport`), and
-  `MobMcpState::relink_detached_councils`; `TemporaryCouncilCoordinator::run_detached`.
+  `MobMcpState::relink_detached_councils`, `CouncilRelinkAction`
+  (`Delivered`, `AlreadyDelivered`, `AwaitingSeal { claim_lease_expires_at }`,
+  `Failed`), `TemporaryCouncilCoordinator::run_detached`,
+  `TemporaryCouncilCoordinator::sweep_unfinished`,
+  `TemporaryCouncilRecoverySweep` (`recovered`, `held`), and
+  `TemporaryCouncilHeldRecord` (`council_id`, `current_claim_epoch`,
+  `claim_lease_expires_at`).
 - `meerkat-mob`: `MobHandle::ensure_member_live` (revive a member's live
-  materialization without running a turn), `ForkJobRecord::durable_terminal_result`,
+  materialization without running a turn), `ForkChildRun::retire_child_if_abandoned`
+  (arm a run handle to retire its child, and the child's descendants, if the
+  handle is dropped before the outcome arrives; an unarmed handle only stops
+  listening), `ForkJobRecord::durable_terminal_result`,
   and `TemporaryCouncilJobBinding` (`job_id`, `owner_session_id`,
   `settled_at`).
 - `meerkat-runtime`: `PromptInput::detached_job_completed`, the prompt input
@@ -260,10 +273,10 @@ them.
   carried across respawn, including `MobHandle::respawn_with_successor_spec`
   (a successor spec keeps the spawner of the incarnation it replaces). It is
   never taken from tool arguments.
-- A `fork_off` call that ends before its child is handed off (the call is
-  dropped while the child is seated, or the job cannot be handed to its
-  completion task) retires the seated child and rolls the job back, so no
-  child runs unsupervised and no job is left in provisioning.
+- A `fork_off` call that ends before its child is handed off never strands the
+  child: the handoff happens with no await after the fork returns, so either
+  the caller gets the result, the detached child's completion custodian is
+  already running, or the child (with its descendants) is retired.
 - A detached `fork_off` child survives a host restart with its outcome
   delivery intact. After a host restores its mobs (or inserts a restored mob
   handle, as MobKit does), a one-time re-link pass settles every child whose
@@ -274,7 +287,10 @@ them.
   otherwise `restart_interrupted` is delivered and the child stays seated.
   Delivery uses the same durable notice and idempotency key, so an outcome
   recorded before the restart is not recorded twice, and an idle forker is
-  woken to see it.
+  woken to see it. A job whose completion was already admitted is finished
+  and never re-linked, so a child kept seated for later work is not
+  cancelled against the old job's limit; a respawn does not carry the job to
+  the successor (ownership still follows the identity).
 - A detached council's convener hears back across a restart. The council's
   custody record carries the convener's job; after the post-restore recovery
   sweep, every council from an earlier process whose job is not settled has
@@ -321,7 +337,8 @@ them.
   deadline was cut off from its forker. The tool held the forker's call until
   the child's turn ended, so the deadline cut the call and left the child
   running with nobody listening for its result. `fork_off` now returns promptly
-  and delivers the outcome as a background-job completion (see Breaking).
+  and records the outcome in the forker's transcript as a durable notice (see
+  Breaking).
 - A `council` whose `timeout_seconds` exceeded the default 600 s tool deadline
   had the convener's call cut while the council kept running and sealed a
   result nobody received. The council now runs detached where the host can
@@ -350,6 +367,15 @@ them.
   result is refused as busy too, so a child can no longer inherit a torn
   transcript. `fork_off` from the member's own turn and
   `fork_member_at_turn_boundary` are unchanged.
+- Temporary councils interrupted by a restart were never recovered on a host
+  that supplies a durable council store without a persistent root (MobKit),
+  and on any host a restart inside the previous process's 120 s claim lease
+  made the one-shot post-restore sweep skip the record silently, with no
+  retry. The sweep now runs whenever the council store is durable (from
+  restore and from `mob_insert_handle`), retries after the earliest observed
+  lease expiry within a bounded number of passes, and reports held records
+  (`TemporaryCouncilCoordinator::sweep_unfinished`); `recover_unfinished`
+  keeps its shape.
 - The runtime loop injected a completion wake into an idle owner even when the
   owner's own turn had already applied that completion. The wake found no
   pending boundary, so each such completion cost a spurious wake, an executor

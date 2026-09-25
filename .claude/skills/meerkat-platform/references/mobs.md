@@ -608,7 +608,9 @@ child's durable `ForkJobRecord` lets a restarted host re-link it: a one-time
 pass after restore (or when MobKit inserts a restored handle) delivers a reply
 already in the child's durable transcript, observes a still-running child with
 `max_run` measured from the original start, or delivers `restart_interrupted`,
-under the same idempotency key, and wakes an idle forker. The `rkat` CLI
+under the same idempotency key, and wakes an idle forker; a job whose
+completion was already admitted is never re-linked, and a respawned child
+carries no job. The `rkat` CLI
 declares `Unavailable` unless it stays alive, so `rkat run` without
 `--keep-alive` and one-shot `rkat mob` commands block and return the child's
 result directly, with `blocked_because` (`host_declared_unavailable` or
@@ -625,10 +627,11 @@ arguments. Without manage scope the forker can still observe its descendants
 with `mob_check_member`, retire them with `mob_retire_member`, and see them,
 and only them, in `mob_list_members`; the member operator tools
 `member_status`, `retire_member`, `force_cancel_member`, and `list_members`
-apply the same rule. Retirement cascades to descendants, deepest first
-(`MobHandle::retire_with_descendants`): the retire tools, autokill,
-failed-child cleanup, and host `mob/retire` / `meerkat_mob_retire` all use it;
-plain `MobHandle::retire` retires one member. A child whose own turn fails is
+apply the same rule. Retirement cascades to descendants, deepest first, in
+the core retire (`MobHandle::retire`; `retire_with_descendants` is an alias):
+the retire tools, autokill, failed-child cleanup, host `mob/retire` /
+`meerkat_mob_retire`, and MobKit's retire paths all take it, and a child
+forked mid-cascade is retired too. A child whose own turn fails is
 retired automatically; a child whose turn completes stays seated until its
 forker retires it. Meerkat adds no retention limit; MobKit applies its
 `idle_retire_secs` policy.

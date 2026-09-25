@@ -995,11 +995,11 @@ SDK subscriptions over repeated full snapshots.
 
 Retiring a member also retires every member it spawned with `fork_off`,
 transitively and deepest first: `mob/retire` over JSON-RPC, `meerkat_mob_retire`
-over MCP, and the browser runtime's `mob_retire` all cascade. Each retirement
-runs through the ordinary retire path and every one is attempted; the first
-failure is reported. Members spawned by other means are not affected. Embedded
-Rust hosts choose: `MobHandle::retire` retires one member,
-`MobHandle::retire_with_descendants` cascades.
+over MCP, the browser runtime's `mob_retire`, and `MobHandle::retire` in
+embedded Rust all cascade (`MobHandle::retire_with_descendants` is an alias).
+Each retirement runs through the ordinary retire path and every one is
+attempted; the first failure is reported, and a retry converges. Members
+spawned by other means are not affected.
 
 `rkat mob force-cancel <MOB_ID> <AGENT_IDENTITY>` (RPC `mob/force_cancel`)
 cooperatively cancels a member's in-flight turn without retiring it — the

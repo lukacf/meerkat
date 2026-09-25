@@ -414,7 +414,11 @@ child whose job began in a previous process:
 
 Delivery uses the same record and idempotency key, so an outcome recorded
 before the restart is never recorded twice, and an idle forker is woken to see
-it. `MobMcpState::relink_restored_fork_children` runs the pass explicitly.
+it. A job whose completion was already admitted is finished: the pass leaves
+it and its child alone (no limit, no cancel, no second record), and a
+respawned child carries no job, although its ownership still follows the
+identity. `MobMcpState::relink_restored_fork_children` runs the pass
+explicitly.
 
 `council` follows the same split. Detached, it returns `status: "running"`,
 the `council_id`, a `job_id`, and a `note`, and the sealed outcome (`result`,
@@ -425,11 +429,12 @@ with `{"error": ...}` as its outcome and status `failed`, and so is a sealed
 council whose exit reason is a failure (`participant_seating_failed`,
 `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`), whose
 record keeps the full sealed outcome. A detached council also survives a
-restart: its custody record carries the convener's job, and after the
-post-restore recovery sweep the council's sealed result is delivered, or
-`coordinator_interrupted` once the dead coordinator's lease has expired
-(councils are never re-executed); `MobMcpState::relink_detached_councils` runs
-this explicitly. Blocking, `council` returns the sealed outcome as its tool
+restart: its custody record carries the convener's job, and the post-restore
+recovery sweep delivers the council's sealed result, or
+`coordinator_interrupted` once the dead coordinator's claim lease has expired
+(councils are never re-executed). The sweep runs on every host whose council
+store is durable, and it retries after the earliest observed lease expiry;
+`MobMcpState::relink_detached_councils` runs the re-link explicitly. Blocking, `council` returns the sealed outcome as its tool
 result, with `blocked_because`. Its own `timeout_seconds` bounds it in both
 forms, and the agent loop's default tool deadline does not. See
 [Temporary Councils](/guides/temporary-councils#agent-tool).
@@ -458,12 +463,15 @@ A profile's member operator tools (`member_status`, `retire_member`,
 all of these tools reach every member, as before.
 
 Retirement cascades like a process tree. Retiring a member retires every member
-it transitively spawned, deepest first, through the ordinary retire path; every
-retirement is attempted and the first failure is reported. This applies to
-`mob_retire_member`, `retire_member`, the `max_run_secs` autokill, the
-retirement of a child whose turn failed, and host-side retirement (`mob/retire`
-over JSON-RPC, `meerkat_mob_retire` over MCP). A forker retired through any of
-these paths takes its descendants with it.
+it transitively spawned, deepest first, then the member itself, each through
+the same exact-incarnation retire; every retirement is attempted and the first
+failure is reported, so a retry converges. The cascade lives in the core
+retire, so every path takes it: `mob_retire_member`, `retire_member`, the
+`max_run_secs` autokill, the retirement of a child whose turn failed,
+host-side retirement (`mob/retire` over JSON-RPC, `meerkat_mob_retire` over
+MCP), and `MobHandle::retire` itself, which MobKit's retire paths and idle
+sweep use. A descendant forked while its subtree is being retired is retired
+with it.
 
 A child whose own turn fails is retired automatically. A child whose turn
 completes stays seated, for inspection or further work, until its forker

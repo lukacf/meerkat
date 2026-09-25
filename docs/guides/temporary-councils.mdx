@@ -115,7 +115,11 @@ Durability is an explicit declaration, never an inference.
 
 A coordinator that dies mid-council leaves a record with no result. The next
 council operation — or an explicit recovery sweep — seals it as a typed
-`coordinator_interrupted` terminal and runs cleanup. Recovery never re-executes
+`coordinator_interrupted` terminal and runs cleanup. After a restart, every host
+whose council store is durable runs that sweep on its own, including a host
+that supplies a durable store without a persistent root. A record whose
+previous claim lease has not expired yet is reported as held and retried once
+the lease expires, rather than skipped. Recovery never re-executes
 a council, because a re-run would duplicate model work and result delivery.
 
 Cleanup is reported **separately** from the result, and the two are never

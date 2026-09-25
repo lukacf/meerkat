@@ -109,9 +109,13 @@ them.
   repeating about 12 KB of schema; the comms send tools document image
   references once, on the `blocks` argument; the OpenAI and Gemini image
   parameter notes are shorter.
+  Behavior-only: `meerkat_schedule::schedule_tools_list` and
+  `meerkat_comms::mcp::tools::tools_list` return the slimmer definitions.
 - OpenAI tool emission drops the root `$schema` and `title` annotations that
   schemars stamps on every derived tool schema (Gemini emission already did).
-  `ToolDef.input_schema` is unchanged.
+  `ToolDef.input_schema` is unchanged. Behavior-only:
+  `meerkat_openai::normalize_openai_tool_parameters_schema` removes both root
+  keys.
 
 ### Fixed
 

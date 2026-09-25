@@ -404,3 +404,45 @@ async fn a_mobkit_style_host_recovers_and_relinks_councils_after_restore() {
     assert!(delivered[0].contains("coordinator_interrupted"));
     fixture.teardown().await;
 }
+
+/// A convener whose session no longer exists can never receive the outcome.
+/// The re-link reports it as typed OwnerGone and settles the job, so later
+/// restarts skip it instead of retrying forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_settles_a_council_whose_convener_is_gone() {
+    let fixture = CouncilFixture::new(|_| ScriptedTurn::Text("position".to_string()));
+    fixture.seed_source_mob(&["researcher"]).await;
+    let job_id = "council-job-orphaned";
+    fixture
+        .state
+        .temporary_council()
+        .run_detached(
+            one_participant_request(&fixture, "relink-orphaned"),
+            TemporaryCouncilJobBinding::new(job_id, meerkat_core::SessionId::new()),
+        )
+        .await
+        .expect("the council runs");
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let restarted = fixture.restart_state();
+    let reports = restarted.relink_detached_councils().await;
+    let report = reports
+        .iter()
+        .find(|report| report.council_id == fixture.council_id("relink-orphaned"))
+        .expect("the council is visited");
+    assert_eq!(report.action, CouncilRelinkAction::OwnerGone);
+    let record = restarted
+        .temporary_council_store_for_tests()
+        .load(&fixture.council_id("relink-orphaned"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        record
+            .detached_job
+            .is_some_and(|job| job.settled_at.is_some()),
+        "an undeliverable job is settled"
+    );
+    assert!(restarted.relink_detached_councils().await.is_empty());
+    fixture.teardown().await;
+}

@@ -40,7 +40,10 @@ pub enum ForkRelinkAction {
     Delivered,
     /// The outcome had already been recorded before the restart.
     AlreadyDelivered,
-    /// Delivery failed (for example the forker's session is gone).
+    /// The forker is gone (retired, or its session archived or deleted), so
+    /// the outcome can never be delivered.
+    OwnerGone,
+    /// Delivery failed.
     Failed(String),
 }
 
@@ -343,6 +346,9 @@ async fn deliver(
             ForkRelinkAction::Delivered
         }
         Ok(_) => ForkRelinkAction::AlreadyDelivered,
+        Err(crate::detached_delivery::DetachedCompletionError::OwnerGone { .. }) => {
+            ForkRelinkAction::OwnerGone
+        }
         Err(error) => ForkRelinkAction::Failed(error.to_string()),
     }
 }

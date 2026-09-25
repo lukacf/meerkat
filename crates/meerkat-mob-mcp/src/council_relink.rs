@@ -76,6 +76,9 @@ pub enum CouncilRelinkAction {
     AwaitingSeal {
         claim_lease_expires_at: DateTime<Utc>,
     },
+    /// The convener is gone (retired, or its session archived or deleted):
+    /// the outcome can never be delivered, so the job is settled.
+    OwnerGone,
     /// Delivery failed; a later re-link retries it.
     Failed(String),
 }
@@ -251,7 +254,9 @@ pub async fn relink_council(
     .await;
     if matches!(
         action,
-        CouncilRelinkAction::Delivered | CouncilRelinkAction::AlreadyDelivered
+        CouncilRelinkAction::Delivered
+            | CouncilRelinkAction::AlreadyDelivered
+            | CouncilRelinkAction::OwnerGone
     ) {
         mark_settled(state, &council_id).await;
     }
@@ -285,24 +290,35 @@ async fn deliver(
     .await
     {
         Err(error @ DetachedCompletionError::Runtime { .. }) => {
-            match state.member_for_bridge_session(owner_session_id).await {
-                Ok(Some((mob_id, identity))) => match state.handle_for(&mob_id).await {
-                    Ok(handle) => {
-                        deliver_detached_completion_to_member(
-                            &runtime,
-                            &handle,
-                            &identity,
-                            owner_session_id,
-                            TOOL_COUNCIL,
-                            job_id,
-                            status,
-                            outcome,
-                        )
-                        .await
-                    }
-                    Err(_) => Err(error),
-                },
-                _ => Err(error),
+            // A convener whose session no longer reads (archived, deleted,
+            // or never persisted) is gone for good, member or not.
+            if let Err(meerkat_core::service::SessionError::NotFound { .. }) =
+                state.session_service().read(owner_session_id).await
+            {
+                Err(DetachedCompletionError::OwnerGone {
+                    tool: TOOL_COUNCIL,
+                    detail: format!("the convener session {owner_session_id} no longer exists"),
+                })
+            } else {
+                match state.member_for_bridge_session(owner_session_id).await {
+                    Ok(Some((mob_id, identity))) => match state.handle_for(&mob_id).await {
+                        Ok(handle) => {
+                            deliver_detached_completion_to_member(
+                                &runtime,
+                                &handle,
+                                &identity,
+                                owner_session_id,
+                                TOOL_COUNCIL,
+                                job_id,
+                                status,
+                                outcome,
+                            )
+                            .await
+                        }
+                        Err(_) => Err(error),
+                    },
+                    _ => Err(error),
+                }
             }
         }
         other => other,
@@ -310,6 +326,7 @@ async fn deliver(
     match delivered {
         Ok(DetachedCompletionDelivered::Delivered) => CouncilRelinkAction::Delivered,
         Ok(_) => CouncilRelinkAction::AlreadyDelivered,
+        Err(DetachedCompletionError::OwnerGone { .. }) => CouncilRelinkAction::OwnerGone,
         Err(error) => CouncilRelinkAction::Failed(error.to_string()),
     }
 }

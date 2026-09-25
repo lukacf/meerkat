@@ -41,6 +41,11 @@ pub enum DetachedCompletionError {
     Rejected { tool: &'static str, detail: String },
     #[error("the {tool} completion could not reach its owner session: {detail}")]
     Runtime { tool: &'static str, detail: String },
+    /// The owner no longer exists: its member was retired, or its session
+    /// was archived or deleted. The completion can never be delivered, so a
+    /// caller may stop retrying it.
+    #[error("the owner of the {tool} completion is gone: {detail}")]
+    OwnerGone { tool: &'static str, detail: String },
 }
 
 /// The idempotency key of job `job_id`'s completion input: one per job.
@@ -165,9 +170,19 @@ pub async fn deliver_detached_completion_to_member(
             owner
                 .ensure_member_live(owner_identity)
                 .await
-                .map_err(|error| DetachedCompletionError::Runtime {
-                    tool,
-                    detail: format!("reviving the owner failed: {error}"),
+                .map_err(|error| match error {
+                    meerkat_mob::MobError::MemberNotFound(_) => {
+                        DetachedCompletionError::OwnerGone {
+                            tool,
+                            detail: format!(
+                                "the owner member {owner_identity} is no longer seated"
+                            ),
+                        }
+                    }
+                    error => DetachedCompletionError::Runtime {
+                        tool,
+                        detail: format!("reviving the owner failed: {error}"),
+                    },
                 })?;
             deliver_detached_completion(runtime, owner_session_id, tool, job_id, status, outcome)
                 .await

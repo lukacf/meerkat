@@ -251,13 +251,25 @@ async with session.stream("Explain this in detail.") as events:
     result = events.result
 ```
 
-`TurnCompleted.usage` is optional. Skip an absent row instead of treating it
-as zero. Eight inventory-known events currently return `UnknownEvent` because
-the handwritten parser has no typed case. Current Rust `server_tool_content`
-and `transcript_rewrite_audit_receipt_committed` are missing from the generated
-inventory and are rejected, while the legacy `RunStarted`, `RunFailed`,
-`Retrying`, and `HookFailed` field parsers can produce malformed events. These
-are SDK/code-generation gaps, not alternate wire contracts.
+`TurnCompleted.usage` is optional; absent means unmeasured, not zero.
+`RunStarted.input` preserves the typed `RunInput`: content (text or blocks) or
+a `pending_tool_results` continuation without a fabricated prompt.
+`RunFailed` accepts the current `error_report` and derives its display fields
+from that report.
+
+Inventory-known events without a handwritten parser class arrive as
+`UnknownEvent`, preserving `event.type` and the complete wire payload in
+`event.data`. This includes `server_tool_content`, all four `model_fallback_*`
+events, `transcript_rewrite_audit_receipt_committed`, `boundary_append_applied`,
+and `boundary_appends_discarded`. A present type outside the generated inventory
+raises `MeerkatError` with code `UNKNOWN_EVENT_TYPE`.
+
+A missing type or malformed payload for a handwritten parser class arrives as
+`UnknownEvent(type="malformed_event")`, with the original payload in
+`event.data`. The `Retrying` and `HookFailed` parsers still expect legacy flat
+fields; current payloads carry `retry` and `reason`, respectively, so they take
+this malformed path. See the [event compatibility
+reference](../../docs/sdks/python/reference.mdx#event-compatibility-note) for details.
 
 ## Run tests
 

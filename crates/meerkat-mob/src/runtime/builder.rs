@@ -7354,6 +7354,9 @@ impl MobBuilder {
                 initial_dsl_authority.as_mut(),
                 &placed_recovery,
             )?;
+            let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
+            let (composition_binding, composition_signal_dispatcher) =
+                super::composition::binding_for_actor(&runtime_adapter, command_tx.clone());
             // One provisioner owns the exact attachment sidecars for the whole
             // recovered runtime. Placed-carrier cleanup, Running reconciliation,
             // and the eventual actor must never materialize through temporary
@@ -7366,7 +7369,8 @@ impl MobBuilder {
                     definition.backend.external.clone(),
                     Arc::clone(&supervisor_bridge),
                 )
-                .with_binding_persistence(definition.id.clone(), storage.runtime_metadata.clone()),
+                .with_binding_persistence(definition.id.clone(), storage.runtime_metadata.clone())
+                .with_composition_signal_dispatcher(composition_signal_dispatcher),
             );
             drive_recovered_placed_carrier_cleanup(
                 initial_dsl_authority.as_mut(),
@@ -7470,11 +7474,6 @@ impl MobBuilder {
             // Prepare shared runtime components early so resume reconciliation can
             // wire tool dispatchers for recreated sessions to the final actor channel.
             let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
-            let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
-            // Cold restoration and the eventual actor share this exact
-            // bidirectional endpoint; other mobs never replace its consumer.
-            let composition_binding =
-                super::composition::binding_for_actor(&runtime_adapter, command_tx.clone());
             let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
             let (machine_state_watch_tx, machine_state_watch_rx) =
                 tokio::sync::watch::channel(initial_dsl_authority.state().clone());
@@ -9293,6 +9292,9 @@ impl MobBuilder {
             )?;
             let (machine_state_watch_tx, _machine_state_watch_rx) =
                 tokio::sync::watch::channel(dsl_authority.state().clone());
+            let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
+            let (composition_binding, composition_signal_dispatcher) =
+                super::composition::binding_for_actor(&runtime_adapter, command_tx.clone());
             let provisioner = Arc::new(
                 MultiBackendProvisioner::new(
                     session_service.clone(),
@@ -9301,15 +9303,13 @@ impl MobBuilder {
                     definition.backend.external.clone(),
                     Arc::clone(&supervisor_bridge),
                 )
-                .with_binding_persistence(definition.id.clone(), runtime_metadata.clone()),
+                .with_binding_persistence(definition.id.clone(), runtime_metadata.clone())
+                .with_composition_signal_dispatcher(composition_signal_dispatcher),
             );
             let session_ops_adapter = provisioner.session_ops_adapter();
             let provisioner: Arc<dyn MobProvisioner> = provisioner;
             let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
-            let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
             let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
-            let composition_binding =
-                super::composition::binding_for_actor(&runtime_adapter, command_tx.clone());
             let wiring = RuntimeWiring {
                 roster,
                 dsl_authority,

@@ -314,14 +314,17 @@ pub fn wired_binding_from_runtime_adapter(
 }
 
 /// Compose both directions for this exact mob actor queue. The reverse endpoint
-/// is carried by successful routed bindings into their runtime registrations.
+/// is installed by each exact prepared materialization before routed binding.
 #[cfg(feature = "runtime-adapter")]
 pub(super) fn binding_for_actor(
     runtime_adapter: &super::RuntimeAdapterOption,
     command_tx: mpsc::Sender<super::scope_gate::RoutedMobCommand>,
-) -> MobCompositionBinding {
+) -> (
+    MobCompositionBinding,
+    Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher>,
+) {
     let Some(runtime_adapter) = runtime_adapter else {
-        return CompositionBinding::Standalone;
+        return (CompositionBinding::Standalone, None);
     };
     let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
     let table = RouteTable::from_schema(&schema)
@@ -330,7 +333,12 @@ pub(super) fn binding_for_actor(
     let dispatcher: CatalogCompositionSignalDispatcher<
         meerkat_runtime::meerkat_machine::composition::MeerkatSeamSignal,
     > = CatalogCompositionSignalDispatcher::new(schema.name.clone(), table).with_consumer(consumer);
-    wired_binding_from_runtime_adapter(runtime_adapter, Arc::new(dispatcher))
+    let dispatcher: meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher =
+        Arc::new(dispatcher);
+    (
+        wired_binding_from_runtime_adapter(runtime_adapter, Arc::clone(&dispatcher)),
+        Some(dispatcher),
+    )
 }
 
 #[cfg(feature = "runtime-adapter")]

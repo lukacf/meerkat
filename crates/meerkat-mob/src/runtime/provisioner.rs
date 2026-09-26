@@ -1908,6 +1908,8 @@ pub struct SessionBackend {
         Arc<StdMutex<HashMap<SessionId, ExplicitResumeAttachmentRetirement>>>,
     reload_registrations: Arc<Mutex<HashMap<SessionId, Arc<Mutex<ReloadRegistrationCustody>>>>>,
     reload_materialization_claim: Option<Arc<Mutex<Option<PreparedSessionMaterialization>>>>,
+    composition_signal_dispatcher:
+        Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher>,
     // DEC-P3H-5: the extracted disposal arc, sharing this backend's
     // `runtime_sessions` sidecar map. The backend delegates its disposal
     // verbs here (one implementation, two instance owners).
@@ -4538,6 +4540,7 @@ impl SessionBackend {
             explicit_resume_retirements: Arc::new(StdMutex::new(HashMap::new())),
             reload_registrations: Arc::new(Mutex::new(HashMap::new())),
             reload_materialization_claim: None,
+            composition_signal_dispatcher: None,
             disposal,
             settlement_ledger: None,
         }
@@ -4709,7 +4712,7 @@ impl SessionBackend {
         session_id: SessionId,
         mode: meerkat_runtime::LocalSessionMaterializationMode,
     ) -> Result<PreparedSessionMaterialization, meerkat_runtime::RuntimeBindingsError> {
-        match self.reload_materialization_claim.as_ref() {
+        let prepared = match self.reload_materialization_claim.as_ref() {
             Some(slot) => slot.lock().await.take().ok_or_else(|| {
                 meerkat_runtime::RuntimeBindingsError::PrepareFailed(
                     session_id,
@@ -4721,7 +4724,19 @@ impl SessionBackend {
                     .prepare_local_session_materialization_with_mode(session_id, mode)
                     .await
             }
+        }?;
+        if let Some(dispatcher) = self.composition_signal_dispatcher.as_ref() {
+            prepared
+                .install_composition_signal_dispatcher(Arc::clone(dispatcher))
+                .await
+                .map_err(|error| {
+                    meerkat_runtime::RuntimeBindingsError::PrepareFailed(
+                        prepared.session_id().clone(),
+                        error.to_string(),
+                    )
+                })?;
         }
+        Ok(prepared)
     }
 
     async fn admit_direct_session_turn(
@@ -12557,6 +12572,14 @@ impl MultiBackendProvisioner {
     /// bound operation identity.
     pub(super) fn session_ops_adapter(&self) -> Arc<super::ops_adapter::MobOpsAdapter> {
         self.session.session_ops_adapter()
+    }
+
+    pub(super) fn with_composition_signal_dispatcher(
+        mut self,
+        dispatcher: Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher>,
+    ) -> Self {
+        self.session.composition_signal_dispatcher = dispatcher;
+        self
     }
 
     pub fn with_binding_persistence(

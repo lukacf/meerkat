@@ -566,14 +566,10 @@ impl MeerkatMachine {
                 "session registration belongs to another composition endpoint".to_string(),
             ));
         }
-        let installs_binding = matches!(input, dsl::MeerkatMachineInput::PrepareBindings { .. });
-        if signal_dispatcher.is_some()
-            && entry.composition_signal_dispatcher.is_none()
-            && !installs_binding
-        {
+        if signal_dispatcher.is_some() && entry.composition_signal_dispatcher.is_none() {
             return Err(dsl_authority::DslTransitionRefusal::other(
                 "composition_endpoint_unbound",
-                "routed control requires this registration's admitted composition binding"
+                "routed input requires this registration's prepared composition endpoint"
                     .to_string(),
             ));
         }
@@ -595,11 +591,6 @@ impl MeerkatMachine {
             );
             (previous_snapshot, effects)
         };
-        // No await separates the generated binding verdict from installing
-        // its reverse endpoint. Rejected bindings never acquire this custody.
-        if installs_binding && let Some(dispatcher) = signal_dispatcher {
-            entry.composition_signal_dispatcher = Some(Arc::clone(dispatcher));
-        }
         let signal_dispatcher = entry.composition_signal_dispatcher.clone();
         drop(sessions);
         if let Err(error) = self

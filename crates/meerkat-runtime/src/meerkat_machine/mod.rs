@@ -3523,6 +3523,55 @@ impl PreparedSessionMaterialization {
         }
     }
 
+    /// Install the reverse composition endpoint using this exact exclusive
+    /// materialization claim. Routed placement inputs cannot acquire endpoint
+    /// custody: an old consumer must never claim a same-ID replacement entry.
+    /// This is mechanical delivery custody, not a placement or readiness verdict.
+    pub async fn install_composition_signal_dispatcher(
+        &self,
+        dispatcher: composition::MeerkatCompositionSignalDispatcher,
+    ) -> Result<(), RuntimeDriverError> {
+        let _mutation_guard = self
+            .machine
+            .lock_current_durability_ready_session_mutation_gate(self.session_id())
+            .await?;
+        let authority = crate::validated_session_runtime_bindings_authority(&self.bindings)
+            .map_err(|error| RuntimeDriverError::StaleAuthority {
+                reason: error.to_string(),
+            })?;
+        let mut sessions = self.machine.sessions.write().await;
+        let entry = sessions.get_mut(self.session_id()).ok_or_else(|| {
+            RuntimeDriverError::StaleAuthority {
+                reason: "composition materialization registration disappeared".to_string(),
+            }
+        })?;
+        if !self.armed
+            || entry.epoch_id != *self.bindings.epoch_id()
+            || !Arc::ptr_eq(&entry.materialization_claim_state, &self.claim_state)
+            || !Arc::ptr_eq(&entry.dsl_authority, &authority.dsl_authority)
+            || !Arc::ptr_eq(&entry.handle_teardown_gate, &authority.teardown_gate)
+            || entry.physical_attachment_is_live()
+            || !self
+                .claim_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .exact_claim_is(
+                    self.claim_id,
+                    &[
+                        crate::RuntimeActorMaterializationClaimPhase::Prepared,
+                        crate::RuntimeActorMaterializationClaimPhase::Staged,
+                    ],
+                )
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "composition endpoint requires the exact unserved materialization claim"
+                    .to_string(),
+            });
+        }
+        entry.composition_signal_dispatcher = Some(dispatcher);
+        Ok(())
+    }
+
     /// Whether this lease still owns the exact process-local materialization
     /// claim that fences same-session actor creation and executor attachment.
     #[must_use]
@@ -9578,6 +9627,7 @@ impl MeerkatMachine {
 
     /// Install an exact-registration signal endpoint for fault-injection tests.
     #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::expect_used)]
     pub async fn set_session_composition_signal_dispatcher_for_test(
         &self,
         session_id: &SessionId,

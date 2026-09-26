@@ -14426,10 +14426,6 @@ async fn test_shared_runtime_two_mobs_destroy_without_cross_delivered_signals() 
     )
     .await
     .expect("direct destruction must not target either closed mob queue");
-    adapter
-        .unregister_session(&direct)
-        .await
-        .expect("remove direct registration");
 }
 
 #[tokio::test]

@@ -290,7 +290,8 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
       });
       assert.equal(result.turn.text, "BROWSER_RUNTIME_OK_1");
       assert.equal(requests.length, 1);
-      assert.ok(JSON.stringify(requests[0].system).includes("Use builtin task tools for lightweight project work tracking"));
+      assert.ok(JSON.stringify(requests[0].messages).includes("Use builtin task tools for lightweight project work tracking"),
+        "per-turn skills must reach the provider as typed skill-context content");
       assert.ok(result.events.some(event => event.type === "skills_resolved" && event.skills.some(skill =>
         skill.source_uuid === "00000000-0000-4b11-8111-000000000001" && skill.skill_name === "task-workflow")),
       JSON.stringify(result.events));

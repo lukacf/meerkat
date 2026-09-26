@@ -72,15 +72,11 @@ use crate::meerkat_machine::{MeerkatMachine, dsl as mm_dsl};
 /// non-reentrant per-session mutation gate the routed dispatch already
 /// holds.
 ///
-/// What that means for stale writers on THIS lane: because the epoch is
-/// self-supplied from the entry, the machine's exact-epoch guard compares the
-/// entry against itself and cannot fence a stale mob-originated placement. The
-/// fence here is the placement triple plus the fence token - `session_id`,
-/// `agent_runtime_id`, `generation` and `fence_token` all come from the
-/// producer and are all matched by the machine. The epoch guard fences
-/// callers that STATE an epoch (every direct, non-routed producer does), which
-/// is why `resolve_routed_entry_runtime_epoch` fills only an absent value and
-/// a stated-but-stale epoch is still refused.
+/// The exact materialization claim installs this surface's reverse endpoint
+/// before any placement route is admitted. A routed input cannot acquire that
+/// endpoint: an old composition is refused both while a same-ID replacement is
+/// unbound and after its new materializer installs a different endpoint. The
+/// generated placement triple and fence guards still own placement meaning.
 ///
 /// [mmi]: crate::meerkat_machine::dsl::MeerkatMachineInput
 pub struct MeerkatConsumerSurface {
@@ -1353,32 +1349,66 @@ mod tests {
         Arc::new(CatalogCompositionSignalDispatcher::new(schema.name, table).with_consumer(surface))
     }
 
+    async fn prepare_composed_session(
+        machine: &Arc<MeerkatMachine>,
+        session_id: &SessionId,
+        dispatcher: &MeerkatCompositionSignalDispatcher,
+    ) -> PreparedSessionMaterialization {
+        let prepared = machine
+            .prepare_local_session_materialization_with_mode(
+                session_id.clone(),
+                crate::LocalSessionMaterializationMode::Ordinary,
+            )
+            .await
+            .expect("prepare exact composition materialization");
+        prepared
+            .install_composition_signal_dispatcher(Arc::clone(dispatcher))
+            .await
+            .expect("install exact materializer endpoint");
+        prepared
+    }
+
     async fn bind_composed_session(
-        machine: &MeerkatMachine,
+        machine: &Arc<MeerkatMachine>,
         session_id: &SessionId,
         dispatcher: &MeerkatCompositionSignalDispatcher,
         runtime_name: &str,
     ) {
-        machine
-            .apply_routed_meerkat_input_with_signal_dispatcher(
-                session_id,
-                mm_dsl::MeerkatMachineInput::PrepareBindings {
-                    agent_runtime_id: mm_dsl::AgentRuntimeId(runtime_name.into()),
-                    fence_token: mm_dsl::FenceToken(19),
-                    generation: Some(mm_dsl::Generation(0)),
-                    runtime_epoch_id: None,
-                    session_id: mm_dsl::SessionId(session_id.to_string()),
-                },
-                Some(dispatcher),
-            )
-            .await
-            .expect("composed runtime binding");
+        MeerkatConsumerSurface::pinned(
+            Arc::clone(machine),
+            session_id.clone(),
+            Arc::clone(dispatcher),
+        )
+        .apply_routed_input(
+            iv("PrepareBindings"),
+            composed_binding_fields(session_id, runtime_name),
+        )
+        .await
+        .expect("composed runtime binding");
+    }
+
+    fn composed_binding_fields(
+        session_id: &SessionId,
+        runtime_name: &str,
+    ) -> Vec<(FieldId, OwnedFieldValue)> {
+        vec![
+            (
+                fld("agent_runtime_id"),
+                OwnedFieldValue::Str(runtime_name.into()),
+            ),
+            (fld("fence_token"), OwnedFieldValue::U64(19)),
+            (fld("generation"), OwnedFieldValue::U64(0)),
+            (
+                fld("session_id"),
+                OwnedFieldValue::Str(session_id.to_string()),
+            ),
+        ]
     }
 
     #[tokio::test]
     async fn shared_machine_routes_signals_to_exact_composition_registration() {
         use crate::traits::RuntimeControlPlane;
-        let machine = MeerkatMachine::ephemeral();
+        let machine = Arc::new(MeerkatMachine::ephemeral());
         let a = SessionId::new();
         let b = SessionId::new();
         let direct = SessionId::new();
@@ -1386,37 +1416,32 @@ mod tests {
         let b_surface = Arc::new(RecordingSignalSurface::default());
         let a_dispatcher = recording_dispatcher(a_surface.clone());
         let b_dispatcher = recording_dispatcher(b_surface.clone());
-        for id in [&a, &b] {
-            machine
-                .register_session(id.clone())
-                .await
-                .expect("register composed session");
-        }
+        let _a_prepared = prepare_composed_session(&machine, &a, &a_dispatcher).await;
+        let _b_prepared = prepare_composed_session(&machine, &b, &b_dispatcher).await;
         bind_composed_session(&machine, &a, &a_dispatcher, "member-a:0").await;
         bind_composed_session(&machine, &b, &b_dispatcher, "member-b:0").await;
         machine
             .prepare_bindings(direct.clone())
             .await
             .expect("prepare direct session");
-        RuntimeControlPlane::retire(&machine, &MeerkatMachine::logical_runtime_id(&b))
+        RuntimeControlPlane::retire(machine.as_ref(), &MeerkatMachine::logical_runtime_id(&b))
             .await
             .expect("retire B");
-        RuntimeControlPlane::destroy(&machine, &MeerkatMachine::logical_runtime_id(&b))
+        RuntimeControlPlane::destroy(machine.as_ref(), &MeerkatMachine::logical_runtime_id(&b))
             .await
             .expect("destroy B");
-        machine
-            .unregister_session(&b)
-            .await
-            .expect("remove B registration");
-        RuntimeControlPlane::retire(&machine, &MeerkatMachine::logical_runtime_id(&a))
+        RuntimeControlPlane::retire(machine.as_ref(), &MeerkatMachine::logical_runtime_id(&a))
             .await
             .expect("retire A after B");
-        RuntimeControlPlane::destroy(&machine, &MeerkatMachine::logical_runtime_id(&a))
+        RuntimeControlPlane::destroy(machine.as_ref(), &MeerkatMachine::logical_runtime_id(&a))
             .await
             .expect("destroy A after B");
-        RuntimeControlPlane::destroy(&machine, &MeerkatMachine::logical_runtime_id(&direct))
-            .await
-            .expect("destroy direct session");
+        RuntimeControlPlane::destroy(
+            machine.as_ref(),
+            &MeerkatMachine::logical_runtime_id(&direct),
+        )
+        .await
+        .expect("destroy direct session");
         for (surface, runtime_name) in [(&a_surface, "member-a:0"), (&b_surface, "member-b:0")] {
             let log = surface.log.lock().await;
             let variants: Vec<_> = log.iter().map(|(variant, _)| variant.as_str()).collect();
@@ -1441,16 +1466,15 @@ mod tests {
 
     #[tokio::test]
     async fn staged_signal_keeps_old_endpoint_across_same_id_replacement() {
-        let machine = MeerkatMachine::ephemeral();
+        let machine = Arc::new(MeerkatMachine::ephemeral());
         let id = SessionId::new();
         let old_surface = Arc::new(RecordingSignalSurface::default());
         let new_surface = Arc::new(RecordingSignalSurface::default());
         let old_dispatcher = recording_dispatcher(old_surface.clone());
         let new_dispatcher = recording_dispatcher(new_surface.clone());
-        machine
-            .register_session(id.clone())
-            .await
-            .expect("register old session");
+        let old_prepared = prepare_composed_session(&machine, &id, &old_dispatcher).await;
+        let old_consumer =
+            MeerkatConsumerSurface::new(Arc::clone(&machine), Arc::clone(&old_dispatcher));
         bind_composed_session(&machine, &id, &old_dispatcher, "old:0").await;
         let staged = machine
             .stage_session_dsl_transition(
@@ -1470,6 +1494,24 @@ mod tests {
             .register_session(id.clone())
             .await
             .expect("register replacement");
+        let error = old_consumer
+            .apply_routed_input(iv("PrepareBindings"), composed_binding_fields(&id, "old:0"))
+            .await
+            .expect_err("old first-arrival binding cannot claim blank replacement");
+        assert_eq!(error.error_code(), "composition_endpoint_unbound");
+        assert_eq!(
+            machine
+                .session_dsl_state(&id)
+                .await
+                .unwrap()
+                .active_runtime_id,
+            None
+        );
+        old_prepared
+            .install_composition_signal_dispatcher(Arc::clone(&old_dispatcher))
+            .await
+            .expect_err("stale exact materializer cannot claim replacement either");
+        let _new_prepared = prepare_composed_session(&machine, &id, &new_dispatcher).await;
         bind_composed_session(&machine, &id, &new_dispatcher, "replacement:0").await;
         machine
             .commit_session_dsl_transition(&id, staged, "test delayed retirement dispatch")

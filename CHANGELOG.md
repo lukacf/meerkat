@@ -38,8 +38,8 @@ them.
 ### Breaking
 
 - `MeerkatMachine::set_composition_signal_dispatcher` is removed. Each mob's
-  bidirectional composition binding now installs its reverse signal endpoint on
-  the exact runtime-session registration. `MeerkatConsumerSurface::new`,
+  exact `PreparedSessionMaterialization` now installs its reverse signal
+  endpoint before routed inputs can bind the runtime-session registration. `MeerkatConsumerSurface::new`,
   `MeerkatConsumerSurface::pinned`, and `wired_binding_from_runtime_adapter`
   require a `MeerkatCompositionSignalDispatcher` argument. Callers must compose
   both directions together; shared runtimes keep separate endpoints per member.

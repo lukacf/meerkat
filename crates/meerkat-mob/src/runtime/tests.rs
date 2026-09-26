@@ -14374,6 +14374,65 @@ async fn test_destroy_detaches_mob_owned_session_ingress_before_runtime_destroy(
 }
 
 #[tokio::test]
+async fn test_shared_runtime_two_mobs_destroy_without_cross_delivered_signals() {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let first = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "shared-machine-first"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create first mob");
+    let second = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "shared-machine-second"),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(service.clone())
+    .create()
+    .await
+    .expect("create second mob");
+    let mut sessions = Vec::new();
+    for (mob, member) in [(&first, "first-worker"), (&second, "second-worker")] {
+        let mut spec = SpawnMemberSpec::new("worker", member);
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        mob.spawn_spec(spec)
+            .await
+            .expect("spawn member on shared machine");
+        sessions.push(
+            mob.resolve_bridge_session_id(&AgentIdentity::from(member))
+                .await
+                .expect("member session"),
+        );
+    }
+    let direct = SessionId::new();
+    adapter
+        .prepare_bindings(direct.clone())
+        .await
+        .expect("prepare unrelated direct session");
+    second.destroy().await.expect("destroy latest-created mob");
+    assert!(adapter.contains_session(&sessions[0]).await);
+    first
+        .destroy()
+        .await
+        .expect("destroy first mob after latest queue closes");
+    for session in sessions {
+        assert!(!adapter.contains_session(&session).await);
+    }
+    meerkat_runtime::RuntimeControlPlane::destroy(
+        adapter.as_ref(),
+        &meerkat_runtime::MeerkatMachine::logical_runtime_id(&direct),
+    )
+    .await
+    .expect("direct destruction must not target either closed mob queue");
+    adapter
+        .unregister_session(&direct)
+        .await
+        .expect("remove direct registration");
+}
+
+#[tokio::test]
 async fn test_destroy_retry_after_member_archive_commit_before_roster_prune() {
     let definition = with_unique_mob_id(sample_definition(), "destroy-archive-commit-retry");
     let events = Arc::new(FaultInjectedMobEventStore::new());
@@ -42952,10 +43011,19 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
         table,
     )
     .with_consumer(signal_surface.clone());
-    adapter.set_composition_signal_dispatcher(Arc::new(dispatcher));
     let provisioner = super::provisioner::SessionBackend::new(service, Some(adapter.clone()), None);
     let bridge_session = Session::new();
     let bridge_session_id = bridge_session.id().clone();
+    adapter
+        .register_session(bridge_session_id.clone())
+        .await
+        .expect("register test signal session");
+    adapter
+        .set_session_composition_signal_dispatcher_for_test(
+            &bridge_session_id,
+            Arc::new(dispatcher),
+        )
+        .await;
 
     provisioner
         .provision_member(super::provisioner::ProvisionMemberRequest {
@@ -62659,7 +62727,7 @@ async fn test_ownerless_stale_runtime_binding_is_redriven_by_missing_live_dispat
         "delivery-time binding preparation must not fabricate an executor"
     );
 
-    meerkat_runtime::meerkat_machine::composition::MeerkatConsumerSurface::pinned(
+    meerkat_runtime::meerkat_machine::composition::MeerkatConsumerSurface::pinned_unobserved_for_test(
         Arc::clone(&adapter),
         bridge_session_id.clone(),
     )

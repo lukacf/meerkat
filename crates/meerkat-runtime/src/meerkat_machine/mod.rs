@@ -1119,6 +1119,7 @@ struct StagedSessionDslInput {
     previous_snapshot: dsl::MeerkatMachineAuthoritySnapshot,
     committed_snapshot: dsl::MeerkatMachineAuthoritySnapshot,
     effects: DslTransitionEffects,
+    signal_dispatcher: Option<composition::MeerkatCompositionSignalDispatcher>,
 }
 
 impl StagedSessionDslInput {
@@ -1500,6 +1501,11 @@ struct RuntimeSessionEntry {
     /// could fall out of sync across a registration/unregistration
     /// boundary.
     drain_slot: CommsDrainSlot,
+    /// Reverse composition endpoint installed by the successful routed binding
+    /// on this exact registration. Direct sessions have no mob consumer.
+    /// Registration removal drops the endpoint; effect batches retain their
+    /// captured endpoint across awaits instead of looking up a successor.
+    composition_signal_dispatcher: Option<composition::MeerkatCompositionSignalDispatcher>,
 }
 
 /// Fully recovered persistent session entry that has not yet been published
@@ -5979,7 +5985,10 @@ impl MeerkatMachine {
         dispatch_failure: CommittedEffectDispatchFailure,
     ) -> Result<(), String> {
         if let Err(error) = self
-            .dispatch_routed_signals_from_effects(&staged.effects)
+            .dispatch_routed_signals_from_effects(
+                staged.signal_dispatcher.as_ref(),
+                &staged.effects,
+            )
             .await
         {
             let CommittedEffectDispatchFailure::PreserveCommittedDslState = dispatch_failure;
@@ -5992,21 +6001,16 @@ impl MeerkatMachine {
 
     async fn dispatch_routed_signals_from_effects(
         &self,
+        dispatcher: Option<&composition::MeerkatCompositionSignalDispatcher>,
         effects: &[dsl::MeerkatMachineEffect],
     ) -> Result<(), String> {
-        let dispatcher = {
-            self.composition_signal_dispatcher
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        };
         let Some(dispatcher) = dispatcher else {
             return Ok(());
         };
 
         for effect in effects {
             if let Some(signal) = composition::lift_routed_signal(effect) {
-                composition::dispatch_routed_signal(&dispatcher, signal).await?;
+                composition::dispatch_routed_signal(dispatcher, signal).await?;
             }
         }
         Ok(())
@@ -7851,11 +7855,6 @@ pub struct MeerkatMachineShared {
     /// it for their lifetime; the registry is scoped to this `MeerkatMachine`
     /// instance, so tests / multi-runtime processes get clean isolation.
     session_claims: Arc<crate::handles::RuntimeSessionClaimRegistry>,
-    /// Optional typed signal dispatcher for MeerkatMachine lifecycle
-    /// effects routed by `meerkat_mob_seam` into MobMachine observation
-    /// signals.
-    composition_signal_dispatcher:
-        StdRwLock<Option<composition::MeerkatCompositionSignalDispatcher>>,
     /// One-shot deterministic fault for the materializer's executor-attach
     /// publication window. Test-support only; production builds compile the
     /// post-ensure hook to a no-op and carry no field.
@@ -9249,7 +9248,6 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_unbound_rejection_authority: live_unbound_rejection_authority(),
                 session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
-                composition_signal_dispatcher: StdRwLock::new(None),
                 #[cfg(feature = "test-support")]
                 test_stop_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "test-support")]
@@ -9339,7 +9337,6 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_unbound_rejection_authority: live_unbound_rejection_authority(),
                 session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
-                composition_signal_dispatcher: StdRwLock::new(None),
                 #[cfg(feature = "test-support")]
                 test_stop_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "test-support")]
@@ -9429,7 +9426,6 @@ impl MeerkatMachine {
                 #[cfg(feature = "live")]
                 live_unbound_rejection_authority: live_unbound_rejection_authority(),
                 session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
-                composition_signal_dispatcher: StdRwLock::new(None),
                 #[cfg(feature = "test-support")]
                 test_stop_executor_after_ensure: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "test-support")]
@@ -9580,17 +9576,23 @@ impl MeerkatMachine {
         Arc::clone(&self.session_claims) as Arc<dyn meerkat_core::handles::SessionClaimHandle>
     }
 
-    /// Attach the typed composition signal dispatcher used for
-    /// MeerkatMachine -> MobMachine lifecycle observation routes.
-    pub fn set_composition_signal_dispatcher(
+    /// Install an exact-registration signal endpoint for fault-injection tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn set_session_composition_signal_dispatcher_for_test(
         &self,
+        session_id: &SessionId,
         dispatcher: composition::MeerkatCompositionSignalDispatcher,
     ) {
-        let mut slot = self
-            .composition_signal_dispatcher
+        let _gate = self
+            .lock_current_session_mutation_gate(session_id)
+            .await
+            .expect("test signal endpoint requires an existing registration");
+        self.sessions
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *slot = Some(dispatcher);
+            .await
+            .get_mut(session_id)
+            .expect("test registration remains current under its mutation gate")
+            .composition_signal_dispatcher = Some(dispatcher);
     }
 
     /// Apply a routed-input variant delivered by the `meerkat_mob_seam`
@@ -9603,11 +9605,31 @@ impl MeerkatMachine {
     /// session lookup + DSL-lock-scoped apply. A typed transition error
     /// from the kernel is surfaced as a `String` so the dispatcher can
     /// map it onto `DispatchRefusal::ConsumerRefused`.
+    #[cfg(test)]
     pub(crate) async fn apply_routed_meerkat_input(
         &self,
         session_id: &SessionId,
         input: dsl::MeerkatMachineInput,
     ) -> Result<(), dsl_authority::DslTransitionRefusal> {
+        self.apply_routed_meerkat_input_with_signal_dispatcher(session_id, input, None)
+            .await
+    }
+
+    pub(crate) async fn apply_routed_meerkat_input_with_signal_dispatcher(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+        signal_dispatcher: Option<&composition::MeerkatCompositionSignalDispatcher>,
+    ) -> Result<(), dsl_authority::DslTransitionRefusal> {
+        let registration = self
+            .current_session_registration_witness(session_id)
+            .await
+            .ok_or_else(|| {
+                dsl_authority::DslTransitionRefusal::other(
+                    "session_authority_unavailable",
+                    format!("session `{session_id}` has no runtime registration"),
+                )
+            })?;
         let _gate_guard = self
             .lock_current_durability_ready_session_mutation_gate(session_id)
             .await
@@ -9620,9 +9642,15 @@ impl MeerkatMachine {
                     ),
                 )
             })?;
-        self.apply_routed_session_dsl_input(session_id, input, "RoutedMeerkatInput")
-            .await
-            .map(|_| ())
+        self.apply_routed_session_dsl_input(
+            session_id,
+            input,
+            &registration,
+            signal_dispatcher,
+            "RoutedMeerkatInput",
+        )
+        .await
+        .map(|_| ())
     }
 
     #[cfg(test)]

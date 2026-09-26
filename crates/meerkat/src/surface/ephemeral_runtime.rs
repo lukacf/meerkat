@@ -16,7 +16,7 @@ use meerkat_core::service::{InitialTurnPolicy, StartTurnRequest, StartTurnRuntim
 use meerkat_core::{AgentEvent, ContentInput, RuntimeBuildMode, SessionService};
 use meerkat_runtime::{
     AcceptOutcome, CompletionOutcome, EnsureRuntimeExecutorAttachment, MeerkatMachine,
-    RuntimeDriverError,
+    RuntimeCleanupTaskSpawner, RuntimeDriverError, RuntimeExecutorAttachmentWitness,
 };
 
 use meerkat_session::LiveSessionActorWitnessSlot;
@@ -91,14 +91,34 @@ impl EphemeralRuntimeError {
 
 /// Create one canonical runtime-owned actor and attach its executor.
 ///
-/// All resources remain under the machine's exact materialization lease until
-/// the executor attachment is committed. Dropped futures therefore roll back
-/// the same actor incarnation instead of leaving an unowned session.
+/// Exact rollback custody spans actor construction, attachment commit, and
+/// peer-ingress installation. Dropping the future before its result is returned
+/// retires that same actor incarnation through the machine.
 pub async fn materialize_ephemeral_runtime_session<B: SessionAgentBuilder + 'static>(
+    service: &Arc<EphemeralSessionService<B>>,
+    machine: &Arc<MeerkatMachine>,
+    request: CreateSessionRequest,
+    keep_alive: bool,
+) -> Result<RunResult, EphemeralRuntimeError> {
+    materialize_ephemeral_runtime_session_inner(
+        service,
+        machine,
+        request,
+        keep_alive,
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        None,
+    )
+    .await
+}
+
+async fn materialize_ephemeral_runtime_session_inner<B: SessionAgentBuilder + 'static>(
     service: &Arc<EphemeralSessionService<B>>,
     machine: &Arc<MeerkatMachine>,
     mut request: CreateSessionRequest,
     keep_alive: bool,
+    #[cfg(all(test, not(target_arch = "wasm32")))] after_attachment_commit: Option<
+        MaterializationCommitTestBarrier,
+    >,
 ) -> Result<RunResult, EphemeralRuntimeError> {
     if request.initial_turn != InitialTurnPolicy::Defer {
         return Err(SessionError::Unsupported(
@@ -154,19 +174,91 @@ pub async fn materialize_ephemeral_runtime_session<B: SessionAgentBuilder + 'sta
             return Err(error);
         }
     };
+    let witness = match &attachment {
+        EnsureRuntimeExecutorAttachment::Pending(pending) => pending.witness().clone(),
+        EnsureRuntimeExecutorAttachment::Existing(witness) => witness.clone(),
+    };
+    // Pending::commit moves its lease into an independent owner task. Capture
+    // exact cleanup custody before that handoff so cancellation of its waiter,
+    // or of later ingress setup, cannot orphan a successful detached commit.
+    let mut unpublished = UnpublishedEphemeralRuntimeAttachment {
+        machine: machine.clone(),
+        witness,
+        cleanup_spawner: prepared.cleanup_task_spawner(),
+        armed: true,
+    };
     drop(boundary);
-    if let EnsureRuntimeExecutorAttachment::Pending(pending) = attachment {
-        pending.commit().await?;
+    let published: Result<(), EphemeralRuntimeError> = async {
+        if let EnsureRuntimeExecutorAttachment::Pending(pending) = attachment {
+            pending.commit().await?;
+        }
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        if let Some(barrier) = after_attachment_commit {
+            let _ = barrier.entered.send(unpublished.witness.clone());
+            let _ = barrier.release.await;
+        }
+        let comms = service.comms_runtime(&session_id).await;
+        machine
+            .update_peer_ingress_context_if_current(&unpublished.witness, keep_alive, comms)
+            .await?;
+        Ok(())
     }
-    let comms = service.comms_runtime(&session_id).await;
-    if let Err(error) = machine
-        .update_peer_ingress_context(&session_id, keep_alive, comms)
-        .await
-    {
-        machine.unregister_session(&session_id).await?;
-        return Err(error.into());
+    .await;
+    if let Err(error) = published {
+        unpublished.retire().await?;
+        return Err(error);
     }
+    // No await may follow this custody transfer: returning the result is the
+    // caller's synchronous acquisition of the completed materialization.
+    unpublished.armed = false;
     Ok(created)
+}
+
+/// Mechanical custody only. Every retirement decision and actor cleanup stays
+/// behind the machine's exact attachment unregister seam.
+struct UnpublishedEphemeralRuntimeAttachment {
+    machine: Arc<MeerkatMachine>,
+    witness: RuntimeExecutorAttachmentWitness,
+    cleanup_spawner: RuntimeCleanupTaskSpawner,
+    armed: bool,
+}
+
+impl UnpublishedEphemeralRuntimeAttachment {
+    async fn retire(&mut self) -> Result<(), RuntimeDriverError> {
+        self.machine
+            .unregister_executor_attachment_if_current(&self.witness)
+            .await?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for UnpublishedEphemeralRuntimeAttachment {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let machine = self.machine.clone();
+        let witness = self.witness.clone();
+        self.cleanup_spawner.spawn_detached(async move {
+            if let Err(error) = machine
+                .unregister_executor_attachment_if_current(&witness)
+                .await
+            {
+                tracing::warn!(
+                    session_id = %witness.session_id(),
+                    %error,
+                    "unpublished ephemeral attachment exact retirement failed"
+                );
+            }
+        });
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+struct MaterializationCommitTestBarrier {
+    entered: tokio::sync::oneshot::Sender<RuntimeExecutorAttachmentWitness>,
+    release: tokio::sync::oneshot::Receiver<()>,
 }
 
 /// Submit through generated runtime input admission and await its exact result.
@@ -764,6 +856,95 @@ mod tests {
             .unregister_session(&created.session_id)
             .await
             .expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn cancelled_post_commit_materialization_retires_exact_actor_and_releases_capacity() {
+        let factory =
+            AgentFactory::new(std::env::temp_dir().join("meerkat-cancelled-materialization-tests"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(meerkat_client::TestClient::for_provider(
+            meerkat_core::Provider::OpenAI,
+        )));
+        let service = Arc::new(EphemeralSessionService::new(builder, 1));
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let creation = tokio::spawn({
+            let service = service.clone();
+            let machine = machine.clone();
+            async move {
+                materialize_ephemeral_runtime_session_inner(
+                    &service,
+                    &machine,
+                    request(),
+                    false,
+                    Some(MaterializationCommitTestBarrier {
+                        entered: entered_tx,
+                        release: release_rx,
+                    }),
+                )
+                .await
+            }
+        });
+        let witness = tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
+            .await
+            .expect("materialization must reach the post-commit ingress boundary")
+            .expect("committed attachment witness");
+        let id = witness.session_id().clone();
+        assert_eq!(
+            machine.current_executor_attachment_witness(&id).await,
+            Some(witness.clone()),
+            "the actor is committed, not merely staged"
+        );
+        assert!(service.live_session_actor_registered(&id).await);
+
+        creation.abort();
+        assert!(
+            creation
+                .await
+                .expect_err("outer future was aborted")
+                .is_cancelled()
+        );
+        let _ = release_tx.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while machine.contains_session(&id).await
+                || service.live_session_actor_registered(&id).await
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancellation must complete exact machine and actor retirement");
+        assert!(matches!(
+            service.read(&id).await,
+            Err(SessionError::NotFound { .. })
+        ));
+        assert!(
+            !machine
+                .unregister_executor_attachment_if_current(&witness)
+                .await
+                .expect("retired witness is an idempotent no-op")
+        );
+
+        let replacement =
+            materialize_ephemeral_runtime_session(&service, &machine, request(), false)
+                .await
+                .expect("cancelled creation must release max_sessions=1 capacity");
+        assert_ne!(replacement.session_id, id);
+        let result = run_ephemeral_runtime_turn(
+            &machine,
+            &replacement.session_id,
+            "capacity recovered".into(),
+            None,
+        )
+        .await
+        .expect("recovered service admits a real runtime turn");
+        ephemeral_runtime_completion_result(result).expect("recovered actor completes");
+        machine
+            .unregister_session(&replacement.session_id)
+            .await
+            .expect("recovered actor cleanup");
     }
 
     #[tokio::test]

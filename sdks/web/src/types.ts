@@ -84,7 +84,7 @@ export interface AppendSystemContextOptions {
 export type { InjectSystemContextResult as AppendSystemContextResult } from './generated/session.js';
 
 export type {
-  SessionState, WireRunResult, RuntimeProfileCapability, RuntimeProfileRefusal,
+  SessionState, WireRunResult, WireTurnInputOptions, RuntimeProfileCapability, RuntimeProfileRefusal,
   RuntimeProfileClearingAction, RuntimeProfileId,
 } from './generated/session.js';
 

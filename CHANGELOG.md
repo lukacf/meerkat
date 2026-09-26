@@ -37,6 +37,12 @@ them.
 
 ### Breaking
 
+- `MeerkatMachine::set_composition_signal_dispatcher` is removed. Each mob's
+  bidirectional composition binding now installs its reverse signal endpoint on
+  the exact runtime-session registration. `MeerkatConsumerSurface::new`,
+  `MeerkatConsumerSurface::pinned`, and `wired_binding_from_runtime_adapter`
+  require a `MeerkatCompositionSignalDispatcher` argument. Callers must compose
+  both directions together; shared runtimes keep separate endpoints per member.
 - Browser direct sessions now use the canonical `MeerkatMachine` runtime.
   The WASM exports `init_runtime`, `init_runtime_from_config`, `create_session`,
   `create_session_simple`, `get_session_state`, `destroy_session`, and

@@ -1,166 +1,64 @@
-<!--
-  Browser OAuth host example — plan §4d.wasm.4.
-
-  Demonstrates how a browser host page runs an OAuth flow outside
-  Meerkat, keeps the refresh token in its own secure storage, and
-  hands Meerkat a resolved auth lease per session via the
-  `registerExternalAuthResolver` callback.
-
-  What this example does:
-    1. Initialize the meerkat WASM runtime with a single realm config
-       that declares an `external_resolver`-backed auth profile.
-    2. Register a JS callback the runtime invokes when it needs a
-       fresh auth lease for a structural auth binding reference.
-    3. Run a single turn with `auth_binding:
-       { realm: "hosted", binding: "chatgpt" }` —
-       the runtime consults the callback for credentials and never
-       touches the host's refresh token.
-
-  NOTE: This is a skeleton for hand-running / documentation; the
-  exact OAuth PKCE flow is provider-specific and intentionally left
-  as host-owned. Replace the `myOAuthClient` mock with a real
-  PKCE-implementing OAuth2 client library.
--->
 <!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Meerkat — Host-owned OAuth example</title>
+    <title>Meerkat host auth resolver registration</title>
     <style>
-      body {
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
-          sans-serif;
-        max-width: 720px;
-        margin: 2rem auto;
-        padding: 0 1rem;
-        line-height: 1.5;
-      }
-      pre {
-        background: #f4f4f5;
-        padding: 0.75rem;
-        border-radius: 6px;
-        overflow-x: auto;
-      }
-      button {
-        padding: 0.5rem 1rem;
-        font-size: 1rem;
-        cursor: pointer;
-      }
-      #output {
-        border: 1px solid #e4e4e7;
-        border-radius: 6px;
-        padding: 0.75rem;
-        min-height: 6rem;
-        white-space: pre-wrap;
-      }
+      body { font: 16px/1.5 system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+      button { font: inherit; padding: 0.5rem 1rem; }
+      output { display: block; margin: 1rem 0; padding: 1rem; background: #f4f4f5; }
     </style>
   </head>
   <body>
-    <h1>Meerkat — Host-owned OAuth</h1>
+    <h1>Host auth resolver registration</h1>
     <p>
-      This page owns the OAuth flow and refresh-token storage. The
-      Meerkat WASM runtime never sees the refresh token — it asks the
-      page for a structured bearer lease when it needs one.
+      This example loads the real WASM module and registers a host callback.
+      An OAuth client belongs in the host application. Replace the callback
+      below with a lease from that client's token store.
     </p>
-    <button id="start">Create session with host-resolved auth</button>
-    <h2>Stream output</h2>
-    <div id="output"></div>
-
+    <p>
+      Using this callback for a session requires a custom Rust/WASM bootstrap
+      with an <code>ExternalResolver { handle: "wasm_host" }</code> binding.
+      Stock <code>MeerkatRuntime.init()</code> accepts provider keys and proxy
+      URLs, and does not install custom realm bindings. This registration demo
+      performs no OAuth login or provider request.
+    </p>
+    <p>Build <code>sdks/web</code>, serve it over HTTP, and open this page.</p>
+    <button id="register" disabled>Register resolver</button>
+    <button id="clear" disabled>Clear resolver</button>
+    <output id="status" role="status">Loading WASM...</output>
     <script type="module">
-      import {
-        MeerkatRuntime,
-        WASM_EXTERNAL_AUTH_RESOLVER_HANDLE as WASM_EXTERNAL_AUTH_RESOLVER_ID,
-        registerExternalAuthResolver,
-        withAuthBinding,
-      } from '../src/index.js';
+      import initWasm, * as wasm from '../wasm/meerkat_web_runtime.js';
+      import { registerExternalAuthResolver, clearExternalAuthResolver } from '../dist/index.js';
 
-      // ---- Your OAuth client implementation (host-owned) ----
-      // Minimal stub showing where a real PKCE-backed OAuth client
-      // would plug in. For real usage, replace with (e.g.)
-      // `@openid-connect/oauth2-client` wired to your provider's
-      // authorize + token endpoints. The refresh token lives in the
-      // host's secure storage; only the short-lived access token
-      // crosses into Meerkat.
-      const myOAuthClient = {
-        async freshAuthLease(authBinding) {
-          // authBinding arrives as { realm, binding, profile? } —
-          // look up the
-          // matching OAuth session in your auth provider store,
-          // refresh if needed, return a structured auth envelope.
-          console.log(
-            '[oauth-host] runtime asked for bearer for',
-            authBinding,
-          );
-          // Placeholder: real code fetches an access token here.
-          const accessToken = 'sk-access-placeholder-from-host-oauth';
-          return {
-            kind: 'inline_secret',
-            secret: accessToken,
-            metadata: {},
-            // Use the actual token endpoint expiry when available.
-            expires_at: new Date(Date.now() + 55 * 60 * 1000).toISOString(),
-          };
-        },
-      };
-
-      // ---- Bootstrap the runtime with a realm declaring a ----
-      // ---- single `external_resolver`-backed auth profile ----
-      const realmConfig = {
-        realm: {
-          hosted: {
-            backend: {
-              chatgpt: {
-                provider: 'openai',
-                backend_kind: 'openai_api',
-              },
-            },
-            auth: {
-              chatgpt: {
-                provider: 'openai',
-                auth_method: 'external_authorizer',
-                source: {
-                  kind: 'external_resolver',
-                  handle: WASM_EXTERNAL_AUTH_RESOLVER_ID,
-                },
-              },
-            },
-            binding: {
-              chatgpt: {
-                backend_profile: 'chatgpt',
-                auth_profile: 'chatgpt',
-                default_model: 'gpt-5.2',
-              },
-            },
-            default_binding: 'chatgpt',
-          },
-        },
-      };
-
-      const rt = await MeerkatRuntime.loadFromConfig(realmConfig);
-
-      // ---- Wire the host's OAuth callback into the runtime ----
-      registerExternalAuthResolver(rt.wasm, (authBinding) =>
-        myOAuthClient.freshAuthLease(authBinding),
-      );
-
-      document.getElementById('start').addEventListener('click', async () => {
-        const out = document.getElementById('output');
-        out.textContent = '';
-
-        const cfg = withAuthBinding({ realm: 'hosted', binding: 'chatgpt' }, {
-          model: 'gpt-5.2',
-          systemPrompt: 'You are concise.',
+      const status = document.getElementById('status');
+      const register = document.getElementById('register');
+      const clear = document.getElementById('clear');
+      function render() {
+        const registered = wasm.has_external_auth_resolver();
+        status.textContent = registered ? 'Resolver registered.' : 'Resolver cleared.';
+        clear.disabled = !registered;
+      }
+      try {
+        await initWasm();
+        register.disabled = false;
+        render();
+        register.addEventListener('click', () => {
+          registerExternalAuthResolver(wasm, async () => {
+            // Install the host's actual lease provider here. A missing login
+            // remains an explicit auth failure, never a placeholder secret.
+            throw { kind: 'interactive_login_required' };
+          });
+          render();
         });
-
-        const session = await rt.createSession(cfg);
-        for await (const event of session.events()) {
-          if (event.type === 'delta' && event.text) {
-            out.textContent += event.text;
-          }
-          if (event.type === 'done') break;
-        }
-      });
+        clear.addEventListener('click', () => {
+          clearExternalAuthResolver(wasm);
+          render();
+        });
+      } catch (error) {
+        status.textContent = `Module loading failed: ${String(error)}`;
+      }
     </script>
   </body>
 </html>

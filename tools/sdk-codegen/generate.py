@@ -5635,7 +5635,7 @@ def generate_web_session_types(schemas: dict, output_dir: Path) -> None:
     wire = schemas["wire-types"]
     definitions: dict[str, Any] = {}
     roots: dict[str, Any] = {}
-    for name in ("WireRunResult", "WireSessionInfo", "InjectSystemContextResult", "RuntimeProfileRefusal"):
+    for name in ("WireRunResult", "WireSessionInfo", "InjectSystemContextResult", "RuntimeProfileRefusal", "WireTurnInputOptions"):
         schema = _lookup_named_schema(wire, name)
         if not schema:
             raise KeyError(f"canonical {name} schema is missing")

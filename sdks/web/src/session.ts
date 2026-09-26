@@ -2,7 +2,7 @@ import { EventSubscription } from './events.js';
 import { isKnownEvent } from './types.js';
 import type {
   ContentBlock,
-  HandlingMode,
+  WireTurnInputOptions,
   TurnResult,
   SessionEvent,
   SessionState,
@@ -26,8 +26,9 @@ type AppendSystemContextFn = (
  * Metadata carried by the canonical runtime input for this turn.
  */
 export interface BrowserTurnOptions {
-  readonly handlingMode?: HandlingMode;
-  readonly transientTurnContext?: string;
+  readonly handlingMode?: WireTurnInputOptions['handling_mode'];
+  readonly transientTurnContext?: WireTurnInputOptions['transient_turn_context'];
+  readonly skillReferences?: WireTurnInputOptions['skill_references'];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -198,6 +199,7 @@ export class Session {
         options === undefined ? undefined : JSON.stringify({
           handling_mode: options.handlingMode,
           transient_turn_context: options.transientTurnContext,
+          skill_references: options.skillReferences,
         }),
       );
     } catch (error) {

@@ -2135,6 +2135,7 @@ impl MeerkatMachine {
             provisional_materialization_claim_id: None,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
+            composition_signal_dispatcher: None,
         };
         Ok((runtime_id, session_entry))
     }
@@ -2317,6 +2318,7 @@ impl MeerkatMachine {
             provisional_materialization_claim_id: None,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
+            composition_signal_dispatcher: None,
         };
         #[cfg(target_arch = "wasm32")]
         {
@@ -2532,6 +2534,7 @@ impl MeerkatMachine {
             provisional_materialization_claim_id: None,
             dsl_authority,
             drain_slot: CommsDrainSlot::new(),
+            composition_signal_dispatcher: None,
         };
         if let Some(rehydration_authority) = rehydration_authority {
             rehydration_authority.mark_ready().map_err(|required| {
@@ -4302,6 +4305,7 @@ impl MeerkatMachine {
                         provisional_materialization_claim_id: None,
                         dsl_authority: Arc::clone(&dsl_authority),
                         drain_slot: CommsDrainSlot::new(),
+                        composition_signal_dispatcher: None,
                     },
                 );
                 let Some(entry) = sessions.get_mut(&session_id) else {

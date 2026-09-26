@@ -94,6 +94,27 @@ impl BrowserRuntimeProfile {
         })
     }
 
+    /// Validate structured skill identities for builds and turn admission.
+    /// The builtin source is supplied by the canonical embedded skill engine;
+    /// every other source requires runtime discovery outside this profile.
+    pub fn require_skill_references(
+        self,
+        references: &[meerkat_core::skills::SkillKey],
+    ) -> Result<(), RuntimeProfileRefusal> {
+        use meerkat_core::skills::SourceUuid;
+
+        if references
+            .iter()
+            .any(|reference| reference.source_uuid != SourceUuid::builtin())
+        {
+            self.require(RuntimeProfileCapability::RuntimeSkills)?;
+        }
+        if !references.is_empty() {
+            self.require(RuntimeProfileCapability::EmbeddedSkills)?;
+        }
+        Ok(())
+    }
+
     /// Apply the profile to a typed mobpack requirement. Unknown-token
     /// rejection remains owned by the manifest vocabulary gate.
     pub fn require_mobpack(
@@ -139,6 +160,35 @@ impl BrowserRuntimeProfile {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_skill_sources_use_the_same_profile_for_builds_and_turns() {
+        use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
+
+        let builtin = SkillKey::builtin(SkillName::parse("task-workflow").expect("valid skill"));
+        BrowserRuntimeProfile
+            .require_skill_references(std::slice::from_ref(&builtin))
+            .expect("embedded source supported");
+        let external = SkillKey::new(
+            SourceUuid::project_local(),
+            SkillName::parse("task-workflow").expect("valid skill"),
+        );
+        let refusal = BrowserRuntimeProfile
+            .require_skill_references(&[builtin, external])
+            .expect_err("external source excluded");
+        assert_eq!(
+            refusal.code,
+            RuntimeProfileRefusalCode::CapabilityUnavailable
+        );
+        assert_eq!(
+            refusal.data.capability,
+            RuntimeProfileCapability::RuntimeSkills
+        );
+        assert_eq!(
+            refusal.data.clearing_action,
+            RuntimeProfileClearingAction::UseSkillRuntime
+        );
+    }
 
     #[test]
     fn every_browser_exclusion_has_a_typed_refusal_and_clearing_action() {

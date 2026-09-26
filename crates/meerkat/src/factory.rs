@@ -1750,7 +1750,6 @@ fn model_aware_default_max_tokens(
         .unwrap_or(meerkat_core::config::DEFAULT_MAX_TOKENS_PER_TURN)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn provider_web_search_enabled(config: &Config, provider: Provider) -> bool {
     match provider {
         Provider::Anthropic => config.provider_tools.anthropic.web_search,
@@ -3335,14 +3334,12 @@ impl AgentFactory {
         let custom_skill_source = false;
         if build.skill_engine_override.is_some()
             || custom_skill_source
-            || build.preload_skills.as_ref().is_some_and(|skills| {
-                skills
-                    .iter()
-                    .any(|key| key.source_uuid != meerkat_core::skills::SourceUuid::builtin())
-            })
             || !config.skills.repositories.is_empty()
         {
             profile.require(Capability::RuntimeSkills)?;
+        }
+        if let Some(skills) = &build.preload_skills {
+            profile.require_skill_references(skills)?;
         }
         if build
             .preload_skills
@@ -7946,7 +7943,7 @@ mod tests {
         let factory = AgentFactory::minimal().with_browser_runtime_profile();
         let config = Config::default();
         let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
-        build.llm_client_override = Some(Arc::new(PromptTestClient));
+        build.llm_client_override = Some(Arc::new(NeverLlmClient));
         build.comms_name = Some("embedded-browser-skills".into());
         build.override_builtins = ToolCategoryOverride::Enable;
         build.backend = Some(meerkat_core::RecoveryBackendKind::Memory);
@@ -7956,7 +7953,10 @@ mod tests {
         ]);
         let expected_skills = build.preload_skills.clone();
         let agent = factory.build_agent(build, &config).await.unwrap();
-        let prompt = system_prompt_of(agent.session().messages());
+        let prompt = match agent.session().messages().first() {
+            Some(meerkat_core::Message::System(message)) => &message.content,
+            other => panic!("expected system prompt, got {other:?}"),
+        };
         assert!(
             prompt.contains("Use comms for live coordination"),
             "mob communication body must load"
@@ -8004,7 +8004,10 @@ mod tests {
         let factory = AgentFactory::minimal()
             .skill_source(source)
             .with_browser_runtime_profile();
-        let error = factory.build_skill_runtime(&config).await.unwrap_err();
+        let error = match factory.build_skill_runtime(&config).await {
+            Ok(_) => panic!("custom skill source unexpectedly allowed"),
+            Err(error) => error,
+        };
         assert!(matches!(error, BuildAgentError::RuntimeProfile(refusal)
             if refusal.data.capability == meerkat_capabilities::RuntimeProfileCapability::RuntimeSkills));
         let build = AgentBuildConfig::new("irrelevant");
@@ -8029,19 +8032,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_profile_refuses_fallback_search_before_provider_resolution() {
-        let mut build = AgentBuildConfig::new("gpt-4o-mini");
-        build.override_web_search = ToolCategoryOverride::Enable;
-        let error = match AgentFactory::minimal()
-            .with_browser_runtime_profile()
-            .build_agent(build, &Config::default())
-            .await
-        {
-            Ok(_) => panic!("fallback search cannot be provisioned"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, BuildAgentError::RuntimeProfile(refusal)
-            if refusal.data.capability == meerkat_capabilities::RuntimeProfileCapability::FallbackWebSearch));
+    async fn browser_profile_refuses_fallback_search_before_credential_resolution() {
+        for (model, native_search_enabled) in [("gpt-5.3-codex", true), ("gpt-6-astra", false)] {
+            let mut build = AgentBuildConfig::new(model);
+            build.override_web_search = ToolCategoryOverride::Enable;
+            let mut config = Config::default();
+            config.provider_tools.openai.web_search = native_search_enabled;
+            let error = match AgentFactory::minimal()
+                .with_browser_runtime_profile()
+                .build_agent(build, &config)
+                .await
+            {
+                Ok(_) => panic!("fallback search cannot be provisioned"),
+                Err(error) => error,
+            };
+            let BuildAgentError::RuntimeProfile(refusal) = error else {
+                panic!("profile must reject fallback search before credentials: {error}");
+            };
+            assert_eq!(
+                refusal.data.capability,
+                meerkat_capabilities::RuntimeProfileCapability::FallbackWebSearch
+            );
+        }
     }
 
     #[tokio::test]

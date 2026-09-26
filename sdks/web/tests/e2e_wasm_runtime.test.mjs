@@ -330,7 +330,10 @@ test("MeerkatRuntime opens and closes a public mob subscription through the ship
     assert.notEqual(subscribedHandle, undefined);
     assert.throws(
       () => rawWasm.poll_subscription(subscribedHandle),
-      /unknown subscription handle/i,
+      error => {
+        assert.equal(JSON.parse(String(error)).code, "invalid_stream_id");
+        return true;
+      },
     );
   } finally {
     await runtime.destroy();

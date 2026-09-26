@@ -144,7 +144,11 @@ export type SourceUuid = string;
 
 export type TokenAggregationProvenance = "sum_disjoint_provider_components" | "provider_inclusive_input_total";
 
+export type TurnRequestContext = string;
+
 export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
+
+export type WireHandlingMode = "queue" | "steer";
 
 export type WireResolvedModelCapabilities = {
   image_generation?: boolean;
@@ -185,6 +189,12 @@ export type WireSessionInfo = {
   session_id: string;
   session_ref?: string | null;
   updated_at: number;
+};
+
+export type WireTurnInputOptions = {
+  handling_mode?: WireHandlingMode | null;
+  skill_references?: SkillKey[] | null;
+  transient_turn_context?: TurnRequestContext | null;
 };
 
 export type WireTurnUsage = {

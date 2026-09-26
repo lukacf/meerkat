@@ -61,6 +61,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireUsage": schema_for!(crate::wire::WireUsage),
         "ContractVersion": schema_for!(crate::version::ContractVersion),
         "WireRunResult": schema_for!(crate::wire::WireRunResult),
+        "WireTurnInputOptions": schema_for!(crate::wire::runtime::WireTurnInputOptions),
         "WireCallbackPending": schema_for!(crate::wire::WireCallbackPending),
         "WirePendingToolCall": schema_for!(crate::wire::WirePendingToolCall),
         "WireCallbackPendingStatus": schema_for!(crate::wire::WireCallbackPendingStatus),

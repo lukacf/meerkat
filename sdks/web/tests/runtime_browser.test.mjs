@@ -280,6 +280,42 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
       assert.equal(requests.length, 0);
     });
 
+    await scenario("typed embedded turn skills resolve through the canonical skill engine", async ({ page, requests }) => {
+      const result = await page.evaluate(async () => {
+        const session = await window.runtime.createSession({ model: window.model });
+        const turn = await session.turn("BROWSER_EMBEDDED_SKILL", { skillReferences: [{
+          source_uuid: "00000000-0000-4b11-8111-000000000001", skill_name: "task-workflow",
+        }] });
+        return { turn, events: session.pollEvents() };
+      });
+      assert.equal(result.turn.text, "BROWSER_RUNTIME_OK_1");
+      assert.equal(requests.length, 1);
+      assert.ok(JSON.stringify(requests[0].system).includes("Use builtin task tools for lightweight project work tracking"));
+      assert.ok(result.events.some(event => event.type === "skills_resolved" && event.skills.some(skill =>
+        skill.source_uuid === "00000000-0000-4b11-8111-000000000001" && skill.skill_name === "task-workflow")),
+      JSON.stringify(result.events));
+    });
+
+    await scenario("external typed turn skills refuse with profile remediation before provider admission", async ({ page, requests }) => {
+      const result = await page.evaluate(async () => {
+        const session = await window.runtime.createSession({ model: window.model });
+        let error;
+        try {
+          await session.turn("BROWSER_EXTERNAL_SKILL", { skillReferences: [{
+            source_uuid: "e2377cb8-8374-4501-8113-893527589e49", skill_name: "outside-skill",
+          }] });
+        } catch (failure) { error = window.errorEnvelope(failure); }
+        return { error, state: await session.getState(), events: session.pollEvents() };
+      });
+      assert.equal(result.error?.code, "CAPABILITY_UNAVAILABLE", JSON.stringify(result));
+      assert.deepEqual(result.error.data, {
+        profile: "browser", capability: "runtime_skills", clearing_action: "use_skill_runtime",
+      });
+      assert.equal(result.state.is_active, false);
+      assert.equal(result.events.some(event => event.type === "run_started"), false);
+      assert.equal(requests.length, 0);
+    });
+
     await scenario("provider failure rejects and projects a failed terminal event", async ({ page, requests, provider }) => {
       provider.mode = "failure";
       const result = await page.evaluate(async () => {
@@ -635,7 +671,7 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
       const result = await page.evaluate(async exclusions => {
         window.runtime = await window.sdk.MeerkatRuntime.init(window.wasm, {
           anthropicApiKey: "synthetic-not-a-key", anthropicBaseUrl: `${location.origin}/anthropic`,
-          model: window.model, maxSessions: 1,
+          model: window.model, maxSessions: 1, mobpackTrust: { policy: "permissive" },
         });
         const pack = new Uint8Array(await (await fetch("/fixture.mobpack")).arrayBuffer());
         const errors = [];
@@ -818,22 +854,25 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
     });
 
     await scenario("direct sessions and mob members share one service capacity", async ({ page, requests }) => {
-      const result = await page.evaluate(async () => {
+      const blocked = await page.evaluate(async () => {
         window.runtime = await window.sdk.MeerkatRuntime.init(window.wasm, {
           anthropicApiKey: "synthetic-not-a-key", anthropicBaseUrl: `${location.origin}/anthropic`, model: window.model, maxSessions: 1,
         });
-        const direct = await window.runtime.createSession({ model: window.model });
-        const mob = await window.runtime.createMob({ id: "shared-service-capacity", profiles: { worker: { model: window.model, tools: { comms: true } } } });
-        const blocked = window.parse(await window.wasm.mob_spawn(mob.mobId, JSON.stringify([{
-          profile: "worker", agent_identity: "blocked-member",
+        window.capacityDirect = await window.runtime.createSession({ model: window.model });
+        window.capacityMob = await window.runtime.createMob({ id: "shared-service-capacity", profiles: { worker: { model: window.model, tools: { comms: true } } } });
+        return window.parse(await window.wasm.mob_spawn(window.capacityMob.mobId, JSON.stringify([{
+          profile: "worker", agent_identity: "blocked-member", runtime_mode: "turn_driven",
         }])));
-        await direct.destroy();
-        const admitted = window.parse(await window.wasm.mob_spawn(mob.mobId, JSON.stringify([{
-          profile: "worker", agent_identity: "admitted-member",
-        }])));
-        return { blocked, admitted, members: await mob.listMembers() };
       });
-      assert.equal(result.blocked[0].status, "failed", JSON.stringify(result));
+      assert.equal(blocked[0].status, "failed", JSON.stringify(blocked));
+      assert.equal(requests.length, 0, "refused admission must not dispatch provider work");
+      const result = await page.evaluate(async () => {
+        await window.capacityDirect.destroy();
+        const admitted = window.parse(await window.wasm.mob_spawn(window.capacityMob.mobId, JSON.stringify([{
+          profile: "worker", agent_identity: "admitted-member", runtime_mode: "turn_driven",
+        }])));
+        return { admitted, members: await window.capacityMob.listMembers() };
+      });
       assert.equal(result.admitted[0].status, "spawned", JSON.stringify(result));
       assert.equal(result.members.length, 1);
       assert.equal(result.members[0].agent_identity, "admitted-member");
@@ -871,6 +910,27 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
       assert.equal(requests.length, 0);
     });
 
+    await scenario("multiple mobs retain exact runtime lifecycle signal ownership during teardown", async ({ page, requests }) => {
+      const result = await page.evaluate(async () => {
+        const mobs = [];
+        for (const name of ["first", "second"]) {
+          const mob = await window.runtime.createMob({ id: `browser-teardown-${name}`, profiles: {
+            worker: { model: window.model, tools: { comms: true } },
+          } });
+          await mob.spawn([{ profile: "worker", agent_identity: "worker", runtime_mode: "turn_driven" }]);
+          mobs.push(mob);
+        }
+        const second = await mobs[1].lifecycle("destroy");
+        const first = await mobs[0].lifecycle("destroy");
+        const remaining = await window.runtime.listMobs();
+        return { first, second, remaining };
+      });
+      assert.equal(result.first.ok, true);
+      assert.equal(result.second.ok, true);
+      assert.deepEqual(result.remaining, []);
+      assert.equal(requests.length, 0);
+    });
+
     await scenario("helper callback can create a direct session without lifecycle lock reentrancy", async ({ page, requests, provider }) => {
       provider.tool = { marker: "BROWSER_HELPER_CREATE_SESSION", name: "create_browser_session", input: {} };
       const result = await page.evaluate(async () => {
@@ -893,6 +953,38 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
       assert.equal(result.helper.output, "BROWSER_RUNTIME_OK_2");
       assert.equal(requests.length, 2);
       assert.ok(JSON.stringify(requests[1]).includes("BROWSER_HELPER_REENTRANCY_OK"));
+    });
+
+    await scenario("spawned and forked helpers preserve profile refusal code and cleanup", async ({ page, requests }) => {
+      await page.evaluate(async () => {
+        window.helperMob = await window.runtime.createMob({ id: "browser-refused-helpers", profiles: {
+          source: { model: window.model, tools: { comms: true } },
+          shell: { model: window.model, tools: { comms: true, shell: true } },
+        } });
+        await window.helperMob.spawn([{ profile: "source", agent_identity: "source", runtime_mode: "turn_driven" }]);
+      });
+      const before = requests.length;
+      const result = await page.evaluate(async () => {
+        const errors = [];
+        for (const mode of ["spawn", "fork"]) {
+          const options = { agentIdentity: `refused-${mode}`, profileName: "shell", resultLabel: "answer", maxTextBytes: 4096 };
+          try {
+            if (mode === "spawn") await window.helperMob.spawnHelper("BROWSER_REFUSED_HELPER", options);
+            else await window.helperMob.forkHelper("source", "BROWSER_REFUSED_HELPER", options);
+            errors.push({ mode, accepted: true });
+          } catch (error) { errors.push({ mode, ...window.errorEnvelope(error) }); }
+        }
+        return { errors, members: await window.helperMob.listMembers() };
+      });
+      assert.equal(result.errors.length, 2);
+      for (const error of result.errors) {
+        assert.equal(error.code, "CAPABILITY_UNAVAILABLE", JSON.stringify(error));
+        assert.deepEqual(error.data, {
+          profile: "browser", capability: "shell", clearing_action: "use_host_process_runtime",
+        });
+      }
+      assert.deepEqual(result.members.map(member => member.agent_identity), ["source"]);
+      assert.equal(requests.length, before, "refused helpers must not dispatch provider work");
     });
 
     await scenario("runtime teardown cancels a pending helper before provider completion", async ({ page, requests, provider }) => {

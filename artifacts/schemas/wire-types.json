@@ -166370,6 +166370,83 @@
     "title": "WireTrustedPeerSpec",
     "type": "object"
   },
+  "WireTurnInputOptions": {
+    "$defs": {
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
+      },
+      "TurnRequestContext": {
+        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
+        "minLength": 1,
+        "type": "string"
+      },
+      "WireHandlingMode": {
+        "description": "Public handling mode for mob member delivery.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Public turn input intent, separate from internal execution authority.\n\nSkill identities use the same structured keys as the skill engine. Runtime\ncompositions validate their source capabilities before admitting the input.\nProvider, tool-overlay, and response-terminal authority is not accepted by\nthis ingress contract.",
+    "properties": {
+      "handling_mode": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireHandlingMode"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "skill_references": {
+        "items": {
+          "$ref": "#/$defs/SkillKey"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "transient_turn_context": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/TurnRequestContext"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "title": "WireTurnInputOptions",
+    "type": "object"
+  },
   "WireUnreachablePeer": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "One currently wired peer that is known to be unreachable.",

@@ -2017,7 +2017,7 @@ pub(super) fn apply_seeded_member_session_binding(
 async fn resolve_seeded_member_runtime_restoration(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     agent_identity: &AgentIdentity,
-    runtime_adapter: &RuntimeAdapterOption,
+    composition_binding: &super::composition::MobCompositionBinding,
 ) -> Result<(), MobError> {
     let transition = apply_seeded_mob_signal_transition(
         authority,
@@ -2026,19 +2026,13 @@ async fn resolve_seeded_member_runtime_restoration(
         },
         "resume_resolve_member_materialization",
     )?;
-    #[cfg(feature = "runtime-adapter")]
-    if let Some(adapter) = runtime_adapter.as_ref() {
-        let binding = super::composition::wired_binding_from_runtime_adapter(adapter);
-        for effect in transition.effects().iter().cloned() {
-            if let Some(effect) = super::composition::MobSeamEffect::routed(effect) {
-                super::composition::dispatch_routed_effect(&binding, effect)
-                    .await
-                    .map_err(super::composition::dispatch_refusal_to_mob_error)?;
-            }
+    for effect in transition.effects().iter().cloned() {
+        if let Some(effect) = super::composition::MobSeamEffect::routed(effect) {
+            super::composition::dispatch_routed_effect(composition_binding, effect)
+                .await
+                .map_err(super::composition::dispatch_refusal_to_mob_error)?;
         }
     }
-    #[cfg(not(feature = "runtime-adapter"))]
-    let _ = (transition, runtime_adapter);
     Ok(())
 }
 
@@ -6471,6 +6465,7 @@ struct RuntimeWiring {
     supervisor_bridge: Arc<MobSupervisorBridge>,
     command_tx: mpsc::Sender<super::scope_gate::RoutedMobCommand>,
     command_rx: mpsc::Receiver<super::scope_gate::RoutedMobCommand>,
+    composition_binding: super::composition::MobCompositionBinding,
 }
 
 /// Owns the supervisor bridge until actor publication succeeds. Builder
@@ -7476,16 +7471,10 @@ impl MobBuilder {
             // wire tool dispatchers for recreated sessions to the final actor channel.
             let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
             let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
-            // Restored bindings can emit RuntimeBound before the actor starts.
-            // Route those observations to its final queue, not a dead prior
-            // actor when the host is reusing the same runtime adapter.
-            #[cfg(feature = "runtime-adapter")]
-            if let Some(adapter) = runtime_adapter.as_ref() {
-                super::composition::attach_signal_dispatcher_to_runtime_adapter(
-                    adapter,
-                    command_tx.clone(),
-                );
-            }
+            // Cold restoration and the eventual actor share this exact
+            // bidirectional endpoint; other mobs never replace its consumer.
+            let composition_binding =
+                super::composition::binding_for_actor(&runtime_adapter, command_tx.clone());
             let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
             let (machine_state_watch_tx, machine_state_watch_rx) =
                 tokio::sync::watch::channel(initial_dsl_authority.state().clone());
@@ -7521,6 +7510,7 @@ impl MobBuilder {
                 supervisor_bridge: supervisor_bridge.clone(),
                 command_tx: command_tx.clone(),
                 command_rx,
+                composition_binding,
             };
             let per_spawn_external_tools: super::handle::PerSpawnExternalTools = Arc::default();
             let preview_handle = MobHandle {
@@ -7571,6 +7561,7 @@ impl MobBuilder {
                     &session_service,
                     runtime_provisioner.as_ref(),
                     &runtime_adapter,
+                    &wiring.composition_binding,
                     supervisor_bridge.clone(),
                     notify_orchestrator_on_resume,
                     default_llm_client.clone(),
@@ -8264,6 +8255,7 @@ impl MobBuilder {
         session_service: &Arc<dyn MobSessionService>,
         provisioner: &MultiBackendProvisioner,
         runtime_adapter: &RuntimeAdapterOption,
+        composition_binding: &super::composition::MobCompositionBinding,
         supervisor_bridge: Arc<MobSupervisorBridge>,
         notify_orchestrator_on_resume: bool,
         default_llm_client: Option<Arc<dyn LlmClient>>,
@@ -8865,7 +8857,7 @@ impl MobBuilder {
                         if let Err(error) = resolve_seeded_member_runtime_restoration(
                             dsl_authority,
                             &entry.agent_identity,
-                            runtime_adapter,
+                            composition_binding,
                         )
                         .await
                         {
@@ -9316,6 +9308,8 @@ impl MobBuilder {
             let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
             let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
             let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
+            let composition_binding =
+                super::composition::binding_for_actor(&runtime_adapter, command_tx.clone());
             let wiring = RuntimeWiring {
                 roster,
                 dsl_authority,
@@ -9333,6 +9327,7 @@ impl MobBuilder {
                 supervisor_bridge,
                 command_tx,
                 command_rx,
+                composition_binding,
             };
             let flow_target_provisioner = Arc::new(std::sync::RwLock::new(None));
             let explicit_resume_operations =
@@ -9454,6 +9449,7 @@ impl MobBuilder {
                 supervisor_bridge,
                 command_tx,
                 command_rx,
+                composition_binding,
             } = wiring;
             let handle_session_service = session_service.clone();
             let wiring_public_phase = seeded_mob_public_phase(dsl_authority.state());
@@ -9558,26 +9554,6 @@ impl MobBuilder {
                     definition.spawn_policy.as_ref(),
                 ),
             ));
-
-            // Wave-c C-6c — flip the composition binding from `Standalone`
-            // to `Wired(_)` whenever a runtime adapter is present, wiring
-            // the mob producer into the `MeerkatConsumerSurface` on
-            // `MeerkatMachine`. Builds without `runtime-adapter` keep the
-            // standalone path (no consumer exists by construction).
-            #[cfg(feature = "runtime-adapter")]
-            let composition_binding = match &runtime_adapter {
-                Some(adapter) => {
-                    let binding = super::composition::wired_binding_from_runtime_adapter(adapter);
-                    super::composition::attach_signal_dispatcher_to_runtime_adapter(
-                        adapter,
-                        command_tx.clone(),
-                    );
-                    binding
-                }
-                None => meerkat_runtime::composition::CompositionBinding::Standalone,
-            };
-            #[cfg(not(feature = "runtime-adapter"))]
-            let composition_binding = meerkat_runtime::composition::CompositionBinding::Standalone;
 
             let dsl_topology_epoch = Arc::new(std::sync::atomic::AtomicU64::new(
                 dsl_authority.state().topology_epoch,
@@ -10120,7 +10096,10 @@ mod tests {
             let error = resolve_seeded_member_runtime_restoration(
                 &mut authority,
                 &identity,
-                &Some(runtime.clone()),
+                &super::super::composition::binding_for_actor(
+                    &Some(runtime.clone()),
+                    mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY).0,
+                ),
             )
             .await
             .expect_err("restoration must not synthesize missing local resources");
@@ -10157,7 +10136,10 @@ mod tests {
             let error = resolve_seeded_member_runtime_restoration(
                 &mut authority,
                 &identity,
-                &Some(runtime.clone()),
+                &super::super::composition::binding_for_actor(
+                    &Some(runtime.clone()),
+                    mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY).0,
+                ),
             )
             .await
             .expect_err("restoration must not overwrite a conflicting placement");
@@ -10179,7 +10161,10 @@ mod tests {
             resolve_seeded_member_runtime_restoration(
                 &mut authority,
                 &AgentIdentity::from("unknown"),
-                &Some(runtime.clone()),
+                &super::super::composition::binding_for_actor(
+                    &Some(runtime.clone()),
+                    mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY).0,
+                ),
             )
             .await
             .expect_err("a successful actor build cannot mint mob revival authority");

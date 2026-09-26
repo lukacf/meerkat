@@ -290,6 +290,7 @@ pub fn lift_routed_effect(effect: &mob_dsl::MobMachineEffect) -> Option<MobSeamE
 #[cfg(feature = "runtime-adapter")]
 pub fn wired_binding_from_runtime_adapter(
     runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    signal_dispatcher: meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher,
 ) -> MobCompositionBinding {
     use meerkat_runtime::composition::{
         CatalogCompositionDispatcher, CompositionBinding, RouteTable,
@@ -302,25 +303,26 @@ pub fn wired_binding_from_runtime_adapter(
     let table = RouteTable::from_schema(&schema)
         .expect("meerkat_mob_seam schema is well-formed by construction");
     let consumer = Arc::new(
-        meerkat_runtime::meerkat_machine::composition::MeerkatConsumerSurface::new(Arc::clone(
-            runtime_adapter,
-        )),
+        meerkat_runtime::meerkat_machine::composition::MeerkatConsumerSurface::new(
+            Arc::clone(runtime_adapter),
+            signal_dispatcher,
+        ),
     );
     let dispatcher: CatalogCompositionDispatcher<MobSeamEffect> =
         CatalogCompositionDispatcher::new(schema.name.clone(), table).with_consumer(consumer);
     CompositionBinding::Wired(Arc::new(dispatcher))
 }
 
-/// Attach the MeerkatMachine -> MobMachine typed signal dispatcher to the
-/// shared runtime adapter. This is the reverse direction of
-/// [`wired_binding_from_runtime_adapter`]: MeerkatMachine is the producer
-/// of RuntimeBound/RuntimeRetired/RuntimeDestroyed lifecycle effects and
-/// the mob actor is the signal consumer.
+/// Compose both directions for this exact mob actor queue. The reverse endpoint
+/// is carried by successful routed bindings into their runtime registrations.
 #[cfg(feature = "runtime-adapter")]
-pub(super) fn attach_signal_dispatcher_to_runtime_adapter(
-    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+pub(super) fn binding_for_actor(
+    runtime_adapter: &super::RuntimeAdapterOption,
     command_tx: mpsc::Sender<super::scope_gate::RoutedMobCommand>,
-) {
+) -> MobCompositionBinding {
+    let Some(runtime_adapter) = runtime_adapter else {
+        return CompositionBinding::Standalone;
+    };
     let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
     let table = RouteTable::from_schema(&schema)
         .expect("meerkat_mob_seam schema is well-formed by construction");
@@ -328,7 +330,7 @@ pub(super) fn attach_signal_dispatcher_to_runtime_adapter(
     let dispatcher: CatalogCompositionSignalDispatcher<
         meerkat_runtime::meerkat_machine::composition::MeerkatSeamSignal,
     > = CatalogCompositionSignalDispatcher::new(schema.name.clone(), table).with_consumer(consumer);
-    runtime_adapter.set_composition_signal_dispatcher(Arc::new(dispatcher));
+    wired_binding_from_runtime_adapter(runtime_adapter, Arc::new(dispatcher))
 }
 
 #[cfg(feature = "runtime-adapter")]

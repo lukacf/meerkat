@@ -662,3 +662,16 @@ canonicalSession.isDestroyed;
 void canonicalIdentity;
 void canonicalState;
 void peerWiring;
+
+// Turn input skills use canonical structured identities, never legacy strings.
+const selectedSkillTurn = canonicalSession.turn('Use the task workflow.', {
+  skillReferences: [{
+    source_uuid: '00000000-0000-4b11-8111-000000000001',
+    skill_name: 'task-workflow',
+  }],
+});
+canonicalSession.turn('Use the task workflow.', {
+  // @ts-expect-error Skill identities must be structured.
+  skillReferences: ['task-workflow'],
+});
+void selectedSkillTurn;

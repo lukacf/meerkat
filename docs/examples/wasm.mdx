@@ -130,6 +130,20 @@ await coordinator.turn("Ask worker to check the task and report back.");
 request-only context to the runtime input. It is visible to that turn's model
 requests and does not become transcript history.
 
+Select embedded skills with their canonical structured identities:
+
+```typescript
+await session.turn("Plan the task and record its steps.", {
+  skillReferences: [{
+    source_uuid: "00000000-0000-4b11-8111-000000000001",
+    skill_name: "task-workflow",
+  }],
+});
+```
+
+External skill sources return `CAPABILITY_UNAVAILABLE` with capability
+`runtime_skills` and clearing action `use_skill_runtime` before turn admission.
+
 <Warning>
 Stock `MeerkatRuntime.init()` and `initFromMobpack()` only synthesize
 `InlineSecret` bindings in the in-memory `global` realm from provider keys

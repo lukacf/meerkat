@@ -4138,7 +4138,8 @@ mod tests {
         assert_eq!(value["result"]["code"], "CAPABILITY_UNAVAILABLE");
         assert_eq!(value["result"]["structured_data"], data);
         assert_eq!(
-            serde_json::from_value::<MobSpawnManyResultEntry>(value).unwrap(),
+            serde_json::from_value::<MobSpawnManyResultEntry>(value)
+                .expect("canonical spawn refusal must round-trip"),
             row
         );
     }

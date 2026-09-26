@@ -563,8 +563,10 @@ fn build_service_infrastructure_with_default_llm_client(
     );
     #[cfg(not(target_arch = "wasm32"))]
     let factory = meerkat::AgentFactory::minimal();
-    let mut builder =
-        meerkat::FactoryAgentBuilder::new(factory.with_browser_runtime_profile(), config);
+    let mut builder = meerkat::FactoryAgentBuilder::new(
+        factory.builtins(true).with_browser_runtime_profile(),
+        config,
+    );
 
     // NO default_llm_client in production - build_agent() resolves the correct
     // provider per-model from realm config bindings. This is architecturally
@@ -794,8 +796,15 @@ fn err_mob(e: meerkat_mob::MobError) -> JsValue {
     js_from_value(mob_error_value(&e))
 }
 
-fn err_bounded_member_run(e: meerkat_mob::BoundedMemberRunError) -> JsValue {
-    err_str("mob_helper_error", e)
+fn bounded_member_run_error_value(error: &meerkat_mob::BoundedMemberRunError) -> serde_json::Value {
+    match error {
+        meerkat_mob::BoundedMemberRunError::Admission(error) => mob_error_value(error),
+        _ => err_value("mob_helper_error", error),
+    }
+}
+
+fn err_bounded_member_run(error: meerkat_mob::BoundedMemberRunError) -> JsValue {
+    js_from_value(bounded_member_run_error_value(&error))
 }
 
 fn mob_destroy_error_value(e: MobMcpDestroyError) -> serde_json::Value {
@@ -1830,28 +1839,6 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
     ))
 }
 
-/// Public intent accepted by the embedded turn ingress. Internal execution,
-/// response-terminal, provider, and tool authority is never caller supplied.
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EmbeddedTurnOptions {
-    #[serde(default)]
-    handling_mode: Option<meerkat_contracts::WireHandlingMode>,
-    #[serde(default)]
-    transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
-}
-
-impl From<EmbeddedTurnOptions> for meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-    fn from(options: EmbeddedTurnOptions) -> Self {
-        meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata {
-            handling_mode: options.handling_mode,
-            transient_turn_context: options.transient_turn_context,
-            ..Default::default()
-        }
-        .into()
-    }
-}
-
 /// Run a turn through generated runtime input admission.
 ///
 /// On success, resolves (Ok) with a JSON-serialized [`meerkat_contracts::WireRunResult`]
@@ -1880,9 +1867,17 @@ pub async fn start_turn(
     let content = parse_prompt_content_input(prompt).map_err(js_from_value)?;
     let metadata = options_json
         .as_deref()
-        .map(serde_json::from_str::<EmbeddedTurnOptions>)
+        .map(serde_json::from_str::<meerkat_contracts::wire::runtime::WireTurnInputOptions>)
         .transpose()
         .map_err(|error| err_str("invalid_request", error))?;
+    if let Some(references) = metadata
+        .as_ref()
+        .and_then(|options| options.skill_references.as_deref())
+    {
+        meerkat_contracts::capability::BrowserRuntimeProfile
+            .require_skill_references(references)
+            .map_err(|refusal| js_from_value(serde_json::json!(refusal)))?;
+    }
     let result = meerkat::surface::run_ephemeral_runtime_turn(
         &machine,
         &session_id,
@@ -2737,6 +2732,9 @@ pub async fn mob_respawn(
         },
         Err(e) => {
             let mut value = err_value("mob_respawn_error", &e);
+            if let Some(code) = e.wire_error_code() {
+                value["code"] = serde_json::json!(code);
+            }
             if let Some(data) = e.structured_data() {
                 value["data"] = data;
             }
@@ -3198,9 +3196,9 @@ mod tests {
     };
     #[cfg(not(target_arch = "wasm32"))]
     use super::{
-        build_service_infrastructure, build_service_infrastructure_with_default_llm_client,
-        destroy_session_with_services, mob_destroy_error_value, mob_error_value,
-        populate_realm_from_api_keys,
+        bounded_member_run_error_value, build_service_infrastructure,
+        build_service_infrastructure_with_default_llm_client, destroy_session_with_services,
+        mob_destroy_error_value, mob_error_value, populate_realm_from_api_keys,
     };
     #[cfg(not(target_arch = "wasm32"))]
     use super::{helper_result_payload, spawn_member_result_payload};
@@ -3718,6 +3716,24 @@ capabilities = [{capability_values}]
         assert_eq!(value["data"]["provider"], "openai");
         assert_eq!(value["data"]["realm_id"], "project");
         assert_eq!(value["data"]["binding_id"], "openai");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn helper_admission_preserves_typed_profile_refusal() {
+        let refusal = meerkat_contracts::capability::BrowserRuntimeProfile
+            .require(meerkat_contracts::capability::RuntimeProfileCapability::Shell)
+            .expect_err("host process excluded");
+        let error =
+            meerkat_mob::BoundedMemberRunError::Admission(meerkat_mob::MobError::SessionError(
+                meerkat_core::SessionError::CapabilityUnavailable(refusal),
+            ));
+        let value = bounded_member_run_error_value(&error);
+        assert_eq!(value["code"], "CAPABILITY_UNAVAILABLE");
+        assert_eq!(value["data"]["profile"], "browser");
+        assert_eq!(value["data"]["capability"], "shell");
+        assert_eq!(value["data"]["clearing_action"], "use_host_process_runtime");
     }
 
     #[test]

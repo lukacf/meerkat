@@ -63,7 +63,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },
     proc_macro_deps = all_crate_deps(
@@ -110,7 +110,7 @@ rust_library(
         "//crates/meerkat-mcp-server:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },
     proc_macro_deps = all_crate_deps(
@@ -161,7 +161,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },
     tags = [
@@ -225,7 +225,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "rkat-mcp",
         "CARGO_MANIFEST_DIR": "crates/meerkat-mcp-server",
     },
@@ -283,7 +283,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "binary_fatal_error_display",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },
@@ -355,7 +355,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "binary_stdio_e2e",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },
@@ -429,7 +429,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "binary_tracing_stderr",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },
@@ -503,7 +503,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "live_mcp_matrix",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },
@@ -579,7 +579,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "mcp_binding_input",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },
@@ -651,7 +651,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "realm_config_ingress",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },
@@ -723,7 +723,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "runtime_backed_ingress",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mcp-server",
     },
@@ -780,7 +780,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_MANIFEST_DIR": "crates/meerkat-mcp-server",
     },
     tags = [
@@ -822,7 +822,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "rkat-mcp",
         "CARGO_MANIFEST_DIR": "crates/meerkat-mcp-server",
     },
@@ -871,7 +871,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_MANIFEST_DIR": "crates/meerkat-mcp-server",
     },
     tags = [
@@ -917,7 +917,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "rkat-mcp",
         "CARGO_MANIFEST_DIR": "crates/meerkat-mcp-server",
     },

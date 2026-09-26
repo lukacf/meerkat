@@ -62,7 +62,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
     },
     proc_macro_deps = all_crate_deps(
@@ -101,7 +101,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
     },
     proc_macro_deps = all_crate_deps(
@@ -144,7 +144,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
     },
     tags = [
@@ -205,7 +205,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "live_video_uri_smoke",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
     },
@@ -265,7 +265,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "oauth_resolve",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
     },

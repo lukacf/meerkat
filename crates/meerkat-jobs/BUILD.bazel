@@ -58,7 +58,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
     proc_macro_deps = all_crate_deps(
@@ -91,7 +91,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
     proc_macro_deps = all_crate_deps(
@@ -128,7 +128,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
     tags = [
@@ -181,7 +181,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "health_census",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
@@ -233,7 +233,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "machine_contract",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
@@ -285,7 +285,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "notification_outbox",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
@@ -337,7 +337,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "predicate_watch",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
@@ -389,7 +389,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "public_projection",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
@@ -441,7 +441,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "recovery_fencing",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
@@ -493,7 +493,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "sqlite_store_conformance",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
@@ -545,7 +545,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "store_contract",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
@@ -597,7 +597,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "subscriptions",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },
@@ -649,7 +649,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.8.43",
+        "CARGO_PKG_VERSION": "0.8.44",
         "CARGO_BIN_NAME": "terminal_outbox",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-jobs",
     },

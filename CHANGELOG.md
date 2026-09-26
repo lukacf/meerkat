@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.8.44] - 2026-09-26
+
 ### Breaking
 
 - `AgentEvent::RunStarted`, `RunCompleted`, and `RunFailed` gain an
@@ -13175,7 +13177,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.43...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.8.44...HEAD
+[0.8.44]: https://github.com/lukacf/meerkat/compare/v0.8.43...v0.8.44
 [0.8.43]: https://github.com/lukacf/meerkat/compare/v0.8.42...v0.8.43
 [0.8.42]: https://github.com/lukacf/meerkat/compare/v0.8.41...v0.8.42
 [0.8.41]: https://github.com/lukacf/meerkat/compare/v0.8.40...v0.8.41

@@ -49322,6 +49322,131 @@ async fn coordinator_resumed_spawn_failure_releases_session_for_a_later_spawn() 
         .expect("retire the later spawn");
 }
 
+/// End to end through the mob actor, post-roster: a coordinator's resumed
+/// spawn commits `MemberSpawned`, then its role-wiring fan-out fails, so the
+/// actor rolls the seated member back through `rollback_failed_spawn` and its
+/// `RestoreResume` phase. That rollback removes the member from the roster,
+/// so the coordinator's operation must be terminal and its binding released,
+/// and a later spawn of the same session under another owner succeeds.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn coordinator_resumed_spawn_wiring_failure_after_member_spawned_releases_session() {
+    let (handle, service) = create_test_mob(sample_definition_with_role_wiring()).await;
+    let _adapter = service.enable_runtime_adapter();
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from("w-peer"),
+            None,
+        )
+        .await
+        .expect("spawn the role-wiring peer");
+    let identity = AgentIdentity::from("w-resume-wiring");
+    let seeded = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "seed".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: Some(4096),
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some(test_comms_name("worker", identity.as_str())),
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("seed the durable worker session");
+    let session_id = seeded.session_id.clone();
+    MobSessionService::discard_live_session(service.as_ref(), &session_id)
+        .await
+        .expect("keep only the durable snapshot");
+    let coordinator = handle
+        .create_generated_ops_owner_context_for_test()
+        .await
+        .expect("coordinator owner context");
+    let coordinator_registry = Arc::clone(&coordinator.ops_registry);
+
+    // Wiring the new member to the existing peer fails after MemberSpawned.
+    service
+        .set_comms_behavior(
+            &test_comms_name("worker", "w-peer"),
+            MockCommsBehavior {
+                fail_add_trust: true,
+                ..MockCommsBehavior::default()
+            },
+        )
+        .await;
+    let error = tokio::time::timeout(
+        WHOLE_CREW_LIFECYCLE_TIMEOUT,
+        handle.spawn_spec_receipt_with_owner_context(
+            SpawnMemberSpec::new("worker", identity.as_str())
+                .with_resume_bridge_session_id(session_id.clone()),
+            coordinator,
+        ),
+    )
+    .await
+    .expect("failed resumed spawn settles")
+    .expect_err("the resumed spawn fails in its wiring fan-out");
+    assert!(
+        matches!(error, MobError::WiringError(_)),
+        "the spawn fails after MemberSpawned, in wiring: {error:?}"
+    );
+    let recorded = handle.events().replay_all().await.expect("replay");
+    assert!(
+        recorded.iter().any(|event| matches!(
+            &event.kind,
+            MobEventKind::MemberSpawned(spawned) if spawned.agent_identity == identity
+        )),
+        "the failure is post-roster: MemberSpawned committed"
+    );
+    assert!(
+        handle
+            .get_member(&identity)
+            .await
+            .expect("roster lookup")
+            .is_none(),
+        "the rolled-back spawn left the roster"
+    );
+    let parent = coordinator_child_operations(&coordinator_registry, &session_id);
+    assert!(
+        !parent.is_empty() && parent.iter().all(|(_, _, _, terminal)| *terminal),
+        "the coordinator's operation for the rolled-back spawn is terminal: {parent:?}"
+    );
+
+    service
+        .set_comms_behavior(
+            &test_comms_name("worker", "w-peer"),
+            MockCommsBehavior::default(),
+        )
+        .await;
+    let respawned = tokio::time::timeout(
+        WHOLE_CREW_LIFECYCLE_TIMEOUT,
+        handle.spawn_spec(
+            SpawnMemberSpec::new("worker", identity.as_str())
+                .with_resume_bridge_session_id(session_id.clone()),
+        ),
+    )
+    .await
+    .expect("later spawn settles")
+    .expect("a later spawn of the session under another owner succeeds");
+    assert_eq!(
+        handle
+            .resolve_bridge_session_id(&respawned.agent_identity)
+            .await
+            .as_ref(),
+        Some(&session_id)
+    );
+    assert_eq!(
+        coordinator_child_operations(&coordinator_registry, &session_id),
+        parent,
+        "the later self-owned spawn adds nothing to the coordinator's registry"
+    );
+}
+
 /// Downstream regression: while the whole crew is stopped, a parent-owned
 /// worker loses its session snapshot and explicit resume repoints it to a
 /// persisted successor session. With the coordinator's owner context live,

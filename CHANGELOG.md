@@ -1006,6 +1006,14 @@ them.
 - A coordinator-owned worker rebuilt by a reconstructed (cold) resume from a
   fresh handle still comes back self-owned, because the coordinator owner is
   not recorded in mob machine state.
+- If settling the coordinator's operation fails during an explicit-resume
+  session repoint (for example a registry persistence write failure), the
+  error is reported in that resume's result, but the old operation is not
+  retried and stays non-terminal for the rest of the process.
+- On wasm32, a worker rebuilt after a whole-crew resume gets a fresh
+  in-process comms key, and a later peer-ready for the replayed coordinator
+  operation is refused with "already peer-ready with a different handle".
+  Refreshing the handle needs an op-lifecycle machine transition.
 
 ## [0.8.42] - 2026-09-24
 

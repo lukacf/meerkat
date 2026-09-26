@@ -16,7 +16,7 @@ use meerkat_mob::{
 };
 use meerkat_mob_mcp::detached_delivery::OwnerRevivalDeferral;
 use meerkat_mob_mcp::fork_relink::ForkRelinkAction;
-use support::{CouncilFixture, ScriptedTurn, TurnGate};
+use support::{CouncilFixture, MobBackedOwnerHost, ScriptedTurn, SeenRequests, TurnGate};
 
 const CHILD_REPLY: &str = "RELINKED-REPLY-4K";
 const CHILD_TASK: &str = "reply with the token";
@@ -275,6 +275,7 @@ async fn relink_rearms_max_run_from_the_original_start() {
     let action = meerkat_mob_mcp::fork_relink::relink_child(
         fixture.state.session_service(),
         relink_runtime(&fixture),
+        None,
         &fixture.source_mob_id(),
         &handle,
         &child,
@@ -366,6 +367,7 @@ async fn relink_past_max_run_delivers_a_child_that_finished_within_its_limit() {
     let action = meerkat_mob_mcp::fork_relink::relink_child(
         fixture.state.session_service(),
         relink_runtime(&fixture),
+        None,
         &fixture.source_mob_id(),
         &handle,
         &child,
@@ -394,6 +396,7 @@ async fn relink_past_max_run_delivers_a_child_that_finished_within_its_limit() {
     let action = meerkat_mob_mcp::fork_relink::relink_child(
         fixture.state.session_service(),
         relink_runtime(&fixture),
+        None,
         &fixture.source_mob_id(),
         &handle,
         &child,
@@ -463,6 +466,7 @@ async fn relink_past_max_run_retires_a_child_still_running() {
     let action = meerkat_mob_mcp::fork_relink::relink_child(
         fixture.state.session_service(),
         relink_runtime(&fixture),
+        None,
         &fixture.source_mob_id(),
         &handle,
         &child,
@@ -536,6 +540,7 @@ async fn relink_after_a_live_limit_passed_delivers_the_completed_childs_reply() 
     let action = meerkat_mob_mcp::fork_relink::relink_child(
         fixture.state.session_service(),
         relink_runtime(&fixture),
+        None,
         &fixture.source_mob_id(),
         &handle,
         &child,
@@ -611,6 +616,7 @@ async fn relink_leaves_a_child_whose_job_already_ended_alone() {
         meerkat_mob_mcp::fork_relink::relink_child(
             fixture.state.session_service(),
             relink_runtime(&fixture),
+            None,
             &fixture.source_mob_id(),
             &handle,
             &child,
@@ -638,6 +644,7 @@ async fn relink_leaves_a_child_whose_job_already_ended_alone() {
     let action = meerkat_mob_mcp::fork_relink::relink_child(
         fixture.state.session_service(),
         relink_runtime(&fixture),
+        None,
         &fixture.source_mob_id(),
         &handle,
         &child,
@@ -892,4 +899,178 @@ async fn relink_on_a_stopped_mob_delivers_once_the_mob_runs() {
         "delivered exactly once"
     );
     fixture.teardown().await;
+}
+
+/// A fork job bound to a plain session: the child's forker does not own it
+/// (spawned_by unset), the job names a session of the host's own, as a
+/// library host binding a job does. The session is not live at restart.
+struct PlainOwnerJob {
+    fixture: CouncilFixture,
+    seen: SeenRequests,
+    handle: meerkat_mob::MobHandle,
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    owner: meerkat_core::SessionId,
+    job_id: String,
+}
+
+impl PlainOwnerJob {
+    async fn after_restart(tag: &str) -> Self {
+        let seen = SeenRequests::default();
+        let fixture = CouncilFixture::new_runtime_backed({
+            let seen = seen.clone();
+            move |request| {
+                seen.record(request);
+                ScriptedTurn::Text(CHILD_REPLY.to_string())
+            }
+        });
+        fixture.seed_source_mob(&["forker", "owner"]).await;
+        let handle = fixture
+            .state
+            .handle_for(&fixture.source_mob_id())
+            .await
+            .unwrap();
+        let owner = handle
+            .resolve_bridge_session_id(&AgentIdentity::from("owner"))
+            .await
+            .expect("owner session");
+        let job_id = format!("job-plain-owner-{tag}");
+        let (_fork, run) = handle
+            .fork_member_then_run_detached(
+                &AgentIdentity::from("forker"),
+                child_spec(&format!("plain-owner-child-{tag}")),
+                None,
+                "fork_off_result",
+                16 * 1024,
+                meerkat_core::DurableForkSourceAdmission::Quiescent,
+                None,
+                Some(ForkJobBinding {
+                    job_id: job_id.clone(),
+                    owner_session_id: owner.clone(),
+                }),
+            )
+            .await
+            .expect("fork");
+        assert!(matches!(
+            run.outcome().await,
+            Some(ForkChildRunOutcome::Completed(_))
+        ));
+        let runtime = fixture.runtime_adapter.clone().expect("runtime-backed");
+        runtime
+            .unregister_session(&owner)
+            .await
+            .expect("the owner session is not live after the restart");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        Self {
+            fixture,
+            seen,
+            handle,
+            runtime,
+            owner,
+            job_id,
+        }
+    }
+
+    fn restarted_state(&self) -> Arc<meerkat_mob_mcp::MobMcpState> {
+        Arc::new(meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+            self.fixture.service.clone(),
+            Some(Arc::clone(&self.runtime)),
+            meerkat_mob::MobControlPrincipal::Owner,
+        ))
+    }
+
+    fn marker(&self) -> String {
+        format!("Background fork_off job {} finished (", self.job_id)
+    }
+
+    async fn records(&self) -> usize {
+        completion_records(&self.fixture, &self.owner, &self.job_id).await
+    }
+
+    /// Wait until the owner's woken turn has run, then give a duplicate
+    /// time to show.
+    async fn await_one_wake(&self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while self.seen.turns_that_saw(&self.marker()) == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the owner was never woken"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            self.seen.turns_that_saw(&self.marker()),
+            1,
+            "the owner is woken for one turn"
+        );
+    }
+}
+
+/// The owner of a fork job is a plain session that is not live at restart.
+/// The restored mob's re-link asks the host's owner hook to make it live:
+/// the outcome is recorded once and wakes the owner once.
+#[tokio::test(flavor = "multi_thread")]
+async fn relink_revives_a_plain_session_owner_through_the_host_hook() {
+    let job = PlainOwnerJob::after_restart("hooked").await;
+    let host = MobBackedOwnerHost::new(job.handle.clone(), "owner");
+    let restarted = job.restarted_state();
+    restarted.set_detached_owner_host(Some(host.clone()));
+    restarted
+        .mob_insert_handle(job.fixture.source_mob_id(), job.handle.clone())
+        .await;
+
+    await_completion_record(&job.fixture, &job.owner, &job.job_id).await;
+    job.await_one_wake().await;
+    assert_eq!(job.records().await, 1, "recorded exactly once");
+    assert!(
+        completion_record_text(&job.fixture, &job.owner, &job.job_id)
+            .await
+            .contains(CHILD_REPLY)
+    );
+    assert_eq!(host.calls(), 1, "the hook made the owner live once");
+    job.fixture.teardown().await;
+}
+
+/// The same owner on a host without an owner hook: the re-link cannot make
+/// the session live, so nothing is recorded and the owner is not woken. The
+/// job stays owed: a re-link on a host that can make the owner live
+/// delivers it, once.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_host_hook_a_plain_session_owner_stays_owed() {
+    let job = PlainOwnerJob::after_restart("unhooked").await;
+    let restarted = job.restarted_state();
+    restarted
+        .mob_insert_handle(job.fixture.source_mob_id(), job.handle.clone())
+        .await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let reports = restarted.relink_restored_fork_children().await;
+    let action = reports
+        .iter()
+        .find(|report| report.job_id == job.job_id)
+        .map(|report| report.action.clone())
+        .expect("the child is visited");
+    assert!(
+        matches!(action, ForkRelinkAction::Failed(_)),
+        "the runtime's refusal is reported: {action:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(job.records().await, 0, "nothing is recorded");
+    assert_eq!(job.seen.turns_that_saw(&job.marker()), 0, "no wake");
+
+    // Still owed: a host that can make the owner live delivers it.
+    let host = MobBackedOwnerHost::new(job.handle.clone(), "owner");
+    restarted.set_detached_owner_host(Some(host.clone()));
+    let reports = restarted.relink_restored_fork_children().await;
+    assert_eq!(
+        reports
+            .iter()
+            .find(|report| report.job_id == job.job_id)
+            .map(|report| report.action.clone()),
+        Some(ForkRelinkAction::Delivered)
+    );
+    await_completion_record(&job.fixture, &job.owner, &job.job_id).await;
+    job.await_one_wake().await;
+    assert_eq!(job.records().await, 1, "recorded exactly once");
+    assert_eq!(host.calls(), 1);
+    job.fixture.teardown().await;
 }

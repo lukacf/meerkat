@@ -654,7 +654,10 @@ delivered once. The council recovery sweep that does this runs only on a
 `MobMcpState` built with `into_shared()` (MobKit 0.8.43 does; a plain
 `Arc::new` never runs it). `council_id` may contain only ASCII alphanumerics,
 `-` and `_` (the derived default is `agent-<uuid>`). On a
-one-shot host the call blocks and returns the sealed outcome.
+one-shot host, or for a plain-session convener on a host without a
+`DetachedOwnerHost` (a top-level REST, MCP-server or keep-alive CLI session;
+`blocked_because: "no_owner_revival_host"`), the call blocks and returns the
+sealed outcome, so no detached job is owed.
 `timeout_seconds` bounds it; the agent loop's default tool deadline does not.
 
 Visibility alone satisfies none of these per-call prerequisites.

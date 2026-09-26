@@ -188,7 +188,9 @@ council. How the sealed result reaches the caller depends on the host:
 - **Detached (hosts that outlive the call).** A host with a runtime adapter
   (the JSON-RPC, REST, and MCP servers, MobKit), `rkat run --keep-alive`, and
   `rkat mob deploy --surface rpc` can deliver a completion after the call
-  returns. There the call returns at once with
+  returns, provided the convener can be made live again to receive it: it is
+  a mob member, or the host installs a `DetachedOwnerHost` (the JSON-RPC host
+  does). There the call returns at once with
   `{"status": "running", "council_id": ..., "job_id": ..., "note": ...}`. When
   the council ends, its sealed outcome (`result`, `cleanup`, `replayed`) is
   recorded once in the convener's transcript as a durable `BackgroundJob`
@@ -197,20 +199,24 @@ council. How the sealed result reaches the caller depends on the host:
   and `persisted: true`). It is delivered as a runtime input with the
   idempotency key `council:<job_id>`: an idle convener runs one turn that sees
   it, and a busy one runs exactly one follow-up turn after its current turn. A
-  convener that is a mob member and is no longer live (the runtime retired its
-  idle executor) is revived through its mob first. The status is
+  convener that is no longer live (the runtime retired its idle executor) is
+  revived first: through its mob when it is a mob member, or through the
+  host's `DetachedOwnerHost` when it is a plain session. The status is
   **`failed`** when the exit reason is a failure (`participant_seating_failed`,
   `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`); the
   record still carries the full sealed outcome, and bound-limited ends
   (`max_exchanges_reached`, `deadline_exceeded`) complete normally with their
   partial result. The notice survives later model calls, turns, and reloads
   and is readable through the convener's session history.
-- **Blocking (one-shot hosts).** A host that may exit when the turn ends cannot
-  deliver a later completion: the `rkat` CLI unless it stays alive, such as
-  `rkat run` without `--keep-alive`. There the call waits for the council and
-  returns the sealed outcome as its ordinary tool result, with
-  `blocked_because` (`host_declared_unavailable`, or `no_runtime_adapter` for a
-  host that declares delivery without a runtime).
+- **Blocking.** The call waits for the council and returns the sealed outcome
+  as its ordinary tool result, with `blocked_because`:
+  `host_declared_unavailable` on a host that may exit when the turn ends (the
+  `rkat` CLI unless it stays alive, such as `rkat run` without
+  `--keep-alive`); `no_runtime_adapter` for a host that declares delivery
+  without a runtime; or `no_owner_revival_host` for a convener that is a plain
+  session on a host without a `DetachedOwnerHost` (a top-level REST,
+  MCP-server, or `rkat run --keep-alive` session). No detached job is owed,
+  so no result can be lost.
 
 In both forms the council's own `timeout_seconds` bounds it. The agent loop's
 default tool deadline does not cut the call, so a council longer than that

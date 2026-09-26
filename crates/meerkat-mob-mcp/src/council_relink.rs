@@ -50,6 +50,7 @@ use crate::agent_tools::{TOOL_COUNCIL, council_outcome_json};
 use crate::detached_delivery::{
     DetachedCompletionDelivered, DetachedCompletionError, OwnerRevivalDeferral,
     deliver_detached_completion, deliver_detached_completion_to_member,
+    deliver_detached_completion_to_session,
 };
 use crate::temporary_council::replay_outcome;
 #[cfg(target_arch = "wasm32")]
@@ -319,9 +320,10 @@ pub async fn relink_council(
 }
 
 /// Deliver a council outcome to its convener through the live custodian's
-/// delivery. When the runtime no longer has the convener live (a restart)
-/// and the convener is a mob member, it is revived through its mob and the
-/// delivery retried, as for a fork_off owner.
+/// delivery. When the runtime no longer has the convener live (a restart),
+/// a convener that is a mob member is revived through its mob, and one that
+/// is a plain session through the host's owner hook
+/// ([`crate::DetachedOwnerHost`]), and the delivery is retried.
 async fn deliver(
     state: &Arc<MobMcpState>,
     owner_session_id: &meerkat_core::SessionId,
@@ -372,7 +374,23 @@ async fn deliver(
                         }
                         Err(_) => Err(error),
                     },
-                    _ => Err(error),
+                    // Not a member of any mob here: a plain session (a
+                    // top-level RPC, REST or CLI convener). The host's owner
+                    // hook makes it live; without one the runtime's refusal
+                    // stands and the job stays owed.
+                    Ok(None) => {
+                        deliver_detached_completion_to_session(
+                            &runtime,
+                            state.detached_owner_host().as_deref(),
+                            owner_session_id,
+                            TOOL_COUNCIL,
+                            job_id,
+                            status,
+                            outcome,
+                        )
+                        .await
+                    }
+                    Err(_) => Err(error),
                 }
             }
         }

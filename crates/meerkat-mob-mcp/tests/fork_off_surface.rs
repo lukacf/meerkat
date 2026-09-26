@@ -1789,3 +1789,199 @@ async fn forker_observes_a_running_child_without_waiting_for_its_turn() {
     gate.open();
     fixture.teardown().await;
 }
+
+// ===========================================================================
+// A result is never owed where it cannot be delivered
+// ===========================================================================
+
+/// An owner hook that never has to act in these tests: it reports the owner
+/// gone if the custodian ever asks.
+struct AbsentOwnerHost;
+
+#[async_trait::async_trait]
+impl meerkat_mob_mcp::DetachedOwnerHost for AbsentOwnerHost {
+    async fn ensure_owner_live(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), meerkat_mob_mcp::DetachedOwnerError> {
+        Err(meerkat_mob_mcp::DetachedOwnerError::OwnerGone {
+            detail: "a test session with no durable record".to_string(),
+        })
+    }
+}
+
+/// The detached route is decided per caller. On a host without an owner
+/// hook, a mob member's call runs detached (its mob revives it to receive the
+/// result) and a plain session's call does not (`no_owner_revival_host`);
+/// with an owner hook a plain session's call runs detached too. fork_off and
+/// council share this decision (fork_off already requires a member caller).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_detached_route_requires_an_owner_that_can_be_revived() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(routed_script(RequestLog::default(), Vec::new()));
+    fixture.seed_source_mob(&["forker"]).await;
+    let member = member_session(&fixture, "forker").await;
+    let plain = SessionId::new();
+
+    assert_eq!(
+        fixture
+            .state
+            .detached_delivery_blocked_because_for(&member)
+            .await,
+        None,
+        "a member's result is delivered detached"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .detached_delivery_blocked_because_for(&plain)
+            .await,
+        Some(DetachedDeliveryUnavailable::NoOwnerRevivalHost),
+        "a plain session on a hookless host is not owed a detached result"
+    );
+    fixture
+        .state
+        .set_detached_owner_host(Some(Arc::new(AbsentOwnerHost)));
+    assert_eq!(
+        fixture
+            .state
+            .detached_delivery_blocked_because_for(&plain)
+            .await,
+        None,
+        "an owner hook makes a plain session's result deliverable"
+    );
+    fixture.teardown().await;
+}
+
+/// No detached job is bound to any council in the state's council store.
+async fn owed_council_jobs(fixture: &CouncilFixture) -> usize {
+    fixture
+        .state
+        .temporary_council_store_for_tests()
+        .list_all()
+        .await
+        .expect("list councils")
+        .iter()
+        .filter(|record| record.detached_job.is_some())
+        .count()
+}
+
+/// A plain-session convener (a top-level REST, MCP-server or keep-alive CLI
+/// session) on a host without an owner hook: the council runs in the turn and
+/// its sealed result comes back in the call, with the typed reason, and no
+/// job is owed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_session_convener_on_a_hookless_host_gets_the_council_in_turn() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(routed_script(RequestLog::default(), Vec::new()));
+    fixture.seed_source_mob(&["alice", "bob"]).await;
+    let mob_id = fixture.source_mob_id().to_string();
+    let convener = bind_surface(
+        &fixture.state,
+        SessionId::new(),
+        convener_authority(&mob_id),
+    );
+
+    let outcome = dispatch(
+        &convener.surface,
+        "council",
+        council_args(&fixture, Some("plain-in-turn")),
+    )
+    .await
+    .expect("the council returns its sealed result in the call");
+    let result = result_json(&outcome);
+    assert!(
+        result.get("job_id").is_none(),
+        "no job for a convener the result could not reach later: {result}"
+    );
+    assert!(
+        result["result"].to_string().contains("COUNCIL-SUMMARY-9Z"),
+        "the sealed result is in the call: {result}"
+    );
+    assert_eq!(
+        result["blocked_because"], "no_owner_revival_host",
+        "the result says, typed, why the call ran in the turn: {result}"
+    );
+    assert_eq!(owed_council_jobs(&fixture).await, 0, "no job is owed");
+    fixture.teardown().await;
+}
+
+/// A mob member convener on the same hookless host runs its council
+/// detached: its mob revives it to receive the result.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_convener_on_a_hookless_host_runs_the_council_detached() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(routed_script(RequestLog::default(), Vec::new()));
+    fixture.seed_source_mob(&["convener", "alice", "bob"]).await;
+    let mob_id = fixture.source_mob_id().to_string();
+    let convener = bind_surface(
+        &fixture.state,
+        member_session(&fixture, "convener").await,
+        convener_authority(&mob_id),
+    );
+
+    let started = result_json(
+        &dispatch(
+            &convener.surface,
+            "council",
+            council_args(&fixture, Some("member-detached")),
+        )
+        .await
+        .expect("council starts"),
+    );
+    assert_eq!(started["status"], "running", "{started}");
+    assert!(started.get("blocked_because").is_none(), "{started}");
+    let job_id = started["job_id"].as_str().expect("job id").to_string();
+    wait_for_completion(&fixture, &convener.session, &job_id).await;
+    fixture.teardown().await;
+}
+
+/// With an owner hook installed, a plain-session convener's council runs
+/// detached as well.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_hook_lets_a_plain_session_convener_run_the_council_detached() {
+    let fixture =
+        CouncilFixture::new_runtime_backed(routed_script(RequestLog::default(), Vec::new()));
+    fixture.seed_source_mob(&["alice", "bob"]).await;
+    fixture
+        .state
+        .set_detached_owner_host(Some(Arc::new(AbsentOwnerHost)));
+    let mob_id = fixture.source_mob_id().to_string();
+    let convener = bind_surface(
+        &fixture.state,
+        SessionId::new(),
+        convener_authority(&mob_id),
+    );
+
+    let started = result_json(
+        &dispatch(
+            &convener.surface,
+            "council",
+            council_args(&fixture, Some("hooked-detached")),
+        )
+        .await
+        .expect("council starts"),
+    );
+    assert_eq!(started["status"], "running", "{started}");
+    assert!(started.get("blocked_because").is_none(), "{started}");
+    assert!(started["job_id"].as_str().is_some(), "{started}");
+    // The council seals on its own task, with the convener's job bound.
+    let store = fixture.state.temporary_council_store_for_tests();
+    let council_id = fixture.council_id("hooked-detached");
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while store
+        .load(&council_id)
+        .await
+        .expect("load council")
+        .and_then(|record| record.result)
+        .is_none()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the council never sealed"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(owed_council_jobs(&fixture).await, 1, "the job is bound");
+    fixture.teardown().await;
+}

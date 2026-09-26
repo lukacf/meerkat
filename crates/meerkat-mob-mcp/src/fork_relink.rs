@@ -39,7 +39,7 @@ use meerkat_mob::{
 
 use crate::MobMcpState;
 use crate::agent_tools::{ForkOffCompletion, ForkOffCompletionStatus, TOOL_FORK_OFF};
-use crate::detached_delivery::OwnerRevivalDeferral;
+use crate::detached_delivery::{DetachedOwnerHost, OwnerRevivalDeferral};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 
@@ -109,6 +109,7 @@ pub async fn relink_restored_fork_children(
             let mob_reports = relink_mob_fork_children(
                 state.session_service(),
                 state.runtime_adapter_for_relink(),
+                state.detached_owner_host(),
                 &mob_id,
                 &handle,
                 restored_before_ms,
@@ -123,12 +124,14 @@ pub async fn relink_restored_fork_children(
                 // revival clears.
                 let service = state.session_service();
                 let runtime = state.runtime_adapter_for_relink();
+                let owner_host = state.detached_owner_host();
                 let pending = mob_reports.clone();
                 let (mob_id, handle) = (mob_id.clone(), handle.clone());
                 tokio::spawn(async move {
                     redeliver_when_owners_revivable(
                         service,
                         runtime,
+                        owner_host,
                         &mob_id,
                         &handle,
                         restored_before_ms,
@@ -154,6 +157,7 @@ pub async fn relink_restored_fork_children(
 pub(crate) async fn redeliver_when_owners_revivable(
     service: Arc<dyn meerkat_mob::MobSessionService>,
     runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    owner_host: Option<Arc<dyn DetachedOwnerHost>>,
     mob_id: &MobId,
     handle: &MobHandle,
     restored_before_ms: u64,
@@ -189,6 +193,7 @@ pub(crate) async fn redeliver_when_owners_revivable(
         let retried = relink_mob_fork_children_where(
             Arc::clone(&service),
             runtime.clone(),
+            owner_host.clone(),
             mob_id,
             handle,
             restored_before_ms,
@@ -213,16 +218,25 @@ pub(crate) async fn redeliver_when_owners_revivable(
 }
 
 /// Re-link the fork children of one mob (see the module docs).
+/// `owner_host` makes an owner that is a plain session, not a mob member,
+/// live for its delivery (see [`DetachedOwnerHost`]).
 pub async fn relink_mob_fork_children(
     service: Arc<dyn meerkat_mob::MobSessionService>,
     runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    owner_host: Option<Arc<dyn DetachedOwnerHost>>,
     mob_id: &MobId,
     handle: &MobHandle,
     restored_before_ms: u64,
 ) -> Vec<ForkRelinkReport> {
-    relink_mob_fork_children_where(service, runtime, mob_id, handle, restored_before_ms, |_| {
-        true
-    })
+    relink_mob_fork_children_where(
+        service,
+        runtime,
+        owner_host,
+        mob_id,
+        handle,
+        restored_before_ms,
+        |_| true,
+    )
     .await
 }
 
@@ -230,6 +244,7 @@ pub async fn relink_mob_fork_children(
 async fn relink_mob_fork_children_where(
     service: Arc<dyn meerkat_mob::MobSessionService>,
     runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    owner_host: Option<Arc<dyn DetachedOwnerHost>>,
     mob_id: &MobId,
     handle: &MobHandle,
     restored_before_ms: u64,
@@ -252,10 +267,12 @@ async fn relink_mob_fork_children_where(
     let tasks = children.into_iter().map(|(child, job)| {
         let service = Arc::clone(&service);
         let runtime = runtime.clone();
+        let owner_host = owner_host.clone();
         let mob_id = mob_id.clone();
         let handle = handle.clone();
         tokio::spawn(async move {
-            let action = relink_child(service, runtime, &mob_id, &handle, &child, &job).await;
+            let action =
+                relink_child(service, runtime, owner_host, &mob_id, &handle, &child, &job).await;
             ForkRelinkReport {
                 mob_id,
                 child,
@@ -281,9 +298,14 @@ async fn relink_mob_fork_children_where(
 /// limit measured from the job's original start; the limit winning (with
 /// still no durable reply) cancels and retires the child (and its
 /// descendants) and delivers `max_run_elapsed`.
+///
+/// An owner that is not the child's forker in the mob (a plain session the
+/// job was bound to) is made live through `owner_host` when the runtime does
+/// not have it live; without a host the runtime's refusal is reported.
 pub async fn relink_child(
     service: Arc<dyn meerkat_mob::MobSessionService>,
     runtime: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    owner_host: Option<Arc<dyn DetachedOwnerHost>>,
     mob_id: &MobId,
     handle: &MobHandle,
     child: &AgentIdentity,
@@ -304,7 +326,15 @@ pub async fn relink_child(
         return ForkRelinkAction::AlreadyDelivered;
     }
     if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await {
-        return deliver(runtime.as_deref(), handle, child, job, completion).await;
+        return deliver(
+            runtime.as_deref(),
+            owner_host.as_deref(),
+            handle,
+            child,
+            job,
+            completion,
+        )
+        .await;
     }
     let deadline_ms = job
         .max_run_ms
@@ -326,13 +356,29 @@ pub async fn relink_child(
                 Some(completion) => completion,
                 None => autokill(mob_id, handle, child, job).await,
             };
-            return deliver(runtime.as_deref(), handle, child, job, completion).await;
+            return deliver(
+                runtime.as_deref(),
+                owner_host.as_deref(),
+                handle,
+                child,
+                job,
+                completion,
+            )
+            .await;
         };
         match ChildObservation::of(observed) {
             ChildObservation::Running => tokio::time::sleep(WATCH_INTERVAL).await,
             ChildObservation::Settled => {
                 let completion = settled_outcome(&service, mob_id, handle, child, job).await;
-                return deliver(runtime.as_deref(), handle, child, job, completion).await;
+                return deliver(
+                    runtime.as_deref(),
+                    owner_host.as_deref(),
+                    handle,
+                    child,
+                    job,
+                    completion,
+                )
+                .await;
             }
             ChildObservation::Unobserved(error) => {
                 // The read says nothing about the child's state. A child
@@ -340,7 +386,15 @@ pub async fn relink_child(
                 // otherwise read again.
                 if let Some(completion) = durable_reply(&service, mob_id, handle, child, job).await
                 {
-                    return deliver(runtime.as_deref(), handle, child, job, completion).await;
+                    return deliver(
+                        runtime.as_deref(),
+                        owner_host.as_deref(),
+                        handle,
+                        child,
+                        job,
+                        completion,
+                    )
+                    .await;
                 }
                 tracing::debug!(
                     mob_id = %mob_id,
@@ -460,6 +514,7 @@ fn member_ref(mob_id: &MobId, child: &AgentIdentity) -> meerkat_contracts::WireM
 
 async fn deliver(
     runtime: Option<&meerkat_runtime::MeerkatMachine>,
+    owner_host: Option<&dyn DetachedOwnerHost>,
     handle: &MobHandle,
     child: &AgentIdentity,
     job: &ForkJobRecord,
@@ -504,9 +559,12 @@ async fn deliver(
             )
             .await
         }
+        // An owner that is not the child's forker in the mob is a plain
+        // session; the host makes it live when the runtime does not have it.
         None => {
-            crate::detached_delivery::deliver_detached_completion(
+            crate::detached_delivery::deliver_detached_completion_to_session(
                 runtime,
+                owner_host,
                 &job.owner_session_id,
                 TOOL_FORK_OFF,
                 &job.job_id,

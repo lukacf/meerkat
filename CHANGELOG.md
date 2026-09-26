@@ -92,7 +92,11 @@ them.
   sealed council whose exit reason is a failure (`participant_seating_failed`,
   `wiring_incomplete`, `exchange_failed`, `coordinator_interrupted`) is also
   recorded as `failed`, with the full outcome. One-shot hosts keep the
-  blocking contract, and the blocking result carries `blocked_because`. The
+  blocking contract, and the blocking result carries `blocked_because`. So
+  does a convener that is a plain session on a host without a
+  `DetachedOwnerHost` (a top-level REST, MCP-server or keep-alive CLI
+  session), with `blocked_because: "no_owner_revival_host"`: its council runs
+  in the call and no detached job is owed. The
   council's `timeout_seconds` bounds it; the agent loop's default tool deadline
   no longer cuts the call.
 - Behavior-only: `TemporaryCouncilId::new` accepts only ASCII alphanumerics,
@@ -407,10 +411,12 @@ them.
   `DetachedCompletionError` (`Encode`, `Rejected`, `Runtime`, `OwnerGone` for
   an owner that no longer exists, and `OwnerRevivalDeferred { tool, mob_id,
   reason }` for one that cannot be revived yet), `OwnerRevivalDeferral`
-  (`MobNotRunning { phase }`,
-  `LifecycleOperationPending { intent }`), `DetachedDeliveryUnavailable` with
-  `HostDeclaredUnavailable` and `NoRuntimeAdapter`),
-  `MobMcpState::detached_delivery_blocked_because`, the `council_relink` module
+  (`MobNotRunning { phase }`, `LifecycleOperationPending { intent }`),
+  `DetachedDeliveryUnavailable` with `HostDeclaredUnavailable`,
+  `NoRuntimeAdapter` and `NoOwnerRevivalHost`),
+  `MobMcpState::detached_delivery_blocked_because` and
+  `MobMcpState::detached_delivery_blocked_because_for` (the route for a given
+  caller), the `council_relink` module
   (`relink_detached_councils`, `relink_council`, `CouncilRelinkReport`), and
   `MobMcpState::relink_detached_councils`, `CouncilRelinkAction`
   (`Delivered`, `AlreadyDelivered`, `AwaitingSeal { claim_lease_expires_at }`,
@@ -426,6 +432,17 @@ them.
   listening), `ForkJobRecord::durable_terminal_result`,
   and `TemporaryCouncilJobBinding` (`job_id`, `owner_session_id`,
   `settled_at`).
+- `meerkat-mob-mcp`: the optional owner hook `DetachedOwnerHost`
+  (`ensure_owner_live`), `DetachedOwnerError` (`OwnerGone`, `Failed`;
+  `#[non_exhaustive]`), `deliver_detached_completion_to_session` (asks the
+  hook to make a plain-session owner live on a runtime refusal and retries
+  once), `deliver_detached_completion_to_member_when_revivable` (waits out a
+  deferred member revival, bounded), and
+  `MobMcpState::with_detached_owner_host`, `set_detached_owner_host` and
+  `detached_owner_host`. `meerkat-rpc`:
+  `detached_owner::RpcDetachedOwnerHost`, which `compose_rpc_mob_state`
+  installs, so the RPC host revives a top-level session owner through the
+  same path its own next turn takes.
 - `meerkat-runtime`: `PromptInput::detached_job_completed`, the prompt input
   that carries one durable completion notice with steer handling.
 - `meerkat-core`: `ToolDeadlineSource` (`OwnerDefault`, `PerToolOverride`;
@@ -573,6 +590,18 @@ them.
   the truncation-marker length; `council` `max_rounds` 1 to 16,
   `max_exchanges` 1 to 64, `max_result_bytes` 256 to 65536, and
   `timeout_seconds` 1 to 86400 (the forked-participant TTL ceiling).
+- Live delivery of a detached completion reaches owners that are not live.
+  The live custodian waits out a deferred owner revival (the owner's mob is
+  not running, or a lifecycle operation is still reviving it) and then
+  delivers once, bounded like the re-link. A detached council whose convener
+  is a plain session rather than a mob member asks the host's
+  `DetachedOwnerHost` to make it live; the JSON-RPC host installs one, so a
+  top-level RPC session that convened a council gets one record and one wake
+  turn even after its idle executor was retired. The restart re-link does the
+  same for fork_off and council jobs owned by a plain session. An embedder
+  must install the hook (`with_detached_owner_host` /
+  `set_detached_owner_host`) before inserting restored mob handles, because
+  `mob_insert_handle` reads it at insert; `compose_rpc_mob_state` does this.
 - Member status never waits for the member's running turn.
   `MobHandle::member_status` (and so RPC `mob/member_status`,
   `mob_check_member`, and the operator tool `member_status`) still tries the
@@ -763,6 +792,12 @@ them.
   binding. Warm revival now releases that superseded binding by exact compare
   before binding the new registration; a binding that changed meanwhile still
   fails closed. A detached `fork_off` made this the common case.
+- A `council` never seated its participants on the JSON-RPC host or the
+  persistent mob CLI host: their `MobSessionService` wrappers
+  (`RpcMobSessionService`, `MobCliSessionService`) did not forward
+  `forked_participant_source_runtime` to the wrapped persistent service, so
+  every participant was rejected as having no source runtime. Every wrapper
+  forwards it now.
 - A `council` called without `council_id` failed to seat any participant: the
   derived id was `agent:<uuid>`, and the `:` is illegal in the temporary mob's
   comms names. The derived id is now `agent-<uuid>`.
@@ -857,6 +892,22 @@ them.
   `pattern`, supported formats, `minItems` 0 or 1) are sent as before, and a
   schema without rejected keywords is sent byte-identical. OpenAI,
   OpenAI-compatible and Gemini requests are unchanged.
+### Known limitations
+
+- A `council` convener that is a plain session gets the detached route only
+  on a host that installs a `DetachedOwnerHost` (the JSON-RPC host does). On a
+  host without one (a top-level REST, MCP-server or `rkat run --keep-alive`
+  session) the council still works, but runs in the call and returns with
+  `blocked_because: "no_owner_revival_host"`; no detached job is owed. Mob
+  members get the detached route on every runtime-backed host.
+- A host that had a `DetachedOwnerHost` and restarts without one cannot make
+  a plain-session owner live: its owed job stays owed, the re-link reports it
+  as `Failed`, and a later re-link delivers it once the owner is live or a
+  hook is installed.
+- One-shot `rkat run` (without `--keep-alive`) keeps blocking `fork_off` and
+  `council`, with `blocked_because: "host_declared_unavailable"` in the
+  result.
+
 ## [0.8.42] - 2026-09-24
 
 ### Added

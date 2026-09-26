@@ -5394,7 +5394,6 @@
             ]
           },
           "created_at": {
-            "default": "2026-09-26T04:16:40.839620Z",
             "type": "string"
           },
           "kind": {
@@ -27343,7 +27342,6 @@
             ]
           },
           "created_at": {
-            "default": "2026-09-26T04:16:40.804805Z",
             "type": "string"
           },
           "kind": {
@@ -40883,7 +40881,6 @@
             ]
           },
           "created_at": {
-            "default": "2026-09-26T04:16:40.796700Z",
             "type": "string"
           },
           "kind": {
@@ -58277,7 +58274,6 @@
             ]
           },
           "created_at": {
-            "default": "2026-09-26T04:16:40.824133Z",
             "type": "string"
           },
           "kind": {
@@ -75591,7 +75587,6 @@
             ]
           },
           "created_at": {
-            "default": "2026-09-26T04:16:40.833778Z",
             "type": "string"
           },
           "kind": {
@@ -84923,7 +84918,6 @@
             ]
           },
           "created_at": {
-            "default": "2026-09-26T04:16:40.844943Z",
             "type": "string"
           },
           "kind": {
@@ -139879,7 +139873,6 @@
             ]
           },
           "created_at": {
-            "default": "2026-09-26T04:16:40.811880Z",
             "type": "string"
           },
           "kind": {

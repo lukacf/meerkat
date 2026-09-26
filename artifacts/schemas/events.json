@@ -4061,7 +4061,6 @@
             ]
           },
           "created_at": {
-            "default": "2026-09-26T04:16:40.973972Z",
             "type": "string"
           },
           "kind": {
@@ -11402,7 +11401,6 @@
             ]
           },
           "created_at": {
-            "default": "2026-09-26T04:16:40.976871Z",
             "type": "string"
           },
           "kind": {

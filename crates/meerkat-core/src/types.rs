@@ -2678,9 +2678,18 @@ pub struct SystemNoticeMessage {
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<SystemNoticeBlock>,
-    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "String", transform = omit_dynamic_timestamp_default)
+    )]
     #[serde(default = "message_timestamp_now")]
     pub created_at: MessageTimestamp,
+}
+
+#[cfg(feature = "schema")]
+fn omit_dynamic_timestamp_default(schema: &mut schemars::Schema) {
+    // The runtime fills an omitted timestamp with now, not a fixed schema value.
+    schema.remove("default");
 }
 
 impl SystemNoticeMessage {

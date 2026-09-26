@@ -12382,7 +12382,6 @@
             ]
           },
           "created_at": {
-            "default": "2026-09-26T04:16:40.939849Z",
             "type": "string"
           },
           "kind": {

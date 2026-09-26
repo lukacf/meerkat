@@ -3286,6 +3286,31 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.live_session_actor_registered(id).await
     }
 
+    /// The live actor's view as its summary and state watches last published
+    /// it, or `None` when no live actor is registered for `id`.
+    ///
+    /// Status observation only. [`SessionService::read`] arbitrates live
+    /// against durable authority by asking the session task for its
+    /// transcript authority, and the task serves no command while a turn
+    /// runs, so a status read through it waits for that whole turn. This
+    /// read never sends the task a command: it reads the watches the task
+    /// publishes, which carry the last assistant text and token count as of
+    /// the actor's last published summary. It performs no authority
+    /// arbitration and never writes.
+    pub async fn observe_live_session_view(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<SessionView>, SessionError> {
+        if !self.inner.live_session_actor_registered(id).await {
+            return Ok(None);
+        }
+        match self.inner.read(id).await {
+            Ok(view) => Ok(Some(view)),
+            Err(SessionError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Capture the exact currently registered actor for attachment-local
     /// executor publication. Callers that need stability across replacement
     /// must still pair this witness with the runtime attachment transaction.
@@ -24310,6 +24335,87 @@ mod tests {
                 .any(|message| matches!(message, Message::System(system) if system.content == "actor-only pending context")),
             "the read must not synchronize away actor-local pending context"
         );
+    }
+
+    /// A member-status observation of a session mid-turn reads the watches
+    /// the actor publishes. The authority-arbitrating `read` asks the session
+    /// task, which serves no command during a turn, so it waits for the
+    /// whole turn; the status view must not.
+    #[tokio::test]
+    async fn live_session_view_observation_does_not_wait_for_active_turn() {
+        let builder = BlockingRunBuilder::new();
+        let service = Arc::new(PersistentSessionService::new(
+            builder.clone(),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        ));
+        let seed = service
+            .save_normalized_session(recoverable_store_row())
+            .await
+            .unwrap();
+        let id = seed.id().clone();
+        service.create_session(resume_request(seed)).await.unwrap();
+        let idle_view = service
+            .observe_live_session_view(&id)
+            .await
+            .unwrap()
+            .expect("an idle live actor publishes its view");
+        assert_eq!(idle_view.state.session_id, id);
+
+        let admission = service.reserve_runtime_turn_admission(&id).await.unwrap();
+        let turn_service = Arc::clone(&service);
+        let turn_id = id.clone();
+        let active_turn = tokio::spawn(async move {
+            let _boundary = turn_service
+                .acquire_runtime_turn_finalization_guard(&turn_id)
+                .await;
+            turn_service
+                .apply_runtime_turn_with_reserved_admission(
+                    &turn_id,
+                    RunId::new(),
+                    runtime_content_turn_request("held turn"),
+                    RunApplyBoundary::RunStart,
+                    vec![InputId::new()],
+                    admission,
+                )
+                .await
+        });
+        builder.wait_for_entered_runs(1).await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                SessionService::read(service.as_ref(), &id),
+            )
+            .await
+            .is_err(),
+            "the authority-arbitrating read queues behind the running turn"
+        );
+        let busy_view = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.observe_live_session_view(&id),
+        )
+        .await
+        .expect("the status view must not wait for the active turn")
+        .unwrap()
+        .expect("the busy live actor still publishes its view");
+        assert_eq!(busy_view.state.session_id, id);
+        assert_eq!(
+            busy_view.billing.total_tokens,
+            idle_view.billing.total_tokens
+        );
+        assert!(
+            service
+                .observe_live_session_view(&SessionId::new())
+                .await
+                .unwrap()
+                .is_none(),
+            "no live actor is no live view"
+        );
+
+        builder.release_notify.add_permits(1);
+        active_turn.await.unwrap().unwrap();
     }
 
     #[cfg(not(target_arch = "wasm32"))]

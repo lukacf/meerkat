@@ -1413,7 +1413,6 @@ impl AgentMobToolSurface {
                         member_ref,
                         fork_session_id: fork.session_id.to_string(),
                         turn_session_id: turn.result().session_id().to_string(),
-                        cache_inheritance: fork.cache_inheritance,
                         bounded_result: turn.result().result().to_wire(),
                         usage: turn.result().usage().clone(),
                         turns: turn.result().turns(),
@@ -1450,7 +1449,6 @@ impl AgentMobToolSurface {
             agent_identity: identity,
             member_ref,
             fork_session_id: fork.session_id.to_string(),
-            cache_inheritance: fork.cache_inheritance,
             note: detached_started_note(
                 TOOL_FORK_OFF,
                 &job_id,
@@ -1826,16 +1824,8 @@ impl AgentMobToolSurface {
                 format!("failed to project mob member status: {e}"),
             )
         })?;
-        let running = status.progress.as_ref().is_some_and(|progress| {
-            matches!(
-                progress.run_state,
-                meerkat_contracts::WireMemberRunState::RunOpen
-            )
-        });
-        let result = CheckMemberResult {
-            status,
-            note: running.then_some(MEMBER_TURN_RUNNING_NOTE),
-        };
+        let note = check_member_note(&status);
+        let result = CheckMemberResult { status, note };
         Self::encode_result(call, json!(result))
     }
 
@@ -3076,6 +3066,15 @@ fn merge_council_definition_dependencies(
     Ok(())
 }
 
+/// Blocking `fork_off` result.
+///
+/// Neither fork_off payload carries the fork's `cache_inheritance`. That field
+/// is prompt-cache accounting for hosts (it stays on
+/// [`meerkat_mob::ForkMemberResult`]); request building never reads it, and a
+/// mob fork always reports it `unavailable` because the child's cache identity
+/// is resolved after the fork. Models read that as the child's prefix being
+/// re-billed, which it does not say. The child's real cache cost is in its
+/// completion's `usage`.
 #[derive(Serialize)]
 struct ForkOffResult {
     /// Authoritative mob resolved from the current durable session binding.
@@ -3086,7 +3085,6 @@ struct ForkOffResult {
     member_ref: meerkat_contracts::WireMemberRef,
     fork_session_id: String,
     turn_session_id: String,
-    cache_inheritance: meerkat_core::ForkCacheInheritance,
     bounded_result: meerkat_contracts::MobBoundedHelperResult,
     usage: meerkat_core::Usage,
     turns: u32,
@@ -3111,7 +3109,27 @@ struct CheckMemberResult {
 const MEMBER_TURN_RUNNING_NOTE: &str = "The member's turn is still running. output_preview \
      and tokens_used are from its last completed turn.";
 
+const MEMBER_PREVIEW_UNAVAILABLE_NOTE: &str = "This status read could not observe the member's \
+     session (see preview_unavailable), so output_preview and tokens_used are missing, not empty \
+     or zero. The status and progress fields are current; check again later for the preview.";
+
+/// The plain-language note a `mob_check_member` result carries, chosen from
+/// the typed status fields.
+fn check_member_note(status: &meerkat_contracts::MobMemberStatusResult) -> Option<&'static str> {
+    if status.preview_unavailable.is_some() {
+        return Some(MEMBER_PREVIEW_UNAVAILABLE_NOTE);
+    }
+    let running = status.progress.as_ref().is_some_and(|progress| {
+        matches!(
+            progress.run_state,
+            meerkat_contracts::WireMemberRunState::RunOpen
+        )
+    });
+    running.then_some(MEMBER_TURN_RUNNING_NOTE)
+}
+
 /// Immediate `fork_off` result: the child is seated and its turn admitted.
+/// Carries no `cache_inheritance`, for the reason given on [`ForkOffResult`].
 #[derive(Serialize)]
 struct ForkOffStarted {
     status: ForkOffStartedStatus,
@@ -3120,7 +3138,6 @@ struct ForkOffStarted {
     agent_identity: String,
     member_ref: meerkat_contracts::WireMemberRef,
     fork_session_id: String,
-    cache_inheritance: meerkat_core::ForkCacheInheritance,
     /// Background job that reports the child's outcome when its turn ends.
     job_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3662,6 +3679,66 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
+    /// The `mob_check_member` note is chosen from typed fields: an
+    /// unobserved preview is called out (it is missing, not empty), and a
+    /// running turn says which fields are as of its last completed turn.
+    #[test]
+    fn check_member_note_calls_out_an_unobserved_preview() {
+        let status = |preview_unavailable, run_state| meerkat_contracts::MobMemberStatusResult {
+            status: meerkat_contracts::WireMobMemberStatus::Active,
+            member_ref: meerkat_contracts::WireMemberRef::encode("mob", "member"),
+            output_preview: None,
+            error: None,
+            tokens_used: 0,
+            is_final: false,
+            current_session_id: None,
+            peer_connectivity: None,
+            kickoff: None,
+            external_member: None,
+            resolved_capabilities: None,
+            progress: Some(meerkat_contracts::WireMemberProgressSnapshot {
+                run_state,
+                in_flight_work: 0,
+                last_progress_at_ms: 0,
+                last_progress_event: meerkat_contracts::WireMemberProgressEvent::Unchanged,
+                health: meerkat_contracts::WireMemberHealthClass::Unknown,
+            }),
+            activity: None,
+            detached_jobs: None,
+            placement: None,
+            control_reachability: None,
+            comms_reachability: None,
+            last_seen_ms: None,
+            freshness_reason: None,
+            lifecycle_capabilities: None,
+            non_portable_disabled: None,
+            preview_unavailable,
+        };
+        for run_state in [
+            meerkat_contracts::WireMemberRunState::Idle,
+            meerkat_contracts::WireMemberRunState::RunOpen,
+        ] {
+            assert_eq!(
+                check_member_note(&status(
+                    Some(meerkat_contracts::WireMemberPreviewUnavailable::ObservationDeadline),
+                    run_state,
+                )),
+                Some(MEMBER_PREVIEW_UNAVAILABLE_NOTE)
+            );
+        }
+        assert_eq!(
+            check_member_note(&status(
+                None,
+                meerkat_contracts::WireMemberRunState::RunOpen
+            )),
+            Some(MEMBER_TURN_RUNNING_NOTE)
+        );
+        assert_eq!(
+            check_member_note(&status(None, meerkat_contracts::WireMemberRunState::Idle)),
+            None
+        );
+    }
 
     /// T-B12 (DEC-P7B-18, ADJ-P7-6): the LLM-visible delegation roster is
     /// snapshot-pinned. No live, host, grant, or member-history tools may drift

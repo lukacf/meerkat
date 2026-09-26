@@ -577,12 +577,11 @@ async fn e2e_smoke_s96_mob_fork_off_vertical() {
     )
     .expect("fork_session_id must parse");
     eprintln!(
-        "S96 B fork_off tool in {:?}: child input={} cache_creation={} cache_read={} inheritance={} reply={:?} parent_reply={:?}",
+        "S96 B fork_off tool in {:?}: child input={} cache_creation={} cache_read={} reply={:?} parent_reply={:?}",
         phase_b.elapsed(),
         child_usage.input_tokens,
         child_created,
         child_read,
-        fork_result["cache_inheritance"],
         child_text,
         fork_turn.result().text()
     );

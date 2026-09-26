@@ -35,6 +35,79 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat_contracts::MobMemberStatusResult` gains the public field
+  `preview_unavailable: Option<WireMemberPreviewUnavailable>`; struct
+  literals must supply it. It is serde-defaulted and omitted when absent, so
+  released SDKs keep reading the payload unchanged.
+- Behavior-only: the model-facing `fork_off` results (`meerkat-mob-mcp`
+  `AgentMobToolSurface`, both the detached `status: "running"` result and the
+  blocking result) no longer carry `cache_inheritance`. Mob forks always
+  reported it `unavailable` (the child's cache identity is resolved after the
+  fork) and request building never reads it, but models and operators read it
+  as the child's prefix being re-billed. It stays on
+  `meerkat_mob::ForkMemberResult` and the SDK fork results for hosts; the
+  child's real cache cost is the `usage` in its `fork_off` completion.
+- Behavior-only: member status reads (`MobHandle::member_status` and every
+  surface over it, including `mob_check_member`) no longer refuse a read
+  because another read of the same mob is in flight. A second read of the
+  same member joins the read in flight and receives the same snapshot; reads
+  of different members run concurrently. A read is refused
+  (`LifecycleOperationAdmissionPending`, stage `observation_lane_saturated`)
+  only after waiting 2 s for the mob-wide capacity of 16 concurrent reads, so
+  its `deadline_reached: true` is now accurate.
+
+### Added
+
+- `MobSessionService::observe_member_status_view` (provided method) returns
+  a `MemberStatusSessionView { last_assistant_text, total_tokens, source }`
+  with `MemberStatusViewSource::{LiveWatch, DurableHead, Absent}`: the
+  read-only preview and token count a status read reports. The persistent
+  service serves a live session from the actor's published watches and any
+  other session from the committed durable head; it never waits on the
+  member's session task, never writes, and never replays the rewrite audit.
+  The default reads through `SessionService::read`, which is correct for
+  in-memory services; wrappers over a persistent service must forward it (the
+  RPC, CLI and test wrappers do).
+- `PersistentSessionService::observe_live_session_view` reads a live
+  session's view from its summary and state watches without a command to the
+  session task.
+- `MobMemberSnapshot::preview_unavailable` and the wire twin
+  `MobMemberStatusResult::preview_unavailable` carry a typed
+  `MemberPreviewUnavailable` / `WireMemberPreviewUnavailable`
+  (`observation_deadline`, `read_failed`, `session_absent`) whenever a status
+  read did not observe the member's session view, so a missing
+  `output_preview` and a zero `tokens_used` are never a silent zero.
+  `mob_check_member` adds a plain-language note when it is set.
+
+### Changed
+
+- `MobHandle::wait_all` polls its members one after another from a single
+  loop instead of running one polling loop per member, and returns the first
+  failed poll instead of waiting for every other member first.
+- The fork_off re-link pass backs off between status reads that did not
+  observe a child (250 ms doubling to 5 s, reset by an observed read) instead
+  of retrying every 100 ms.
+
+### Fixed
+
+- `mob_check_member` on an idle fork child no longer fails with
+  `observation_lane_saturated` while anything else reads a member's status.
+  Every mob had a single status permit taken with a fail-fast `try_acquire`
+  and held for the whole read, and a busy member's read held it through an
+  unbounded full durable load (rewrite-audit read and possible finalize
+  write included). A console progress sweep or an operator polling a busy
+  member kept it taken, so the forker's check of its own child was refused
+  whatever the child's state.
+- A member status read is bounded. It never queues behind the member's
+  running turn: the idle path used `SessionService::read`, which asks the
+  session task and waits for the whole turn when one starts between the busy
+  probe and the read. A failed execution snapshot is treated as unknown (the
+  run state comes from the runtime machine) instead of idle. The session
+  reads of one observation stop at a 1 s deadline and return the runtime run
+  state with the typed `observation_deadline` marker.
+
 ## [0.8.44] - 2026-09-26
 
 ### Breaking

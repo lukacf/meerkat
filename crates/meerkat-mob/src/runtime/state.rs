@@ -611,6 +611,9 @@ pub(super) struct MemberStatusSessionObservation {
     /// The runtime machine's own run phase, read when the session actor is
     /// busy and cannot answer the execution snapshot.
     pub(super) runtime_run_state: Option<super::handle::MemberRunState>,
+    /// Set when the session view was not observed, so `output_preview` and
+    /// `tokens_used` are not observations.
+    pub(super) preview_unavailable: Option<super::handle::MemberPreviewUnavailable>,
     pub(super) observed_at_ms: u64,
 }
 
@@ -1160,12 +1163,13 @@ pub(super) enum MobCommand {
         agent_identity: crate::ids::AgentIdentity,
         reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
     },
+    /// An off-actor member-status observation returning to the actor, with
+    /// every caller that joined it.
     ProjectMemberStatusObserved {
         agent_identity: crate::ids::AgentIdentity,
         expected_target: MemberStatusProjectionTarget,
-        observation: Box<MemberStatusSessionObservation>,
-        observation_permit: tokio::sync::OwnedSemaphorePermit,
-        reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
+        outcome: Box<super::actor::member_status_lane::MemberStatusObservationOutcome>,
+        waiters: Arc<super::actor::member_status_lane::MemberStatusObservationWaiters>,
     },
     GetIdentityIntent {
         agent_identity: crate::ids::AgentIdentity,

@@ -403,9 +403,9 @@ pub use handle::{
     HostCapabilityReport, HostRevokeReport, InitializeAdaptiveRunRequest,
     MEMBER_ADMISSION_LANE_CAPACITY, MEMBER_RELOAD_TOTAL_TIMEOUT, MemberAdmissionBacklogGauge,
     MemberAdmissionBacklogSnapshot, MemberBoundedTurnResult, MemberDeliveryReceipt, MemberHandle,
-    MemberReloadDisposition, MemberReloadOutcome, MemberRespawnReceipt, MemberRunState,
-    MemberTurnEventSender, MemberTurnHandle, MemberTurnOptions, MobDestroyError, MobDestroyReport,
-    MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
+    MemberPreviewUnavailable, MemberReloadDisposition, MemberReloadOutcome, MemberRespawnReceipt,
+    MemberRunState, MemberTurnEventSender, MemberTurnHandle, MemberTurnOptions, MobDestroyError,
+    MobDestroyReport, MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
     MobMachineStateChanges, MobMemberListEntry, MobMemberSnapshot, MobMemberStatus,
     MobPeerConnectivitySnapshot, MobRespawnError, MobSpawnManyFailure, MobUnreachablePeer,
     MobWireMembersBatchReport, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
@@ -446,10 +446,11 @@ pub use reconcile::{
 pub use recovery::RestoreIncompatible;
 use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::{
-    AuthorizedSessionResume, MobSessionService, PersistedSessionAuthorityReadCost,
-    ResumeRejectionKind, ResumeSessionLoad, ResumeVerdictTerminality, SessionResumeAuthority,
-    SessionResumeLifecycle, SessionResumeMaterialization, SessionResumePreparationReceipt,
-    SessionResumeRejection, SessionResumeVerdict, materialize_nonpersistent_session_resume_verdict,
+    AuthorizedSessionResume, MemberStatusSessionView, MemberStatusViewSource, MobSessionService,
+    PersistedSessionAuthorityReadCost, ResumeRejectionKind, ResumeSessionLoad,
+    ResumeVerdictTerminality, SessionResumeAuthority, SessionResumeLifecycle,
+    SessionResumeMaterialization, SessionResumePreparationReceipt, SessionResumeRejection,
+    SessionResumeVerdict, materialize_nonpersistent_session_resume_verdict,
 };
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
 use spawn_profile_authority::{

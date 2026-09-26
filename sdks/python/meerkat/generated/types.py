@@ -2455,6 +2455,7 @@ class MobMemberStatusResult:
     output_preview: Optional[str] = None
     peer_connectivity: Optional[WirePeerConnectivity] = None
     placement: Optional[WireHostRef] = None
+    preview_unavailable: Optional[Literal['observation_deadline', 'read_failed', 'session_absent']] = None
     progress: Optional[WireMemberProgressSnapshot] = None
     resolved_capabilities: Optional[WireResolvedModelCapabilities] = None
 

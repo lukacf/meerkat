@@ -358,8 +358,8 @@ impl MobCommand {
             Self::ProjectMemberStatus { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
-            Self::ProjectMemberStatusObserved { reply_tx, .. } => {
-                let _ = reply_tx.send(Err(error));
+            Self::ProjectMemberStatusObserved { waiters, .. } => {
+                waiters.settle(Err(error));
             }
             Self::GetIdentityIntent { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));

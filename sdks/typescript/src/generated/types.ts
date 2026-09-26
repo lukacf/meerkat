@@ -1862,6 +1862,7 @@ export interface MobMemberStatusResult {
   output_preview?: string | null;
   peer_connectivity?: WirePeerConnectivity | null;
   placement?: WireHostRef | null;
+  preview_unavailable?: "observation_deadline" | "read_failed" | "session_absent" | null;
   progress?: WireMemberProgressSnapshot | null;
   resolved_capabilities?: WireResolvedModelCapabilities | null;
   status: WireMobMemberStatus;

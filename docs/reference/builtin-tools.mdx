@@ -341,11 +341,17 @@ JSON-RPC host does). A `fork_off` caller is always a mob member. There
   "agent_identity": "planner-ledger-fork",
   "member_ref": "...",
   "fork_session_id": "...",
-  "cache_inheritance": { "...": "..." },
   "job_id": "...",
   "note": "Running in the background. The result will be added to your conversation later as \"Background fork_off job ... finished\". ..."
 }
 ```
+
+Neither this result nor the blocking one carries the fork's
+`cache_inheritance`. That is prompt-cache accounting for hosts (it stays on the
+Rust `ForkMemberResult` and the SDK fork results); request building never reads
+it, and a mob fork always reports it `unavailable`, which says nothing about
+what the child's turn is billed. The child's cache cost is the `usage` in its
+completed outcome.
 
 When the child's turn ends, its outcome names the child (`agent_identity`,
 `member_ref`) and carries a `status`:
@@ -503,7 +509,12 @@ tool arguments. Without manage scope over the mob, the forker can still:
 - read any of its descendants with `mob_check_member`, which answers at once
   even while the member's turn runs (`progress.run_state` is `run_open`, the
   output preview and token count are from its last completed turn, and a
-  `note` says so);
+  `note` says so). Status reads of different members never hold each other
+  up, and concurrent reads of one member share one read. A read whose session
+  view could not be observed in time still answers, with a typed
+  `preview_unavailable` (`observation_deadline`, `read_failed`, or
+  `session_absent`) meaning the preview and token count are missing, not
+  empty;
 - retire any of its descendants with `mob_retire_member`;
 - list its descendants, and only those, with `mob_list_members`.
 

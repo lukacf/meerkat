@@ -1559,6 +1559,17 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         self.service.execution_snapshot(session_id).await
     }
 
+    async fn observe_member_status_view(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::MemberStatusSessionView, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::observe_member_status_view(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
     async fn tool_scope_snapshot(
         &self,
         session_id: &SessionId,

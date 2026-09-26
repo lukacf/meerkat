@@ -592,8 +592,9 @@ declares `DetachedCompletionDelivery::Available` and has a runtime adapter
 (the default for hosts built with one: the JSON-RPC, REST and MCP servers,
 MobKit; also `rkat run --keep-alive` and `rkat mob deploy --surface rpc`). It
 returns once the child is seated and its turn admitted: `status: "running"`,
-`agent_identity`, `member_ref`, `fork_session_id`, `cache_inheritance`, a
-`job_id`, and a `note`. When the child's turn ends, its outcome is recorded
+`agent_identity`, `member_ref`, `fork_session_id`, a `job_id`, and a `note`
+(no `cache_inheritance`: that host-side accounting stays on
+`ForkMemberResult`). When the child's turn ends, its outcome is recorded
 once in the forker's transcript as a durable `BackgroundJob` system notice
 (header "Background fork_off job <id> finished (<status>):" with status
 `completed`, `terminated` for an autokill, or `failed`; the outcome JSON is the

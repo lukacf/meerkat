@@ -9601,8 +9601,9 @@ impl MobBuilder {
                 lifecycle_tasks: tokio::task::JoinSet::new(),
                 pending_lifecycle_delivery_error: None,
                 actor_io_tasks: tokio::task::JoinSet::new(),
-                member_status_observation_permits: Arc::new(tokio::sync::Semaphore::new(
-                    super::actor::MAX_PENDING_MEMBER_STATUS_OBSERVATIONS,
+                member_status_observations: BTreeMap::new(),
+                member_status_observation_capacity: Arc::new(tokio::sync::Semaphore::new(
+                    super::actor::member_status_lane::MAX_CONCURRENT_MEMBER_STATUS_OBSERVATIONS,
                 )),
                 next_member_status_observed_at_ms,
                 member_live_mutation_tasks: tokio::task::JoinSet::new(),

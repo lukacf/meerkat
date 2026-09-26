@@ -246,10 +246,12 @@ async fn call(
 
 /// `call`, retried while the mob reports a retryable pending admission.
 ///
-/// A restored mob runs the fork_off re-link pass, which observes restored
-/// children through the mob's single member-status observation lane; a
-/// concurrent check is told to retry (`observation_lane_saturated`) rather
-/// than queued. Any other error ends the retries.
+/// Only for lifecycle calls on a freshly restored mob, whose resume may still
+/// be admitting. Never use it for member-status reads: a status read must
+/// succeed on its first attempt (see
+/// `forker_checks_its_idle_child_while_an_operator_reads_the_busy_forker`),
+/// and a retry loop would hide exactly that failure. Any other error ends the
+/// retries.
 async fn call_when_admitted(
     surface: &Arc<dyn AgentToolDispatcher>,
     name: &'static str,
@@ -281,6 +283,10 @@ async fn start_detached_fork(bound: &BoundSurface, member_id: &str, args: Value)
         .unwrap_or_else(|error| panic!("fork_off {member_id} starts: {error}"));
     assert_eq!(started["status"], "running", "{started}");
     assert_eq!(started["agent_identity"], member_id, "{started}");
+    assert!(
+        started.get("cache_inheritance").is_none(),
+        "prompt-cache accounting is host-facing, not in the model's fork_off result: {started}"
+    );
     started["job_id"].as_str().expect("job id").to_string()
 }
 
@@ -802,6 +808,10 @@ async fn one_shot_hosts_block_for_the_fork_off_result() {
     let result = result_json(&outcome);
     assert_eq!(result["agent_identity"], "blocking-child", "{result}");
     assert_eq!(result["bounded_result"]["text"], CHILD_REPLY, "{result}");
+    assert!(
+        result.get("cache_inheritance").is_none(),
+        "prompt-cache accounting is host-facing, not in the model's fork_off result: {result}"
+    );
     assert_eq!(
         result["blocked_because"], "host_declared_unavailable",
         "the result says, typed, why the call blocked: {result}"
@@ -1638,7 +1648,9 @@ async fn spawned_by_survives_resume_restart_and_successor_respawn() {
         forker.session.clone(),
         forker_authority(mob_id.as_str()),
     );
-    call_when_admitted(
+    // The restored mob's fork re-link pass reads its children's status
+    // concurrently; the forker's check neither waits on it nor is refused.
+    call(
         &forker_after_restart.surface,
         "mob_check_member",
         json!({"mob_id": mob_id.as_str(), "member_id": "kept-child"}),
@@ -1787,6 +1799,105 @@ async fn forker_observes_a_running_child_without_waiting_for_its_turn() {
         "{checked}"
     );
     gate.open();
+    fixture.teardown().await;
+}
+
+/// Marker of a forker turn held open at its model call.
+const FORKER_HOLD: &str = "FORKER-HOLD-3K keep this turn open";
+
+/// The HomeCore incident: an operator harness polled the forker's status
+/// while the forker was mid-turn, each read of the busy forker held the mob's
+/// single status permit, and the forker's own `mob_check_member` on its idle
+/// fork child was refused (`observation_lane_saturated`). The check must
+/// succeed on its first attempt, with no retry loop to hide a refusal.
+#[tokio::test(flavor = "multi_thread")]
+async fn forker_checks_its_idle_child_while_an_operator_reads_the_busy_forker() {
+    let gate = TurnGate::new();
+    let _release_on_exit = OpenOnDrop(gate.clone());
+    let fixture = CouncilFixture::new_runtime_backed(routed_script(
+        RequestLog::default(),
+        vec![
+            (CHILD_TASK, ChildReply::Text(CHILD_REPLY)),
+            (
+                FORKER_HOLD,
+                ChildReply::Gated(gate.clone(), FOLLOW_UP_REPLY),
+            ),
+        ],
+    ));
+    fixture.seed_source_mob(&["forker"]).await;
+    let mob_id = fixture.source_mob_id();
+    let forker = member_surface(&fixture, "forker").await;
+    let job_id =
+        start_detached_fork(&forker, "idle-child", fork_args("idle-child", CHILD_TASK)).await;
+    wait_for_completion(&fixture, &forker.session, &job_id).await;
+
+    // The forker is mid-turn: its session task serves no status request.
+    let handle = source_handle(&fixture).await;
+    let spec = BoundedResultSpec::new("held", 4096).expect("bounded result spec");
+    let held_turn = handle
+        .start_work_for_identity_bounded(
+            AgentIdentity::from("forker"),
+            WorkSpec::new(
+                ContentInput::Text(FORKER_HOLD.to_string()),
+                WorkOrigin::Internal,
+            ),
+            HandlingMode::Queue,
+            spec.clone(),
+        )
+        .await
+        .expect("start the held forker turn");
+    gate.wait_entered(1).await;
+
+    // An operator keeps reading the busy forker's status, as the harness's
+    // once-a-second identity inspection did; each read of a busy member runs
+    // for at least the execution-snapshot bound.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let operator = {
+        let state = Arc::clone(&fixture.state);
+        let mob_id = mob_id.clone();
+        let stop = Arc::clone(&stop);
+        tokio::spawn(async move {
+            let mut longest = Duration::ZERO;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let started = std::time::Instant::now();
+                let _ = state
+                    .mob_member_status(&mob_id, &AgentIdentity::from("forker"))
+                    .await;
+                longest = longest.max(started.elapsed());
+            }
+            longest
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let checked = tokio::time::timeout(
+        Duration::from_secs(10),
+        call(
+            &forker.surface,
+            "mob_check_member",
+            json!({"mob_id": mob_id.as_str(), "member_id": "idle-child"}),
+        ),
+    )
+    .await
+    .expect("the check does not wait on the operator's read of the forker")
+    .expect("the forker's check of its idle child succeeds on the first attempt");
+    assert_eq!(checked["output_preview"], CHILD_REPLY, "{checked}");
+    assert!(
+        checked.get("preview_unavailable").is_none(),
+        "the idle child's preview is observed: {checked}"
+    );
+
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let longest_operator_read = operator.await.expect("operator poller");
+    assert!(
+        longest_operator_read >= Duration::from_millis(200),
+        "the operator's reads of the busy forker were held open: {longest_operator_read:?}"
+    );
+    gate.open();
+    tokio::time::timeout(Duration::from_secs(60), held_turn.wait_bounded(spec))
+        .await
+        .expect("the held forker turn finishes once released")
+        .expect("the held forker turn completes");
     fixture.teardown().await;
 }
 

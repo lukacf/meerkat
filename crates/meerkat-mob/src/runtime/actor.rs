@@ -13,6 +13,7 @@ use super::*;
 
 mod explicit_resume;
 pub(super) mod member_effect_lane;
+pub(super) mod member_status_lane;
 pub(super) mod reload_revival;
 mod resume_post_commit;
 mod resume_rollback;
@@ -26,6 +27,7 @@ mod spawn_admission_io;
 pub(super) mod wiring_io;
 
 use member_effect_lane::MemberIncarnationFence;
+use member_status_lane::{MEMBER_STATUS_OBSERVATION_DEADLINE, MemberStatusObservationWaiters};
 use wiring_io::{
     LocalMemberRepairCustody, LocalMemberUnwireCustody, LocalMemberWireCustody,
     WireMembersBatchContinuation, WiringIoReply, WiringIoTicket, WiringNotice, WiringPlan,
@@ -3605,7 +3607,6 @@ const MAX_CONCURRENT_AUTONOMOUS_STOP_INTERRUPTS: usize = 8;
 pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 1024;
 #[cfg(test)]
 pub(super) const MAX_PENDING_PEER_DELIVERIES: usize = 4;
-pub(super) const MAX_PENDING_MEMBER_STATUS_OBSERVATIONS: usize = 1;
 
 pub(super) fn advance_rotating_cursor(
     item_count: usize,
@@ -6649,7 +6650,13 @@ pub(super) struct MobActor {
     /// executor instead. Mutating live Open/Control work uses
     /// `member_live_mutation_tasks` below.
     pub(super) actor_io_tasks: tokio::task::JoinSet<()>,
-    pub(super) member_status_observation_permits: Arc<tokio::sync::Semaphore>,
+    /// The member-status observation in flight for each member; a second
+    /// request for the same member joins it (see `member_status_lane`).
+    pub(super) member_status_observations:
+        BTreeMap<AgentIdentity, Arc<MemberStatusObservationWaiters>>,
+    /// Mob-wide bound on concurrent member-status session reads, waited for
+    /// (never try-acquired) inside each observation task.
+    pub(super) member_status_observation_capacity: Arc<tokio::sync::Semaphore>,
     /// Actor-issued order for member-status observations. MobMachine remains
     /// the authority that accepts or rejects each observation as monotonic.
     pub(super) next_member_status_observed_at_ms: u64,
@@ -7176,35 +7183,18 @@ pub(super) fn member_status_wall_clock_ms() -> Result<u64, MobError> {
     })
 }
 
-pub(super) async fn enqueue_member_status_observation(
-    command_tx: mpsc::Sender<RoutedMobCommand>,
-    agent_identity: AgentIdentity,
-    expected_target: super::state::MemberStatusProjectionTarget,
-    observation: super::state::MemberStatusSessionObservation,
-    observation_permit: tokio::sync::OwnedSemaphorePermit,
-    mut reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, MobError>>,
-) -> bool {
-    let permit = tokio::select! {
-        biased;
-        () = reply_tx.closed() => return false,
-        permit = command_tx.reserve() => permit,
-    };
-    let Ok(permit) = permit else {
-        return false;
-    };
-    if reply_tx.is_closed() {
-        return false;
-    }
-    permit.send(RoutedMobCommand::internal(
-        MobCommand::ProjectMemberStatusObserved {
-            agent_identity,
-            expected_target,
-            observation: Box::new(observation),
-            observation_permit,
-            reply_tx,
-        },
-    ));
-    true
+/// What one member-status session-view read found.
+enum MemberStatusSessionViewRead {
+    Observed {
+        output_preview: Option<String>,
+        tokens_used: u64,
+    },
+    /// The session has no readable view; `genuinely_absent` when the durable
+    /// store holds no current document for it.
+    Absent {
+        genuinely_absent: bool,
+    },
+    Unavailable(super::handle::MemberPreviewUnavailable),
 }
 
 impl MobActor {
@@ -12493,108 +12483,131 @@ impl MobActor {
         include_local_session_details: bool,
         observed_at_ms: u64,
     ) -> super::state::MemberStatusSessionObservation {
+        // One deadline bounds the whole observation, so the lane it holds is
+        // released even when a session read would not finish.
+        let deadline = std::pin::pin!(tokio::time::sleep(MEMBER_STATUS_OBSERVATION_DEADLINE));
+        let mut observation = super::state::MemberStatusSessionObservation {
+            output_preview: None,
+            tokens_used: 0,
+            genuinely_absent: false,
+            execution_snapshot: None,
+            runtime_run_state: None,
+            preview_unavailable: None,
+            observed_at_ms,
+        };
+        let Some(session_id) = bridge_session_id
+            .as_ref()
+            .filter(|_| include_local_session_details)
+        else {
+            return observation;
+        };
         // Status reads never queue behind the member's running turn (steer,
         // not queue). The bounded execution snapshot answers only while the
-        // session actor is free. When it times out the member is busy: its
-        // run state comes from the runtime machine, and its preview and token
-        // count from the durable committed transcript instead of the session
-        // actor's command lane. The run state is then the typed "mid-turn"
-        // marker and the other fields are as of the last commit.
-        let (execution_snapshot, snapshot_timed_out) =
-            match (include_local_session_details, bridge_session_id.as_ref()) {
-                (true, Some(session_id)) => match tokio::time::timeout(
-                    MEMBER_PROGRESS_OBSERVATION_TIMEOUT,
-                    session_service.execution_snapshot(session_id),
-                )
-                .await
-                {
-                    Ok(Ok(snapshot)) => (snapshot, false),
-                    Ok(Err(_)) => (None, false),
-                    Err(_) => (None, true),
-                },
-                (false, _) | (true, None) => (None, false),
-            };
-        // The runtime machine the mob's members run on says whether the busy
-        // member has a run open; that read never queues behind the turn.
-        let busy = snapshot_timed_out;
-        let runtime_run_state = match (bridge_session_id.as_ref(), runtime_adapter.as_deref()) {
-            (Some(session_id), Some(runtime)) if busy => {
-                observe_member_runtime_run_state(runtime, session_id).await
+        // session actor is free. When it times out the member is busy; when
+        // it fails the member's execution state is unknown. Either way the
+        // run state comes from the runtime machine, which never queues behind
+        // the turn; a failed snapshot is never taken for an idle member.
+        let run_state_from_runtime = match tokio::time::timeout(
+            MEMBER_PROGRESS_OBSERVATION_TIMEOUT,
+            session_service.execution_snapshot(session_id),
+        )
+        .await
+        {
+            Ok(Ok(snapshot)) => {
+                observation.execution_snapshot = snapshot;
+                false
             }
-            _ => None,
+            Ok(Err(_)) | Err(_) => true,
         };
-        let (output_preview, tokens_used, genuinely_absent) = match bridge_session_id.as_ref() {
-            Some(bridge_session_id) if include_local_session_details && busy => {
-                if session_service.supports_persistent_sessions() {
-                    match session_service
-                        .load_persisted_session(bridge_session_id)
-                        .await
-                    {
-                        Ok(Some(session)) => (
-                            session
-                                .messages()
-                                .iter()
-                                .rev()
-                                .find_map(|message| match message {
-                                    meerkat_core::types::Message::BlockAssistant(assistant) => {
-                                        let text = assistant.to_string();
-                                        (!text.is_empty()).then_some(text)
-                                    }
-                                    _ => None,
-                                }),
-                            session.total_tokens(),
-                            false,
-                        ),
-                        Ok(None) | Err(_) => (None, 0, false),
-                    }
-                } else {
-                    // An in-memory session is readable only through its
-                    // actor, which is busy with the turn: report the run
-                    // state without waiting for it.
-                    (None, 0, false)
+        if run_state_from_runtime && let Some(runtime) = runtime_adapter.as_deref() {
+            observation.runtime_run_state =
+                observe_member_runtime_run_state(runtime, session_id).await;
+        }
+        // Preview and token count come from the session view, which serves
+        // the live actor's published state or the committed durable head and
+        // never waits on the member's session task.
+        let view = tokio::select! {
+            biased;
+            view = Self::read_member_status_session_view(
+                session_service.as_ref(),
+                &agent_identity,
+                session_id,
+            ) => view,
+            () = deadline => MemberStatusSessionViewRead::Unavailable(
+                super::handle::MemberPreviewUnavailable::ObservationDeadline,
+            ),
+        };
+        match view {
+            MemberStatusSessionViewRead::Observed {
+                output_preview,
+                tokens_used,
+            } => {
+                observation.output_preview = output_preview;
+                observation.tokens_used = tokens_used;
+            }
+            MemberStatusSessionViewRead::Absent { genuinely_absent } => {
+                observation.genuinely_absent = genuinely_absent;
+                observation.preview_unavailable =
+                    Some(super::handle::MemberPreviewUnavailable::SessionAbsent);
+            }
+            MemberStatusSessionViewRead::Unavailable(marker) => {
+                observation.preview_unavailable = Some(marker);
+            }
+        }
+        observation
+    }
+
+    /// Read one member's status view and, when its session has none, whether
+    /// the durable store genuinely holds no current document for it.
+    async fn read_member_status_session_view(
+        session_service: &dyn MobSessionService,
+        agent_identity: &AgentIdentity,
+        session_id: &SessionId,
+    ) -> MemberStatusSessionViewRead {
+        let view = match session_service.observe_member_status_view(session_id).await {
+            Ok(view) => view,
+            Err(error) => {
+                tracing::debug!(
+                    %agent_identity,
+                    bridge_session_id = %session_id,
+                    %error,
+                    "member status session view read failed"
+                );
+                return MemberStatusSessionViewRead::Unavailable(
+                    super::handle::MemberPreviewUnavailable::ReadFailed,
+                );
+            }
+        };
+        match view.source {
+            super::session_service::MemberStatusViewSource::LiveWatch
+            | super::session_service::MemberStatusViewSource::DurableHead => {
+                MemberStatusSessionViewRead::Observed {
+                    output_preview: view.last_assistant_text,
+                    tokens_used: view.total_tokens,
                 }
             }
-            Some(bridge_session_id) if include_local_session_details => {
-                match session_service.read(bridge_session_id).await {
-                    Ok(view) => (
-                        view.state.last_assistant_text,
-                        view.billing.total_tokens,
-                        false,
-                    ),
-                    Err(meerkat_core::service::SessionError::NotFound { .. }) => {
-                        let genuinely_absent = matches!(
-                            session_service
-                                .observe_session_resume_authority(bridge_session_id)
-                                .await,
-                            Ok(authority)
-                                if matches!(
-                                    authority.lifecycle(),
-                                    super::session_service::SessionResumeLifecycle::NoCurrentDurableAuthority
-                                )
-                        );
-                        if !genuinely_absent {
-                            tracing::debug!(
-                                %agent_identity,
-                                %bridge_session_id,
-                                "member status read NotFound but the durable document is not \
-                                 absent (archived or transiently unreadable); not recording a \
-                                 missing bridge session"
-                            );
-                        }
-                        (None, 0, genuinely_absent)
-                    }
-                    Err(_) => (None, 0, false),
+            super::session_service::MemberStatusViewSource::Absent => {
+                let genuinely_absent = matches!(
+                    session_service
+                        .observe_session_resume_authority(session_id)
+                        .await,
+                    Ok(authority)
+                        if matches!(
+                            authority.lifecycle(),
+                            super::session_service::SessionResumeLifecycle::NoCurrentDurableAuthority
+                        )
+                );
+                if !genuinely_absent {
+                    tracing::debug!(
+                        %agent_identity,
+                        bridge_session_id = %session_id,
+                        "member status view is absent but the durable document is not \
+                         (archived or transiently unreadable); not recording a missing \
+                         bridge session"
+                    );
                 }
+                MemberStatusSessionViewRead::Absent { genuinely_absent }
             }
-            Some(_) | None => (None, 0, false),
-        };
-        super::state::MemberStatusSessionObservation {
-            output_preview,
-            tokens_used,
-            genuinely_absent,
-            execution_snapshot,
-            runtime_run_state,
-            observed_at_ms,
         }
     }
 
@@ -12606,88 +12619,6 @@ impl MobActor {
         )?;
         self.next_member_status_observed_at_ms = next;
         Ok(issued)
-    }
-
-    fn spawn_member_status_projection(
-        &mut self,
-        agent_identity: AgentIdentity,
-        reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, MobError>>,
-    ) {
-        self.spawn_member_status_projection_with_permit(agent_identity, reply_tx, None);
-    }
-
-    fn spawn_member_status_projection_with_permit(
-        &mut self,
-        agent_identity: AgentIdentity,
-        mut reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, MobError>>,
-        observation_permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    ) {
-        if reply_tx.is_closed() {
-            return;
-        }
-        let observation_permit = match observation_permit {
-            Some(permit) => permit,
-            None => match self
-                .member_status_observation_permits
-                .clone()
-                .try_acquire_owned()
-            {
-                Ok(permit) => permit,
-                Err(_) => {
-                    let _ = reply_tx.send(Err(MobError::LifecycleOperationAdmissionPending {
-                        intent: "member_status_observation".to_string(),
-                        stage: "observation_lane_saturated",
-                    }));
-                    return;
-                }
-            },
-        };
-        let expected_target = match self.member_status_projection_target(&agent_identity) {
-            Ok(target) => target,
-            Err(error) => {
-                let _ = reply_tx.send(Err(error));
-                return;
-            }
-        };
-        let observed_at_ms = match self.issue_member_status_observed_at_ms() {
-            Ok(observed_at_ms) => observed_at_ms,
-            Err(error) => {
-                let _ = reply_tx.send(Err(error));
-                return;
-            }
-        };
-        let session_service = Arc::clone(&self.session_service);
-        #[cfg(feature = "runtime-adapter")]
-        let runtime_adapter = self.runtime_adapter.clone();
-        #[cfg(not(feature = "runtime-adapter"))]
-        let runtime_adapter = None;
-        let command_tx = self.command_tx.clone();
-        self.actor_io_tasks.spawn(async move {
-            let observation = tokio::select! {
-                biased;
-                () = reply_tx.closed() => return,
-                observation = Self::observe_member_status_session(
-                    session_service,
-                    runtime_adapter,
-                    agent_identity.clone(),
-                    expected_target.bridge_session_id.clone(),
-                    expected_target.include_local_session_details,
-                    observed_at_ms,
-                ) => observation,
-            };
-            if reply_tx.is_closed() {
-                return;
-            }
-            enqueue_member_status_observation(
-                command_tx,
-                agent_identity,
-                expected_target,
-                observation,
-                observation_permit,
-                reply_tx,
-            )
-            .await;
-        });
     }
 
     async fn machine_member_material_from_observation(
@@ -20929,6 +20860,9 @@ impl MobActor {
             }
         }
         self.abort_and_join_actor_io_tasks().await;
+        // Every observation task is joined; dropping the in-flight lanes
+        // closes each waiting caller's reply channel.
+        self.member_status_observations.clear();
 
         self.peer_delivery_tasks.abort_all();
         while let Some(result) = self.peer_delivery_tasks.join_next().await {
@@ -25680,42 +25614,21 @@ impl MobActor {
                     agent_identity,
                     reply_tx,
                 } => {
-                    self.spawn_member_status_projection(agent_identity, reply_tx);
+                    self.project_member_status(agent_identity, reply_tx);
                 }
                 MobCommand::ProjectMemberStatusObserved {
                     agent_identity,
                     expected_target,
-                    observation,
-                    observation_permit,
-                    reply_tx,
+                    outcome,
+                    waiters,
                 } => {
-                    if reply_tx.is_closed() {
-                        return ActorLoopControl::ProceedBoundary;
-                    }
-                    match self.member_status_projection_target(&agent_identity) {
-                        Ok(current_target) if current_target == expected_target => {
-                            let result = self
-                                .machine_member_material_from_observation(
-                                    &agent_identity,
-                                    current_target.bridge_session_id,
-                                    current_target.include_local_session_details,
-                                    *observation,
-                                )
-                                .await
-                                .map(|material| material.to_snapshot());
-                            let _ = reply_tx.send(result);
-                        }
-                        Ok(_) => {
-                            self.spawn_member_status_projection_with_permit(
-                                agent_identity,
-                                reply_tx,
-                                Some(observation_permit),
-                            );
-                        }
-                        Err(error) => {
-                            let _ = reply_tx.send(Err(error));
-                        }
-                    }
+                    self.complete_member_status_observation(
+                        agent_identity,
+                        expected_target,
+                        *outcome,
+                        waiters,
+                    )
+                    .await;
                 }
                 MobCommand::GetIdentityIntent {
                     agent_identity,

@@ -68,6 +68,8 @@ use tokio_util::sync::CancellationToken;
 use crate::store::MobMemberOperatorRequestKey;
 
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
+/// Pause between wait polls of a member that is not yet terminal.
+const MEMBER_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const HOST_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const REACHABILITY_STALE_AFTER: Duration = Duration::from_secs(15);
@@ -939,6 +941,12 @@ pub struct MobMemberSnapshot {
     /// Machine-owned live execution/progress projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<MemberProgressSnapshot>,
+    /// Present when this read could not observe the member's session view,
+    /// so `output_preview` and `tokens_used` are unavailable rather than
+    /// empty. Absent when they are observations (or the member has no local
+    /// session to observe).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_unavailable: Option<MemberPreviewUnavailable>,
     /// Machine-recorded remote placement (owning host peer id) for this
     /// member (phase 7, ADJ-P7-2: produced from the `member_placement`
     /// machine fact at the status projection). `None` = local to the
@@ -966,6 +974,24 @@ pub enum MemberRunState {
     Idle,
     RunOpen,
     Unknown,
+}
+
+/// Why a member status read carries no observation of the member's session
+/// view. When a snapshot carries this marker, its `output_preview` and
+/// `tokens_used` are not observations (a missing preview and a zero count),
+/// never an empty member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MemberPreviewUnavailable {
+    /// The bounded session-view read did not finish before the status
+    /// observation deadline.
+    ObservationDeadline,
+    /// The session-view read failed.
+    ReadFailed,
+    /// The member's bound session has no readable view: it is absent from
+    /// the durable store or archived.
+    SessionAbsent,
 }
 
 /// Machine-owned liveness classification.
@@ -1009,6 +1035,14 @@ impl MobMemberSnapshot {
 
     pub(crate) fn current_bridge_session_id(&self) -> Option<&SessionId> {
         self.current_bridge_session_id.as_ref()
+    }
+
+    pub(crate) fn with_preview_unavailable(
+        mut self,
+        preview_unavailable: Option<MemberPreviewUnavailable>,
+    ) -> Self {
+        self.preview_unavailable = preview_unavailable;
+        self
     }
 
     /// Convenience accessor for the canonical member identity. Equivalent to
@@ -1138,7 +1172,25 @@ impl MobMemberSnapshot {
             freshness_reason: self.freshness_reason.clone(),
             lifecycle_capabilities: self.lifecycle_capabilities,
             non_portable_disabled: self.non_portable_disabled.clone(),
+            preview_unavailable: self.preview_unavailable.map(wire_preview_unavailable),
         })
+    }
+}
+
+/// Project a domain [`MemberPreviewUnavailable`] into its closed wire twin.
+fn wire_preview_unavailable(
+    marker: MemberPreviewUnavailable,
+) -> meerkat_contracts::WireMemberPreviewUnavailable {
+    match marker {
+        MemberPreviewUnavailable::ObservationDeadline => {
+            meerkat_contracts::WireMemberPreviewUnavailable::ObservationDeadline
+        }
+        MemberPreviewUnavailable::ReadFailed => {
+            meerkat_contracts::WireMemberPreviewUnavailable::ReadFailed
+        }
+        MemberPreviewUnavailable::SessionAbsent => {
+            meerkat_contracts::WireMemberPreviewUnavailable::SessionAbsent
+        }
     }
 }
 
@@ -12467,20 +12519,28 @@ impl MobHandle {
         agent_identity: &AgentIdentity,
     ) -> Result<MobMemberSnapshot, MobError> {
         loop {
-            let wait_class = self.classify_member_wait(agent_identity).await?;
-            if wait_class == mob_dsl::MemberWaitClassificationKind::MissingRuntimeMaterial {
-                return Err(MobError::Internal(format!(
-                    "MobMachine runtime material is absent for member '{agent_identity}'"
-                )));
-            }
-            let snapshot = self
-                .member_status(&AgentIdentity::from(agent_identity.as_str()))
-                .await?;
-            if snapshot.is_final {
+            if let Some(snapshot) = self.final_member_snapshot(agent_identity).await? {
                 return Ok(snapshot);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(MEMBER_WAIT_POLL_INTERVAL).await;
         }
+    }
+
+    /// One wait poll of `agent_identity`: its snapshot once it is terminal.
+    async fn final_member_snapshot(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<Option<MobMemberSnapshot>, MobError> {
+        let wait_class = self.classify_member_wait(agent_identity).await?;
+        if wait_class == mob_dsl::MemberWaitClassificationKind::MissingRuntimeMaterial {
+            return Err(MobError::Internal(format!(
+                "MobMachine runtime material is absent for member '{agent_identity}'"
+            )));
+        }
+        let snapshot = self
+            .member_status(&AgentIdentity::from(agent_identity.as_str()))
+            .await?;
+        Ok(snapshot.is_final.then_some(snapshot))
     }
 
     async fn classify_member_wait(
@@ -12864,16 +12924,27 @@ impl MobHandle {
     }
 
     /// Wait for all specified members to reach terminal states.
+    ///
+    /// One poller reads the members one after another, so a wait over many
+    /// members issues one member-status read at a time instead of competing
+    /// with itself for the mob's status observation capacity. Snapshots are
+    /// returned in `identities` order; the first failed poll ends the wait.
     pub async fn wait_all(
         &self,
         identities: &[AgentIdentity],
     ) -> Result<Vec<MobMemberSnapshot>, MobError> {
-        let futs = identities
-            .iter()
-            .map(|identity| self.wait_one_snapshot(identity))
-            .collect::<Vec<_>>();
-        let results = futures::future::join_all(futs).await;
-        results.into_iter().collect()
+        let mut finals: Vec<Option<MobMemberSnapshot>> = vec![None; identities.len()];
+        loop {
+            for (slot, identity) in finals.iter_mut().zip(identities) {
+                if slot.is_none() {
+                    *slot = self.final_member_snapshot(identity).await?;
+                }
+            }
+            if finals.iter().all(Option::is_some) {
+                return Ok(finals.into_iter().flatten().collect());
+            }
+            tokio::time::sleep(MEMBER_WAIT_POLL_INTERVAL).await;
+        }
     }
 
     /// Collect snapshots for all members that have reached terminal states.
@@ -15690,6 +15761,7 @@ mod tests {
             freshness_reason: None,
             lifecycle_capabilities: None,
             non_portable_disabled: None,
+            preview_unavailable: None,
         }
         .with_current_bridge_session_id(Some(sid.clone()));
         let snapshot_value =
@@ -15730,6 +15802,7 @@ mod tests {
             freshness_reason: None,
             lifecycle_capabilities: None,
             non_portable_disabled: None,
+            preview_unavailable: None,
         };
 
         let snapshot_value =
@@ -15772,6 +15845,7 @@ mod tests {
             freshness_reason: None,
             lifecycle_capabilities: None,
             non_portable_disabled: None,
+            preview_unavailable: None,
         };
         assert_eq!(
             snapshot.agent_identity(),
